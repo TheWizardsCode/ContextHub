@@ -27,8 +27,9 @@
     "cpuHeadroomPct": 100,
     "wallHeadroomPct": 200,
     "wallFloorMs": 250,
-    "note": "CPU time (process.resourceUsage user+system, from the F1 spawn records) is the load-independent regression gate, with 100 % headroom because the `src` (tsx) target's CPU time varies ~50 % run-to-run on a shared host (transpile + frequency/cache effects: an F7 gate run measured 3226 ms against a 2149 ms baseline's 50 % limit of 3224 ms). Wall time gets 200 % + a 250 ms floor; peak RSS keeps a tighter 25 % headroom (`rssHeadroomPct`) so memory regressions still fail promptly. A genuine CPU regression (doubling) still fails; the AC1 target is asserted separately once `ac1Targets.enforced`.",
-    "rssHeadroomPct": 25
+    "note": "CPU time (process.resourceUsage user+system, from the F1 spawn records) is the load-independent regression gate, with 100 % headroom because the `src` (tsx) target's CPU time varies ~50 % run-to-run on a shared host (transpile + frequency/cache effects: an F7 gate run measured 3226 ms against a 2149 ms baseline's 50 % limit of 3224 ms). Wall time gets 200 % + a 250 ms floor and is additionally normalised by the host-load factor measured by that run's bare-node control (measured floor / recorded floor, clamped at `maxHostLoadFactor` = 8, never below 1), so a saturated host cannot flake the ratchet (WL-0MVS9Z965006MC4R: warm cache-hit wall at 7512.9 ms vs the un-normalised 6903 ms limit while CPU stayed flat). Peak RSS keeps a tighter 25 % headroom (`rssHeadroomPct`) so memory regressions still fail promptly. A genuine CPU regression (doubling) still fails; the AC1 target is asserted separately once `ac1Targets.enforced`.",
+    "rssHeadroomPct": 25,
+    "maxHostLoadFactor": 8
   },
   "baselines": {
     "src": {

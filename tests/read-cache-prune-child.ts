@@ -15,7 +15,6 @@
 
 import {
   bumpStateCounter,
-  readStateCounter,
   pruneStateDir,
 } from '../src/read-cache.js';
 
@@ -31,15 +30,21 @@ if (!cacheDir || !worklogDir) {
 }
 
 if (mode === 'bump') {
-  let last = readStateCounter(cacheDir, worklogDir);
+  // Monotonicity is asserted against the writer's OWN bump sequence, so the
+  // baseline starts at 0 (there is no prior bump on the first iteration). A
+  // pre-existing on-disk value this process never produced is not part of that
+  // sequence: another writer's stale write may have lowered it, and a bump may
+  // legitimately return below it (the concurrency contract only guarantees a
+  // writer's own returns are strictly increasing — WL-0MVOGBJ7V00973BI).
+  let last = 0;
   for (let i = 0; i < rounds; i++) {
     const value = bumpStateCounter(cacheDir, worklogDir);
     if (!Number.isFinite(value) || value < 1) {
       process.stderr.write(`NON-FINITE COUNTER child=${childId} i=${i} value=${value}\n`);
       process.exit(1);
     }
-    // Monotonicity: a bump must never return a value below the last observed
-    // one, even with a pruning process racing this writer.
+    // Monotonicity: a bump must never return a value below the one it last
+    // returned, even with a pruning process racing this writer.
     if (value < last) {
       process.stderr.write(
         `COUNTER REGRESSION child=${childId} i=${i} last=${last} value=${value}\n`,

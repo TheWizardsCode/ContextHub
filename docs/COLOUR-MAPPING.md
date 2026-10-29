@@ -74,7 +74,11 @@ The colour-coding system is designed with accessibility in mind:
 - `src/theme.ts` — canonical priority colour mapping (chalk) for the CLI
 - `src/commands/helpers.ts` — `titleColorForPriority`, `renderTitle`, `formatTitleAndId` (both title and id by priority)
 - `packages/shared/src/icons.ts` — `priorityColor(priority)` / `applyPriorityColour(text, priority)` (ANSI 256) for Herdr
-- `packages/herdr/src/worklist.ts` — `formatItemLine` (title and id both via priority colour)
+- `packages/herdr/src/worklist.ts` — `formatItemLine` (title and id both via priority
+  colour). **Deferral (WL-0MVND6DHH008R3LG):** `formatItemLine` still lives in the
+  `worklist.ts` barrel — the formatting slice (extraction phase) has not moved it
+  yet, so this reference stays until that extraction lands; the `STAGE_COLORS`
+  map moved to `packages/herdr/src/worklist.constants.ts` with this slice.
 
 ### Functions
 

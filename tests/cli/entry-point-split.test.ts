@@ -29,7 +29,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawnSync } from 'child_process';
+import { spawnSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -106,6 +106,69 @@ function runCli(args: string[], cwd: string, env: NodeJS.ProcessEnv): CliResult 
   return { stdout: result.stdout ?? '', stderr: result.stderr ?? '', status: result.status };
 }
 
+/** Same contract as {@link runCli}, but asynchronous (bounded-pool friendly). */
+function runCliAsync(
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv
+): Promise<CliResult> {
+  return new Promise((resolve) => {
+    const child = spawn(entryInvocation[0], [...entryInvocation.slice(1), ...args], {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    const killTimer = setTimeout(() => {
+      if (!child.killed) child.kill('SIGKILL');
+    }, 60_000);
+    child.on('error', () => {
+      clearTimeout(killTimer);
+      resolve({ stdout, stderr, status: null });
+    });
+    child.on('close', (status) => {
+      clearTimeout(killTimer);
+      resolve({ stdout, stderr, status });
+    });
+  });
+}
+
+/**
+ * Map `items` through `fn` with at most `limit` promises in flight, keeping
+ * results in order. Used so dispatch parity does not multiply its wall cost
+ * serially: the parity loop below spawns one CLI process per built-in
+ * command (~32), and each spawn competes with everything else the host is
+ * running. A serial loop is therefore load-sensitive — on a contended host
+ * each `--help` can take ~10 s and the sum blew a fixed 300 s budget with
+ * nothing wrong in the code (WL-0MVSFQ3J4004SNJ9).
+ */
+async function mapConcurrent<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 /**
  * Isolated environment for one temp worklog: its own cache, spawn-record
  * file, plugin dir and XDG config home, so host plugins/cache state can
@@ -140,8 +203,8 @@ function writePluginCanary(pluginDir: string): void {
   );
 }
 
-describe('entry-point split — dispatch parity', { timeout: 300_000 }, () => {
-  it('keeps every built-in command dispatchable', () => {
+describe('entry-point split — dispatch parity', { timeout: 600_000 }, () => {
+  it('keeps every built-in command dispatchable', async () => {
     const tempDir = createTempDir();
     try {
       writeConfig(tempDir, 'Entry Split Dispatch', 'ESD');
@@ -149,8 +212,12 @@ describe('entry-point split — dispatch parity', { timeout: 300_000 }, () => {
       const env = isolatedEnv(tempDir);
 
       const failures: string[] = [];
-      for (const command of BUILT_IN_COMMANDS) {
-        const res = runCli([command, '--help'], tempDir, env);
+      const results = await mapConcurrent(BUILT_IN_COMMANDS, 4, (command) =>
+        runCliAsync([command, '--help'], tempDir, env)
+      );
+      for (let i = 0; i < BUILT_IN_COMMANDS.length; i += 1) {
+        const command = BUILT_IN_COMMANDS[i];
+        const res = results[i];
         const output = `${res.stdout}${res.stderr}`;
         if (res.status !== 0) {
           failures.push(

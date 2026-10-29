@@ -22,22 +22,14 @@ import { readCodeFreezeState, readCodeFreezeStatus, writeCodeFreezeMarker, clear
 import { runShipGuard, formatBlockedNotice } from './ship-guard.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
-  statusIcon,
-  stageIcon,
+  stageColor,
   priorityIcon,
   riskIcon,
   effortIcon,
-  auditIcon,
-  needsProducerReviewIcon,
-  stageDisplayIcon,
   getIconPrefixParts,
   isCoveredByParent,
-  applyStageColour,
-  stageColor,
   applyPriorityColour,
-  priorityColor,
   ICON_LEGEND,
-  type IconOptions,
 } from '@worklog/shared/icons';
 import {
   runSync,
@@ -59,6 +51,13 @@ import {
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
 import { groupRecentDispatchesByTimeBlock, recentDispatchedItems } from './downtime-log.js';
 import { buildDispatchWorkItem, mergeDispatchRow } from './dispatch-view.js';
+import { resolveSprintViewWindow } from './browse-window.js';
+import {
+  assigneeHoldBannerText,
+  assigneeHoldStatusText,
+  summariseDispatchWindowHold,
+  type DispatchWindowHoldSummary,
+} from './dispatch-window-hold.js';
 import {
   createHydratorRunner,
   createProductionHydratorDeps,
@@ -71,13 +70,12 @@ import {
   hasUnknownIdentifiers,
   getUnknownIdentifiers,
   FormState,
-  substituteIdentifiers,
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
 import { KeypressDecoder } from './key-input.js';
 import { extractFilePaths } from './grouping.js';
-import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
+import { renderMarkdown } from './md-viewer.js';
 import {
   findNoteInParagraph,
   insertNoteMarker,
@@ -90,177 +88,103 @@ import {
   resolveNoteWithSync,
   type NoteEditResult,
 } from './md-note-edit.js';
+import {
+  ANSI,
+  DOUBLE_CLICK_WINDOW_MS,
+  DRAG_THRESHOLD_CELLS,
+  PRIORITY_MAP,
+  SHIP_IT_COMMAND,
+  STAGES,
+  STAGE_COLORS,
+  STAGE_MAP,
+  type Stage,
+} from './worklist.constants.js';
+import { computeMetadataPanelHeight, getTermSize } from './worklist.layout.js';
+import type {
+  ChordState,
+  DisplayHeadingRow,
+  ExecuteResult,
+  HelpIconRow,
+  KeyAction,
+  MouseAction,
+  MouseClickState,
+  MouseDragState,
+  NavigationStackEntry,
+  NoteEditAction,
+  ParsedMouseEvent,
+  PodcastNotice,
+  PodcastTargetResolution,
+  ReviewQueueBannerState,
+  TermSize,
+  ViewMode,
+} from './worklist.types.js';
 
-// ── Input-active predicate (WL-0MTV67MZU003H7SH) ──────────────────────
+// ── Barrel re-exports (WL-0MVND6DHH008R3LG): moved symbols still on the
+// public surface; `PRIORITY_MAP`/`STAGE_COLORS` and `MIN_META_SHARE`/
+// `MAX_META_SHARE` are internal to their modules (recorded-unused outside,
+// parent AC2 — re-export only symbols consumers actually use) ──
+export {
+  ANSI,
+  DOUBLE_CLICK_WINDOW_MS,
+  DRAG_THRESHOLD_CELLS,
+  SHIP_IT_COMMAND,
+  STAGES,
+  STAGE_MAP,
+} from './worklist.constants.js';
+export type { Stage } from './worklist.constants.js';
+export { computeMetadataPanelHeight, getTermSize } from './worklist.layout.js';
+export type {
+  ChordState,
+  DisplayHeadingRow,
+  ExecuteResult,
+  HelpIconRow,
+  KeyAction,
+  MouseAction,
+  MouseClickState,
+  MouseDragState,
+  NavigationStackEntry,
+  NoteEditAction,
+  ParsedMouseEvent,
+  PodcastNotice,
+  PodcastTargetResolution,
+  ReviewQueueBannerState,
+  TermSize,
+} from './worklist.types.js';
 
-/**
- * Whether any text-input overlay is currently active.
- *
- * Returns `true` when `formState` or `shipItDialog` is non-null — meaning
- * the user is actively typing into a form (unknown-identifier input),
- * the Ship It confirmation dialog, or note-edit (which opens a FormState).
- * When `true`, the scheduler should skip auto-refresh and auto-sync ticks
- * so keypresses are not dropped by a concurrent re-render.
- *
- * Design decision — skip, don't coalesce: ticks while typing are silently
- * dropped; the next regular tick after close fires normally. No queued
- * immediate refresh is emitted on close (avoids infinite-refresh loops).
- *
- * NOTE: this gate stops background re-render contention but does NOT by
- * itself prevent dropped keystrokes when the user types fast — the PTY can
- * coalesce several keys into one stdin chunk. The text-input handlers run
- * every chunk through `splitKeypresses()` (`key-input.ts`) so no character
- * is discarded (WL-0MTV67MZU003H7SH).
- */
-export function isInputActive(
-  formState: FormState | null,
-  shipItDialog: ShipItDialogState | null,
-  blockedNoticeActive = false,
-): boolean {
-  return formState !== null || shipItDialog !== null || blockedNoticeActive;
-}
+// ── Barrel re-exports (WL-0MVND6F9V004IQ3V): the state machine, the
+// navigation/stage-filter helpers and the presentation leaf helpers the state
+// machine depends on, moved to their own modules. Every symbol below is on the
+// frozen consumer baseline (re-derived mechanically from the live import
+// scan); the rest of each module stays internal. ──
+export { createGatedTick, isHeadingRow, isInputActive, WorkItemListState } from './worklist.state.js';
+export type { DisplayRow } from './worklist.state.js';
+export { NavigationStack, StageFilter } from './worklist.navigation.js';
+export {
+  buildMetaRows,
+  clearDescriptionPreviewCache,
+  metadataPanelContentHeight,
+  pairMetaRows,
+} from './worklist.meta.js';
+export { formatDetailContent, firstMarkdownKeyFile, renderFileViewer } from './worklist.detail.js';
+export { formatTimestamp } from './worklist.format.js';
 
-/**
- * Build the standard scheduler-tick runner used by the worklist's periodic
- * tasks (the 30s auto-refresh and the 60s auto-sync).
- *
- * Gate ordering:
- *   1. Typing gate — skip while any text-input overlay is open so a
- *      background re-render never steals focus or drops a keypress
- *      (WL-0MTV67MZU003H7SH).
- *   2. Visibility gate — skip while the pane's tab is hidden
- *      (pause-when-hidden); the hidden/visible side effects are delegated to
- *      the caller so it can drive the resume-poll and `panePaused` state.
- *   3. DB-change gate — skip when the worklog DB is unchanged and the last
- *      sync is still fresh (zero `wl` spawns for an idle pane).
- *
- * Skips are silent and NOT coalesced: the task stays scheduled, so the next
- * regular tick after the reason clears fires normally.
- *
- * Exported so the scheduler-integration tests exercise the REAL guard
- * ordering with a real `TaskScheduler`, instead of re-implementing the guard
- * inline in the test body.
- */
-export function createGatedTick(deps: {
-  isInputActive: () => boolean;
-  isVisible: () => Promise<boolean>;
-  onHidden: () => void;
-  onVisible: () => void;
-  isDbUnchanged: () => boolean;
-  action: () => void;
-}): () => Promise<void> {
-  return async () => {
-    if (deps.isInputActive()) return;
-    if (!(await deps.isVisible())) {
-      deps.onHidden();
-      return;
-    }
-    deps.onVisible();
-    if (deps.isDbUnchanged()) return;
-    deps.action();
-  };
-}
-
-// ── Constants ─────────────────────────────────────────────────────────
-
-/**
- * The dev→main release command dispatched by the Ship It shortcut (`S`,
- * WL-0MSGG5N5Z0074TLY). Global release — receives NO work item id. The
- * command must be typed as `ship` + Enter in the confirmation dialog
- * before it is dispatched via the standard command-routing path.
- */
-export const SHIP_IT_COMMAND = '/skill:ship release';
-
-// The canonical `wl` CLI stage vocabulary (WL-0MUY1CRBQ007L7AK). Mirrors the
-// stages accepted by `wl update`/`wl next` validation (`done` is the
-// post-release terminal stage). Do NOT reintroduce `in_progress`/`completed`:
-// the CLI no longer accepts them as stages (`status=in-progress` is the
-// "actively worked" signal).
-export const STAGES = [
-  'idea',
-  'intake_complete',
-  'plan_complete',
-  'in_review',
-  'done',
-] as const;
-
-export type Stage = (typeof STAGES)[number];
-
-// ── /wl <stage> argument map (WL-0MSDT8X1V003206G) ────────────────────
-// Maps every accepted /wl stage argument — shorthand aliases and canonical
-// stage names — to the internal stage name used for filtering. Restricted to
-// the CLI stage vocabulary (WL-0MUY1CRBQ007L7AK): unknown/removed values are
-// absent, so `/wl <bogus>` (and `/wl progress`, `/wl completed`) fail soft.
-export const STAGE_MAP: Record<string, string> = {
-  intake: 'intake_complete',
-  plan: 'plan_complete',
-  review: 'in_review',
-  // Canonical names mapped to themselves for validation
-  idea: 'idea',
-  intake_complete: 'intake_complete',
-  plan_complete: 'plan_complete',
-  in_review: 'in_review',
-  done: 'done',
-};
-
-// ── /wl --priority <priority> map (WL-0MSKC8T46006999S) ────────────────
-// Canonical priority names accepted by `/wl --priority <p>` and the
-// `f p *` priority-filter chords. Invalid/unknown values fall back
-// gracefully (no crash, no filter change), matching `/wl <bogus>`.
-export const PRIORITY_MAP: Record<string, string> = {
-  critical: 'critical',
-  high: 'high',
-  medium: 'medium',
-  low: 'low',
-};
-
-// Re-export stage colors from icons for backward compatibility
-export const STAGE_COLORS: Record<string, number> = {
-  idea: 247,
-  intake_complete: 68,
-  plan_complete: 172,
-  in_review: 220,
-  done: 33,
-};
-
-// ── Metadata panel sizing ───────────────────────────────────────────────
-// The list renderer shows the selected item's metadata in a panel below the
-// list. The list takes as much vertical space as its content needs (up to
-// the full pane height) and the panel fills the remainder, keeping a small
-// minimum — see computeDynamicLayout (WL-0MSQ44MDX008U69J).
-// computeMetadataPanelHeight below is retained as a legacy fallback (used by
-// metaScrollDown when no dynamic panel height is supplied) from the original
-// fixed 20–40% reservation (WL-0MSAYNVBY006LM9X).
-
-/** Minimum share of pane rows reserved for the metadata panel (small panes). */
-export const MIN_META_SHARE = 0.2;
-/** Maximum share of pane rows reserved for the metadata panel (tall panes). */
-export const MAX_META_SHARE = 0.4;
-
-/** Pane height (rows) at which the panel uses the minimum share. */
-const META_SHARE_MIN_ROWS = 12;
-/** Pane height (rows) at which the panel reaches the maximum share. */
-const META_SHARE_MAX_ROWS = 40;
-
-/**
- * Legacy fallback: compute a fixed metadata panel height from the pane rows.
- *
- * The share ramps linearly from MIN_META_SHARE at `META_SHARE_MIN_ROWS` to
- * MAX_META_SHARE at `META_SHARE_MAX_ROWS`. The result is clamped to a
- * minimum of 3 rows. Only used by metaScrollDown when no dynamic panel
- * height is provided; the renderer uses computeDynamicLayout instead.
- *
- * @param rows - Total pane height in rows.
- * @returns Number of panel rows (always < rows).
- */
-export function computeMetadataPanelHeight(rows: number): number {
-  let share = MIN_META_SHARE;
-  if (rows > META_SHARE_MIN_ROWS) {
-    const t = Math.min(1, (rows - META_SHARE_MIN_ROWS) / (META_SHARE_MAX_ROWS - META_SHARE_MIN_ROWS));
-    share = MIN_META_SHARE + (MAX_META_SHARE - MIN_META_SHARE) * t;
-  }
-  return Math.max(3, Math.min(Math.round(rows * share), Math.floor(rows * MAX_META_SHARE)));
-}
+// ── Internal imports (WL-0MVND6F9V004IQ3V): symbols the barrel's own
+// remaining code still calls, imported from the concrete sibling modules so
+// the barrel never defines them twice. Not re-exported — unused outside. ──
+import {
+  WorkItemListState,
+  createGatedTick,
+  isHeadingRow,
+  isInputActive,
+} from './worklist.state.js';
+import type { DisplayRow } from './worklist.state.js';
+import { buildMetadataPanelLines } from './worklist.meta.js';
+import {
+  DETAIL_HEADER_LINES,
+  formatDetailContent,
+  formatDetailToC,
+} from './worklist.detail.js';
+import { formatTimestamp, truncateLine, visibleLength } from './worklist.format.js';
 
 /**
  * Compute the dynamic list / metadata panel layout (WL-0MSQ44MDX008U69J).
@@ -314,1040 +238,7 @@ export function computeDynamicLayout(
   return { panelHeight, listArea, listHeight };
 }
 
-// ── Terminal helpers ─────────────────────────────────────────────────
-
-export interface TermSize {
-  rows: number;
-  cols: number;
-}
-
-/**
- * Get current terminal size. Falls back to defaults.
- */
-export function getTermSize(): TermSize {
-  try {
-    // Prefer process.stdout.columns/rows (reflects actual terminal size dynamically)
-    if (process.stdout.columns && process.stdout.rows) {
-      return { rows: process.stdout.rows, cols: process.stdout.columns };
-    }
-    // Fallback to env vars
-    const rows = parseInt(process.env.LINES || '', 10) || 24;
-    const cols = parseInt(process.env.COLUMNS || '', 10) || 80;
-    return { rows, cols };
-  } catch {
-    return { rows: 24, cols: 80 };
-  }
-}
-
-/**
- * ANSI escape code helpers.
- */
-export const ANSI = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  reverse: '\x1b[7m',
-  underline: '\x1b[4m',
-  yellow: '\x1b[33m',
-  clear: '\x1b[2J',
-  clearLine: '\x1b[2K',
-  cursorHome: '\x1b[H',
-  cursorUp: (n: number) => `\x1b[${n}A`,
-  cursorDown: (n: number) => `\x1b[${n}B`,
-  cursorCol: (n: number) => `\x1b[${n}G`,
-  fg: (code: number) => `\x1b[38;5;${code}m`,
-  bg: (code: number) => `\x1b[48;5;${code}m`,
-  hideCursor: '\x1b[?25l',
-  showCursor: '\x1b[?25h',
-  scrollRegion: (top: number, bottom: number) => `\x1b[${top};${bottom}r`,
-  // SGR mouse tracking (WL-0MSGHM5BQ0096BNJ AC1): enable/disable sequences
-  // for button-event (1000), button-event-motion (1002) and SGR-encoded
-  // (1006) reporting, emitted on raw-mode entry / cleanup respectively.
-  mouseEnable: '\x1b[?1000h\x1b[?1002h\x1b[?1006h',
-  mouseDisable: '\x1b[?1000l\x1b[?1002l\x1b[?1006l',
-};
-
-// ── Navigation Stack ──────────────────────────────────────────────────
-
-/**
- * A single entry on the navigation stack, representing a parent context
- * that the user can return to via Escape.
- */
-export interface NavigationStackEntry {
-  /** ID of the parent item whose context was saved. */
-  parentId: string;
-  /** Scroll offset at the time of push. */
-  scrollOffset: number;
-  /** Selected index at the time of push. */
-  selectedIndex: number;
-}
-
-/**
- * A LIFO stack that tracks navigation history for hierarchical browsing.
- * Each entry captures the parent's scroll position and selection so they
- * can be restored when the user navigates back via Escape.
- */
-export class NavigationStack {
-  private stack: NavigationStackEntry[] = [];
-
-  /**
-   * Push a new entry onto the stack.
-   */
-  push(entry: NavigationStackEntry): void {
-    this.stack.push(entry);
-  }
-
-  /**
-   * Pop and return the top entry, or undefined if the stack is empty.
-   */
-  pop(): NavigationStackEntry | undefined {
-    return this.stack.pop();
-  }
-
-  /**
-   * Return the top entry without removing it, or undefined if empty.
-   */
-  peek(): NavigationStackEntry | undefined {
-    return this.stack.length > 0 ? this.stack[this.stack.length - 1] : undefined;
-  }
-
-  /**
-   * Remove all entries from the stack.
-   */
-  clear(): void {
-    this.stack = [];
-  }
-
-  /**
-   * Remove the topmost entry whose parentId matches, if any.
-   * Used when collapsing a parent: the saved context for that parent is no
-   * longer reachable, so keeping it would make a later Escape pop into a
-   * collapsed parent.
-   */
-  removeForParent(parentId: string): void {
-    for (let i = this.stack.length - 1; i >= 0; i--) {
-      if (this.stack[i].parentId === parentId) {
-        this.stack.splice(i, 1);
-        return;
-      }
-    }
-  }
-
-  /** Current depth of the navigation stack. */
-  get depth(): number {
-    return this.stack.length;
-  }
-
-  /** Whether the navigation stack is empty (at root level). */
-  get isEmpty(): boolean {
-    return this.stack.length === 0;
-  }
-}
-
-// ── State ─────────────────────────────────────────────────────────────
-
-export type ViewMode = 'list' | 'detail' | 'filter' | 'form' | 'help';
-
-/**
- * A group heading row in the display-rows model (WL-0MSL5MPSZ003TG94).
- *
- * Headings are first-class rows interleaved with item rows by
- * `WorkItemListState.getDisplayRows()`. They carry the group number, the
- * human-readable label, the count of top-level items in the group (current
- * view, post stage-filter) and the in-memory collapse state.
- */
-export interface DisplayHeadingRow {
-  kind: 'heading';
-  /** Group number (1-indexed, from regroupWorkItems). */
-  group: number;
-  /** Human-readable group label (e.g. `Group 1`, `Idea`, `In Review`). */
-  groupLabel: string;
-  /** Top-level items in this group in the current view (post stage-filter). */
-  count: number;
-  /** Whether the group's items are hidden (in-memory, session-only). */
-  collapsed: boolean;
-  /** Depth indentation level (0 = top-level, 1+ = inside expanded parents). */
-  depth?: number;
-}
-
-/**
- * A single row in the display-rows model: either a group heading or a work
- * item (children of expanded parents included). Navigation, clamping and
- * scrolling operate over these rows so the cursor can land on headings.
- */
-export type DisplayRow = DisplayHeadingRow | WorkItem;
-
-/**
- * Type guard: is this display row a group heading row?
- */
-export function isHeadingRow(row: DisplayRow): row is DisplayHeadingRow {
-  return 'kind' in row && row.kind === 'heading';
-}
-
-/**
- * Mutable state for the work item list UI.
- */
-export class WorkItemListState {
-  /** All loaded work items (unfiltered). */
-  private _allItems: WorkItem[];
-
-  /** Currently visible items (after filtering). */
-  items: WorkItem[];
-
-  /**
-   * All loaded items (unfiltered). Lets the pane-marker refresh re-evaluate
-   * every item — including those excluded by the active stage/priority
-   * filter — without a `wl` re-fetch (WL-0MV1BWETT005GSUJ).
-   */
-  allItems(): WorkItem[] {
-    return this._allItems;
-  }
-
-  /** Currently selected index within `items`. */
-  selectedIndex = 0;
-
-  /**
-   * Set selected index with clamping and scroll adjustment.
-   * Uses flattened item count for clamping when hierarchy active.
-   */
-  setSelectedIndex(index: number): void {
-    this.selectedIndex = index;
-    this._clampSelection();
-    this._adjustScroll();
-    this._resetMetaScroll();
-    // Cache is keyed by item ID; a new selection means a new item's preview
-    // will be needed — invalidate the previous item's cached preview.
-    clearDescriptionPreviewCache();
-  }
-
-  /** Number of rows in the display-rows model (headings + items). */
-  get flatCount(): number {
-    return this.getDisplayRows().length;
-  }
-
-  /**
-   * Clamp using the flattened item count when a filter/hierarchy is active
-   * (called automatically from navigation methods).
-   */
-  private _clampFlat(): void {
-    const total = this.flatCount;
-    if (total === 0) {
-      this.selectedIndex = 0;
-    } else if (this.selectedIndex >= total) {
-      this.selectedIndex = total - 1;
-    } else if (this.selectedIndex < 0) {
-      this.selectedIndex = 0;
-    }
-  }
-
-  /** Vertical scroll offset for the list display. */
-  scrollOffset = 0;
-
-  /** Current view mode. */
-  mode: ViewMode = 'list';
-
-  /** Currently displayed detail item (when mode === 'detail'). */
-  detailItem: WorkItem | null = null;
-
-  /** Active stage filter (null = no stage filter). */
-  activeFilter: string | null = null;
-
-  /**
-   * Active priority filter (null = no priority filter). Mutually exclusive
-   * with `activeFilter` (replace semantics, WL-0MSKC8T46006999S): applying
-   * a priority filter clears the stage filter and vice versa, and sprint
-   * clears both. Only one axis can be active at a time.
-   */
-  activePriorityFilter: string | null = null;
-
-  /**
-   * Active recent-dispatches filter (WL-0MUL2IZLF002S9X5). The third
-   * mutually-exclusive filter axis: when true the list shows log-derived
-   * synthetic rows from `.worklog/downtime-dispatches.log` instead of live
-   * `wl` items. Applying a stage/priority filter clears it and vice versa,
-   * and `clearFilter()` clears all three axes.
-   */
-  activeDispatchFilter = false;
-
-  /**
-   * Display label for the active filter, axis-qualified, or null when no
-   * filter is active (e.g. `stage in_review`, `priority critical`,
-   * `dispatches`). The list header renders `(filtered: <label>)` from this
-   * value.
-   */
-  get activeFilterLabel(): string | null {
-    if (this.activeFilter) return `stage ${this.activeFilter}`;
-    if (this.activePriorityFilter) return `priority ${this.activePriorityFilter}`;
-    if (this.activeDispatchFilter) return 'dispatches';
-    return null;
-  }
-
-  /** Scroll offset within the detail view. */
-  detailScrollOffset = 0;
-
-  /** Selected Related Docs ToC entry (detail mode, 0-based). */
-  detailToCIndex = 0;
-
-  /**
-   * Keyboard focus in the detail view: true = ToC navigation, false =
-   * document scroll region (WL-0MSHWHULZ001FL8I).
-   */
-  detailToCFocus = true;
-
-  /**
-   * Which Key File's content is rendered in the md viewer (default 0 =
-   * first file, auto-render preserved). Enter on a ToC entry sets this to
-   * detailToCIndex.
-   */
-  detailRenderedIndex = 0;
-
-  /**
-   * Paragraph cursor in the md viewer (WL-0MSKV6SKK008MMXR): the index
-   * (into `splitParagraphs` of the rendered file) that note-edit chords
-   * operate on. Defaults to the first paragraph; the viewer integration
-   * moves it as the user scrolls the document region.
-   */
-  detailNoteCursor = 0;
-
-  /**
-   * Scroll offset within the metadata panel. Reset to 0 whenever the
-   * selection changes so a stale position from a previous item never
-   * leaves the panel blank (WL-0MSAYNVBY006LM9X-FT4).
-   */
-  metaScrollOffset = 0;
-
-  /**
-   * Active blockers of the current selection, supplied by the render loop so
-   * the metadata-panel scroll clamp counts the same `Blocked By` rows the
-   * renderer shows (WL-0MV8EZRDJ001TDA8). Null while unresolved or absent.
-   */
-  metaBlockedBy: BlockerRef[] | null = null;
-
-  /**
-   * Active blockers of the detail item, supplied by the render loop so the
-   * detail-view scroll clamp counts the `Blocked By` rows the renderer shows
-   * (WL-0MVBMLY2Z0032CYR). Null while unresolved or absent.
-   */
-  detailBlockedBy: BlockerRef[] | null = null;
-
-  /** Set of expanded item IDs (for hierarchical display). */
-  expandedItems: Set<string> = new Set();
-
-  /**
-   * In-memory set of collapsed group numbers (WL-0MSL5MPSZ003TG94).
-   *
-   * When a group is collapsed its items are hidden from both the render and
-   * navigation.  Collapsed state survives list refreshes (keyed by group
-   * number, mirroring `expandedItems` handling) and does NOT persist across
-   * pane restarts.
-   */
-  collapsedGroups: Set<number> = new Set();
-
-  /** Navigation stack for hierarchical browsing (push/pop parent contexts). */
-  navigationStack: NavigationStack = new NavigationStack();
-
-  // ── Hover tooltip state (WL-0MT9XRZDK006GMUH) ──────────────────────
-  /** Display-row index of the currently hovered row (null = no hover). */
-  hoveredRowIndex: number | null = null;
-
-  /** True when the user pressed Esc to dismiss the tooltip (blocks auto-show until mouse leaves/re-enters). */
-  tooltipDismissed: boolean = false;
-
-  /** Terminal size for layout calculations. */
-  termSize: TermSize;
-
-  constructor(items: WorkItem[], termSize: TermSize) {
-    this._allItems = [...items];
-    this.items = [...items];
-    this.termSize = termSize;
-    this._clampSelection();
-  }
-
-  // ── Navigation ──────────────────────────────────────────────────
-
-  moveUp(): void {
-    if (this.flatCount === 0) return;
-    if (this.selectedIndex > 0) {
-      this.selectedIndex -= 1;
-    } else {
-      this.selectedIndex = this.flatCount - 1; // wrap to last
-    }
-    this._adjustScroll();
-    this._resetMetaScroll();
-  }
-
-  moveDown(): void {
-    if (this.flatCount === 0) return;
-    if (this.selectedIndex < this.flatCount - 1) {
-      this.selectedIndex += 1;
-    } else {
-      this.selectedIndex = 0; // wrap to first
-    }
-    this._adjustScroll();
-    this._resetMetaScroll();
-  }
-
-  pageUp(): void {
-    const pageSize = this._listHeight();
-    this.selectedIndex = Math.max(0, this.selectedIndex - pageSize);
-    this._adjustScroll();
-    this._resetMetaScroll();
-  }
-
-  pageDown(): void {
-    const pageSize = this._listHeight();
-    const maxIndex = Math.max(0, this.flatCount - 1);
-    this.selectedIndex = Math.min(maxIndex, this.selectedIndex + pageSize);
-    this._adjustScroll();
-    this._resetMetaScroll();
-  }
-
-  goToFirst(): void {
-    if (this.mode === 'detail') {
-      this.detailScrollOffset = 0;
-    } else {
-      this.selectedIndex = 0;
-      this.scrollOffset = 0;
-      this._resetMetaScroll();
-    }
-  }
-
-  goToLast(): void {
-    if (this.mode === 'detail') {
-      this.detailScrollOffset = 999999; // Will be clamped
-    } else if (this.flatCount > 0) {
-      this.selectedIndex = this.flatCount - 1;
-      this._adjustScroll();
-      this._resetMetaScroll();
-    }
-  }
-
-  /**
-   * Check if an item ID is currently expanded.
-   */
-  isExpanded(id: string): boolean {
-    return this.expandedItems.has(id);
-  }
-
-  /**
-   * Save the current navigation state (scroll position, selection) and push
-   * it onto the navigation stack so the user can return via Escape.
-   */
-  pushNavigationState(parentId: string): void {
-    this.navigationStack.push({
-      parentId,
-      scrollOffset: this.scrollOffset,
-      selectedIndex: this.selectedIndex,
-    });
-  }
-
-  /**
-   * Pop the top navigation stack entry and restore its scroll/selection state.
-   * Returns the restored entry, or undefined if the stack is empty.
-   */
-  popNavigationState(): NavigationStackEntry | undefined {
-    const entry = this.navigationStack.pop();
-    if (entry) {
-      this.scrollOffset = entry.scrollOffset;
-      this.selectedIndex = entry.selectedIndex;
-      this._clampSelection();
-      this._adjustScroll();
-      this._resetMetaScroll();
-    }
-    return entry;
-  }
-
-  /**
-   * Drop the saved navigation context for a parent, used when that parent is
-   * collapsed so a later Escape does not pop back into a collapsed list.
-   */
-  clearNavigationStateFor(parentId: string): void {
-    this.navigationStack.removeForParent(parentId);
-  }
-
-  /**
-   * Toggle expand/collapse for an item.
-   */
-  toggleExpand(id: string): void {
-    if (this.expandedItems.has(id)) {
-      this.expandedItems.delete(id);
-    } else {
-      this.expandedItems.add(id);
-    }
-  }
-
-  /**
-   * Toggle the collapse state of a group by its group number.
-   *
-   * Collapsed groups hide their items from both the display rows and
-   * navigation (WL-0MSL5MPSZ003TG94). The heading row itself remains
-   * visible so the user can re-expand the group.
-   */
-  toggleGroupCollapse(group: number): void {
-    if (this.collapsedGroups.has(group)) {
-      this.collapsedGroups.delete(group);
-    } else {
-      this.collapsedGroups.add(group);
-    }
-  }
-
-  /**
-   * Produce the display-rows model that interleaves heading rows with item
-   * rows (WL-0MSL5MPSZ003TG94).
-   *
-   * The rows are derived from `getFlattenedItems()` (which includes children
-   * of expanded parents) but items belonging to collapsed groups are excluded.
-   * A heading row is emitted whenever the group changes between consecutive
-   * flattened items, matching the existing group-separator insertion logic.
-   *
-   * Heading `count` = top-level items in the group in the current view
-   * (post stage-filter), unaffected by collapse state. This is computed
-   * from `this.items` (top-level, filtered) so children of expanded parents
-   * are never counted.
-   *
-   * @returns An array of `DisplayRow` entries (headings + items).
-   */
-  getDisplayRows(): DisplayRow[] {
-    const result: DisplayRow[] = [];
-
-    // Count top-level items per group (post stage-filter, current view).
-    // Only items that carry a group number count toward their group's heading.
-    const groupCounts = new Map<number, number>();
-    for (const item of this.items) {
-      if (item.group !== undefined) {
-        groupCounts.set(item.group, (groupCounts.get(item.group) ?? 0) + 1);
-      }
-    }
-
-    let lastGroup: number | undefined;
-
-    const appendItem = (item: WorkItem, depth: number, parent: WorkItem | null): void => {
-      // Insert a heading row when the group changes between consecutive
-      // items. Items without a group field (e.g. children, ungrouped items)
-      // never trigger a new heading.
-      if (item.group !== undefined && item.id !== '..') {
-        if (lastGroup === undefined || item.group !== lastGroup) {
-          const isCollapsed = this.collapsedGroups.has(item.group);
-          result.push({
-            kind: 'heading' as const,
-            group: item.group,
-            groupLabel: item.groupLabel ?? `Group ${item.group}`,
-            count: groupCounts.get(item.group) ?? 0,
-            collapsed: isCollapsed,
-            depth,
-          });
-          lastGroup = item.group;
-        }
-      }
-
-      // Skip the entire subtree of an item in a collapsed group (children
-      // carry no group metadata, so they are excluded via this early return
-      // rather than per-item group checks). The heading above was already
-      // emitted so the collapsed group stays visible and re-expandable.
-      if (item.group !== undefined && this.collapsedGroups.has(item.group)) {
-        return;
-      }
-
-      // Enrich nested items with their direct parent's audit state so the
-      // render layer can derive coverage at read time
-      // (WL-0MUBVH8QG0020H9L). Root rows pass through unchanged.
-      const node = depth > 0 ? withParentAudit(item, parent) : item;
-      if (depth === 0) {
-        result.push(node);
-      } else {
-        result.push(node.depth === depth ? node : { ...node, depth });
-      }
-      if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
-        for (const child of item.children) {
-          appendItem(child, depth + 1, item);
-        }
-      }
-    };
-
-    for (const item of this.items) {
-      appendItem(item, 0, null);
-    }
-
-    return result;
-  }
-
-  /**
-   * Get the flattened item list, inserting children of expanded parents.
-   *
-   * Recurses into any depth (WL-0MSQ3FH1K000MMJW): after inserting a child
-   * of an expanded item, the child's own children are inserted too when the
-   * child is itself expanded. Depth is derived from the hierarchy position
-   * (top-level = no depth, each nested level = parent's depth + 1), so
-   * items fetched at any level render at the correct indentation.
-   */
-  getFlattenedItems(): WorkItem[] {
-    const result: WorkItem[] = [];
-    const appendItem = (item: WorkItem, depth: number, parent: WorkItem | null): void => {
-      // Enrich nested items with their direct parent's audit state so derived
-      // coverage is available on the flattened rows as well as the display
-      // rows (WL-0MUBVH8QG0020H9L).
-      const node = depth > 0 ? withParentAudit(item, parent) : item;
-      // Top-level items are pushed as-is (no depth field, matching the
-      // pre-hierarchy shape). Nested items are always shallow copies: the
-      // coverage enrichment above adds `parentAudit`, and a stored depth that
-      // does not match the hierarchy position is additionally corrected.
-      // On-demand child fetches mutate the LIVE tree (attachChildren), which
-      // the next flatten picks up — the copy is display-only.
-      if (depth === 0) {
-        result.push(node);
-      } else {
-        result.push(node.depth === depth ? node : { ...node, depth });
-      }
-      if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
-        for (const child of item.children) {
-          appendItem(child, depth + 1, item);
-        }
-      }
-    };
-    for (const item of this.items) {
-      appendItem(item, 0, null);
-    }
-    return result;
-  }
-
-  /**
-   * Compute the hierarchy depth of an item in the current tree
-   * (0 = top-level, 1 = child, …). Returns 0 for unknown IDs — the safe
-   * default used when fetching their children at depth 1 (WL-0MSQ3FH1K000MMJW).
-   */
-  getItemDepth(id: string): number {
-    const walk = (items: WorkItem[], depth: number): number => {
-      for (const item of items) {
-        if (item.id === id) return depth;
-        if (item.children && item.children.length > 0) {
-          const found = walk(item.children, depth + 1);
-          if (found >= 0) return found;
-        }
-      }
-      return -1;
-    };
-    const depth = walk(this.items, 0);
-    return depth >= 0 ? depth : 0;
-  }
-
-  /**
-   * Attach fetched children to the item in the live tree (walking nested
-   * levels), never to a flattened copy. Ensures an on-demand fetch for a
-   * child at any depth lands on the object the flatten recursion walks, so
-   * the grandchildren actually render (WL-0MSQ3FH1K000MMJW).
-   */
-  attachChildren(id: string, children: WorkItem[]): void {
-    const walk = (items: WorkItem[]): boolean => {
-      for (const item of items) {
-        if (item.id === id) {
-          item.children = children;
-          return true;
-        }
-        if (item.children && item.children.length > 0 && walk(item.children)) {
-          return true;
-        }
-      }
-      return false;
-    };
-    walk(this.items);
-  }
-
-  selectItem(): void {
-    if (this.items.length === 0) return;
-    const row = this.getSelectedDisplayRow();
-    // Enter on a heading is a no-op (only Tab toggles group collapse,
-    // WL-0MSL5MPSZ003TG94 AC5).
-    if (row === null || isHeadingRow(row)) return;
-    const item = row;
-    this.detailItem = item;
-    this.mode = 'detail';
-    this.detailScrollOffset = 0;
-    // Reset ToC/focus state per item (WL-0MSHWHULZ001FL8I): first entry
-    // selected, keyboard focus on the ToC, auto-render of the first file
-    // remains the initial default.
-    this.detailToCIndex = 0;
-    this.detailToCFocus = true;
-    this.detailRenderedIndex = 0;
-    this._resetMetaScroll();
-  }
-
-  back(): void {
-    if (this.mode === 'detail') {
-      this.mode = 'list';
-      this.detailItem = null;
-      this.detailScrollOffset = 0;
-    } else if (this.mode === 'filter') {
-      this.mode = 'list';
-    }
-  }
-
-  // ── Detail scroll ──────────────────────────────────────────────
-
-  detailScrollUp(amount = 1): void {
-    this.detailScrollOffset = Math.max(0, this.detailScrollOffset - amount);
-  }
-
-  detailScrollDown(amount = 1): void {
-    const maxCols = this.termSize.cols;
-    const viewportHeight = Math.max(10, this.termSize.rows - 4);
-    // The header + ToC block is pinned at the top; only the body below
-    // scrolls (WL-0MSHWHULZ001FL8I / WL-0MSI28AP80002F5S). The content
-    // height must include the `Blocked By` rows the renderer shows or they
-    // become unreachable when the view scrolls (WL-0MVBMLY2Z0032CYR).
-    const allLines = formatDetailContent(this.detailItem, maxCols, undefined, false, 0, true, 0, this.detailBlockedBy);
-    const tocLines = formatDetailToC(this.detailItem, maxCols).length;
-    const pinnedHeight = DETAIL_HEADER_LINES + tocLines;
-    const bodyLines = Math.max(0, allLines.length - pinnedHeight);
-    const bodyViewport = Math.max(1, viewportHeight - pinnedHeight);
-    const maxScroll = Math.max(0, bodyLines - bodyViewport);
-    this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
-  }
-
-  // ── Selection-preserving list scroll (drag-to-scroll) ───────────
-  /**
-   * Scroll the list by a given number of rows **without** changing the
-   * selected index.  Clamps `scrollOffset` to `[0, maxOffset]` using the
-   * same `_listHeight()` / `flatCount` maths as `_adjustScroll`.  (WL-0MSI72S0Y0060BRK)
-   */
-  scrollBy(rows: number): void {
-    const listHeight = this._listHeight();
-    const maxOffset = Math.max(0, this.flatCount - listHeight);
-    this.scrollOffset = Math.max(0, Math.min(maxOffset, this.scrollOffset + rows));
-  }
-
-  // ── Metadata panel scroll ───────────────────────────────────────
-
-  /**
-   * Return the display row at the current selection (heading or item), or
-   * null when the list is empty or the selection is out of range.
-   */
-  getSelectedDisplayRow(): DisplayRow | null {
-    const rows = this.getDisplayRows();
-    if (rows.length === 0) return null;
-    const idx = this.selectedIndex;
-    if (idx < 0 || idx >= rows.length) return null;
-    return rows[idx];
-  }
-
-  /**
-   * Return the currently selected item, or null when the selection is a
-   * heading row (the metadata panel then renders group info), the list is
-   * empty, or the selection is out of range.
-   */
-  getSelectedItem(): WorkItem | null {
-    const row = this.getSelectedDisplayRow();
-    if (row === null || isHeadingRow(row)) return null;
-    return row;
-  }
-
-  /** Scroll the metadata panel up (toward the start of the content). */
-  metaScrollUp(amount = 1): void {
-    this.metaScrollOffset = Math.max(0, this.metaScrollOffset - amount);
-  }
-
-  /** Scroll the metadata panel down (toward the end of the content). */
-  metaScrollDown(amount = 1, panelHeight?: number): void {
-    // Use the provided panel height (from the renderer's new dynamic layout)
-    // or fall back to computing from termSize.
-    let ph = panelHeight;
-    if (ph === undefined) {
-      ph = computeMetadataPanelHeight(this.termSize.rows);
-    }
-    const selected = this.getSelectedItem();
-    if (!selected) return;
-    const contentHeight = metadataPanelContentHeight(selected, this.termSize.cols, ph, undefined, false, this.metaBlockedBy);
-    const maxScroll = Math.max(0, contentHeight - ph);
-    this.metaScrollOffset = Math.min(maxScroll, this.metaScrollOffset + amount);
-  }
-
-  /**
-   * Reset the metadata panel scroll offset. Called whenever the selection
-   * changes so the panel always starts at the top for the newly selected
-   * item.
-   */
-  private _resetMetaScroll(): void {
-    this.metaScrollOffset = 0;
-  }
-
-  // ── Filtering ───────────────────────────────────────────────────
-
-  activateFilter(): void {
-    this.mode = 'filter';
-  }
-
-  applyFilter(stage: string): void {
-    this.activeFilter = stage;
-    this.activePriorityFilter = null; // replace semantics: one axis at a time
-    this.activeDispatchFilter = false; // replace semantics: one axis at a time
-    this._applyFilters();
-    this.selectedIndex = 0;
-    this.scrollOffset = 0;
-    this.mode = 'list';
-    this._resetMetaScroll();
-    // Filter changes the visible item set — invalidate cached previews.
-    clearDescriptionPreviewCache();
-  }
-
-  /**
-   * Apply a priority filter (replace semantics, WL-0MSKC8T46006999S):
-   * clears any active stage filter so stage and priority filters are
-   * mutually exclusive.
-   */
-  applyPriorityFilter(priority: string): void {
-    this.activePriorityFilter = priority;
-    this.activeFilter = null; // replace semantics: one axis at a time
-    this.activeDispatchFilter = false; // replace semantics: one axis at a time
-    this._applyFilters();
-    this.selectedIndex = 0;
-    this.scrollOffset = 0;
-    this.mode = 'list';
-    this._resetMetaScroll();
-    // Filter changes the visible item set — invalidate cached previews.
-    clearDescriptionPreviewCache();
-  }
-
-  /**
-   * Apply the recent-dispatches filter (replace semantics,
-   * WL-0MUL2IZLF002S9X5): clears any active stage/priority filter so the
-   * dispatch axis is mutually exclusive with the other two. The dispatch
-   * rows are supplied by `fetchItemsForView` (sourced from the local rolling
-   * dispatch log), so `_applyFilters` passes them through unchanged.
-   */
-  applyDispatchFilter(): void {
-    this.activeDispatchFilter = true;
-    this.activeFilter = null; // replace semantics: one axis at a time
-    this.activePriorityFilter = null; // replace semantics: one axis at a time
-    this._applyFilters();
-    this.selectedIndex = 0;
-    this.scrollOffset = 0;
-    this.mode = 'list';
-    this._resetMetaScroll();
-    // Filter changes the visible item set — invalidate cached previews.
-    clearDescriptionPreviewCache();
-  }
-
-  clearFilter(): void {
-    this.activeFilter = null;
-    this.activePriorityFilter = null;
-    this.activeDispatchFilter = false;
-    this._applyFilters();
-    this.selectedIndex = 0;
-    this.scrollOffset = 0;
-    this._resetMetaScroll();
-    // Reverting a filter changes the visible item set — invalidate cached previews.
-    clearDescriptionPreviewCache();
-  }
-
-  // ── Refresh ─────────────────────────────────────────────────────
-
-  refreshItems(newItems: WorkItem[]): void {
-    // Clear the description preview cache on refresh (descriptions may have
-    // changed externally; WL-0MT9ZJF28004UJ28).
-    clearDescriptionPreviewCache();
-
-    // Capture the currently selected item's ID before replacing items
-    const prevSelectedId = this._captureSelectedId();
-
-    // The fetcher returns fresh top-level objects that never carry a
-    // `children` array (normalizeItem drops it), so a plain swap would
-    // momentarily collapse every expanded parent until doRefresh re-fetches
-    // children asynchronously — the reported flicker (WL-0MSBVBNGH002RDP5).
-    // Carry the previously fetched children over to the new objects by ID so
-    // the flattened view — and any selection pointing at a child — survives
-    // the swap atomically; doRefresh replaces the carried-over data with
-    // fresh children immediately afterwards.
-    const prevChildrenById = new Map<string, WorkItem[]>();
-    for (const item of this._allItems) {
-      if (item.children && item.children.length > 0) {
-        prevChildrenById.set(item.id, item.children);
-      }
-    }
-
-    this._allItems = [...newItems];
-    this._applyFilters();
-
-    // Attach carried-over children only where the new object has no children
-    // yet (fresh children attached by doRefresh are never clobbered).
-    for (const item of this._allItems) {
-      if (item.childCount && item.childCount > 0 && !item.children) {
-        const prev = prevChildrenById.get(item.id);
-        if (prev) {
-          item.children = prev;
-        }
-      }
-    }
-
-    // Try to restore selection by ID; fall back to clamping if not found
-    if (!this._restoreSelectionById(prevSelectedId)) {
-      this._clampSelection();
-    }
-
-    this._adjustScroll();
-    // Only reset the metadata scroll when the selection actually changed
-    // (auto-refreshes with the same item selected keep the user's position).
-    if (this._captureSelectedId() !== prevSelectedId) {
-      this._resetMetaScroll();
-    }
-  }
-
-  /**
-   * Capture the ID of the currently selected item, or undefined if the
-   * display rows are empty, the selection is a heading, or nothing is
-   * selected.
-   */
-  private _captureSelectedId(): string | undefined {
-    const row = this.getSelectedDisplayRow();
-    if (row === null || isHeadingRow(row)) return undefined;
-    return row.id;
-  }
-
-  /**
-   * Search the display rows for an item matching `id` and set
-   * selectedIndex to its position.
-   *
-   * @returns true if the item was found and selection restored;
-   *          false if the item is no longer visible.
-   */
-  private _restoreSelectionById(id: string | undefined): boolean {
-    if (id === undefined) return false;
-    const rows = this.getDisplayRows();
-    const newIndex = rows.findIndex((row) => !isHeadingRow(row) && (row as WorkItem).id === id);
-    if (newIndex === -1) return false;
-    this.selectedIndex = newIndex;
-    return true;
-  }
-
-  // ── Internal ────────────────────────────────────────────────────
-
-  private _applyFilters(): void {
-    let filtered = [...this._allItems];
-    if (this.activeFilter) {
-      filtered = filtered.filter((item) => item.stage === this.activeFilter);
-    } else if (this.activePriorityFilter) {
-      filtered = filtered.filter((item) => item.priority === this.activePriorityFilter);
-    }
-    // The dispatches axis is applied at FETCH time (fetchItemsForView
-    // returns exactly the log-derived rows); there is nothing further to
-    // filter here, so every fetched row passes through unchanged
-    // (WL-0MUL2IZLF002S9X5).
-    this.items = filtered;
-  }
-
-  private _clampSelection(): void {
-    const total = this.flatCount;
-    if (total === 0) {
-      this.selectedIndex = 0;
-    } else if (this.selectedIndex >= total) {
-      this.selectedIndex = total - 1;
-    } else if (this.selectedIndex < 0) {
-      this.selectedIndex = 0;
-    }
-  }
-
-  /**
-   * Public wrapper around the private `_clampSelection` for external
-   * handlers (the private member is not accessible outside the class).
-   * Clamps the selected index back into the visible row range (e.g. after
-   * collapsing a group removes rows).
-   */
-  clampSelection(): void {
-    this._clampSelection();
-  }
-
-  /** Number of visible list rows (accounts for the metadata panel). */
-  _listHeight(): number {
-    // Dynamic layout (WL-0MSQ44MDX008U69J): list takes up to the max available
-    // rows minus the metadata minimum (3 rows).  This approximates the renderer's
-    // computation — the state does not know the banner count, so it uses a simpler
-    // formula. The renderer's own list-height computation is the source of truth.
-    const rows = this.termSize.rows;
-    const minMeta = 3; // metadata panel minimum
-    return Math.max(3, rows - 4 - minMeta); // rows - chrome(4) - minMeta
-  }
-
-  _adjustScroll(): void {
-    const listHeight = this._listHeight();
-    if (this.selectedIndex < this.scrollOffset) {
-      this.scrollOffset = this.selectedIndex;
-    } else if (this.selectedIndex >= this.scrollOffset + listHeight) {
-      this.scrollOffset = this.selectedIndex - listHeight + 1;
-    }
-    // Clamp scroll offset using flattened item count
-    const maxOffset = Math.max(0, this.flatCount - listHeight);
-    if (this.scrollOffset > maxOffset) {
-      this.scrollOffset = maxOffset;
-    }
-    // Hover tooltip (WL-0MT9XRZDK006GMUH): a scroll/selection adjustment
-    // means the rows under the pointer changed (keyboard navigation,
-    // refresh) — clear the hovered row so a stale tooltip never renders.
-    // The next mouse motion re-establishes it. The Esc dismissal flag is
-    // intentionally preserved (it only clears on hover-none / re-entry).
-    this.hoveredRowIndex = null;
-  }
-
-  /** Returns the currently visible slice of items. */
-  getVisibleItems(): WorkItem[] {
-    const listHeight = this._listHeight();
-    return this.items.slice(this.scrollOffset, this.scrollOffset + listHeight);
-  }
-}
-
-// ── Stage filter helper ───────────────────────────────────────────────
-
-export class StageFilter {
-  private _current: string | null = null;
-  private _index = -1;
-
-  get current(): string | null {
-    return this._current;
-  }
-
-  set(stage: string | null): void {
-    this._current = stage;
-    if (stage === null) {
-      this._index = -1;
-    } else {
-      this._index = STAGES.indexOf(stage as Stage);
-    }
-  }
-
-  /** Cycle to the next stage. Wraps around (including null/off). */
-  cycle(): void {
-    this._index += 1;
-    if (this._index >= STAGES.length) {
-      this._index = -1;
-      this._current = null;
-    } else {
-      this._current = STAGES[this._index];
-    }
-  }
-}
-
 // ── Formatting functions ──────────────────────────────────────────────
-
-/**
- * Return a shallow copy of a nested item carrying its DIRECT parent's audit
- * state, so the render layer can derive child coverage at read time
- * (WL-0MUBVH8QG0020H9L). Coverage is derived, never persisted: the copy's
- * `parentAudit` is consumed by the shared `isCoveredByParent` /
- * `stageDisplayIcon` helpers. A root item (parent === null) is returned
- * unchanged. Depth is limited to the direct parent (depth 1); transitive
- * coverage is intentionally out of scope.
- */
-function withParentAudit(item: WorkItem, parent: WorkItem | null): WorkItem {
-  if (!parent) return item;
-  return {
-    ...item,
-    parentId: item.parentId ?? parent.id,
-    parentAudit: {
-      auditResult: parent.auditResult,
-      auditedAt: parent.auditedAt,
-      updatedAt: parent.updatedAt,
-      fingerprint: parent.fingerprint,
-      currentFingerprint: parent.currentFingerprint,
-    },
-  };
-}
 
 /**
  * Format a single item line for the list display.
@@ -1478,112 +369,6 @@ export function formatItemLine(
 }
 
 /**
- * Ensure a line (possibly with ANSI codes) fits within the given width
- * by truncating and appending an ellipsis if necessary.
- */
-/**
- * Compute the visual (terminal) width of a string, accounting for
- * multi-width characters that render as 2 cells.
- *
- * Characters in these Unicode ranges are known to be double-width
- * in most terminals:
- *   • U+2300–U+23FF  misc technical (⏳ etc.)
- *   • U+2600–U+26FF  miscellaneous symbols (⚠, ⛔)
- *   • U+1F000+       emoji (including supplementary-plane emoji)
- *   • U+3000–U+303F  CJK punctuation (ideographic space U+3000)
- *   • U+3400–U+4DBF  CJK Unified Ideographs Extension A
- *   • U+4E00–U+9FFF  CJK Unified Ideographs (core)
- *   • U+20000+       CJK Extension B+ (supplementary-plane)
- *   • U+AC00–U+D7AF  Hangul Syllables (Korean)
- *   • U+1100–U+11FF  Hangul Jamo
- *   • U+3130–U+318F  Hangul Compatibility Jamo
- *   • U+3100–U+312F  Bopomofo
- *   • U+31A0–U+31BF  Bopomofo Extended
- *   • U+FF01–U+FF5E  Fullwidth ASCII variants
- *   • U+FFA0–U+FFDC  Fullwidth Hangul
- *   • U+3200–U+32FF  Enclosed CJK
- *   • U+2460–U+24FF  Enclosed Alphanumeric
- */
-function visibleLength(s: string): number {
-  let width = 0;
-  for (let i = 0; i < s.length; i++) {
-    // Handle surrogate pairs
-    let cp: number;
-    if (s.charCodeAt(i) >= 0xd800 && s.charCodeAt(i) < 0xdc00 && i + 1 < s.length) {
-      cp = 0x10000 + ((s.charCodeAt(i) - 0xd800) << 10) + (s.charCodeAt(i + 1) - 0xdc00);
-      i += 1;
-    } else {
-      cp = s.charCodeAt(i);
-    }
-    // Double-width ranges: emoji, CJK, Hangul, fullwidth forms
-    if (cp >= 0x2300 && cp < 0x2400) width += 2;            // ⏳ misc technical
-    else if (cp >= 0x2600 && cp < 0x2700) width += 2;       // ⚠, ⛔ symbols
-    else if (cp >= 0x1f000) width += 2;                      // emoji (incl. supplementary)
-    else if (cp >= 0x3000 && cp < 0x3040) width += 2;       // CJK punctuation (ideographic space)
-    else if (cp >= 0x3400 && cp < 0x4DC0) width += 2;       // CJK Extension A
-    else if (cp >= 0x4E00 && cp < 0xA000) width += 2;       // CJK Unified Ideographs
-    else if (cp >= 0x20000) width += 2;                      // CJK Extension B+
-    else if (cp >= 0xAC00 && cp < 0xD800) width += 2;       // Hangul Syllables
-    else if (cp >= 0x1100 && cp < 0x1200) width += 2;       // Hangul Jamo
-    else if (cp >= 0x3130 && cp < 0x3190) width += 2;       // Hangul Compatibility Jamo
-    else if (cp >= 0x3100 && cp < 0x3130) width += 2;       // Bopomofo
-    else if (cp >= 0x31A0 && cp < 0x31C0) width += 2;       // Bopomofo Extended
-    else if (cp >= 0xFF01 && cp < 0xFF5F) width += 2;       // Fullwidth ASCII
-    else if (cp >= 0xFFA0 && cp < 0xFFDD) width += 2;       // Fullwidth Hangul
-    else if (cp >= 0x3200 && cp < 0x3300) width += 2;       // Enclosed CJK
-    else if (cp >= 0x2460 && cp < 0x2500) width += 2;       // Enclosed Alphanumeric
-    else width += 1;
-  }
-  return width;
-}
-
-function truncateLine(line: string, maxWidth: number): string {
-  const visibleLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
-  if (visibleLen <= maxWidth) return line;
-
-  let result = '';
-  let visLen = 0;
-  let i = 0;
-  while (visLen < maxWidth - 1 && i < line.length) {
-    if (line[i] === '\x1b' && line[i + 1] === '[') {
-      const end = line.indexOf('m', i);
-      if (end >= 0) {
-        result += line.slice(i, end + 1);
-        i = end + 1;
-        continue;
-      }
-    }
-    // Count visual width (multi-width chars add 2). Append the FULL
-    // character (both surrogate halves) so truncation never leaves a lone
-    // surrogate that would encode to U+FFFD (�) on write (WL-0MU3U1AMP0044WUX).
-    let ch: string;
-    let cp: number;
-    if (line.charCodeAt(i) >= 0xd800 && line.charCodeAt(i) < 0xdc00 && i + 1 < line.length) {
-      ch = line.slice(i, i + 2); // both halves of the surrogate pair
-      cp = 0x10000 + ((line.charCodeAt(i) - 0xd800) << 10) + (line.charCodeAt(i + 1) - 0xdc00);
-      i += 2;
-    } else {
-      ch = line[i];
-      cp = line.charCodeAt(i);
-      i += 1;
-    }
-    if (cp >= 0x2300 && cp < 0x2400) {
-      visLen += 2; // ⏳ etc.
-    } else if (cp >= 0x2600 && cp < 0x2700) {
-      visLen += 2; // ⚠, ⛔
-    } else if (cp >= 0x1f000) {
-      visLen += 2; // emoji
-    } else {
-      visLen += 1;
-    }
-    result += ch;
-  }
-  // Close open ANSI and append ellipsis
-  result += `${ANSI.reset}…`;
-  return result;
-}
-
-/**
  * Wrap a row in reverse video for the selected-row highlight.
  *
  * Row content (item lines) can contain its own SGR colour segments, each
@@ -1598,25 +383,6 @@ function truncateLine(line: string, maxWidth: number): string {
 function reverseWrap(line: string): string {
   const reasserted = line.replace(/\x1b\[0m/g, `${ANSI.reset}${ANSI.reverse}`);
   return `${ANSI.reverse}${reasserted}${ANSI.reset}`;
-}
-
-/**
- * Format an ISO-8601 timestamp for display as `DD/MM/YY HH:MM` in the
- * user's local time zone (zero-padded, 24-hour clock).
- *
- * Unparseable input is returned unchanged so a corrupt timestamp never
- * breaks rendering (WL-0MSF8HYUX0012WA9).
- */
-export function formatTimestamp(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) {
-    return iso;
-  }
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return (
-    `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${pad(d.getFullYear() % 100)} ` +
-    `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  );
 }
 
 // ── Hover tooltip rendering (WL-0MT9XRZDK006GMUH) ───────────────────
@@ -1720,408 +486,6 @@ export function formatTooltipOverlay(cols: number, lines: string[]): string[] {
     const fg = ANSI.fg(252);
     return `${ANSI.reset}${bg}${fg} ${line}${' '.repeat(padding)} ${ANSI.reset}`;
   });
-}
-
-/**
- * Build the metadata table rows for a work item (label/value pairs).
- *
- * Includes every tracked field: ID, Title, Status, Stage, Priority, Type,
- * Risk, Effort, Children, Parent, Tags, GitHub Issue, Created, Updated,
- * Audit, and Audited At. When the item's `Key Files:` section
- * contains `.md` paths, a `Related Docs` row lists every one of them (joined
- * with `, `); the row is omitted when there are no `.md` Key Files
- * (WL-0MSGTLSUT002NF29). Fields that are unset are omitted.
- * Timestamps (Created, Updated, Audited At) are rendered in local time as
- * `DD/MM/YY HH:MM` via {@link formatTimestamp}.
- *
- * Icon-bearing fields (Status, Stage, Priority, Type, Risk, Effort, Audit)
- * render as **icon + text label**, using the same icon helpers as
- * the list rows (statusIcon, stageDisplayIcon, priorityIcon,
- * riskIcon, effortIcon, auditIcon) so the metadata
- * section and the list can never diverge (WL-0MSGIXHHI009KFW9). With icons
- * disabled the values fall back to plain text — the metadata deliberately
- * does NOT use the list's `[BRACKET]` fallbacks.
- * Shared by the detail view and the list-mode metadata panel so both stay
- * consistent (WL-0MSAYNVBY006LM9X-FT4).
- */
-export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, string]> {
-  const metaRows: Array<[string, string]> = [];
-  const addMeta = (label: string, value: string | undefined | null): void => {
-    if (value != null && value !== '') {
-      metaRows.push([label, value]);
-    }
-  };
-  // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ) that have no live `wl`
-  // counterpart (`isLogOnly`) render an explicit `—` for priority/risk/effort
-  // instead of silently dropping the row, so the panel never looks blank or
-  // broken. A dispatch row ENRICHED from the live item (`mergeDispatchRow`)
-  // leaves `isLogOnly` unset and renders exactly like any other live row
-  // (WL-0MUGLL9SS002E1D2 audit fix).
-  const addMetaOrDash = (label: string, value: string | undefined | null): void => {
-    if (item.isLogOnly) {
-      metaRows.push([label, value != null && value !== '' ? value : '—']);
-    } else {
-      addMeta(label, value);
-    }
-  };
-
-  // Prefix a display value with its icon (`icon + text`, e.g. `🔄
-  // in_progress`). Unknown icon keys return '' (e.g. free-form effort `3`),
-  // so those rows stay text-only — consistent with the list
-  // (WL-0MSGIXHHI009KFW9). When icons are disabled the icon is omitted
-  // entirely: plain text only, no emoji, no [BRACKET] fallbacks.
-  const iconText = (icon: string, text: string | undefined | null): string | undefined => {
-    if (text == null || text === '') return undefined;
-    return icon ? `${icon} ${text}` : text;
-  };
-
-  // Text labels paired with the Audit icons (AC5).
-  const auditLabel = (result: boolean | null | undefined): string | undefined => {
-    if (result === true) return 'ready to close';
-    if (result === false) return 'not ready';
-    return 'unknown';
-  };
-  const reviewLabel = (needsReview: boolean | undefined): string | undefined => {
-    if (needsReview === undefined) return undefined;
-    return needsReview ? 'needs review' : 'reviewed';
-  };
-
-  addMeta('ID', item.id);
-  addMeta('Title', item.title);
-  addMeta('Status', iconText(noIcons ? '' : statusIcon(item.status), item.status));
-  // Stage mirrors the list's audit-aware in_review icon via the shared
-  // stageDisplayIcon helper (AC2). A covered child's inherited parent-audit
-  // symbol is dimmed to match the list row; the `Covered by` row that follows
-  // names the covering parent so coverage is explicit and never silently
-  // dropped (WL-0MUBVH8QG0020H9L AC3). The row is omitted when the parent's
-  // audit state is unavailable (e.g. the detail view may not have the parent
-  // loaded) — coverage is never guessed.
-  const coveredByParent = isCoveredByParent(item, item.parentAudit);
-  const stageGlyph = noIcons ? '' : stageDisplayIcon(item);
-  addMeta(
-    'Stage',
-    noIcons
-      ? item.stage
-      : coveredByParent
-        ? `${ANSI.dim}${stageGlyph}${ANSI.reset} ${item.stage}`
-        : iconText(stageGlyph, item.stage),
-  );
-  if (coveredByParent && item.parentId) {
-    addMeta('Covered by', item.parentId);
-  }
-  addMetaOrDash('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
-  // Type renders as plain text for every issue type — the `⊙` epic icon was
-  // removed (WL-0MVAQ873D007LNWD); parent items are marked by the list's
-  // expand arrow, so the indicator added no information.
-  addMeta('Type', item.issueType);
-  addMetaOrDash('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
-  addMetaOrDash('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
-  // Dispatch provenance for log-derived rows (WL-0MUL2IY8L009S3PQ).
-  if (item.isLogDerived) {
-    addMeta('Dispatch', item.dispatchKind);
-    addMeta('Outcome', item.dispatchOutcome);
-    addMeta('Dispatched', item.dispatchedAt ? formatTimestamp(item.dispatchedAt) : undefined);
-  }
-  addMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
-  addMeta('Parent', item.parentId);
-  if (item.tags && item.tags.length > 0) {
-    metaRows.push(['Tags', item.tags.join(', ')]);
-  }
-  addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
-  addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
-  addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
-  if (item.isLogOnly && item.auditResult == null) {
-    // No live audit state on a log-only row — show `—` (WL-0MUL2IY8L009S3PQ).
-    addMeta('Audit', '—');
-  } else {
-    addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
-  }
-  addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
-
-  // Producer-review row (restored WL-0MVAMS4RO000H3B0 F2): the flag drives a
-  // `Reviewed` metadata row, mirroring the list-row ✓/✗ producer column so the
-  // list and metadata can never diverge (WL-0MSGIXHHI009KFW9).
-  addMeta('Reviewed', iconText(noIcons ? '' : needsProducerReviewIcon(item.needsProducerReview), reviewLabel(item.needsProducerReview)));
-
-  // Related Docs — every .md path referenced in the item's `Key Files:`
-  // section, joined with a compact delimiter so multi-file values fit the
-  // existing label/value row format (WL-0MSGTLSUT002NF29). Display-only:
-  // paths are shown as written in the description, no file I/O at render
-  // time; resolution happens at open time via resolveKeyFilePath.
-  const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
-  if (mdPaths.length > 0) {
-    metaRows.push(['Related Docs', mdPaths.join(', ')]);
-  }
-
-  return metaRows;
-}
-
-// ── Compound metadata rows (WL-0MSNIX4V60012266) ──────────────────────────
-// The four field pairs that should be rendered on a single compressed row.
-
-/** Metadata field-pair definitions for compressed rendering. */
-const META_ROW_PAIRS: Array<[string, string, string]> = [
-  ['Status+Stage', 'Status', 'Stage'],
-  ['Priority+Type', 'Priority', 'Type'],
-  ['Created+Updated', 'Created', 'Updated'],
-  ['Audit+AuditedAt', 'Audit', 'Audited At'],
-] as const;
-
-/**
- * Post-process `buildMetaRows` output to pair four field combinations onto
- * single rows, reducing the vertical space used in the metadata panel.
- *
- * Pairs: Status+Stage, Priority+Type, Created+Updated, Audit+AuditedAt.
- * Each pair is joined with ` / ` as a separator when BOTH values are
- * present. When only one half of a pair is present, the present half is
- * kept as its own single row (with its original label) so no field
- * information is ever lost (e.g. an item with an audit verdict but no
- * audited-at timestamp still shows its `Audit` row).
- *
- * All other rows pass through unchanged. The original row order is
- * preserved (pairs appear where their first component originally appeared).
- *
- * @param metaRows - Raw label/value pairs from {@link buildMetaRows}.
- * @returns A new array with the four pairs compressed into single rows.
- */
-export function pairMetaRows(
-  metaRows: Array<[string, string]>,
-): Array<[string, string]> {
-  const rows = new Map<string, string>(metaRows);
-  const consumed = new Set<string>();
-
-  const result: Array<[string, string]> = [];
-  for (const [label, value] of metaRows) {
-    // Second key of a pair already emitted inside a compound row — skip.
-    if (consumed.has(label)) continue;
-
-    // First key of a pair (buildMetaRows always emits the first key before
-    // the second, so the compound row lands in its natural position).
-    const pairDef = META_ROW_PAIRS.find(([, keyA]) => keyA === label);
-    if (pairDef) {
-      const [compoundLabel, keyA, keyB] = pairDef;
-      const valA = rows.get(keyA);
-      const valB = rows.get(keyB);
-      if (valA != null && valB != null) {
-        result.push([compoundLabel, `${valA} / ${valB}`]);
-        consumed.add(keyB);
-      } else {
-        // Incomplete pair — keep the present half as a single row.
-        result.push([label, value]);
-      }
-    } else {
-      // Regular row, or the lone second key of an incomplete pair —
-      // pass through unchanged.
-      result.push([label, value]);
-    }
-  }
-
-  return result;
-}
-
-// ── Description preview cache (WL-0MT9ZJF28004UJ28) ─────────────────────
-// Cache key: `${itemId}|${descHash}|${maxCols}`. Stores FULL rendered markdown
-// lines (no heading, no preview slicing) so the markdown parser — the
-// expensive step — runs at most once per selection change per item; the
-// per-call slicing to available panel space is cheap.
-const descriptionPreviewCache = new Map<string, string[]>();
-
-/**
- * Minimum number of description preview lines shown in the metadata panel
- * (rendered markdown lines, after the `Description` heading row).
- */
-const DESCRIPTION_PREVIEW_MAX_LINES = 3;
-
-/**
- * Simple djb2 hash for description strings — used as part of the cache key.
- * Collisions are harmless (cache miss triggers re-render); only correctness
- * and speed matter.
- */
-function hashString(s: string): number {
-  let hash = 5381;
-  for (let i = 0; i < s.length; i++) {
-    // eslint-disable-next-line no-bitwise
-    hash = ((hash << 5) + hash + s.charCodeAt(i)) >>> 0;
-  }
-  return hash;
-}
-
-/**
- * Invalidate the description preview cache. Called on selection change
- * (cache reset per item) and item refresh (global clear).
- */
-export function clearDescriptionPreviewCache(itemId?: string): void {
-  if (itemId) {
-    for (const key of descriptionPreviewCache.keys()) {
-      if (key.startsWith(itemId + '|')) {
-        descriptionPreviewCache.delete(key);
-      }
-    }
-  } else {
-    descriptionPreviewCache.clear();
-  }
-}
-
-/**
- * Build the description preview lines for the metadata panel.
- *
- * Replaces the original raw-line preview with a markdown-aware version that
- * calls {@link renderMarkdown} from `md-viewer.ts`. Results are cached keyed
- * by (item.id, description hash) so the markdown parser runs at most once
- * per selection change (WL-0MT9ZJF28004UJ28 AC3).
- *
- * Returns up to `maxLines` rendered markdown lines from the item's
- * description, each truncated to `maxCols`. The preview starts with a dimmed
- * `Description` heading row. Returns an empty array when the description is
- * missing or blank.
- *
- * The preview fills the available panel space (AC2): `maxLines` is derived
- * from the remaining panel rows by the caller, clamped to a 3-row minimum
- * when other metadata lines are present.
- *
- * @param itemId - Work item ID (used for cache keying).
- * @param description - The work item's description text.
- * @param maxCols - Terminal width for truncation.
- * @param maxLines - Maximum rendered lines to show (floor 3 by default).
- * @returns Preview lines ready to insert into the metadata panel.
- */
-function buildDescriptionPreview(
-  itemId: string,
-  description: string | undefined | null,
-  maxCols: number,
-  maxLines: number = DESCRIPTION_PREVIEW_MAX_LINES,
-): string[] {
-  if (!description || description.trim() === '') {
-    return [];
-  }
-
-  const descHash = hashString(description);
-  const renderKey = `${itemId}|${descHash}|${maxCols}`;
-
-  // Reuse the fully rendered output across calls; slicing below is cheap.
-  let rendered = descriptionPreviewCache.get(renderKey);
-  if (!rendered) {
-    rendered = renderMarkdown(description, maxCols);
-    descriptionPreviewCache.set(renderKey, rendered);
-  }
-
-  const preview: string[] = [];
-  // Heading row
-  preview.push(` ${ANSI.dim}${ANSI.underline}Description${ANSI.reset}`);
-
-  // Up to `maxLines` rendered markdown lines (the renderer already handles
-  // wrapping/truncation, so lines are taken as-is)
-  for (const line of rendered) {
-    if (preview.length - 1 >= maxLines) break;
-    preview.push(line);
-  }
-
-  return preview;
-}
-
-/**
- * Build the FULL, unpadded metadata-panel content lines for an item.
- *
- * Shared by {@link formatMetadataPanel} (which truncates, slices and pads
- * them to the panel viewport) and {@link metadataPanelContentHeight} (the
- * `m`/`M` scroll clamp), so the rendered window and the scroll clamp can
- * never diverge (WL-0MV8EZRDJ001TDA8).
- */
-function buildMetadataPanelLines(
-  item: WorkItem,
-  maxCols: number,
-  panelRows: number,
-  lastCommand?: string | null,
-  noIcons = false,
-  blockedBy?: BlockerRef[] | null,
-): string[] {
-  const lines: string[] = [];
-
-  // Header separator identifying the selected item
-  lines.push(` ${ANSI.dim}── ${item.id} ──${ANSI.reset}`);
-
-  // Metadata rows — pair Status+Stage, Priority+Type, Created+Updated,
-  // Audit+AuditedAt onto single rows for a more compact display (WL-0MSNIX4V60012266).
-  // Drop the ID row since the panel header already shows the ID (WL-0MSHIJR7T007Q9R7).
-  const metaRows = pairMetaRows(buildMetaRows(item, noIcons)).filter(([label]) => label !== 'ID');
-  // Blocked By rows (WL-0MV8EZRDJ001TDA8) — one row per ACTIVE blocker, at
-  // the END of the metadata section (after every field row, before the
-  // description preview). ``${id} — ${title}`` keeps both readable; a
-  // title-less blocker falls back to the bare ID rather than a dangling
-  // separator. The blocker's status is appended as an icon + text suffix
-  // when the edge carries one (WL-0MVBMLY2Z0032CYR). Omitted entirely when
-  // there are no active blockers.
-  for (const blocker of blockedBy ?? []) {
-    if (!blocker || !blocker.id) continue;
-    metaRows.push(['Blocked By', formatBlockerValue(blocker, noIcons)]);
-  }
-  if (metaRows.length > 0) {
-    const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
-    for (const [label, value] of metaRows) {
-      lines.push(` ${label.padEnd(fieldWidth)} ${value}`);
-    }
-  }
-
-  // Description preview — markdown-rendered lines filling the available
-  // panel space (WL-0MT9ZJF28004UJ28 AC2). The 3-row floor keeps a
-  // meaningful preview on short panels; tall panels show more of the
-  // description. A row is reserved for the Last command line (when the item
-  // is being actively worked, i.e. status is in-progress) so it stays visible.
-  // Cached per (id, description) so the markdown parser runs at most once per
-  // selection change.
-  const reserveLastCommand = item.status === 'in-progress' ? 1 : 0;
-  const previewBudget = Math.max(DESCRIPTION_PREVIEW_MAX_LINES, panelRows - lines.length - reserveLastCommand);
-  const preview = buildDescriptionPreview(item.id, item.description, maxCols, previewBudget);
-  lines.push(...preview);
-
-  // Last command — only meaningful while the item is being worked on
-  if (item.status === 'in-progress') {
-    if (lastCommand) {
-      lines.push(` ${ANSI.dim}Last command: ${lastCommand}${ANSI.reset}`);
-    } else {
-      lines.push(` ${ANSI.dim}Last command: none yet${ANSI.reset}`);
-    }
-  }
-
-  return lines;
-}
-
-/**
- * Format a single `Blocked By` row value (WL-0MVBMLY2Z0032CYR):
- * ``<id> — <title>`` with the blocker's status appended as an icon + text
- * suffix when the edge carries one (``<id> — <title> <icon> <status>``),
- * consistent with the Status/Stage/Priority row convention
- * (WL-0MSGIXHHI009KFW9). A title-less blocker falls back to the bare ID;
- * a status-less blocker renders ID (+ title) alone — the status suffix is
- * only appended when present. `noIcons` gates the emoji exactly like every
- * other meta row: icons disabled → plain text status only.
- */
-function formatBlockerValue(blocker: BlockerRef, noIcons: boolean): string {
-  const base = blocker.title ? `${blocker.id} — ${blocker.title}` : blocker.id;
-  const status = (blocker.status ?? '').trim();
-  if (!status) return base;
-  const icon = noIcons ? '' : statusIcon(status);
-  return icon ? `${base} ${icon} ${status}` : `${base} ${status}`;
-}
-
-/**
- * Height (in lines) of the metadata panel's full content for `item` at
- * `panelRows` — the value the `m`/`M` scroll clamp subtracts the panel
- * height from (WL-0MV8EZRDJ001TDA8). Unlike {@link formatMetadataPanel}'s
- * return value (always exactly `panelRows` lines after padding), this is the
- * UNPADDED content length, so the scroll offset can reach the true bottom of
- * the panel.
- */
-export function metadataPanelContentHeight(
-  item: WorkItem | null,
-  maxCols: number,
-  panelRows: number,
-  lastCommand?: string | null,
-  noIcons = false,
-  blockedBy?: BlockerRef[] | null,
-): number {
-  if (!item) return 0;
-  return buildMetadataPanelLines(item, maxCols, panelRows, lastCommand, noIcons, blockedBy).length;
 }
 
 /**
@@ -2262,215 +626,7 @@ export function formatGroupInfoPanel(
   return visible;
 }
 
-/**
- * Build the Related Docs Table of Contents (ToC) lines for the detail view
- * (WL-0MSHWHULZ001FL8I).
- *
- * Lists every `.md` Key File of the item, numbered, with a focus indicator
- * (`▸`) on the selected entry. Returns [] when the item has no `.md` Key
- * Files so the detail view renders exactly as before.
- *
- * @param item - Work item whose `Key Files:` section is scanned.
- * @param maxCols - Terminal width.
- * @param detailToCIndex - Selected ToC entry (0-based).
- * @param detailToCFocus - Whether keyboard focus is on the ToC (unused for
- *   rendering; kept for parity with the state and future dimming).
- * @param noIcons - Icons gated off (focus indicator is a plain text marker).
- * @returns ToC lines, or [] when the item has no `.md` Key Files.
- */
-export function formatDetailToC(
-  item: WorkItem | null,
-  maxCols: number,
-  detailToCIndex = 0,
-  detailToCFocus = true,
-  noIcons = false,
-): string[] {
-  if (!item) return [];
-  const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
-  if (mdPaths.length === 0) return [];
-
-  const lines: string[] = [];
-  lines.push('');
-  lines.push(` ${ANSI.underline}Related Docs${ANSI.reset}`);
-  lines.push('');
-  mdPaths.forEach((path, i) => {
-    const marker = i === detailToCIndex ? '▸' : ' ';
-    lines.push(` ${marker} ${i + 1}. ${path}`);
-  });
-  lines.push('');
-  return lines;
-}
-
-/**
- * Build the full content lines for a detail view (without scrolling).
- * Returns an array of lines ready for viewport rendering.
- *
- * Metadata section includes: Status, Priority, Stage, Type, Risk, Effort,
- * Children, Tags, GitHub Issue (number), Created, Updated, Audit
- * (auditResult icon + text label), and Audited At (ISO timestamp). Rendered as a markdown
- * table; icon-bearing values are `icon + text` via the shared
- * {@link buildMetaRows} (WL-0MSGIXHHI009KFW9). ID and Title are shown in
- * the header (from the shared {@link buildMetaRows} set they are omitted
- * from the table to avoid duplication).
- *
- * `Blocked By` rows (WL-0MVBMLY2Z0032CYR): the detail view renders the
- * SAME active blockers the selection-list metadata panel shows — one row
- * per blocker (`<id> — <title> <status-icon> <status>`) appended to the
- * metadata table, reversing the documented divergence (WL-0MV8Q5X8U004KKAP
- * AC-5). The rows arrive pre-resolved from the render loop via the same
- * single-flight + signature-keyed cache as the preview, so the detail view
- * never spawns an uncoordinated async lookup and cannot re-open the
- * WL-0MV8Q5X8U004KKAP flicker class; an expired/failed lookup simply
- * passes no rows (fail-open).
- */
-export function formatDetailContent(
-  item: WorkItem | null,
-  maxCols: number,
-  readFile?: (filePath: string) => string | null,
-  noIcons = false,
-  detailToCIndex = 0,
-  detailToCFocus = true,
-  detailRenderedIndex = 0,
-  blockedBy?: BlockerRef[] | null,
-): string[] {
-  if (!item) return [];
-
-  const lines: string[] = [];
-  const contentWidth = maxCols - 2;
-  const separator = '─'.repeat(Math.min(contentWidth, 72));
-
-  // Header
-  lines.push('');
-  lines.push(` ${item.id}`);
-  lines.push(` ${ANSI.bold}${item.title}${ANSI.reset}`);
-  lines.push(separator);
-
-  // Related Docs ToC — pinned at the top of the detail view
-  // (WL-0MSHWHULZ001FL8I).
-  lines.push(...formatDetailToC(item, maxCols, detailToCIndex, detailToCFocus, noIcons));
-
-  // Metadata — rendered as a markdown table (shared row builder; ID and
-  // Title are already shown in the header above, so they are filtered out
-  // here to avoid duplicating them). Apply compound row pairing for a
-  // more compact display (WL-0MSNIX4V60012266).
-  const metaRows = pairMetaRows(
-    buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title'),
-  );
-  // `Blocked By` rows (WL-0MVBMLY2Z0032CYR) — one row per ACTIVE blocker
-  // after the metadata table, mirroring the selection-list preview:
-  // ``<id> — <title>`` plus the blocker's status (icon + text) when the
-  // edge carries one. Omitted entirely when there are none, so an
-  // unblocked item's detail view is unchanged.
-  for (const blocker of blockedBy ?? []) {
-    if (!blocker || !blocker.id) continue;
-    metaRows.push(['Blocked By', formatBlockerValue(blocker, noIcons)]);
-  }
-
-  // Render the metadata as a markdown table
-  if (metaRows.length > 0) {
-    const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
-    for (const [label, value] of metaRows) {
-      lines.push(`| ${label.padEnd(fieldWidth)} | ${value} |`);
-    }
-  }
-
-  lines.push(separator);
-
-  // Description
-  if (item.description) {
-    lines.push('');
-    lines.push(` ${ANSI.underline}Description${ANSI.reset}`);
-    lines.push('');
-    // Render the description as GFM (tables, bold/italic, inline code,
-    // links, lists, headings) via the shared markdown renderer; NOTE
-    // markers render as `<id>↗` links inside the rendered output. Wrap to
-    // the content width minus the 2-space indent.
-    const indent = 2;
-    const wrapWidth = contentWidth - indent - 2;
-    const descLines = renderMarkdown(item.description, Math.max(wrapWidth, 20));
-    for (const dl of descLines) {
-      lines.push(`  ${dl}`);
-      // Limit total lines
-      if (lines.length > 500) {
-        lines.push(`  ... (truncated, ${item.description.split('\n').length} total description lines)`);
-        break;
-      }
-    }
-  }
-
-  // Generic md-document viewer for a Key Files: .podcast.md episode file
-  // (any .md Key File). When a readFile callback is provided and the item
-  // references a readable .md file, render it in place of the raw
-  // description so the producer sees the paragraph-format episode.
-  // Inline-note markers can be edited from the viewer via the n,e / n,d
-  // chords (WL-0MSKV6SKK008MMXR). Renders the file at detailRenderedIndex
-  // (default 0 = first file, the existing auto-render); Enter on a ToC
-  // entry selects another file
-  // (WL-0MSHWHULZ001FL8I).
-  if (readFile) {
-    const mdPaths = extractFilePaths(item.description ?? '').filter(p => p.endsWith('.md'));
-    const mdPath = mdPaths[detailRenderedIndex] ?? mdPaths[0];
-    const mdViewerLines = renderFileViewer(item, maxCols, readFile, mdPath);
-    if (mdViewerLines.length > 0) {
-      lines.push('');
-      lines.push(` ${ANSI.underline}Episode file (md viewer)${ANSI.reset}`);
-      lines.push('');
-      lines.push(...mdViewerLines);
-    }
-  }
-
-  // Ensure every line fits within the terminal width
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].length > 0) {
-      lines[i] = truncateLine(lines[i], maxCols);
-    }
-  }
-
-  lines.push(separator);
-  lines.push(` ${ANSI.dim}[↑↓/j:k] scroll  [g/G] top/bot  [esc] back  [q] quit  [click] select  [dbl-click] open  [wheel] scroll${ANSI.reset}`);
-
-  return lines;
-}
-
-/**
- * Render a Key Files: .md document (e.g. an episode .podcast.md) for the
- * detail view via the generic markdown viewer.
- *
- * @param item - The work item whose description carries a `Key Files:` path.
- * @param maxCols - Terminal width.
- * @param readFile - Synchronous file reader (path -> content or null).
- * @param mdPath - Optional explicit .md path to render. When omitted,
- *   falls back to the first .md Key File (existing auto-render behavior).
- * @returns Viewer lines, or [] when no readable .md file is referenced.
- */
-export function renderFileViewer(
-  item: WorkItem | null,
-  maxCols: number,
-  readFile: (filePath: string) => string | null,
-  mdPath?: string,
-): string[] {
-  if (!item) return [];
-  const path = mdPath ?? firstMarkdownKeyFile(item.description);
-  if (!path) return [];
-  const content = readFile(path);
-  if (content == null) return [];
-  return renderMarkdownViewer(content, maxCols);
-}
-
 // ── Note-edit write-back (WL-0MSKV6SKK008MMXR) ────────────────────────
-
-/** A note-edit operation to apply to a markdown file. */
-export interface NoteEditAction {
-  kind: 'insert' | 'update' | 'remove';
-  /** Paragraph index (into `splitParagraphs`) for insert. */
-  paragraphIndex?: number;
-  /** New note body (insert/update). */
-  text?: string;
-  /** Marker id to update/remove. */
-  noteId?: string;
-  /** Mark DONE (§7.3) on update. */
-  done?: boolean;
-}
 
 /**
  * Read a markdown file, apply an inline-note edit, and write it back.
@@ -2575,19 +731,6 @@ function buildEpisodeCandidates(state: WorkItemListState): WorkItem[] {
   }
   return candidates;
 }
-/**
- * Return the first `Key Files:` path ending in `.md` (or empty).
- *
- * Mirrors the `Key Files:` convention used by Worklog descriptions; the
- * plugin's `extractFilePaths` in grouping.ts provides the full list, and
- * this helper picks the first markdown document among them.
- */
-export function firstMarkdownKeyFile(description: string | undefined): string {
-  if (!description) return '';
-  const paths = extractFilePaths(description);
-  const md = paths.find(p => p.endsWith('.md'));
-  return md ?? '';
-}
 
 /**
  * Resolve a `Key Files:` markdown path to an absolute filesystem path.
@@ -2639,8 +782,6 @@ export function resolveKeyFilePath(filePath: string): string | null {
  * @param viewportHeight - Number of visible lines (default: terminal rows - 4)
  * @returns The rendered detail view string
  */
-/** Fixed height of the detail-view header block (blank, id, title, separator). */
-const DETAIL_HEADER_LINES = 4;
 
 export function formatDetailView(
   item: WorkItem | null,
@@ -2920,16 +1061,6 @@ export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
   return parts.join('  ');
 }
 
-/** A single row in the help screen's icon legend. */
-export interface HelpIconRow {
-  /** Icon category (the name prefix, e.g. `status`) used to group the legend. */
-  category: string;
-  /** The glyph (or noIcons text fallback) as rendered in the list. */
-  glyph: string;
-  /** Short human-readable meaning of the glyph. */
-  meaning: string;
-}
-
 /**
  * Word-wrap a single logical line into lines of at most `cols` display
  * cells, indenting continuation lines by `indent` columns. Keeps the FULL
@@ -3195,42 +1326,6 @@ export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFr
 }
 
 // ── Keyboard handling ─────────────────────────────────────────────────
-
-export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
-  | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
-  | 'meta-up' | 'meta-down'
-  | 'chord-start' | 'chord-complete' | 'chord-cancel'
-  | 'toggle-expand' | 'dismiss-tooltip' | null;
-
-export interface ChordState {
-  /** Keys pressed so far in the current chord sequence */
-  pendingKeys: string[];
-  /** Hints for next-expected keys and their commands */
-  hints: string;
-  /** The resolved command if chord was completed (cleared after execution) */
-  resolvedCommand: string | null;
-  /**
-   * The model pattern bound to the resolved shortcut entry, if any
-   * (cleared after execution). Used to spawn the pi CLI with `--model`.
-   */
-  resolvedModel: string | null;
-  /**
-   * Whether the resolved shortcut should open a visible pane
-   * (WL-0MSJLD1I70045ZUL). `undefined` = the entry did not set `open_pane`
-   * → open a pane (the default, backward compatible); `false` = run in the
-   * background with output captured to a log file. Cleared (undefined)
-   * after execution.
-   */
-  resolvedOpenPane: boolean | undefined;
-  /**
-   * Whether the resolved shortcut wants the new pane focused
-   * (WL-0MT70LC6B009TL3Q). `undefined`/`false` = open without focus
-   * (current default); `true` = the new pane is zoomed/focused immediately
-   * after opening. Only `P n` (new session) sets this to `true` today.
-   * Cleared (undefined) after execution.
-   */
-  resolvedFocus: boolean | undefined;
-}
 
 /**
  * Map special key sequences to action names.
@@ -3538,57 +1633,6 @@ const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
  * (e.g. '\x1b[<0;10;') — still awaiting its terminating M/m. */
 const SGR_PARTIAL_RE = /^\x1b\[<[0-9;]*$/;
 
-/**
- * A parsed SGR mouse event with 1-based terminal coordinates.
- */
-export interface ParsedMouseEvent {
-  /** Raw SGR button code: 0=left, 1=middle, 2=right, 64=wheel up,
-   * 65=wheel down; bit 32 = motion. */
-  button: number;
-  /** 1-based column. */
-  x: number;
-  /** 1-based row. */
-  y: number;
-  /** True for '\x1b[<...m' (release), false for '\x1b[<...M' (press). */
-  release: boolean;
-}
-
-/** Double-click window in ms (WL-0MSGHM5BQ0096BNJ AC3); boundary
- * inclusive (<=). */
-export const DOUBLE_CLICK_WINDOW_MS = 400;
-
-/** Minimum pointer displacement (in terminal cells / rows) before a
- * held-button motion event is treated as a drag-to-scroll gesture rather
- * than click jitter.  SGR coordinates are 1-based cell positions so a
- * threshold of 1 row distinguishes deliberate scrolling from incidental
- * movement.  (WL-0MSI72S0Y0060BRK) */
-export const DRAG_THRESHOLD_CELLS = 1;
-
-/** State tracker for an active drag-to-scroll gesture.  Tracks the press
- * origin, a fractional accumulator for proportional scrolling, and the
- * pre-press selection/scroll so the drag can restore them when it
- * activates — ensuring a drag never leaves the selection moved by the
- * initial press.  (WL-0MSI72S0Y0060BRK) */
-export interface MouseDragState {
-  /** Origin of the press (x, y) or null when no drag is active. */
-  origin: { x: number; y: number } | null;
-  /** Fractional row/line accumulator — integer parts are dispatched as
-   * discrete scroll deltas. */
-  accumulator: number;
-  /** True when the drag has crossed the threshold and is actively
-   * scrolling. */
-  active: boolean;
-  /** Snapshot of selectedIndex and scrollOffset taken at press time, used
-   * to restore state when the drag activates so the drag never leaves the
-   * selection moved by the initial press. */
-  prePressSelection: { selectedIndex: number; scrollOffset: number } | null;
-  /** True once the pre-press selection has been restored for this drag
-   * gesture — the restore happens exactly once, on the first threshold-
-   * crossing motion; subsequent drag events accumulate scroll on top of
-   * the restored state. */
-  restored: boolean;
-}
-
 /** Create a fresh drag state (helper for tests). */
 export function createDragState(): MouseDragState {
   return {
@@ -3599,41 +1643,6 @@ export function createDragState(): MouseDragState {
     restored: false,
   };
 }
-
-/** Prior left-press coordinates plus an injectable clock for deterministic
- * double-click tests. */
-export interface MouseClickState {
-  /** The previous left-press position/time, or null when none. */
-  lastClick: { x: number; y: number; at: number } | null;
-  /** Current clock (ms) — injected for deterministic tests. */
-  now: number;
-}
-
-/** Internal drag bookkeeping action — emitted on the first press and
- * never dispatched to the state switch (it triggers state capture only).
- * (WL-0MSI72S0Y0060BRK) */
-type DragAction =
-  | { type: 'drag-start' }
-  | { type: 'drag-list'; rows: number }
-  | { type: 'drag-detail'; lines: number };
-
-/** Dispatchable mouse action — mirrors the list/detail/filter key paths.
- * Drag actions are emitted by `mapMouseDrag` and dispatched by
- * `handleMouseInput`; the drag consumer never emits `select-row` /
- * `open-detail`, so a drag-release can never click.  (WL-0MSI72S0Y0060BRK) */
-export type MouseAction =
-  | { type: 'select-row'; index: number } // list: click/tap an item row
-  | { type: 'open-detail' } // list: double-click (Enter-equivalent)
-  | { type: 'back' } // detail: double-click (to the list)
-  | { type: 'wheel-up' } // list: wheel/touch-scroll up
-  | { type: 'wheel-down' } // list: wheel/touch-scroll down
-  | { type: 'scroll-detail-up' } // detail: wheel up (k-equivalent)
-  | { type: 'scroll-detail-down' } // detail: wheel down (j-equivalent)
-  | { type: 'filter-stage'; index: number } // filter: tap a stage option
-  | { type: 'hover-row'; index: number } // list: motion over an item row (tooltip)
-  | { type: 'hover-none' } // list: motion over chrome rows (pointer left the rows)
-  | DragAction // internal drag actions (drag-start, drag-list, drag-detail)
-  | null; // inert: chrome rows, motion, releases, unknown buttons
 
 /**
  * Parse a COMPLETE SGR mouse sequence ('\x1b[<b;x;yM' press or
@@ -4191,20 +2200,6 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
 }
 
 /**
- * Review-queue banner state for the footer (parent WL-0MTHSHN5V008R5L0).
- */
-export interface ReviewQueueBannerState {
-  /** True when the root-only completed/in_review count ≥ browseItemCount. */
-  queueDeep: boolean;
-  /** Number of root-level completed/in_review items counted. */
-  completedCount: number;
-  /** browseItemCount threshold (undefined when the setting is unavailable). */
-  browseItemCount?: number;
-  /** True when at least one root in_review item has an outstanding audit. */
-  auditsOutstanding: boolean;
-}
-
-/**
  * Choose the review-queue-depth footer banner copy, or `null` when the banner
  * must not render (the queue is not deep).
  *
@@ -4283,6 +2278,19 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   detailBlockedBy?: BlockerRef[] | null,
   /** Non-blocking background-sync status notice appended to the header (F3 — WL-0MVJV2O7H003HY9N). */
   syncNotice?: string,
+  /**
+   * Header segment naming how many dispatch-window items are held by an
+   * `assignee` (AC1, WL-0MVR8FN1D002SCIR): `[held: N by Map]`. Display-only;
+   * absent/null renders nothing.
+   */
+  assigneeHoldStatus?: string | null,
+  /**
+   * Banner copy for a dispatch window held ENTIRELY by the `assignee`
+   * scheduling hold (AC2, WL-0MVR8FN1D002SCIR). Display-only and read-only:
+   * the banner never clears a hold or changes a dispatch decision. `null`
+   * renders no banner (and consumes no chrome row).
+   */
+  assigneeHoldNotice?: string | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -4328,6 +2336,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     detailBlockedBy?: BlockerRef[] | null,
     /** Non-blocking background-sync status notice appended to the header (F3 — WL-0MVJV2O7H003HY9N). */
     syncNotice?: string,
+    /** Header segment for dispatch-window `assignee` holds (AC1, WL-0MVR8FN1D002SCIR). */
+    assigneeHoldStatus?: string | null,
+    /** Banner copy for an all-held dispatch window (AC2, WL-0MVR8FN1D002SCIR). */
+    assigneeHoldNotice?: string | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -4392,6 +2404,15 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (downtimeStatus) {
       header += downtimeStatus;
     }
+    // ── Assignee scheduling-hold indicator (AC1 — WL-0MVR8FN1D002SCIR) ──
+    // Names how many dispatch-window items are held by a non-empty
+    // `assignee` (the producer's scheduling hold). Display-only: it never
+    // clears a hold and never changes a dispatch decision. The all-held
+    // WARNING is a banner below (AC2); this segment reports the count even
+    // when the window still has dispatchable work.
+    if (assigneeHoldStatus) {
+      header += ` ${ANSI.fg(220)}${assigneeHoldStatus}${ANSI.reset}`;
+    }
     // ── Non-blocking sync notice (F3 — WL-0MVJV2O7H003HY9N) ─────
     // A tiny, render-only status notice ("⟳ syncing… Ns") while a background
     // `wl sync` is in flight. It NEVER blocks input: it is a pure string read
@@ -4432,6 +2453,20 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     }
     if (codeFreezeAmbiguous) {
       const bannerText = `⚠ Ambiguous Codefreeze marker — implement/audit dispatch disabled`;
+      const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
+    }
+    // Assignee scheduling-hold banner (AC2 — WL-0MVR8FN1D002SCIR): a
+    // dispatch window with ZERO dispatchable items solely because every item
+    // carries a non-empty `assignee` (the producer sentinel `Map`, …). This
+    // is a display-only WARNING — the hold is intentional and is never
+    // auto-cleared; the operator just gets to tell "I parked this work on
+    // purpose" apart from "the dispatcher is broken". Consumes one chrome
+    // row so the `rows - 1` pane line-count invariant still holds
+    // (WL-0MSAAON63003N6LO).
+    if (assigneeHoldNotice) {
+      const bannerText = `⚠ ${assigneeHoldNotice}`;
       const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
       bannerCount++;
@@ -4927,19 +2962,6 @@ export function formatNoticeDialog(
 }
 
 /**
- * Outcome of a podcast w-chord dispatch attempt, surfaced to the operator.
- *
- * - `dispatched` — the command resolved and was sent to a Pi agent pane.
- * - `error` — `resolvePodcastTarget` refused to resolve the command (e.g. no
- *   script in `Key Files:`, or the belt-and-braces "never author a duplicate"
- *   guard). Nothing was dispatched.
- */
-export interface PodcastNotice {
-  kind: 'dispatched' | 'error';
-  body: string;
-}
-
-/**
  * Render the persistent, dismissable notice for a podcast w-chord dispatch
  * attempt (OSL-0MUQ59IRF009ICIF).
  *
@@ -5292,19 +3314,6 @@ export function dispatchChordCommand(
 
   // Unknown command — not handled
   return false;
-}
-
-export type ExecuteResult = 'dispatched' | 'callback' | 'noop' | 'blocked';
-
-/**
- * Result of resolving a podcast-progression command marker for the selected
- * work item. Either a fully-resolved command (no markers remain) or an
- * error message that must be surfaced WITHOUT dispatching (OSL-0MSHFQ51L009IUOS
- * belt-and-braces guard).
- */
-export interface PodcastTargetResolution {
-  command?: string;
-  error?: string;
 }
 
 /**
@@ -5851,6 +3860,31 @@ export async function runWorklistTui(
   let sprintCompletedCount = 0;
   let sprintAuditsOutstanding = false;
 
+  // ── Assignee scheduling-hold surface (WL-0MVR8FN1D002SCIR) ───────
+  // Derived from the ALREADY-FETCHED dispatch window on every refresh (no
+  // new `wl` spawn) and purely display-only: it never clears a hold and
+  // never changes a dispatch decision (AC4). `null` while a filter narrows
+  // the list — a filtered window cannot answer "is the WHOLE window held?"
+  // (fail-safe: no warning rather than a false one).
+  let assigneeHoldSummary: DispatchWindowHoldSummary | null = null;
+
+  /**
+   * Recompute the assignee-hold account from the window the worklist just
+   * rendered. Skipped for any filtered/dispatch-derived view, whose items are
+   * not the canonical dispatch window.
+   */
+  const applyAssigneeHoldState = (items: WorkItem[]): void => {
+    const filtered =
+      state.activeFilter !== null ||
+      state.activePriorityFilter !== null ||
+      state.activeDispatchFilter;
+    assigneeHoldSummary = filtered
+      ? null
+      : summariseDispatchWindowHold(items, {
+          windowSize: resolveSprintViewWindow(loadSettings().browseItemCount ?? opts.browseItemCount),
+        });
+  };
+
   /**
    * Apply a pre-fetched review-queue-depth state to the banner indicator
    * (display-only; completed+in_review root count vs browseItemCount, plus
@@ -6063,7 +4097,6 @@ export async function runWorklistTui(
       }
     });
   }
-
 
   // Check if we're in raw mode (stdin is a TTY)
   const isInteractive = process.stdin.isTTY;
@@ -6301,6 +4334,11 @@ export async function runWorklistTui(
         // released before the pane was (re)opened). Fail-open.
         await applyPaneMarkers(newItems);
         state.refreshItems(newItems);
+        // Refresh the assignee-hold account from the window we just fetched
+        // (WL-0MVR8FN1D002SCIR): no extra `wl` spawn, and the shared
+        // classifier keeps the TUI in step with the coordination log's
+        // `all-window-items-held` token.
+        applyAssigneeHoldState(newItems);
         // Blocked-by rows survive refreshes (WL-0MV8Q5X8U004KKAP): the
         // blocker cache is keyed by item ID and invalidated per item only
         // when its payload signature changes (status/stage/updatedAt — see
@@ -7536,6 +5574,10 @@ export async function runWorklistTui(
       metaBlockers,
       detailBlockers,
       syncNoticeText,
+      // Assignee scheduling-hold surface (AC1 header count + AC2 banner):
+      // display-only, read-only — the holds are never cleared here.
+      assigneeHoldStatusText(assigneeHoldSummary),
+      assigneeHoldBannerText(assigneeHoldSummary),
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

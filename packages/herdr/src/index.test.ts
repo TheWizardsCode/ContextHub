@@ -25,6 +25,7 @@ import {
   defaultStalledPanesLister,
   worklogRootFromPiSessionPath,
   resolveInteractiveDispatchPriority,
+  setHostCpuSamplerForTests,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
 import {
@@ -48,6 +49,18 @@ import type {
   DispatcherTabInfo,
   ItemTabAnchor,
 } from './dispatcher-anchor.js';
+
+// Deterministic host-CPU gate (WL-0MVK0UO3Q002TXW6 AC6): `createDowntimeDeps`
+// wires the REAL `/proc/stat` sampler in production. Every test here pins a
+// low-utilisation fixture so dispatch behaviour never depends on the host's
+// current load (tests must never read the real /proc/stat).
+beforeEach(() => {
+  setHostCpuSamplerForTests(() => ({ ok: true, percent: 5, source: 'proc-stat' }));
+});
+
+afterEach(() => {
+  setHostCpuSamplerForTests(null);
+});
 
 // ---------------------------------------------------------------------------
 // buildSendToPiArgs tests (WL-0MSD48ZFC0043AO3)

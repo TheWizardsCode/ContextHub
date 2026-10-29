@@ -13,10 +13,12 @@
  *   2. MEASURED — a real burst of distinct cold single-item reads through the
  *      fetcher's exec seam must observe AT MOST the documented cap of `wl`
  *      processes in flight (the production semaphore), record exactly one
- *      spawn per read, keep the event loop within the ≤ ~200 ms input bound,
- *      and keep the derived aggregate bound `cap × per-spawn peak` inside the
- *      documented RSS ceiling. The same burst with the cap widened is the
- *      `uncapped` reference (the fan-out the budget bounds).
+ *      spawn per read, keep the event loop within the ≤ ~200 ms input bound
+ *      measured as on-CPU time (host descheduling on a shared machine is
+ *      excluded from the gate, WL-0MVMSE5LN003KCPQ), and keep the derived
+ *      aggregate bound `cap × per-spawn peak` inside the documented RSS
+ *      ceiling. The same burst with the cap widened is the `uncapped`
+ *      reference (the fan-out the budget bounds).
  *
  * The full-scale profile (~2,600 items / ~100 MB) runs on demand:
  * `npm run test:perf:large -- --spawn-burst 12`.
@@ -28,10 +30,13 @@ import {
   DEFAULT_WL_SPAWN_CAP,
   LARGE_DB_PROFILES,
   REPO_ROOT,
+  attributeEventLoopTick,
   defaultLargeDbBudget,
   evaluateSpawnCapReport,
+  loopThreadCpuMs,
   readLargeDbBudget,
   runSpawnConcurrencyScenario,
+  startEventLoopProbe,
   type SpawnCapScenarioReport,
 } from '../test/perf/large-db-harness.js';
 
@@ -51,6 +56,8 @@ function syntheticReport(
     aggregateRssBoundMb: 220,
     eventLoopBlockedMs: 12,
     maxEventLoopBlockedMs: 8,
+    eventLoopBusyBlockedMs: 12,
+    maxEventLoopBusyBlockedMs: 8,
     wallMs: 420,
   };
   return {
@@ -109,11 +116,30 @@ describe('F5 spawn-cap budget policy', () => {
   });
 
   it('flags queued reads that blocked the event loop (input must never lock)', () => {
+    // Loop-attributable (on-CPU) blocking, not just a late timer.
     const evaluation = evaluateSpawnCapReport(
-      syntheticReport({ capped: { eventLoopBlockedMs: 900 } }),
+      syntheticReport({
+        capped: { eventLoopBlockedMs: 900, eventLoopBusyBlockedMs: 900 },
+      }),
       budget,
     );
     expect(evaluation.violations.join('\n')).toContain('event loop blocked');
+  });
+
+  it('does not flag wall-clock delay caused by host descheduling (not loop work)', () => {
+    // WL-0MVMSE5LN003KCPQ: on a shared host the 1 ms probe counted OS
+    // descheduling (other agents' suites) as "blocked", flaking the measured
+    // ratchet with 332 ms of wall delay and ~none of it attributable to the
+    // process. The gate is on-CPU blocking (F1's CPU-time policy), so a
+    // loaded host cannot fail the absolute AC1 bound.
+    const evaluation = evaluateSpawnCapReport(
+      syntheticReport({
+        capped: { eventLoopBlockedMs: 332.3, eventLoopBusyBlockedMs: 18 },
+      }),
+      budget,
+    );
+    expect(evaluation.violations).toEqual([]);
+    expect(evaluation.ok).toBe(true);
   });
 
   it('reads the documented cap from the checked-in budget file', () => {
@@ -123,19 +149,126 @@ describe('F5 spawn-cap budget policy', () => {
   });
 });
 
+describe('event-loop probe CPU attribution', () => {
+  const yieldToEventLoop = (ms = 5): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+  /**
+   * Block this thread synchronously until it has consumed `ms` of on-CPU
+   * time (the loop cannot run timers meanwhile).
+   *
+   * CPU time — not `performance.now()` — is the budget because it is the only
+   * load-independent measure: a wall-clock busy-wait on a contended host is
+   * descheduled mid-wait, so 120 ms of wall time can burn well under 60 ms of
+   * CPU and the probe would then (correctly) attribute the rest to host
+   * descheduling (WL-0MVS5CZFT001GHK9). Burning loop CPU makes the reading
+   * genuinely load-independent, which is what the assertions below test.
+   *
+   * Returns the on-CPU milliseconds actually burned.
+   */
+  const blockLoop = (ms = 120): number => {
+    const started = loopThreadCpuMs();
+    const until = started + ms;
+    while (loopThreadCpuMs() < until) {
+      // busy-wait: the loop is blocked by our own synchronous work
+    }
+    return loopThreadCpuMs() - started;
+  };
+
+  it('attributes a tick to loop work only when the loop thread consumed CPU', () => {
+    // synchronous block: the timer ran late AND the loop thread was on CPU
+    expect(attributeEventLoopTick(300, 300, 2)).toEqual({
+      blockedMs: 298,
+      busyBlockedMs: 298,
+    });
+    // host descheduling: the timer ran late with the process off CPU
+    expect(attributeEventLoopTick(300, 1, 2)).toEqual({
+      blockedMs: 298,
+      busyBlockedMs: 0,
+    });
+    // a normal tick: inside the timer-granularity tolerance
+    expect(attributeEventLoopTick(1.5, 0.2, 2)).toEqual({
+      blockedMs: 0,
+      busyBlockedMs: 0,
+    });
+    // partial: half on CPU, half descheduled
+    expect(attributeEventLoopTick(9, 4, 2)).toEqual({
+      blockedMs: 7,
+      busyBlockedMs: 2,
+    });
+    // CPU can never exceed the interval the loop had (parallel GC/compiler
+    // threads on a process-wide clock must not look like loop work)
+    expect(attributeEventLoopTick(10, 40, 2)).toEqual({
+      blockedMs: 8,
+      busyBlockedMs: 8,
+    });
+  });
+
+  it('records a synchronous block as on-CPU loop blocking', async () => {
+    const probe = startEventLoopProbe();
+    await yieldToEventLoop();
+    const burned = blockLoop();
+    // The delayed tick is only recorded once the loop is free again.
+    await yieldToEventLoop();
+    const blocking = probe.stop();
+    // A ~120 ms synchronous block consumes ~120 ms of loop-thread CPU whatever
+    // the host scheduler does, so the CPU-attributed reading is load-independent.
+    expect(burned).toBeGreaterThanOrEqual(120);
+    expect(blocking.busyBlockedMs).toBeGreaterThan(60);
+    expect(blocking.totalBlockedMs).toBeGreaterThanOrEqual(blocking.busyBlockedMs);
+  });
+
+  it('attributes on-CPU time only, even when the host deschedules the loop mid-block', async () => {
+    // Shared-host pattern: the block is descheduled part way through, so the
+    // wall delay doubles while the loop thread is on CPU for only half of it.
+    // The attributed busy time must follow the CPU clock (~60 ms), never the
+    // wall delay (~120 ms) — the property the load-independent threshold in
+    // the previous test relies on (WL-0MVS5CZFT001GHK9).
+    const onCpuMs = 60;
+    let usage = { user: 0, system: 0 };
+    const probe = startEventLoopProbe(2, { readCpuUsage: () => usage });
+    await yieldToEventLoop();
+    const until = performance.now() + 120;
+    while (performance.now() < until) {
+      // busy-wait the wall delay; CPU is credited below to model a half-share
+    }
+    usage = { user: onCpuMs * 1000, system: 0 };
+    await yieldToEventLoop();
+    const blocking = probe.stop();
+    // ~60 ms on CPU minus the probe's tick tolerance, capped by the wall delay.
+    expect(blocking.busyBlockedMs).toBeGreaterThan(45);
+    expect(blocking.busyBlockedMs).toBeLessThan(75);
+    expect(blocking.totalBlockedMs).toBeGreaterThan(blocking.busyBlockedMs);
+  });
+
+  it('reports a wall-clock delay with no CPU use as wall-only (descheduling)', async () => {
+    // Frozen CPU clock: exactly the shared-host pattern (the timer runs late
+    // because the process was descheduled). Nothing may be attributed to the
+    // loop.
+    const frozen = { user: 9_000_000, system: 1_000_000 };
+    const probe = startEventLoopProbe(2, { readCpuUsage: () => frozen });
+    await yieldToEventLoop();
+    blockLoop();
+    await yieldToEventLoop();
+    const blocking = probe.stop();
+    expect(blocking.totalBlockedMs).toBeGreaterThan(60);
+    expect(blocking.busyBlockedMs).toBe(0);
+  });
+});
+
 describe(
   'F5 spawn-cap measured ratchet',
   { timeout: 300_000 },
   () => {
     /**
-     * The measured half is skipped on a loaded host (> 0.75 load/core): the 1 ms event-loop
-     * probe counts OS descheduling as "blocked", so under external CPU
-     * contention an absolute timing reading describes the host, not the
-     * plugin (the documented F1 policy gates regressions on CPU time for the
-     * same reason). The absolute AC1/AC5 numbers are measured at full scale
-     * by F7's `--ac-report` on a quiet reference host; the deterministic
-     * cap/RSS/no-drop policy is covered by the synthetic tests above
-     * regardless.
+     * The measured half asserts the cap/RSS/no-drop invariants and the
+     * input-lag bound that the plugin is responsible for. Input lag is
+     * measured as the event-loop delay during which the process was actually
+     * on CPU: the 1 ms probe's raw wall delay also counts OS descheduling, so
+     * on a shared host (other agents' test suites) a wall reading describes
+     * the host, not the plugin. F1 gates regressions on CPU time for the same
+     * reason. The absolute AC1/AC5 numbers at full scale are still measured by
+     * F7's `--ac-report` on a quiet reference host; the host-independent
+     * cap/RSS/no-drop policy is covered by the synthetic tests above too.
      */
     it('keeps a real read burst inside the documented cap, loop and RSS bounds', async () => {
       const report = await runSpawnConcurrencyScenario({
@@ -159,21 +292,20 @@ describe(
       // Nothing was dropped: every burst read spawned exactly once.
       expect(report.capped.spawns).toBe(report.capped.burst);
 
-      // Queued reads never blocked input: total event-loop blocking during a
-      // spawn-heavy burst stays well inside the parent AC 1 ≤ ~200 ms bound.
-      // The 1 ms probe counts OS descheduling as blocked, so the absolute
-      // reading is only valid on a quiet host (check AFTER the measurement:
-      // a 1-min average sampled at collection time misses contention spikes).
-      // The absolute AC1 number is measured at full scale by F7's
-      // `--ac-report` on a quiet reference host; the deterministic cap/RSS/
-      // no-drop policy above holds regardless.
+      // Queued reads never blocked input: total event-loop blocking the
+      // process actually spent running code stays inside the parent AC 1
+      // ≤ ~200 ms bound. OS descheduling — other agents' suites on a shared
+      // host — delays the probe timers without consuming this process's CPU,
+      // so like F1's CPU-time gate the absolute bound is asserted on
+      // loop-attributable time and the raw wall reading is reported for
+      // diagnostics only (WL-0MVMSE5LN003KCPQ).
       const loadPerCore = os.loadavg()[0] / Math.max(1, os.cpus().length);
-      if (loadPerCore <= 0.75) {
-        expect(report.capped.eventLoopBlockedMs).toBeLessThanOrEqual(200);
-      } else {
+      expect(report.capped.eventLoopBusyBlockedMs).toBeLessThanOrEqual(200);
+      if (report.capped.eventLoopBlockedMs > 200) {
         console.warn(
-          `[spawn-cap] host load ${loadPerCore.toFixed(2)}/core — absolute event-loop ` +
-            `assertion skipped (measured ${report.capped.eventLoopBlockedMs} ms)`,
+          `[spawn-cap] wall-clock loop delay ${report.capped.eventLoopBlockedMs} ms exceeds 200 ms ` +
+            `but CPU-attributed blocking is ${report.capped.eventLoopBusyBlockedMs} ms — ` +
+            `host descheduling at ${loadPerCore.toFixed(2)} load/core, not the plugin`,
         );
       }
 
@@ -188,12 +320,8 @@ describe(
       }
 
       const evaluation = evaluateSpawnCapReport(report, budget);
-      const violations =
-        loadPerCore <= 0.75
-          ? evaluation.violations
-          : evaluation.violations.filter((violation) => !violation.includes('event loop blocked'));
-      expect(violations, violations.join('\n')).toEqual([]);
-      if (loadPerCore <= 0.75) expect(report.ok).toBe(true);
+      expect(evaluation.violations, evaluation.violations.join('\n')).toEqual([]);
+      expect(report.ok).toBe(true);
 
       // Same fixture logic as the refresh ratchet (nested + dependency-edged).
       expect(report.datasetItems).toBe(LARGE_DB_PROFILES.default.items);

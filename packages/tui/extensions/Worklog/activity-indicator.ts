@@ -36,7 +36,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from '@earendil-works/pi-coding-agent';
-import { runWl } from '../wl-integration.js';
+import { resolveWorkItemTitle } from './lib/work-item-title.js';
 import { truncateWorkItemId } from './terminal-utils.js';
 
 /**
@@ -80,11 +80,16 @@ export const BUILTIN_COMMANDS = new Set([
  * Regex to detect work item ID patterns in user input.
  *
  * Matches patterns like `WL-0MQL0T5TR0060AEH` (prefix + dash + 15+ alphanumeric chars).
- * The prefix must be 2-3 uppercase letters followed by a dash and at least 15
+ * The prefix must be 2-5 uppercase letters followed by a dash and at least 15
  * alphanumeric characters. This is intentionally conservative to avoid false
  * positives on ordinary text while matching all known work item ID formats.
+ *
+ * NOTE (WL-0MVGB23MM004X501): the upper bound was widened from 3 to 5 so that
+ * 4-letter prefixes (RISE, GOLF, FEUD) resolve like the rest — the original
+ * `{2,3}` silently skipped them, which is exactly the cross-project gap
+ * reported. `skill/shared/status_lifecycle.py` accepts `{2,5}` too.
  */
-export const WORK_ITEM_ID_REGEX = /\b[A-Z]{2,3}-[A-Z0-9]{15,}/;
+export const WORK_ITEM_ID_REGEX = /\b[A-Z]{2,5}-[A-Z0-9]{15,}/;
 
 /**
  * Extract the first work item ID from input text.
@@ -190,33 +195,12 @@ export function showActivity(ctx: StatusContext, activity: string, showIndicator
 }
 
 /**
- * Resolve a work item ID to its title via `wl show <id> --json`.
- *
- * Uses `runWl` from the Worklog integration layer with a 2-second timeout.
- * Returns the title string on success, or `null` if the lookup fails
- * (invalid ID, not found, timeout, or any other error).
- *
- * Errors are silently swallowed so that callers can fall back gracefully
- * without requiring try/catch boilerplate.
- */
-async function resolveWorkItemTitle(id: string): Promise<string | null> {
-  try {
-    const result = await runWl('show', [id], { timeout: 2000 });
-    if (result && typeof result === 'object' && typeof result.title === 'string') {
-      return result.title;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Show activity text with optional async work item title resolution.
  *
  * First displays the raw input text immediately. If a work item ID is detected
- * in the text, it then async-looks up the work item title via `wl show` and
- * replaces the display with the format `⏵ <id> <title>` (truncated to fit).
+ * in the text, it then async-looks up the work item title via the shared
+ * resolver (`lib/work-item-title.ts`, cross-project aware, AC3) and replaces
+ * the display with the format `⏵ <id> <title>` (truncated to fit).
  *
  * On lookup failure (invalid ID, not found, timeout), the raw text remains
  * shown — no error is displayed to the user.
@@ -226,7 +210,7 @@ async function resolveWorkItemTitle(id: string): Promise<string | null> {
  * @param showIndicator - Passed through to showActivity(); when false the
  *   indicator is suppressed entirely.
  */
-async function showActivityWithTitleLookup(ctx: StatusContext, text: string, showIndicator?: boolean): Promise<void> {
+export async function showActivityWithTitleLookup(ctx: StatusContext, text: string, showIndicator?: boolean): Promise<void> {
   // First, show the raw text immediately
   showActivity(ctx, text, showIndicator);
 

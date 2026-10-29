@@ -65,6 +65,22 @@ path's dynamic entrypoints and their runtime module union, plus the measured
 `src`/`dist` baselines and regression headroom. Background and re-run
 instructions: [`docs/dev/wl-startup-import-budget.md`](docs/dev/wl-startup-import-budget.md).
 
+**Missing shared build output.** Before anything resolves
+`@worklog/shared/*`, the fast path checks that the workspace build output
+(`packages/shared/dist`) actually exists and, when it does not, prints one
+actionable line (the missing artifact, the absolute path checked and the fix)
+and exits non-zero instead of an `ERR_MODULE_NOT_FOUND` stack trace. Recovery
+is always the same:
+
+```sh
+npm run build:shared
+```
+
+The check resolves through the same `node_modules/@worklog/shared` link the
+runtime uses, so a linked worktree without its own `dist/` (which resolves the
+main checkout's build) never trips it. Details:
+[`docs/dev/wl-shared-dist-diagnostic.md`](docs/dev/wl-shared-dist-diagnostic.md).
+
 ### Spawn instrumentation and CPU-seconds per refresh cycle
 
 When `WL_SPAWN_COUNT_FILE=<path>` is set, every `wl` process appends one line
@@ -744,7 +760,9 @@ WL-0MVI0IT4S0070G78):
   "worklogDir": "/abs/path/.worklog",   // resolved worklog dir (honours --worklog-dir)
   "requestedCount": 20,                 // the -n value that was used
   "subsets": {
-    // priority critical, status open|in-progress|blocked|completed, ALL parent levels
+    // priority critical, status open|in-progress|blocked|completed, ALL parent
+    // levels — the discovery feed; the top-level-only rule lives in the Herdr
+    // consumer (see below)
     "critical":        [ /* WorkItem[] */ ],
     // status completed|in-progress, stage in_review, root-only
     "reviewQueue":     [ /* WorkItem[] */ ],
@@ -764,6 +782,17 @@ the same enrichment `wl list --json` emits (`auditResult`, `auditedAt`,
 same filter expressions and hierarchy ordering as the equivalent `wl list`
 invocations. `browse` is item-for-item and order-for-order identical to
 `wl next` with the same browse window and `--no-re-sort`.
+
+The `critical` subset is deliberately **all parent levels** (it is the only
+mandatory subset without `rootOnly`): it doubles as the discovery feed that
+lets the Herdr layer find the parents of still-actionable critical children.
+Rendering nothing but roots at the top level — critical items included — is a
+Herdr-side rule: the plugin hides a critical child and substitutes its root
+ancestor, so the work stays reachable without duplicating a row
+(WL-0MVN4WESM007T4XI, `packages/herdr/README.md` § *Selection List
+Behaviour*). Other consumers of `wl worklist` and of
+`wl list --priority critical` (e.g. the ship critical-items gate) still see
+child items.
 
 ### `next` [options]
 

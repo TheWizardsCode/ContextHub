@@ -14,33 +14,59 @@ same work item without the item's state durably changing between dispatches
 Usage:
     python3 packages/herdr/scripts/scan-duplicate-dispatches.py [root ...] [--json] [--since ISO]
 
-Roots default to the five worklog roots observed on this host. `--since`
-filters to entries dispatched at or after the given ISO-8601 timestamp
-(useful for focusing on post-fix evidence). Output is a human-readable table
-by default; `--json` emits a machine-readable report. Exit code is always 0
-(the tool reports; it does not fail on findings).
+Roots default to `$HERDR_DISPATCH_ROOTS` (a `os.pathsep`-separated list) or,
+when that is unset, to the host worklog roots that carry a live dispatch log
+(`AI_Hell`, `ContentCreator`, `Nova`, `tts` under the host projects root).
+`--since` filters to entries dispatched at or after the given ISO-8601
+timestamp (useful for focusing on post-fix evidence). Output is a
+human-readable table by default; `--json` emits a machine-readable report.
+Exit code is always 0 (the tool reports; it does not fail on findings).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-# The five worklog roots with an active downtime dispatch log on this host
-# (dispatch logs are written under each project's `.worklog/` directory).
-DEFAULT_ROOTS = [
-    "/home/rgardler/projects/ContextHub",
-    "/home/rgardler/projects/SorraAgents",
-    "/home/rgardler/projects/Tableau-Card-Engine",
-    "/home/rgardler/projects/dev-scripts",
-    "/home/rgardler/projects/open_source_llm",
-]
+#: Environment variable holding the roots to scan, `os.pathsep`-separated.
+#: Overrides the built-in defaults so a different host layout needs no code
+#: change (and so the retired pre-rename checkout path never has to return).
+ROOTS_ENV_VAR = "HERDR_DISPATCH_ROOTS"
+
+#: The host's projects root. Every built-in default root is a project beneath it.
+DEFAULT_PROJECTS_ROOT = Path("/home/rgardler/projects")
+
+#: The projects that carry an active downtime dispatch log on this host
+#: (dispatch logs are written under each project's `.worklog/` directory).
+#: Verified 2026-10-25: the five roots recorded in the 2026-08-08 audit no
+#: longer have logs, and the pre-rename `open_source_llm` checkout is this
+#: repository under its current name, `ContentCreator`.
+DEFAULT_PROJECT_NAMES = ("AI_Hell", "ContentCreator", "Nova", "tts")
+
+DEFAULT_ROOTS = [str(DEFAULT_PROJECTS_ROOT / name) for name in DEFAULT_PROJECT_NAMES]
 
 LOG_REL = Path(".worklog") / "downtime-dispatches.log"
+
+
+def resolve_roots(explicit: list[str] | None = None) -> list[str]:
+    """Resolve the worklog roots to scan.
+
+    Precedence: explicit CLI roots, then ``$HERDR_DISPATCH_ROOTS``
+    (``os.pathsep``-separated), then :data:`DEFAULT_ROOTS`. Blank override
+    entries are dropped so a trailing separator cannot pull in the current
+    directory (``Path("") / LOG_REL`` would resolve against the cwd).
+    """
+    if explicit:
+        return list(explicit)
+    override = os.environ.get(ROOTS_ENV_VAR, "")
+    roots = [entry.strip() for entry in override.split(os.pathsep)]
+    roots = [entry for entry in roots if entry]
+    return roots or list(DEFAULT_ROOTS)
 
 
 def read_entries(log_path: Path) -> list[dict]:
@@ -154,7 +180,14 @@ def main(argv: list[str] | None = None) -> int:
             "more than once (RCA WL-0MSRBFFLN005W3VT evidence scan)."
         )
     )
-    parser.add_argument("roots", nargs="*", help="worklog roots to scan (default: the five host roots)")
+    parser.add_argument(
+        "roots",
+        nargs="*",
+        help=(
+            "worklog roots to scan (default: $HERDR_DISPATCH_ROOTS, else the "
+            "four host roots that carry a dispatch log)"
+        ),
+    )
     parser.add_argument(
         "--json", action="store_true", help="emit machine-readable JSON report"
     )
@@ -165,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    roots = args.roots or DEFAULT_ROOTS
+    roots = resolve_roots(args.roots)
     reports = find_duplicates(roots, since=args.since)
 
     if args.json:

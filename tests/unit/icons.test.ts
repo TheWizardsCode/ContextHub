@@ -11,9 +11,11 @@
  * `@worklog/shared/icons` functions.
  */
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
-import { readFileSync, readdirSync, statSync, lstatSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { walkRepoSourceFiles } from '../helpers/repo-file-walk.js';
 
 import {
   priorityIcon,
@@ -900,28 +902,15 @@ describe('effortLabel', () => {
 //   packages/herdr/src/icons.ts (consumers import from @worklog/shared/icons)
 // Any import of an `icons.js`/`icons.ts` path would regress that removal, so
 // this guard fails the test suite if such an import ever reappears.
+//
+// The walk goes through `walkRepoSourceFiles`, which skips ".worklog/" (so
+// sibling agents' linked worktrees are never traversed) and tolerates entries
+// that are removed mid-walk. A hand-rolled readdir/stat/read walk raised
+// ENOENT whenever a concurrent `implement.py finish` pruned a worktree
+// (WL-0MVSLXT79008D4X6).
 
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const EXCLUDED_DIRS = new Set(['node_modules', 'dist', '.git', '.worklog', 'coverage']);
 const ICONS_FILE_RE = /(?:from\s+['"]|require\(\s*['"])([^'"]*icons\.(?:js|ts))(?:['"])/;
-
-function collectRepoFiles(dir: string): string[] {
-  const files: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (EXCLUDED_DIRS.has(entry)) continue;
-    const full = join(dir, entry);
-    // Skip symlinks (e.g. the root status-stage-rules.js -> dist/ shim):
-    // following a broken symlink raises ENOENT in fresh checkouts/worktrees
-    // where dist/ is not yet built.
-    if (lstatSync(full).isSymbolicLink()) continue;
-    if (statSync(full).isDirectory()) {
-      files.push(...collectRepoFiles(full));
-    } else if (/\.(ts|js|mjs|cjs)$/.test(entry)) {
-      files.push(full);
-    }
-  }
-  return files;
-}
 
 // ─── Producer Review Icons (restored contract WL-0MVAMS4RO000H3B0 F1) ───
 // RED-pinned with it(`: the `needsProducerReviewIcon`/… exports were
@@ -1032,10 +1021,9 @@ describe('needsProducerReviewLabel (RED-contract, restored)', () => {
 describe('repo-wide grep guard (WL-0MT2GMTAZ003VKVL)', () => {
   it('no file imports from a removed icons.js/icons.ts path', () => {
     const offenders: string[] = [];
-    for (const file of collectRepoFiles(REPO_ROOT)) {
-      const content = readFileSync(file, 'utf8');
+    walkRepoSourceFiles(REPO_ROOT, (file, content) => {
       if (ICONS_FILE_RE.test(content)) offenders.push(file);
-    }
+    });
     expect(offenders).toEqual([]);
   });
 

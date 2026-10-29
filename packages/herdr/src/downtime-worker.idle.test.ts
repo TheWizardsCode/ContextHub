@@ -44,6 +44,9 @@ import {
   perSlotIdleOwned,
   perSlotOwnedOneUnowned,
   prefillPacingStatus,
+  prefillIdleUncalibrated,
+  prefillIdleZeroOccupancy,
+  prefillBusyOccupancy,
 } from './downtime-worker.fixtures.js';
 import type { CoordinationLogEntry } from './downtime-log.js';
 
@@ -1061,6 +1064,138 @@ describe('evaluatePrefillPacing (WL-0MVHSZRZQ00482QX)', () => {
 
   it('AC4: a queue ETA within the budget does not defer', () => {
     const pacing = evaluatePrefillPacing(prefillPacingStatus({ queue_eta_seconds: 30 }), null);
+    expect(pacing.deferReason).toBeUndefined();
+  });
+});
+
+// ── Pacing gate: calibration prerequisite + occupancy-only ETA ────────
+//
+// Parent WL-0MVPRZU0A000TSWD: the live dispatcher deferred every tick with
+// `prefill-eta` on a fully idle pool (`capacityHint: idle`, `freeSlots 2/2`,
+// nothing prefilling, no gate waiters) because the proxy's 97.5 s
+// `queue_eta_seconds` exceeded the 60 s admission budget. That ETA is the
+// NEWCOMER's own cold prefill — an unavoidable service cost, not a queue
+// wait — and it was UNCALIBRATED (the proxy's own admission guard is inert at
+// `insufficient_samples`). Deferring on it livelocks dispatch: never dispatch
+// ⇒ never calibrate ⇒ stay pessimistic ⇒ never dispatch.
+//
+// The contract these specs pin:
+//  - AC1 (parent): an uncalibrated ETA never paces dispatch (fail open), while
+//    `prefill-cap` and `prefill-gate` keep their precedence;
+//  - AC2 (parent): only OCCUPANCY paces — a wait behind other prefills; the
+//    newcomer's own prefill (and an idle slot's stale per-slot ETA) never
+//    blocks dispatch;
+//  - AC3 (parent): a real occupancy ETA above the budget still defers with the
+//    existing `prefill-eta` reason.
+//
+// LANDED: these bodies were committed as RED witnesses (`it.fails`) by
+// WL-0MVPUDYHD000QI0K and flipped to `it` by the implementation child
+// WL-0MVPUE4C9005380J (calibration prerequisite + occupancy-only ETA).
+describe('evaluatePrefillPacing — calibration + occupancy (WL-0MVPUDYHD000QI0K)', () => {
+  it(
+    'parent AC1: an uncalibrated ETA above the budget never defers (fail open)',
+    () => {
+      // The incident fixture: idle pool, 97.5 s own-prefill ETA, 60 s budget,
+      // `prefill_eta_calibrated: false`.
+      const status = prefillIdleUncalibrated;
+      const pacing = evaluatePrefillPacing(status, status.slots ?? null);
+      expect(pacing.queueEtaSeconds).toBe(97.5);
+      expect(pacing.budgetSeconds).toBe(60);
+      expect(pacing.deferReason).toBeUndefined();
+    },
+  );
+
+  it('parent AC1: gate waiters still defer while the proxy is uncalibrated', () => {
+    const pacing = evaluatePrefillPacing(
+      { ...prefillIdleUncalibrated, prefill_gate_waiters: 2 },
+      null,
+    );
+    expect(pacing.gateWaiters).toBe(2);
+    expect(pacing.deferReason).toBe('prefill-gate');
+  });
+
+  it('parent AC1: a saturated cap still defers while the proxy is uncalibrated', () => {
+    const pacing = evaluatePrefillPacing(
+      { ...prefillIdleUncalibrated, local_prefills_in_flight: 1 },
+      null,
+    );
+    expect(pacing.capacityBudget).toBe(0);
+    expect(pacing.deferReason).toBe('prefill-cap');
+  });
+
+  it(
+    'parent AC2: a calibrated zero-occupancy pool never defers on a high own-prefill ETA',
+    () => {
+      const status = prefillIdleZeroOccupancy;
+      const pacing = evaluatePrefillPacing(status, status.slots ?? null);
+      // The 300 s ETA is entirely the newcomer's own prefill: no slot is
+      // busy and the occupancy terms are zero.
+      expect(pacing.queueEtaSeconds).toBe(300);
+      expect(pacing.budgetSeconds).toBe(60);
+      expect(pacing.deferReason).toBeUndefined();
+    },
+  );
+
+  it(
+    'parent AC2: an idle slot\u2019s stale per-slot prefill ETA never defers',
+    () => {
+      // Same zero-occupancy pool, but a STALE per-slot `prefill_eta_seconds`
+      // lingers on a slot that is not processing: an idle pool has no
+      // in-flight slot ETA to respect.
+      const status = prefillPacingStatus({
+        ...prefillIdleZeroOccupancy,
+        slots: [
+          { slot_id: 'slot-1', is_processing: false, lease_state: 'free', prefill_eta_seconds: 300 },
+          { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+        ],
+      });
+      const pacing = evaluatePrefillPacing(status, status.slots ?? null);
+      expect(pacing.deferReason).toBeUndefined();
+    },
+  );
+
+  it(
+    'parent AC2: occupancy below the budget does not defer even when the total ETA exceeds it',
+    () => {
+      // Own prefill (~97.5 s) + 30 s behind one in-flight prefill: the total
+      // ETA (127.5 s) is above the 60 s budget, but the only PACED term —
+      // occupancy — is below it.
+      const status = prefillPacingStatus({
+        local_prefills_in_flight: 1,
+        local_max_concurrent_prefills: 2,
+        prefill_budget_seconds: 60,
+        queue_eta_seconds: 127.5,
+        queue_eta_occupancy_seconds: 30,
+        queue_eta_busy_slots: 1,
+        prefill_eta_calibrated: true,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, lease_state: 'generating' },
+          { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+        ],
+      });
+      const pacing = evaluatePrefillPacing(status, status.slots ?? null);
+      expect(pacing.deferReason).toBeUndefined();
+    },
+  );
+
+  it('parent AC3: an occupancy ETA above the budget still defers with prefill-eta', () => {
+    // One slot prefilling, 300 s of occupancy wait, 60 s budget, capacity
+    // headroom still positive (cap 2, one in flight) and no per-slot ETA on
+    // the busy slot — only the occupancy term can explain the paced tick.
+    const status = prefillBusyOccupancy;
+    const pacing = evaluatePrefillPacing(status, status.slots ?? null);
+    expect(pacing.capacityBudget).toBe(1);
+    expect(pacing.gateWaiters).toBe(0);
+    expect(pacing.budgetSeconds).toBe(60);
+    expect(pacing.deferReason).toBe('prefill-eta');
+  });
+
+  it('parent AC3: an uncalibrated busy pool does not defer on the ETA either', () => {
+    const status = prefillPacingStatus({
+      ...prefillBusyOccupancy,
+      prefill_eta_calibrated: false,
+    });
+    const pacing = evaluatePrefillPacing(status, status.slots ?? null);
     expect(pacing.deferReason).toBeUndefined();
   });
 });

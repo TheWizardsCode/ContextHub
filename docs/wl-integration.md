@@ -18,6 +18,34 @@ and the Pi extension wrapper `packages/tui/extensions/wl-integration.ts`) use
 `runWl` to fetch work item state for the session health footer. The
 CLI-level spawn layer lives at `src/wl-integration/spawn.ts`.
 
+### Cross-project work item titles (`Worklog/lib/work-item-title.ts`)
+
+The footer's work item title lookups go through a single shared resolver,
+`packages/tui/extensions/Worklog/lib/work-item-title.ts`, rather than calling
+`runWl('show', …)` directly. For an ID whose prefix belongs to a *sibling*
+project (declared as `prefix: <PFX>` in `<projects-root>/<project>/.worklog/config.yaml`,
+where `<projects-root>` is the parent of the checkout shipping the extension),
+it appends `--worklog-dir <sibling>/.worklog` to the `wl show` invocation —
+the same prefix-to-sibling resolution the skills layer performs
+(`skill/shared/status_lifecycle.py`, `SIBLING_SCAN_ROOT`). Without it, an ID
+such as `RISE-…` looked up from another project's cwd failed with "Work item
+not found" and the footer silently showed no title (WL-0MVGB23MM004X501).
+
+Behavioural contract:
+
+- The prefix→`.worklog` scan is memoised per process and only considers
+  *initialised* worklogs; ambiguous prefixes (e.g. `POD` declared by several
+  projects) are resolved by probing candidates, so only the project that owns
+  the ID is used.
+- No sibling match falls back to a plain cwd lookup (the previous behaviour);
+  any failure degrades silently to the raw ID.
+- The lookup budget is `TITLE_LOOKUP_TIMEOUT_MS` (5 s) — sized for a cold
+  `wl show` of a large item.
+- `runWl(command, args, options)` itself is unchanged for all other callers.
+
+The scan root can be overridden with the `WORKLOG_SIBLING_SCAN_ROOT`
+environment variable.
+
 ```ts
 import { runWlCommand, runWl, wlEvents } from './packages/tui/extensions/wl-integration.js';
 

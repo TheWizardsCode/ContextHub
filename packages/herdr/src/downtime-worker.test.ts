@@ -141,6 +141,9 @@ import {
   prefillGateContended,
   prefillQueueEtaOverBudget,
   prefillSlotEtaOverBudget,
+  prefillIdleUncalibrated,
+  prefillLegacyIdlePool,
+  prefillBusyOccupancy,
 } from './downtime-worker.fixtures.js';
 import {
   resumeStalledPane,
@@ -1210,7 +1213,14 @@ describe('stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2)', () 
       300_000,
     );
 
-    expect(result).toEqual({ ok: true, stalledResume: true });
+    // The result union is unchanged; WL-0MVR8FKMU009XTED AC1 only ADDS the
+    // machine-readable empty-offer attribution ("a stalled pane was resumed in
+    // place, so no new offer was made").
+    expect(result).toEqual({
+      ok: true,
+      stalledResume: true,
+      attribution: { reason: 'stalled-resume', windowSize: 0 },
+    });
     expect(deps.getHerdrListHead).not.toHaveBeenCalled();
   });
 
@@ -1702,9 +1712,11 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
   };
 
   /**
-   * The audit tier plus an implement fallback: with the free-slot budget
-   * clamped to the prefill headroom the audit tier (≥ 2 free slots) is
-   * skipped and the implement tier dispatches instead.
+   * The audit tier plus an implement fallback candidate, so a tick can
+   * assert which tier it picked: the audit tier dispatches while its
+   * slot-count minimum is met, and the implement tier is the fallback
+   * whenever the audit tier is skipped (WL-0MVR8FI4Q0007CGR reversed the
+   * old clamp of that minimum to the prefill headroom).
    */
   function auditTierDeps(): Partial<DowntimeWorkerDeps> {
     return {
@@ -1879,10 +1891,11 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
     }
   });
 
-  it('AC2/AC6: the effective budget is clamped to the prefill headroom (audit needs 2 free slots)', async () => {
-    // Headroom 1 (cap 2, one prefill in flight, 3 genuinely free slots):
-    // the effective budget is 1, so the audit tier (needs ≥ 2) is skipped
-    // and the implement tier dispatches instead of the audit.
+  it('WL-0MVR8FI4Q0007CGR AC2: the audit minimum uses the slot budget, not the prefill headroom', async () => {
+    // Headroom 1 (cap 2, one prefill in flight, 3 genuinely free slots): the
+    // SLOT budget is 3, so the audit tier (needs ≥ 2) is eligible and
+    // dispatches. The reduced prefill headroom paces only the single-pane
+    // tiers; it must never gate the audit tier's slot-count requirement.
     const rootOne = tempDirs.make('dt-prefill-headroom1-');
     const workerOne = makePrefillWorker({
       status: prefillPacingStatus({
@@ -1903,15 +1916,17 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
     // The tick outcome carries no candidate; assert the dispatched TIER via
     // the claim + spawned prompt (the observable dispatch seams).
     expect(workerOne.deps.claimItem).toHaveBeenCalledWith(
-      'WL-IMP',
+      'WL-AUD',
       expect.anything(),
       expect.anything(),
     );
     expect(workerOne.deps.spawnAgentPane).toHaveBeenCalledWith(
-      expect.stringContaining('/skill:implement'),
+      expect.stringContaining('/skill:audit'),
       expect.anything(),
     );
     expect(workerOne.deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    // The implement fallback is never consulted once the audit tier is live.
+    expect(workerOne.deps.getNextImplementCandidate).not.toHaveBeenCalled();
 
     // Headroom 2 (nothing in flight): the effective budget is 2 → the audit
     // tier (the higher-priority tier) dispatches as before.
@@ -1936,4 +1951,297 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
       expect.anything(),
     );
   });
+
+  it('WL-0MVR8FI4Q0007CGR AC1: cap=1 + 2 free slots dispatches the audit tier (not no-candidate)', async () => {
+    // The documented default: local_max_concurrent_prefills=1, nothing in
+    // flight → capacityBudget 1 → effectiveFreeSlots min(2,1)=1. The audit
+    // tier must still dispatch because the SLOT budget is 2.
+    const root = tempDirs.make('dt-prefill-cap1-audit-');
+    const { worker, deps } = makePrefillWorker({
+      status: prefillPacingStatus({
+        local_max_concurrent_prefills: 1,
+        local_prefills_in_flight: 0,
+        total_slots: 2,
+        slots: [
+          { slot_id: 'slot-1', is_processing: false, lease_state: 'free' },
+          { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+        ],
+      }),
+      root,
+      deps: auditTierDeps(),
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(true);
+    expect(worker.blockReason).not.toBe('no-candidate');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', expect.anything(), expect.anything());
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit'),
+      expect.anything(),
+    );
+  });
+
+  it('WL-0MVR8FI4Q0007CGR AC6: a cap=0 (gate disabled) pool is unchanged and dispatches the audit tier', async () => {
+    // cap=0 disables the prefill gate → capacityBudget undefined →
+    // effectiveFreeSlots === freeSlots. The audit tier behaves exactly as
+    // before the fix.
+    const root = tempDirs.make('dt-prefill-cap0-audit-');
+    const { worker, deps } = makePrefillWorker({
+      status: prefillPacingStatus({
+        local_max_concurrent_prefills: 0,
+        local_prefills_in_flight: 2,
+      }),
+      root,
+      deps: auditTierDeps(),
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', expect.anything(), expect.anything());
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit'),
+      expect.anything(),
+    );
+  });
+
+  it('WL-0MVR8FI4Q0007CGR AC5: a budget-skipped audit tier emits a distinct observation token', async () => {
+    // Raw slot budget 1 (< the audit minimum of 2): the audit tier is
+    // skipped even though a candidate exists (lookup never consulted). The
+    // tick must record the distinct `audit-tier-budget-skipped` observation
+    // carrying all three budgets and the skipped tier, so the skip is never
+    // collapsed into a bare `no-candidate`.
+    const root = tempDirs.make('dt-audit-budget-skipped-');
+    const { worker } = makePrefillWorker({
+      status: prefillPacingStatus({
+        local_max_concurrent_prefills: 1,
+        local_prefills_in_flight: 0,
+        total_slots: 1,
+        slots: [{ slot_id: 'slot-1', is_processing: false, lease_state: 'free' }],
+      }),
+      root,
+      // Only lower tiers that answer empty: the audit skip leaves an empty
+      // backlog, so the terminal reason stays `no-candidate` and the skip is
+      // observable only through its distinct token.
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('no-candidate');
+    await vi.waitFor(async () => {
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      const skipped = entries.find((e) => e.reason === 'audit-tier-budget-skipped');
+      expect(skipped).toBeDefined();
+      expect(skipped).toMatchObject({
+        reason: 'audit-tier-budget-skipped',
+        freeSlots: 1,
+        capacityBudget: 1,
+        effectiveFreeSlots: 1,
+        skippedTier: 'audit',
+      });
+    });
+  });
+
+  // ── Occupancy/calibration evidence on the paced decision record ─────
+  //
+  // Parent WL-0MVPRZU0A000TSWD AC3: the paced tick keeps its existing reason
+  // string, header token and no-candidate semantics, and the decision record
+  // ADDITIONALLY carries the proxy's occupancy/calibration terms
+  // (`queueEtaOccupancySeconds`, `queueEtaBusySlots`, `prefillEtaCalibrated`)
+  // so an operator can tell "waiting behind other prefills" from "waiting on
+  // my own cold prefill" straight from the coordination log.
+  //
+  // LANDED: the paced-record spec below was committed as a RED witness
+  // (`it.fails`) by WL-0MVPUDZ7P008UZGD while today's `capacityEvidence`
+  // emitted only the pre-existing gate/ETA fields; the implementation child
+  // WL-0MVPUE4C9005380J added the occupancy/calibration extraction and
+  // flipped the witness to `it`. The legacy-omission spec is a plain `it`
+  // guard (today's shape must survive the fix).
+
+  it(
+    'parent AC3: a paced tick records the occupancy/calibration evidence',
+    async () => {
+      // One slot genuinely prefilling, a 300 s wait behind it
+      // (`queue_eta_occupancy_seconds`) against a 60 s admission budget, the
+      // proxy calibrated — a legitimate paced stop both before and after the
+      // pacing fix (only the occupancy term can explain it: the busy slot
+      // carries no per-slot `prefill_eta_seconds`).
+      const root = tempDirs.make('dt-prefill-occupancy-evidence-');
+      const { worker, deps } = makePrefillWorker({
+        status: prefillBusyOccupancy,
+        root,
+        deps: {
+          getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+        },
+      });
+      const outcome = await worker.tick();
+      // Reason string, no-candidate semantics and header token unchanged.
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('prefill-eta');
+      expect(decisionHeaderToken('prefill-eta')).toBe('prefill-eta');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({
+          reason: 'prefill-eta',
+          // Existing evidence fields, unchanged by the occupancy split.
+          prefillsInFlight: 1,
+          maxConcurrentPrefills: 2,
+          prefillGateWaiters: 0,
+          prefillBudgetSeconds: 60,
+          queueEtaSeconds: 320,
+          // New diagnosability evidence (parent AC3).
+          queueEtaOccupancySeconds: 300,
+          queueEtaBusySlots: 1,
+          prefillEtaCalibrated: true,
+        });
+      });
+    },
+  );
+
+  it('parent AC4: a legacy poll without the new fields omits them from the record', async () => {
+    // A legacy proxy poll (no occupancy/calibration fields) still produces a
+    // decision record with today's shape: the new keys are simply absent, so
+    // existing log readers see no change.
+    const root = tempDirs.make('dt-prefill-legacy-shape-');
+    const { worker } = makePrefillWorker({
+      status: prefillCapReached,
+      root,
+      deps: {
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      },
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('prefill-cap');
+    await vi.waitFor(async () => {
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      expect(entries).toHaveLength(1);
+      // Non-vacuous: the record exists and carries the pre-existing evidence.
+      expect(entries[0]).toMatchObject({ reason: 'prefill-cap', prefillsInFlight: 1 });
+      expect(entries[0]).not.toHaveProperty('queueEtaOccupancySeconds');
+      expect(entries[0]).not.toHaveProperty('queueEtaBusySlots');
+      expect(entries[0]).not.toHaveProperty('prefillEtaCalibrated');
+    });
+  });
+
+  // ── Tick-level proof: idle-uncalibrated poll now dispatches ────────
+  //
+  // Parent WL-0MVPRZU0A000TSWD AC5 / this item WL-0MVPUEFJ8008THX5: a unit
+  // test on `evaluatePrefillPacing` alone cannot prove a candidate is now
+  // SELECTED — the function is called BEFORE candidate selection, so a
+  // misfiring gate starves every tier machine-wide. These tests drive the
+  // full tick (poll → pacing → tier budget → selection → dispatch) with the
+  // F1 incident fixture and assert the observable dispatch seams. AC1 is the
+  // red→green witness: it fails against the pre-F4 gate (commit 4b0ee3bf,
+  // where 97.5 s > 60 s deferred `prefill-eta` and the tick livelocked) and
+  // passes with the calibration prerequisite (d028711d) — see the work-item
+  // comment for the red/green outputs.
+
+  it(
+    'AC1: an idle uncalibrated poll selects and dispatches a candidate (F1 fixture)',
+    async () => {
+      // The incident pool (`capacity_hint: idle`, freeSlots 2/2, nothing
+      // prefilling, no gate waiters) with an UNCALIBRATED 97.5 s own-prefill
+      // ETA against a 60 s budget, plus a dispatchable implement backlog.
+      // Pre-F4 this tick deferred `prefill-eta` (no candidate, no dispatch);
+      // the calibration prerequisite (parent AC1) fails open → the tick must
+      // proceed through candidate selection to a real dispatch.
+      const root = tempDirs.make('dt-prefill-idle-unc-');
+      const { worker, deps } = makePrefillWorker({
+        status: prefillIdleUncalibrated,
+        root,
+        deps: {
+          getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+        },
+      });
+      const outcome = await worker.tick();
+      // A candidate IS selected and dispatched: no deferral, no blockReason.
+      expect(outcome.dispatched).toBe(true);
+      expect(worker.blockReason).toBeNull();
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        expect.stringContaining('/skill:implement'),
+        expect.anything(),
+      );
+      // Dispatch recorded through the marker seam (kind 'implement').
+      expect(deps.recordDispatch).toHaveBeenCalledTimes(1);
+      expect(deps.recordDispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ itemId: 'WL-IMP', kind: 'implement' }),
+      );
+      // No paced-decision line: the no-dispatch stream is silent.
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      expect(entries).toHaveLength(0);
+    },
+  );
+
+  it(
+    'AC3: the busy-occupancy twin still paces with prefill-eta (no blanket admission)',
+    async () => {
+      // The paired negative control: the SAME harness and dispatchable
+      // backlog, but the pool is genuinely busy — one slot prefilling, a
+      // 300 s occupancy wait behind it > the 60 s budget, calibrated. The
+      // fix must not blanket-admit: this tick keeps the `prefill-eta`
+      // deferral, the existing header token and the no-dispatch semantics.
+      // (The occupancy-evidence fields on the record are pinned by the
+      // parent-AC3 test above; this test pins the contrast with AC1.)
+      const root = tempDirs.make('dt-prefill-busy-twin-');
+      const { worker, deps } = makePrefillWorker({
+        status: prefillBusyOccupancy,
+        root,
+        deps: {
+          getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+        },
+      });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('prefill-eta');
+      expect(decisionHeaderToken('prefill-eta')).toBe('prefill-eta');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      expect(deps.recordDispatch).not.toHaveBeenCalled();
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({ reason: 'prefill-eta' });
+      });
+    },
+  );
+
+  it(
+    'AC4: a legacy poll (advisory fields absent) dispatches on an idle pool',
+    async () => {
+      // A pre-feature proxy publishes NONE of the pacing fields — absent
+      // occupancy/calibration terms AND absent ETA/budget. Parent AC4:
+      // "exactly today's behaviour, erring towards dispatch" — an absent
+      // ETA/budget/calibration flag never blocks dispatch, so the tick keeps
+      // the free-slot-only budget and dispatches this idle 2-slot pool.
+      const root = tempDirs.make('dt-prefill-legacy-dispatch-');
+      const { worker, deps } = makePrefillWorker({
+        status: prefillLegacyIdlePool,
+        root,
+        deps: {
+          getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+        },
+      });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(true);
+      expect(worker.blockReason).toBeNull();
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      expect(deps.recordDispatch).toHaveBeenCalledTimes(1);
+      expect(deps.recordDispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ itemId: 'WL-IMP', kind: 'implement' }),
+      );
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      expect(entries).toHaveLength(0);
+    },
+  );
 });

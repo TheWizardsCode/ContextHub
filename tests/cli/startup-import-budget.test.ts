@@ -39,6 +39,7 @@ import {
   evaluateImportRatchet,
   evaluateFastPathAllowlist,
   evaluateStartupBudget,
+  MAX_HOST_LOAD_FACTOR,
   type StartupBudget,
   type StartupBudgetScenario,
 } from '../../bench/startup-budget.js';
@@ -56,7 +57,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 /** A complete measurement result built from synthetic numbers. */
 function syntheticResult(
   overrides: Partial<StartupScenarioMeasurement> = {},
-  target: 'src' | 'dist' = 'src'
+  target: 'src' | 'dist' = 'src',
+  options: { bareNodeP95WallMs?: number } = {}
 ): StartupBenchmarkResult {
   const scenario: StartupScenarioMeasurement = {
     name: 'next-json',
@@ -85,7 +87,12 @@ function syntheticResult(
     capturedAt: new Date('2026-01-01T00:00:00.000Z').toISOString(),
     invocation: 'node dist/cli.js',
     scenarios: [scenario],
-    bareNode: { runs: 3, p95WallMs: 450, p95CpuMs: 380, p95RssMb: 58 },
+    bareNode: {
+      runs: 3,
+      p95WallMs: options.bareNodeP95WallMs ?? 450,
+      p95CpuMs: 380,
+      p95RssMb: 58,
+    },
     importGraph: { entry: CLI_ENTRY, modules: [CLI_ENTRY], external: [] },
   };
 }
@@ -332,6 +339,60 @@ describe('startup import budget — regression policy', () => {
       syntheticResult({ p95WallMs: 5000 }),
       syntheticBudget()
     );
+    expect(evaluation.violations.join('\n')).toContain('p95WallMs');
+    // The control measured the same floor as the baseline: an un-loaded host,
+    // so the wall budget keeps its un-normalised limit.
+    expect(evaluation.hostLoadFactor).toBe(1);
+  });
+
+  it('normalises the wall budget by the host slowdown the bare-node control measured', () => {
+    // The bare-node control measured 3x its recorded floor, so the host was 3x
+    // slower while `wl` was sampled: the wall budget scales with the host
+    // instead of flaking (the WL-0MVS9Z965006MC4R failure was a saturated host
+    // inflating `wl --version` to 3.4x its recorded p95 while CPU stayed flat).
+    const loaded = syntheticResult(
+      { p95WallMs: 6000 }, // beyond the un-normalised 3850 ms limit
+      'src',
+      { bareNodeP95WallMs: 1350 }
+    );
+    const evaluation = evaluateStartupBudget(loaded, syntheticBudget());
+
+    expect(evaluation.violations).toEqual([]);
+    expect(evaluation.hostLoadFactor).toBeCloseTo(3, 5);
+  });
+
+  it('never tightens the wall budget when the host is faster than the baseline', () => {
+    // A *faster* bare-node control (150 ms vs the recorded 450 ms) must not
+    // tighten the limit to 0.33x — the budget is normalised upwards only.
+    const evaluation = evaluateStartupBudget(
+      syntheticResult({ p95WallMs: 5000 }, 'src', { bareNodeP95WallMs: 150 }),
+      syntheticBudget()
+    );
+
+    expect(evaluation.hostLoadFactor).toBe(1);
+    expect(evaluation.violations.join('\n')).toContain('p95WallMs');
+  });
+
+  it('bounds the host-load factor so a wild control sample cannot mask a regression', () => {
+    // A bare-node sample 100x the recorded floor would otherwise lift the wall
+    // limit to 360,250 ms; the clamp keeps it at 1200 * 8 * 3 + 250 = 29,050 ms.
+    const evaluation = evaluateStartupBudget(
+      syntheticResult({ p95WallMs: 60_000 }, 'src', { bareNodeP95WallMs: 45_000 }),
+      syntheticBudget()
+    );
+
+    expect(evaluation.hostLoadFactor).toBe(MAX_HOST_LOAD_FACTOR);
+    expect(evaluation.violations.join('\n')).toContain('p95WallMs');
+    expect(evaluation.violations.join('\n')).toContain('29050');
+  });
+
+  it('falls back to the un-normalised wall budget without a bare-node measurement', () => {
+    const result = syntheticResult({ p95WallMs: 5000 });
+    delete (result as { bareNode?: unknown }).bareNode;
+
+    const evaluation = evaluateStartupBudget(result, syntheticBudget());
+
+    expect(evaluation.hostLoadFactor).toBe(1);
     expect(evaluation.violations.join('\n')).toContain('p95WallMs');
   });
 

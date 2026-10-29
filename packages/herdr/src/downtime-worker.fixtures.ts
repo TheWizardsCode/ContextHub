@@ -21,7 +21,12 @@ import { join } from 'node:path';
 import { vi } from 'vitest';
 
 import { DOWNTIME_LOG_FILE } from './downtime-log.js';
-import type { DowntimeWorkerDeps, LlamaStatus } from './downtime-worker.js';
+import type {
+  DowntimeWorkerDeps,
+  LlamaStatus,
+  LocalReservationGrantedBody,
+  LocalReservationRefusedBody,
+} from './downtime-worker.js';
 
 // ── Status payloads ───────────────────────────────────────────────────
 
@@ -230,14 +235,32 @@ export const idleWithCumulativeContention: LlamaStatus = {
 // served; the named fixtures pin the individual pacing transitions so the
 // parser, the pacing helper and the tick-level gates can share one shape.
 
+// The proxy's ADVISORY occupancy/calibration terms
+// (LP-0MVGDUV5E005UWBQ, `prefill_eta.py:status_estimate`): the wait behind
+// OTHER prefills (`queue_eta_occupancy_seconds`), how many slots that wait is
+// composed of (`queue_eta_busy_slots`) and whether the estimate has enough
+// samples to be actionable (`prefill_eta_calibrated`). Declared on
+// `LlamaStatus` (WL-0MVPUE4SE004QYUT); the regression fixtures and their
+// witnesses landed test-first (WL-0MVPUDYHD000QI0K). Absent on a legacy proxy,
+// so the factory injects them only when supplied.
+
+/** `prefillPacingStatus` overrides: any `LlamaStatus` field (incl. the advisory terms). */
+export type PrefillPacingOverrides = Partial<LlamaStatus>;
+
 /**
  * Schema-v2 status with the prefill-gate fields served. Defaults: four
  * free/idle_leased slots, cap `1`, nothing in flight, no waiters, a 120 s
  * admission budget and a 0 s queue ETA — i.e. TODAY's behaviour (dispatch
  * admitted) with the new fields present. Override one field per fixture.
  */
-export function prefillPacingStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
-  return {
+export function prefillPacingStatus(overrides: PrefillPacingOverrides = {}): LlamaStatus {
+  const {
+    queue_eta_occupancy_seconds,
+    queue_eta_busy_slots,
+    prefill_eta_calibrated,
+    ...statusOverrides
+  } = overrides;
+  const status: LlamaStatus = {
     llama_server_running: true,
     local_active_query: false,
     model_switch_in_progress: false,
@@ -264,8 +287,20 @@ export function prefillPacingStatus(overrides: Partial<LlamaStatus> = {}): Llama
     ],
     contention_queue_depth: 0,
     contention_queued_count: 0,
-    ...overrides,
+    ...statusOverrides,
   };
+  // Advisory fields appear only when the fixture supplies them, so a fixture
+  // built without them keeps the legacy (absent) shape byte-for-byte.
+  if (queue_eta_occupancy_seconds !== undefined) {
+    status.queue_eta_occupancy_seconds = queue_eta_occupancy_seconds;
+  }
+  if (queue_eta_busy_slots !== undefined) {
+    status.queue_eta_busy_slots = queue_eta_busy_slots;
+  }
+  if (prefill_eta_calibrated !== undefined) {
+    status.prefill_eta_calibrated = prefill_eta_calibrated;
+  }
+  return status;
 }
 
 /**
@@ -320,6 +355,121 @@ export const prefillSlotEtaOverBudget: LlamaStatus = prefillPacingStatus({
     { slot_id: 'slot-4', is_processing: false, lease_state: 'free' },
   ],
 });
+
+// ── Occupancy/calibration regression fixtures (WL-0MVPUDYHD000QI0K) ───
+//
+// Reconstructed from the leader's `prefill-eta` decision records in
+// `.worklog/downtime-coordination.log` (parent WL-0MVPRZU0A000TSWD): the
+// dispatcher deferred every tick with `capacityHint: idle`, `freeSlots 2/2`,
+// `prefillsInFlight: 0`, `prefillGateWaiters: 0`, `queueEtaSeconds: 97.5`,
+// `prefillBudgetSeconds: 60`, `queueEtaOccupancySeconds: 0`,
+// `queueEtaBusySlots: 0`, `prefillEtaCalibrated: false`.
+
+/**
+ * The incident pool: TWO slots, both genuinely free, nothing prefilling, no
+ * gate waiters, and an UNCALIBRATED proxy whose 97.5 s queue ETA is the
+ * newcomer's OWN cold prefill against a 60 s admission budget. Deferring on
+ * it is the livelock this parent exists to fix (never dispatch ⇒ never
+ * calibrate ⇒ stay pessimistic). Occupancy terms are zero, so the whole ETA
+ * is the own-prefill cost.
+ */
+export const prefillIdleUncalibrated: LlamaStatus = prefillPacingStatus({
+  local_active_query: false,
+  local_lease_active: false,
+  available_slots: 2,
+  total_slots: 2,
+  capacity_hint: 'idle',
+  local_prefills_in_flight: 0,
+  local_max_concurrent_prefills: 1,
+  prefill_gate_waiters: 0,
+  prefill_budget_seconds: 60,
+  queue_eta_seconds: 97.5,
+  queue_eta_occupancy_seconds: 0,
+  queue_eta_busy_slots: 0,
+  prefill_eta_calibrated: false,
+  slots: [
+    { slot_id: 'slot-1', is_processing: false, lease_state: 'free' },
+    { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+  ],
+});
+
+/**
+ * The same idle pool on a CALIBRATED proxy, isolating the occupancy rule from
+ * the calibration prerequisite: `queue_eta_seconds` is high (300 s) but no
+ * slot is busy and the occupancy terms are zero, so the ETA is entirely the
+ * newcomer's own prefill and must never defer dispatch.
+ */
+export const prefillIdleZeroOccupancy: LlamaStatus = prefillPacingStatus({
+  ...prefillIdleUncalibrated,
+  queue_eta_seconds: 300,
+  prefill_eta_calibrated: true,
+});
+
+/**
+ * The LEGACY twin of the incident pool (parent AC4, this item AC4): a
+ * pre-feature proxy that publishes NONE of the prefill-gate fields — no cap,
+ * no gate counters, no `queue_eta_seconds` / `prefill_budget_seconds`, and
+ * none of the advisory occupancy/calibration terms
+ * (`queue_eta_occupancy_seconds`, `queue_eta_busy_slots`,
+ * `prefill_eta_calibrated`) — on the same idle 2-slot pool. An absent
+ * ETA/budget/calibration flag never blocks dispatch: the tick keeps exactly
+ * today's free-slot-only budget, erring towards dispatch.
+ */
+export const prefillLegacyIdlePool: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 2,
+  total_slots: 2,
+  slots: [
+    { slot_id: 'slot-1', is_processing: false },
+    { slot_id: 'slot-2', is_processing: false },
+  ],
+};
+
+/**
+ * A genuinely contended pool: one slot is prefilling and the newcomer's wait
+ * behind it (`queue_eta_occupancy_seconds`) is 300 s — well above the 60 s
+ * admission budget — while the capacity headroom is still positive (cap `2`,
+ * one in flight), so only the occupancy ETA can explain a paced tick. The
+ * busy slot deliberately carries NO per-slot `prefill_eta_seconds`, so the
+ * retained `prefill-eta` deferral must come from the occupancy term.
+ */
+export const prefillBusyOccupancy: LlamaStatus = prefillPacingStatus({
+  local_active_query: true,
+  available_slots: 1,
+  total_slots: 2,
+  capacity_hint: 'prefill_bound',
+  local_prefills_in_flight: 1,
+  local_max_concurrent_prefills: 2,
+  prefill_gate_waiters: 0,
+  prefill_budget_seconds: 60,
+  queue_eta_seconds: 320,
+  queue_eta_occupancy_seconds: 300,
+  queue_eta_busy_slots: 1,
+  prefill_eta_calibrated: true,
+  slots: [
+    { slot_id: 'slot-1', is_processing: true, lease_state: 'generating', phase: 'prefill' },
+    { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+  ],
+});
+
+/**
+ * Idle status that ALSO serves the prefill-serialisation counters needed to
+ * judge a one-per-idle-window launch (parent WL-0MVIKRFP0005JDL8, slice C3).
+ * Defaults model the serialised proxy: four free slots, nothing prefilling,
+ * cap `1`. Override one field per scenario (e.g. raise `cap` to model a
+ * proxy that would otherwise admit a second concurrent launch, or keep
+ * `local_prefills_in_flight` at `0` to model the STALE status that follows a
+ * launch before the new pane's prefill registers).
+ */
+export function launchWindowStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
+  return {
+    ...idleAllSlotsFree,
+    local_prefills_in_flight: 0,
+    local_max_concurrent_prefills: 1,
+    prefill_gate_waiters: 0,
+    ...overrides,
+  };
+}
 
 /** Raw `herdr pane list` output with two live downtime panes + noise. */
 export const herdrPaneListRaw: string = JSON.stringify({
@@ -415,6 +565,69 @@ export const statusFixtures: LlamaStatusFixture[] = [
     note: 'total_slots 0 → ambiguous → busy',
   },
 ];
+
+// ── Reservation handshake fixtures (parent WL-0MVIKRFP0005JDL8, slice C1) ──
+//
+// The reserve handshake (`POST /llama/local/reserve`) is pinned by
+// `downtime-worker.reserve.test.ts` before any client exists. One fixture per
+// real response class the proxy may produce: granted ticket, `429` refusal,
+// endpoint absent, server error and timeout — so no contract test needs an
+// ad-hoc inline response object (C1-AC2).
+
+/**
+ * A mocked reserve-handshake response: the HTTP status the caller observed
+ * plus the parsed body. `status: 0` models "no response at all" (timeout /
+ * network abort) — the fail-open path an older or unreachable proxy takes.
+ */
+export interface LocalReservationHttpFixture<Body = unknown> {
+  status: number;
+  body: Body;
+}
+
+/**
+ * Granted ticket (`2xx`): the gate ticket id and its TTL in seconds. Override
+ * any field to model an alias rename or an invalid variant the tolerant
+ * parser must reject.
+ */
+export function reserveGranted(
+  overrides: Record<string, unknown> = {},
+): LocalReservationHttpFixture<LocalReservationGrantedBody> {
+  return {
+    status: 200,
+    body: { ticket_id: 'tkt-granted-1', ttl_s: 30, ...overrides },
+  };
+}
+
+/**
+ * Refused ticket (`429`): `{ reason, retry_after_s }`. The dispatcher must
+ * defer by `retry_after_s` and record the reason instead of launching.
+ */
+export function reserveRefused429(
+  overrides: Record<string, unknown> = {},
+): LocalReservationHttpFixture<LocalReservationRefusedBody> {
+  return {
+    status: 429,
+    body: { reason: 'prefill-gate', retry_after_s: 12, ...overrides },
+  };
+}
+
+/** Older proxy with no reserve handler → `404`, no body → fail open to null. */
+export const reserveEndpointAbsent: LocalReservationHttpFixture<null> = {
+  status: 404,
+  body: null,
+};
+
+/** The proxy failed on the reserve path → `500`, no body → fail open to null. */
+export const reserveServerError: LocalReservationHttpFixture<null> = {
+  status: 500,
+  body: null,
+};
+
+/** The call timed out or was aborted → no HTTP status, no body → fail open. */
+export const reserveTimeout: LocalReservationHttpFixture<null> = {
+  status: 0,
+  body: null,
+};
 
 // ── HTTP response / error fixtures (poller tests, F2) ─────────────────
 

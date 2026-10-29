@@ -30,6 +30,8 @@ import {
   buildDowntimeSpawnOptions,
   scrubRepositoryOverrides,
   REPOSITORY_OVERRIDE_ENV_VARS,
+  LOCAL_PREFERENCE_ENV_VAR,
+  LOCAL_RESERVATION_TICKET_ENV,
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
   paneLabelItemId,
@@ -205,6 +207,42 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     }
   });
 
+  it('buildDowntimeSpawnOptions never inherits the launcher pane-launch knobs (WL-0MVP643Q4007BZJ8)', () => {
+    // The downtime suite can itself run inside a herdr pane that carries
+    // `HERDR_LOCAL_PREFERENCE` (a `local-preferred` pane) or a reservation ticket.
+    // Inheriting that leaked value would (a) break the documented fail-open
+    // contract (`absent value omits the env var`, C4-AC3) and (b) bypass the
+    // dispatch priority rule — a local-preferred leader would force EVERY child
+    // local-preferred. Only the explicit dispatch decision may set these vars.
+    const saved = new Map<string, string | undefined>();
+    for (const key of [LOCAL_PREFERENCE_ENV_VAR, LOCAL_RESERVATION_TICKET_ENV]) {
+      saved.set(key, process.env[key]);
+      process.env[key] = 'leaked-from-launcher';
+    }
+    try {
+      const inherited = buildDowntimeSpawnOptions('/repo');
+      expect(inherited.env[LOCAL_PREFERENCE_ENV_VAR]).toBeUndefined();
+      expect(inherited.env[LOCAL_RESERVATION_TICKET_ENV]).toBeUndefined();
+      // Scrubbing the knobs must not discard unrelated forwarding.
+      expect(inherited.env.HERDR_RESOLVED_CWD).toBe('/repo');
+      expect(inherited.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+
+      // The explicit dispatch decision still reaches the pane.
+      const explicit = buildDowntimeSpawnOptions('/repo', {
+        localPreference: 'remote-ok',
+        reservationTicketId: 'tkt-1',
+      });
+      expect(explicit.env[LOCAL_PREFERENCE_ENV_VAR]).toBe('remote-ok');
+      expect(explicit.env[LOCAL_RESERVATION_TICKET_ENV]).toBe('tkt-1');
+    } finally {
+      for (const key of [LOCAL_PREFERENCE_ENV_VAR, LOCAL_RESERVATION_TICKET_ENV]) {
+        const previous = saved.get(key);
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      }
+    }
+  });
+
   it('scrubRepositoryOverrides removes only override vars and never mutates its input', () => {
     const input = {
       PATH: '/usr/bin',
@@ -245,6 +283,38 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     // Observable contract: spawnFn injected boundary adapter — the opts
     // carrier reaches the spawn boundary unchanged.
     expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo' });
+  });
+
+  it('honours an injectable probe window and strips it from the spawn opts (WL-0MVOTIJ2U000JI44)', async () => {
+    const handle = { unref: vi.fn(), once: vi.fn() };
+    const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
+
+    // Deterministic fake timers: no wall-clock assertion (a timing assertion
+    // is the same load-sensitive flake class this item fixes).
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const spawned = spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo', probeMs: 40 }, spawnFn);
+      void spawned.then(() => {
+        settled = true;
+      });
+
+      // The probe window is a caller-side deadline, NOT part of the spawn opts
+      // carrier: the boundary sees the pane opts unchanged.
+      expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo' });
+      // Before the injected 40 ms window elapses the pane is not yet assumed
+      // opened...
+      await vi.advanceTimersByTimeAsync(30);
+      expect(settled).toBe(false);
+      // ...and at 40 ms it resolves ok:true — proving the override is honoured
+      // (the 500 ms default would still be pending here) and that no-op-event
+      // panes still assume the pane opened.
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(true);
+      expect(await spawned).toEqual({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

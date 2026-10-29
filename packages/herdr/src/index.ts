@@ -20,18 +20,15 @@
  *   1 - wl CLI not found
  */
 
-import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
 import { tmpdir } from 'node:os';
-import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync } from 'node:fs';
-import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
 import { isAuditFresh } from '@worklog/shared/icons';
 import {
   checkWlAvailable,
   fetchNextItems,
   fetchItemsByStage,
-  setWorklogDir,
   claimWorkItem,
   rollbackClaimWorkItem,
   markNeedsProducerReviewWorkItem,
@@ -41,22 +38,14 @@ import {
   extractJson,
   extractItems,
 } from './fetcher.js';
-import {
-  INTERACTIVE_DEFAULT_REQUEST_PRIORITY,
-  INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS,
-  REQUEST_PRIORITY_ENV_VAR,
-  resolveInteractiveRequestPriority,
-  type RequestPriority,
-} from './request-priority.js';
+import { REQUEST_PRIORITY_ENV_VAR } from './request-priority.js';
+import type { LocalPreference } from './local-preference.js';
 import { AgentTracker, AGENT_PANES_FILE } from './agent-tracker.js';
 import {
-  isAgentCommand,
   buildManuallyTriggeredPaneTitle,
   buildShellPaneTitle,
   stripSkillName,
-  stripAgentPromptPrefix,
 } from './pane-title.js';
-import { showToast } from './notify.js';
 import { applyActivePaneMarkers, createProductionHydratorDeps } from './hydrator.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
@@ -87,8 +76,6 @@ import {
   parseAuditCandidatesOutput,
   parseImplementCandidatesOutput,
   parseCriticalCandidatesOutput,
-  parseDepListBlockersOutput,
-  parseShownWorkItem,
   selectAuditCandidate,
   selectImplementCandidate,
   selectCriticalCandidate,
@@ -100,7 +87,6 @@ import {
   type DowntimeWorker,
   type DowntimeWorkerDeps,
   type DowntimeStage,
-  type CriticalCandidate,
   type DowntimeCandidate,
   type DowntimeDispatchEvent,
   type DowntimeDispatchFailureEvent,
@@ -122,10 +108,8 @@ import {
   type DowntimeActiveAuditResult,
   withTransientRetry,
   parseHerdrPaneListOutput,
-  countRunningDowntimePanes,
   isSafeDowntimePaneToClose,
-  type HerdrPaneRecord,
-  type RunningPanesResult,
+  createLocalReserver,
 } from './downtime-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
@@ -140,13 +124,9 @@ import {
   recentAuditDispatchedItemIds,
 } from './downtime-log.js';
 import {
-  buildStalledResumeStartArgs,
-  classifyHerdrAgentFailure,
   resumeStalledPane,
   scanStalledPanes,
   type StalledPaneCandidate,
-  type StalledResumeCliResult,
-  type StalledResumeStartOptions,
   type StalledScanOptions,
 } from './stalled-work.js';
 import {
@@ -159,18 +139,15 @@ import {
   loadScheduledPrompts,
   updateScheduledPromptLastTriggered,
 } from './scheduled-prompts.js';
+import type { ItemTabAnchor } from './dispatcher-anchor.js';
 import {
-  getDispatcherAnchor as resolveDispatcherAnchor,
-  getDispatcherTabAnchor as resolveDispatcherTabAnchor,
-  getItemTabAnchor as resolveItemTabAnchor,
-  resolveProjectWorkspace as resolveProjectWorkspaceForRoot,
-  createDispatcherAnchorDeps,
-  type DispatcherAnchor,
-  type DispatcherAnchorDeps,
-  type DispatcherPrefixTabAnchor,
-  type ItemTabAnchor,
-  type ProjectWorkspaceTarget,
-} from './dispatcher-anchor.js';
+  buildRunInPaneArgs,
+  buildSendToPiArgs,
+  parsePaneIdFile,
+  routeCommand,
+  stripAgentPromptPrefix,
+  stripCommandPrefix,
+} from './index.commands.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -178,1128 +155,179 @@ const _currentDir = dirname(fileURLToPath(import.meta.url));
 const SEND_TO_PI_SCRIPT = resolve(_currentDir, '..', 'scripts', 'send-to-pi.sh');
 const RUN_IN_PANE_SCRIPT = resolve(_currentDir, '..', 'scripts', 'run-in-pane.sh');
 
-/**
- * Routes a resolved command to its execution channel.
- *
- * - `'agent'` — agent workflow commands (`/skill:*`, `/intake`, `/plan`)
- *   are sent to a new pi agent pane via `send-to-pi.sh`.
- * - `'pane'` — commands prefixed with `!!` or `!` (shell-executed commands
- *   such as the audit/review/priority shortcuts) are run visibly in a new
- *   herdr pane via `run-in-pane.sh`.
- * - `'stdout'` — everything else falls back to the `CMD:` stdout protocol.
- */
-export type CommandRoute = 'agent' | 'pane' | 'stdout';
+// ── Command routing and pane-argument builders (index.commands.ts) ─────
+// Extracted verbatim (move-only, WL-0MVOA0HYY005RG06): re-exported so the
+// barrel keeps the surface index.test.ts and other consumers import.
 
-export function routeCommand(command: string): CommandRoute {
-  if (isAgentCommand(command)) {
-    return 'agent';
-  }
-  if (command.startsWith('!!') || command.startsWith('!')) {
-    return 'pane';
-  }
-  return 'stdout';
-}
+export {
+  buildRunInPaneArgs,
+  buildSendToPiArgs,
+  parsePaneIdFile,
+  routeCommand,
+  stripAgentPromptPrefix,
+  stripCommandPrefix,
+} from './index.commands.js';
 
-/**
- * Strip bash history-expansion prefixes (`!!` or `!`) from command strings.
- *
- * Commands stored in shortcuts.json may be prefixed with `!!` or `!` to
- * signal that the `wl` command should be executed via a shell.  Herdr does
- * not understand these prefixes, so they must be stripped before the
- * `CMD:` prefix is added.
- *
- * @param command - Raw command string (possibly prefixed).
- * @returns The command with any leading `!!` or `!` prefix removed.
- */
-export function stripCommandPrefix(command: string): string {
-  if (command.startsWith('!!')) {
-    return command.substring(2);
-  }
-  if (command.startsWith('!')) {
-    return command.substring(1);
-  }
-  return command;
-}
+// ── Background (no-pane) dispatch (index.background.ts) ──────────────
+// Extracted verbatim (move-only, WL-0MVOA0K6T009KTN1): re-exported so the
+// barrel keeps the surface index.test.ts and other consumers import. The
+// TUI dispatch path (`main()`) also imports the helpers directly for its
+// internal calls (same pattern as the index.commands.js value import above).
 
-/**
- * Strip the `/prompt:` routing prefix from a free-form prompt command.
- *
- * `/prompt:` commands are routed to the agent channel (a new pi pane) so the
- * user can inject an arbitrary prompt, not just skill/workflow invocations.
- * The prefix is a routing signal only — pi must receive the bare prompt text
- * (e.g. `Review the current work item and suggest next steps`), not the
- * prefix itself.
- *
- * @param command - Raw command string, possibly starting with `/prompt:`.
- * @returns The prompt text with the `/prompt:` prefix removed; unchanged
- *          commands (no `/prompt:` prefix) are returned as-is.
- */
-export { stripAgentPromptPrefix };
+import {
+  buildBackgroundLogPath,
+  notifyBackgroundFailure,
+  spawnBackgroundPi,
+  spawnBackgroundShell,
+} from './index.background.js';
 
-/**
- * Build the argument vector for spawning `send-to-pi.sh` for an agent
- * command.
- *
- * The resolved project root is passed via `--cwd`. When the shortcut entry
- * carries a `model` (WL-0MSD48ZFC0043AO3), `--model <pattern>` is forwarded
- * so the pi CLI opens with the requested model (e.g. `pi --model code
- * '/skill:implement <id>'`). Free-form `/prompt:` commands have their routing
- * prefix stripped here so pi receives only the prompt text. Commands without
- * a model get no `--model` flag.
- *
- * When `paneIdFile` is provided (agent commands carrying a work-item ID,
- * WL-0MSBQUJQX005RAT9), `--pane-id-file <path>` is forwarded so the script
- * writes the new pane ID immediately after the split succeeds — the plugin
- * reads it back to record the work-item ↔ pane association.
- *
- * When `paneName` is provided, it is forwarded via `--pane-name` so the new
- * pane gets a descriptive title (WL-0MSJ4E8UA005KG9Y). Without the flag the
- * script falls back to its default "Pi Agent".
- *
- * Focus control (WL-0MT70LC6B009TL3Q): when `focus` is `true`, `--focus`
- * is passed so send-to-pi.sh zooms the new pane. When `focus` is `false`
- * or `undefined`, `--no-focus` is passed so the selection list keeps focus
- * (the default for most shortcuts). The shared script's own default
- * (focus=true) is unchanged for its other consumers.
- *
- * Interactive item-ID tab placement (WL-0MUYI3JAO002BTNL, parent
- * WL-0MUKZGEQ2007FECS): when `anchor` is a non-empty pane id, `--anchor
- * <paneId>` is forwarded so send-to-pi.sh splits that pane instead of the
- * current pane, placing the new pi pane in the work-item-ID tab. An
- * absent/empty anchor omits the flag, keeping the legacy current-pane split
- * (no-ID commands and the fail-open fallback, AC4/AC5).
- *
- * Request priority (WL-0MVE1NZ4J000H5NH AC2): when `requestPriority` is
- * supplied, `--request-priority <low|medium|high>` is forwarded so
- * send-to-pi.sh injects `HERDR_REQUEST_PRIORITY` into the pane process'
- * environment. An absent value omits the flag (backward compatible — the
- * Worklog pi extension then leaves the request headers untouched).
- */
-export function buildSendToPiArgs(
-  command: string,
-  targetCwd: string,
-  model?: string,
-  paneIdFile?: string,
-  paneName?: string,
-  focus?: boolean,
-  anchor?: string,
-  requestPriority?: RequestPriority,
-): string[] {
-  const agentPrompt = stripAgentPromptPrefix(command);
-  const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
-  if (paneName) {
-    args.push('--pane-name', paneName);
-  }
-  if (model) {
-    args.push('--model', model);
-  }
-  if (paneIdFile) {
-    args.push('--pane-id-file', paneIdFile);
-  }
-  if (anchor) {
-    args.push('--anchor', anchor);
-  }
-  // Request priority: placed before the command, which must stay the final
-  // argv token (send-to-pi.sh treats everything after its options as the
-  // command).
-  if (requestPriority) {
-    args.push('--request-priority', requestPriority);
-  }
-  args.push(agentPrompt);
-  return args;
-}
+export {
+  buildBackgroundLogPath,
+  formatBackgroundFailure,
+  spawnBackgroundPi,
+  spawnBackgroundShell,
+} from './index.background.js';
 
-/**
- * Build the argument vector for spawning `scripts/run-in-pane.sh` for a
- * command-output pane (`!!`/`!`-prefixed pane route and plain shell stdout
- * route). Mirrors `buildSendToPiArgs`: `--no-focus` (WL-0MSHIA53D009DJOT) is
- * passed by default so opening the command-output pane does not steal focus
- * from the selection list, followed by `--cwd <targetCwd>` so the pane starts
- * in the resolved project root. `run-in-pane.sh` parses all three options at
- * the head of argv; everything else is the command itself.
- *
- * Focus control (WL-0MT70LC6B009TL3Q): when `focus` is `true`, `--focus`
- * is passed so run-in-pane.sh zooms the new pane. When `focus` is `false`
- * or `undefined`, `--no-focus` is passed (the default for most shortcuts).
- *
- * When `paneName` is provided, `--pane-name <paneName>` replaces the
- * script's default "Command Output" (WL-0MSJ4E8UA005KG9Y).
- *
- * Interactive item-ID tab placement (WL-0MUYI3JAO002BTNL, parent
- * WL-0MUKZGEQ2007FECS): when `anchor` is a non-empty pane id, `--anchor
- * <paneId>` is forwarded so run-in-pane.sh splits that pane instead of the
- * current one, placing the command-output pane in the work-item-ID tab. An
- * absent/empty anchor omits the flag, keeping the legacy current-pane split
- * (no-ID commands and the fail-open fallback, AC4/AC5).
- *
- * When `paneIdFile` is provided, `--pane-id-file <path>` is forwarded so
- * run-in-pane.sh writes the new pane id immediately after the split succeeds
- * (mirroring send-to-pi.sh). The interactive dispatch path uses this as a
- * split-confirmation channel to gate the fail-safe placeholder root-pane
- * cleanup (WL-0MUYI3K8H007MPKF, AC7). An absent value omits the flag.
- */
-export function buildRunInPaneArgs(
-  command: string,
-  targetCwd: string,
-  paneName?: string,
-  focus?: boolean,
-  anchor?: string,
-  paneIdFile?: string,
-): string[] {
-  const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
-  if (paneName) {
-    args.push('--pane-name', paneName);
-  }
-  if (anchor) {
-    args.push('--anchor', anchor);
-  }
-  if (paneIdFile) {
-    args.push('--pane-id-file', paneIdFile);
-  }
-  args.push(command);
-  return args;
-}
+// ── Pane-ID capture + work-item extraction (index.pane-capture.ts) ──
+// Extracted verbatim (move-only, WL-0MVOA0MBH004KKL0): the pane-ID
+// association capture and work-item extraction helpers moved to
+// `index.pane-capture.ts`. Re-exported so the barrel keeps the surface
+// index.test.ts/claim.test.ts import (`CAPTURE_TIMEOUT_MS`,
+// `capturePaneIdFromFile`, `extractWorkItemId`); `CAPTURE_POLL_INTERVAL_MS`
+// and `PaneIdFileDeps` become internal to the new module. The dispatch
+// paths below value-import the helpers (same pattern as the
+// index.commands.js import above). `AGENT_ASSIGNEE` moved with the claim
+// section (phase 5, `index.claim.ts`).
 
-/**
- * Parse the pane-ID file written by send-to-pi.sh (`--pane-id-file`).
- *
- * The script writes `{"pane_id": "<id>"}` immediately after the pane split
- * succeeds. Tolerates log lines prefixed before the JSON envelope.
- * Returns undefined when the file is absent, unparseable, or has no pane id.
- */
-export function parsePaneIdFile(raw: string): string | undefined {
-  const start = raw.indexOf('{');
-  if (start < 0) return undefined;
-  try {
-    const obj = JSON.parse(raw.slice(start)) as Record<string, unknown>;
-    const paneId = obj?.pane_id ?? obj?.paneId;
-    return typeof paneId === 'string' && paneId !== '' ? paneId : undefined;
-  } catch {
-    return undefined;
-  }
-}
+import {
+  capturePaneIdFromFile,
+  extractWorkItemId,
+} from './index.pane-capture.js';
 
-// ── Background (no-pane) dispatch (WL-0MSJLD1I70045ZUL) ────────────────
+export {
+  CAPTURE_TIMEOUT_MS,
+  capturePaneIdFromFile,
+  extractWorkItemId,
+} from './index.pane-capture.js';
 
-/**
- * Directory (under the OS tmpdir) holding per-run background-dispatch logs.
- * A single known directory so logs can be located for inspection; cleanup
- * of old logs is out of scope (each filename carries a timestamp + pid).
- */
-export const BACKGROUND_LOG_DIR = 'herdr-background-logs';
+// ── Claim + interactive priority (index.claim.ts) ────────────────────
+// Extracted verbatim (move-only, WL-0MVOA0ODW002W5C4): the claim and
+// interactive-priority section (AGENT_ASSIGNEE, claimItemForAgentCommand,
+// lookupWorkItemPriority, resolveInteractiveDispatchPriority,
+// fetchCriticalBlockers) moved to `index.claim.ts`. Value-imported so
+// the barrel's dispatch paths / createDowntimeDeps can keep calling the
+// helpers internally (same pattern as the index.background.js
+// `notifyBackgroundFailure` value import; AC6 — the claim module imports
+// only concrete siblings). Re-exported so the barrel keeps the surface
+// index.test.ts/claim.test.ts import (`claimItemForAgentCommand`,
+// `resolveInteractiveDispatchPriority`); `AGENT_ASSIGNEE` and
+// `fetchCriticalBlockers` stay OUT of the consumed public surface.
 
-/**
- * Build a per-run log file path for a background (no-pane) shortcut
- * dispatch (WL-0MSJLD1I70045ZUL).
- *
- * Returns `<tmpdir>/herdr-background-logs/herdr-<timestamp>-<pid>-<slug>.log`
- * where the slug is a sanitised prefix of the command — concurrent
- * dispatches never collide (timestamp + pid) and each run is individually
- * inspectable. The caller logs the returned path to stderr so the user can
- * locate the file.
- */
-export function buildBackgroundLogPath(command: string): string {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const slug =
-    command.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) ||
-    'command';
-  return join(tmpdir(), BACKGROUND_LOG_DIR, `herdr-${stamp}-${process.pid}-${slug}.log`);
-}
+import {
+  AGENT_ASSIGNEE,
+  claimItemForAgentCommand,
+  fetchCriticalBlockers,
+  resolveInteractiveDispatchPriority,
+} from './index.claim.js';
 
-/**
- * Build the operator-facing toast content for a background (`open_pane: false`)
- * dispatch that exited non-zero. Returns null for a clean (exit 0) run. Pure so
- * it can be unit-tested without spawning a process (WL-0MUEBQLRD00288VV AC4).
- *
- * @param command - the dispatched command (shown so the operator knows what failed)
- * @param code - process exit code (null when terminated by a signal)
- * @param signal - termination signal (null when exited normally)
- * @param logPath - the per-run log file holding the full output
- * @param excerpt - optional short excerpt of the command's output (e.g. stderr tail)
- */
-export function formatBackgroundFailure(
-  command: string,
-  code: number | null,
-  signal: string | null,
-  logPath: string,
-  excerpt?: string | null,
-): { title: string; body: string } | null {
-  if (code === 0) return null;
-  const reason =
-    code !== null ? `exit ${code}` : signal ? `signal ${signal}` : 'unknown failure';
-  const short = (excerpt ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
-  return {
-    title: 'Background command failed',
-    body: short
-      ? `${command} (${reason}) — ${short}`
-      : `${command} (${reason}) — see ${logPath}`,
-  };
-}
+export {
+  claimItemForAgentCommand,
+  resolveInteractiveDispatchPriority,
+} from './index.claim.js';
 
-/**
- * Read a short tail of a background log file for inclusion in a failure toast
- * (never throws; returns null when the file is unreadable).
- */
-function readBackgroundLogExcerpt(logPath: string, maxChars = 400): string | null {
-  try {
-    if (!existsSync(logPath)) return null;
-    return readFileSync(logPath, 'utf8').slice(-maxChars);
-  } catch {
-    return null;
-  }
-}
+import {
+  defaultDispatcherAnchorResolver,
+  defaultDispatcherTabAnchorResolver,
+  defaultItemTabAnchorResolver,
+  defaultProjectWorkspaceResolver,
+} from './index.anchor-resolvers.js';
 
-/**
- * Surface a non-zero background dispatch exit as a Herdr toast so failures are
- * not visible only in a log file (WL-0MUEBQLRD00288VV AC4).
- */
-function notifyBackgroundFailure(
-  command: string,
-  code: number | null,
-  signal: string | null,
-  logPath: string,
-): void {
-  const failure = formatBackgroundFailure(command, code, signal, logPath, readBackgroundLogExcerpt(logPath));
-  if (failure) showToast(failure.title, { body: failure.body });
-}
+// ── Interactive placement + root-pane cleanup (index.interactive.ts) ──
+// Extracted verbatim (move-only, WL-0MVOA0S1E0022UV7): the interactive
+// workspace/item-anchor resolution and fail-safe tab root-pane cleanup
+// moved to `index.interactive.ts`. Value-imported so `main()` can keep
+// calling the helpers internally (same pattern as the index.claim.js
+// value import; AC6 — the interactive module imports only concrete
+// siblings). Re-exported so the barrel keeps the surface index.test.ts
+// imports via dynamic `import('./index.js')` casts
+// (`resolveInteractiveWorkspaceId`, `resolveInteractiveItemAnchor`,
+// `closeInteractiveTabRootPane`, `defaultInteractiveLiveTrackedPanesResolver`);
+// `InteractiveLiveTrackedPanesResult`, `InteractiveRootPaneCleanupDeps`,
+// `isLiveTrackedPane` and `defaultInteractiveClosePane` stay OUT of the
+// consumed public surface — `main` (phase 11) imports the internal defaults
+// directly from `index.interactive.ts`.
 
-/**
- * Injectable spawn/filesystem dependencies for the background spawn
- * helpers (tests replace these so no real subprocess or log file is needed).
- */
-export interface BackgroundSpawnDeps {
-  spawn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
-  openSync?: (path: string, flags: string) => number;
-  /** Called when the background child process exits — triggers a TUI refresh. */
-  onExit?: (exitCode: number | null, signal: string | null) => void;
-  /**
-   * Already-mapped request priority for the dispatched item
-   * (WL-0MVE1NZ4J000H5NH AC2). Defaults to the interactive default (`high`)
-   * when omitted.
-   */
-  requestPriority?: RequestPriority;
-}
+import {
+  closeInteractiveTabRootPane,
+  defaultInteractiveClosePane,
+  defaultInteractiveLiveTrackedPanesResolver,
+  resolveInteractiveItemAnchor,
+  resolveInteractiveWorkspaceId,
+} from './index.interactive.js';
 
-/**
- * Open a background log file for append, creating the directory first.
- * Returns the fd, or -1 when the log cannot be opened (caller falls back to
- * 'ignore' stdio so a logging failure never blocks dispatch).
- */
-function openBackgroundLog(logPath: string, open: (path: string, flags: string) => number): number {
-  try {
-    mkdirSync(dirname(logPath), { recursive: true });
-    return open(logPath, 'a');
-  } catch (err) {
-    process.stderr.write(
-      `[worklog-plugin] Could not open background log ${logPath}: ${(err as Error).message}\n`,
-    );
-    return -1;
-  }
-}
+export {
+  closeInteractiveTabRootPane,
+  defaultInteractiveLiveTrackedPanesResolver,
+  resolveInteractiveItemAnchor,
+  resolveInteractiveWorkspaceId,
+} from './index.interactive.js';
 
-/**
- * Spawn a shell command detached with stdout/stderr redirected to a log
- * file — the `open_pane: false` execution path for `!!`/`!` shell commands
- * (WL-0MSJLD1I70045ZUL).
- *
- * Mirrors the existing pane-spawn pattern (`detached: true` + `unref()`)
- * so the TUI event loop and process lifecycle are unaffected: the parent
- * exits independently while the child runs to completion, appending its
- * output to the log. When the log file cannot be opened, stdio falls back
- * to 'ignore' (logged) — a logging failure never blocks dispatch.
- */
-export function spawnBackgroundShell(
-  command: string,
-  targetCwd: string,
-  logPath: string,
-  deps: BackgroundSpawnDeps = {},
-): ChildProcess {
-  const spawnFn = deps.spawn ?? spawn;
-  const open = deps.openSync ?? openSync;
-  const fd = openBackgroundLog(logPath, open);
-  const child = spawnFn('bash', ['-c', command], {
-    detached: true,
-    stdio: fd >= 0 ? (['ignore', fd, fd] as const) : 'ignore',
-    cwd: targetCwd,
-    env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
-  });
-  child.unref(); // Allow the parent to exit independently
+// ── Downtime resolvers (index.downtime-resolvers.ts) ─────────────────
+// Extracted verbatim (move-only, WL-0MVOA0U84003EXVK): the running-pane
+// liveness resolver, the stalled-work resume seams, the pane lister, the
+// pi-session-log root decoder and the closed-pane log reader moved to
+// `index.downtime-resolvers.ts`. Value-imported so `createDowntimeDeps` and
+// the pane-close reaper keep calling the helpers internally (same pattern as
+// the index.claim.js value import; AC6 — the module imports only concrete
+// siblings). Re-exported so the barrel keeps the surface index.test.ts
+// imports (`defaultStalledPaneRootResolver`, `defaultStalledPanesLister`,
+// `worklogRootFromPiSessionPath`); `defaultRunningDowntimePanesResolver`,
+// `defaultStalledResumePromptAgent`, `defaultStalledResumeStartAgent` and
+// `readClosedPaneIds` stay OUT of the consumed public surface.
 
-  // On exit, fire the refresh callback (fire-and-forget — never blocks).
-  if (deps.onExit) {
-    child.on('exit', deps.onExit);
-  }
+import {
+  defaultRunningDowntimePanesResolver,
+  defaultStalledPaneRootResolver,
+  defaultStalledPanesLister,
+  defaultStalledResumePromptAgent,
+  defaultStalledResumeStartAgent,
+  readClosedPaneIds,
+} from './index.downtime-resolvers.js';
 
-  return child;
-}
+export {
+  defaultStalledPaneRootResolver,
+  defaultStalledPanesLister,
+  worklogRootFromPiSessionPath,
+} from './index.downtime-resolvers.js';
 
-/**
- * Spawn a headless pi run detached with stdout/stderr redirected to a log
- * file — the `open_pane: false` execution path for agent commands
- * (`/skill:*`, `/intake`, `/plan`, `/prompt:`) (WL-0MSJLD1I70045ZUL).
- *
- * Uses the established headless pattern `pi -p --mode json` (see
- * `~/.pi/agent/skills/audit/scripts/audit_runner.py`, WL-0MSG4VSP10020NL7):
- * no pane is created, so the work-item ↔ pane association
- * (WL-0MSBQUJQX005RAT9) is skipped. The entry's `model` is honored via
- * `--model <pattern>`; free-form `/prompt:` commands have their routing
- * prefix stripped so pi receives only the prompt text. Detached + unref'd
- * like the pane-spawn paths; log open failure falls back to 'ignore'.
- */
-export function spawnBackgroundPi(
-  prompt: string,
-  targetCwd: string,
-  model: string | undefined,
-  logPath: string,
-  deps: BackgroundSpawnDeps = {},
-): ChildProcess {
-  const spawnFn = deps.spawn ?? spawn;
-  const open = deps.openSync ?? openSync;
-  const fd = openBackgroundLog(logPath, open);
-  const args = ['-p', '--mode', 'json'];
-  if (model) {
-    args.push('--model', model);
-  }
-  args.push(prompt);
-  const child = spawnFn('pi', args, {
-    detached: true,
-    stdio: fd >= 0 ? (['ignore', fd, fd] as const) : 'ignore',
-    cwd: targetCwd,
-    env: {
-      ...process.env,
-      HERDR_RESOLVED_CWD: targetCwd,
-      [REQUEST_PRIORITY_ENV_VAR]:
-        deps.requestPriority ?? INTERACTIVE_DEFAULT_REQUEST_PRIORITY,
-    },
-  });
-  child.unref(); // Allow the parent to exit independently
+// ── Host-CPU sampler (index.host-cpu.ts) ─────────────────────────────
+// Extracted verbatim (move-only, WL-0MVOA0U84003EXVK): the module-level
+// host-CPU sampler and its test seam moved to `index.host-cpu.js` so the
+// singleton state lives in exactly one module (AC5). `readHostCpu` is the
+// internal read path `createDowntimeDeps` wires into the worker;
+// `setHostCpuSamplerForTests` is re-exported for `index.test.ts`.
 
-  // On exit, fire the refresh callback (fire-and-forget — never blocks).
-  if (deps.onExit) {
-    child.on('exit', deps.onExit);
-  }
+import { readHostCpu } from './index.host-cpu.js';
 
-  return child;
-}
+export { setHostCpuSamplerForTests } from './index.host-cpu.js';
 
-// ── Pane-ID capture (WL-0MSBQUJQX005RAT9) ─────────────────────────────
+// ── Settings bootstrap + worklog-target (index.settings.ts) ─────────
+// Extracted verbatim (move-only, WL-0MVOA0W1P000IZKK): the single module-level
+// `const settings = loadSettings()` side effect and the two worklog-target
+// bootstrap functions moved to `index.settings.ts` so the settings singleton
+// lives in exactly one module (AC5). Value-imported so `createDowntimeDeps` and
+// `main()` keep sharing the same instance (settings is NOT re-exported — no
+// consumer imports it from the barrel, AC2). Re-exported so the barrel keeps
+// the surface index.test.ts imports via dynamic `import('./index.js')` casts
+// (`configureWorklogTarget`, `uninitializedReport`).
 
-/** Poll interval for the pane-ID file capture loop. */
-export const CAPTURE_POLL_INTERVAL_MS = 200;
-/** Total time budget for the pane-ID file capture loop. */
-export const CAPTURE_TIMEOUT_MS = 5000;
+import {
+  configureWorklogTarget,
+  settings,
+  uninitializedReport,
+} from './index.settings.js';
 
-/**
- * Injectable filesystem/timer dependencies for {@link capturePaneIdFromFile}
- * (tests replace these so no real polling or temp files are needed).
- */
-export interface PaneIdFileDeps {
-  existsSync?: (p: string) => boolean;
-  readFile?: (p: string) => string;
-  unlink?: (p: string) => void;
-  sleep?: (ms: number) => Promise<void>;
-  now?: () => number;
-}
-
-/**
- * Poll for the pane-ID file written by send-to-pi.sh, record the
- * work-item ↔ pane association, and clean up the temp file.
- *
- * Fire-and-forget (never awaited by the TUI): the loop polls briefly for
- * the file so pane-ID capture never blocks the TUI event loop or changes
- * spawn behavior. A missing file (split failed) is a no-op — no entry is
- * recorded. All failures are swallowed (fail-open).
- *
- * @param workItemId - Work item the agent command was dispatched for.
- * @param paneIdFile - Path passed to send-to-pi.sh via `--pane-id-file`.
- * @param record - Records the association (typically
- *                 `tracker.recordAgentForWorkItem`).
- * @param deps - Injectable fs/timer dependencies (tests).
- * @returns The captured pane ID, or undefined on timeout.
- */
-export async function capturePaneIdFromFile(
-  workItemId: string,
-  paneIdFile: string,
-  record: (workItemId: string, paneId: string) => void | Promise<void>,
-  deps: PaneIdFileDeps = {},
-): Promise<string | undefined> {
-  const existsSyncFn = deps.existsSync ?? ((p: string) => existsSync(p));
-  const readFileFn = deps.readFile ?? ((p: string) => readFileSync(p, 'utf8'));
-  const unlinkFn = deps.unlink ?? ((p: string) => { try { unlinkSync(p); } catch { /* ignore */ } });
-  const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  const now = deps.now ?? (() => Date.now());
-  const deadline = now() + CAPTURE_TIMEOUT_MS;
-
-  while (now() < deadline) {
-    if (existsSyncFn(paneIdFile)) {
-      let raw: string | null = null;
-      try {
-        raw = readFileFn(paneIdFile);
-      } catch {
-        raw = null; // file mid-write — keep polling
-      }
-      const paneId = raw !== null ? parsePaneIdFile(raw) : undefined;
-      if (paneId) {
-        try {
-          await record(workItemId, paneId);
-        } catch {
-          // Recording must never break dispatch; the temp file is still
-          // cleaned up below.
-        }
-        unlinkFn(paneIdFile);
-        return paneId;
-      }
-    }
-    await sleep(CAPTURE_POLL_INTERVAL_MS);
-  }
-  // Timed out — the split may have failed or the file never appeared.
-  return undefined;
-}
-
-/**
- * Work-item ID format: a prefix (e.g. `WL`, `SA`) followed by a hash,
- * e.g. `WL-0MS9NPHQU005Y3VE`.
- */
-const WORK_ITEM_ID_PATTERN = /^[A-Z]+-\w+$/;
-
-/**
- * Assignee used when the plugin claims a work-item (sets status to
- * in_progress) before dispatching an agent command. Matches the agent
- * handle used across the worklog (see AGENTS.md claim pattern).
- */
-const AGENT_ASSIGNEE = 'Map';
-
-/**
- * Extract the work-item ID from an agent command string.
- *
- * Agent commands are typically `/intake <id>`, `/plan <id>`, or
- * `/skill:<name> <id>` with the ID as the last argument. All tokens are
- * scanned for the work-item ID pattern and the last match is returned.
- * Commands without an ID (e.g. `/intake` alone) return `undefined` and
- * skip the status update gracefully.
- */
-export function extractWorkItemId(command: string): string | undefined {
-  const tokens = command.trim().split(/\s+/);
-  for (let i = tokens.length - 1; i >= 0; i -= 1) {
-    if (WORK_ITEM_ID_PATTERN.test(tokens[i])) {
-      return tokens[i];
-    }
-  }
-  return undefined;
-}
-
-/**
- * Claim the work-item referenced by an agent command (set its status to
- * in_progress) before the agent pane is spawned.
- *
- * Non-blocking: never throws. Failures are logged to stderr and must not
- * prevent the agent pane from opening (AC2). Commands without a work-item
- * ID (e.g. `/intake` alone) are skipped silently.
- */
-export async function claimItemForAgentCommand(command: string): Promise<void> {
-  const itemId = extractWorkItemId(command);
-  if (!itemId) {
-    return;
-  }
-  const result = await claimWorkItem(itemId, AGENT_ASSIGNEE);
-  if (!result.success) {
-    process.stderr.write(
-      `[worklog-plugin] Failed to set ${itemId} status to in_progress: ${result.error ?? 'unknown error'}\n`,
-    );
-  }
-}
-
-/**
- * Look up a work item's raw priority for interactive request-priority
- * resolution (WL-0MVE1NZ4J000H5NH AC2).
- *
- * Bounded and fail-open: any CLI error, timeout or parse failure resolves
- * `undefined`, which the interactive mapping turns into the default `high`.
- * Never throws.
- */
-async function lookupWorkItemPriority(itemId: string): Promise<string | undefined> {
-  try {
-    const { stdout } = await getExecFileAsync()(
-      'wl',
-      buildWlArgs(['show', itemId, '--json']),
-      { encoding: 'utf8', timeout: INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS },
-    );
-    return parseShownWorkItem(stdout)?.priority;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Resolve the request priority for an interactive agent dispatch
- * (WL-0MVE1NZ4J000H5NH AC2): map the dispatched work item's priority through
- * the interactive table. Fail-open — no item id, a lookup failure or a
- * timeout yields the interactive default (`high`).
- *
- * `lookup` is the priority-resolution seam (validation WL-0MVGC6JVP00812DS
- * AC1): it defaults to the production `wl show` lookup and may be injected
- * by tests to drive the resolution deterministically (absent id, lookup
- * failure, timeout). The `timeoutMs` budget is forwarded to the underlying
- * resolution when supplied.
- */
-export async function resolveInteractiveDispatchPriority(
-  itemId: string | undefined,
-  lookup: (
-    id: string,
-  ) =>
-    | string
-    | null
-    | undefined
-    | Promise<string | null | undefined> = lookupWorkItemPriority,
-  timeoutMs: number = INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS,
-): Promise<RequestPriority> {
-  return resolveInteractiveRequestPriority(itemId, lookup, timeoutMs);
-}
-
-/**
- * Resolve the dependency blockers of a work item via `wl dep list`
- * (F3, decision Q3). The outbound `depends-on` edges of the queried item
- * are its blockers; the dep-list edges carry only id/title/status/
- * priority, so each blocker is enriched via `wl show` to obtain the full
- * stage/risk/effort/sortIndex fields the frontier resolution needs
- * (stage→skill mapping + implement caps, Q2). THROWS on a wl or parse
- * failure — the caller's fail-closed catch converts it into a strike
- * (`{ok:false}`), so a dependency look-up failure never masquerades as an
- * empty frontier (AC5: no silent fall-through).
- */
-async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<CriticalCandidate[]> {
-  const { stdout } = await withTransientRetry(() => getExecFileAsync()(
-    'wl',
-    buildWlArgs(['dep', 'list', itemId, '--json']),
-    { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-  ));
-  const blockerRefs = parseDepListBlockersOutput(stdout);
-  if (blockerRefs === null) throw new Error('wl dep list parse failure');
-  const blockers: CriticalCandidate[] = [];
-  for (const ref of blockerRefs) {
-    const { stdout: showOut } = await withTransientRetry(() => getExecFileAsync()(
-      'wl',
-      buildWlArgs(['show', ref.id, '--json']),
-      { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-    ));
-    const full = parseShownWorkItem(showOut);
-    if (full === null) throw new Error(`wl show parse failure for ${ref.id}`);
-    blockers.push(full);
-  }
-  return blockers;
-}
-
-/**
- * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
- * (C0 WL-0MTR01EU7005SYZG): resolves the machine-wide dedicated Dispatcher
- * anchor pane via the herdr CLI (F1 WL-0MTR2CD4X006XI7U), provisioning the
- * Dispatcher workspace idempotently on first dispatch. Null on any
- * failure — dispatch degrades to "no dispatch this cycle". Injectable for
- * tests that build real deps without a live herdr session.
- */
-async function defaultDispatcherAnchorResolver(
-  cwd: string,
-): Promise<DispatcherAnchor | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveDispatcherAnchor(cwd, createDispatcherAnchorDeps(cwd, herdrBin));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Default project-workspace resolver used by {@link createDowntimeDeps}
- * (WL-0MU321YK70035AYT): resolves the herdr plugin pane/workspace whose
- * logical root (`HERDR_RESOLVED_CWD`) equals the worklog root `cwd`, via the
- * herdr CLI. Null on any failure — dispatch falls back to the retained
- * Dispatcher anchor (AC4). Injectable for tests that build real deps without
- * a live herdr session.
- */
-async function defaultProjectWorkspaceResolver(
-  cwd: string,
-): Promise<ProjectWorkspaceTarget | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveProjectWorkspaceForRoot(
-      cwd,
-      createDispatcherAnchorDeps(cwd, herdrBin),
-      cwd,
-    );
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Default per-prefix Dispatcher tab-anchor resolver used by
- * {@link createDowntimeDeps} (C1, parent WL-0MTRQT482001SNXC): resolves or
- * creates the tab labelled with the work-item id prefix (e.g. `WL`, `TCE`)
- * inside the machine-wide Dispatcher workspace and returns its root pane.
- * This is the FALLBACK placement path (AC3, WL-0MUR5FUWD00024XN) — it is only
- * consulted when no project workspace resolves for the item's root. Null on
- * any failure — the dispatch fails closed ('anchor-unavailable'), never a
- * wrong-tab/workspace placement. Injectable for tests that build real deps
- * without a live herdr session.
- */
-async function defaultDispatcherTabAnchorResolver(
-  cwd: string,
-  prefix: string,
-): Promise<DispatcherPrefixTabAnchor | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveDispatcherTabAnchor(
-      cwd,
-      createDispatcherAnchorDeps(cwd, herdrBin),
-      prefix,
-    );
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Default item-ID tab-anchor resolver used by {@link createDowntimeDeps}
- * (WL-0MU321YK70035AYT): ensures/reuses the tab labelled with the exact
- * work-item id inside the resolved project workspace and returns its root
- * pane, via the herdr CLI. Null on any failure — the dispatch fails closed
- * ('anchor-unavailable'). Injectable for tests that build real deps without
- * a live herdr session.
- */
-async function defaultItemTabAnchorResolver(
-  cwd: string,
-  workspaceId: string,
-  itemId: string,
-): Promise<ItemTabAnchor | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveItemTabAnchor(
-      cwd,
-      createDispatcherAnchorDeps(cwd, herdrBin),
-      workspaceId,
-      itemId,
-    );
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Resolve the workspace that should host an interactive item-ID tab
- * (WL-0MUYI3JAO002BTNL, parent WL-0MUKZGEQ2007FECS, Q2a).
- *
- * Interactive dispatch uses the invoking pane's current workspace, not the
- * project-resolved workspace the automated downtime path uses. Reads
- * `HERDR_WORKSPACE_ID` (present in the plugin pane environment); when it is
- * absent/blank it falls back to the workspace component of `HERDR_PANE_ID`
- * (`<workspace>:<pane>`), then `null` so the caller fails open to the
- * current-pane split. Synchronous and total: never throws.
- *
- * @param env - Environment to read (defaults to `process.env`).
- * @returns The workspace id, or `null` when it cannot be determined.
- */
-export function resolveInteractiveWorkspaceId(
-  env: Record<string, string | undefined> = process.env,
-): string | null {
-  const explicit = env.HERDR_WORKSPACE_ID;
-  if (typeof explicit === 'string' && explicit.trim() !== '') {
-    return explicit.trim();
-  }
-  const invokingPane = env.HERDR_PANE_ID;
-  if (typeof invokingPane === 'string') {
-    const sep = invokingPane.indexOf(':');
-    if (sep > 0) {
-      const derived = invokingPane.slice(0, sep).trim();
-      if (derived !== '') return derived;
-    }
-  }
-  return null;
-}
-
-/**
- * Resolve (or create) the item-ID tab anchor for an interactive dispatch
- * (WL-0MUYI3JAO002BTNL, parent WL-0MUKZGEQ2007FECS, AC1/AC2/AC3/AC5).
- *
- * Wraps {@link resolveItemTabAnchor} (`getItemTabAnchor`): the tab labelled
- * exactly `itemId` inside `workspaceId` is created on first use and reused
- * thereafter (the tab label is the key; no duplicate is created). The
- * interactive path is intentionally **fail-open** — unlike the automated
- * downtime path's fail-closed placement, a resolution/creation failure
- * returns `null` so the caller falls back to the current-pane split instead
- * of dropping the operator's dispatch. Never throws.
- *
- * @param cwd - Worklog root used for the coordination directory.
- * @param workspaceId - Host workspace (see {@link resolveInteractiveWorkspaceId}).
- * @param itemId - Exact work-item ID used as the tab label.
- * @param deps - Injectable herdr deps; production builds real ones.
- * @param onCreate Optional create-vs-reuse observer forwarded to
- *   {@link resolveItemTabAnchor} (`getItemTabAnchor`): invoked only when this
- *   call provisioned the tab. The interactive dispatch path uses it to gate
- *   the fail-safe placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF, AC7).
- * @returns The resolved tab anchor, or `null` on any failure/empty input.
- */
-export async function resolveInteractiveItemAnchor(
-  cwd: string,
-  workspaceId: string,
-  itemId: string,
-  deps?: DispatcherAnchorDeps,
-  onCreate?: (anchor: ItemTabAnchor) => void,
-): Promise<ItemTabAnchor | null> {
-  try {
-    if (workspaceId === '' || itemId === '') return null;
-    const anchorDeps =
-      deps ?? createDispatcherAnchorDeps(cwd, process.env.HERDR_BIN_PATH ?? 'herdr');
-    return await resolveItemTabAnchor(cwd, anchorDeps, workspaceId, itemId, onCreate);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Liveness dependency for {@link closeInteractiveTabRootPane}: the ids of
- * panes currently hosting a TRACKED pi/shell session, or `{ok:false}` when
- * the probe cannot be answered (unknown → the caller leaves the pane open).
- *
- * Mirrors the downtime path's `getRunningDowntimePanes` result shape: only a
- * POSITIVE `{ok:true, paneIds}` excludes the anchor from cleanup.
- */
-export interface InteractiveLiveTrackedPanesResult {
-  ok: boolean;
-  paneIds?: string[];
-  error?: string;
-}
-
-/** Injectable dependencies for {@link closeInteractiveTabRootPane} (tests). */
-export interface InteractiveRootPaneCleanupDeps {
-  /** Live tracked pi/shell pane ids, or `{ok:false}` when unknown. */
-  getLiveTrackedPanes?: (cwd: string) => Promise<InteractiveLiveTrackedPanesResult>;
-  /** Close a pane; may reject (the helper swallows it). */
-  closePane?: (paneId: string, cwd: string) => Promise<boolean>;
-}
-
-/**
- * Fail-safe cleanup of an interactive item tab's placeholder root pane
- * (WL-0MUYI3K8H007MPKF, parent WL-0MUKZGEQ2007FECS, AC7).
- *
- * A freshly provisioned item tab is created with herdr's initial root pane,
- * used only as the split anchor for the FIRST dispatch. Once that dispatch's
- * pane has spawned, the placeholder is closed so the tab shows only the
- * productive pane. This mirrors the downtime path's root-pane cleanup
- * (WL-0MU2EOHK900425VU) with the interactive path's fail-safe/fail-open
- * semantics:
- *
- *  - **Fail-safe:** the anchor is closed ONLY when liveness POSITIVELY
- *    confirms it is not a live tracked pi/shell pane. When the probe is
- *    absent, failed (`ok:false`), or returns an unparseable payload
- *    (no `paneIds`), the anchor is left open — a live agent/shell pane is
- *    never closed (a reused tab's anchor is a live pane and survives).
- *  - **Fail-open:** any thrown error (liveness probe or close) is swallowed;
- *    cleanup never blocks, fails, or changes the dispatch outcome.
- *
- * @param anchorPaneId The anchor pane to close, or `undefined`/empty when no
- *   item tab was provisioned (a no-op — liveness is not even probed).
- * @param ctx The worklog root (`cwd`) the resolver/close operations run in.
- * @param deps Injectable liveness + close dependencies.
- */
-export async function closeInteractiveTabRootPane(
-  anchorPaneId: string | undefined,
-  ctx: { cwd: string },
-  deps: InteractiveRootPaneCleanupDeps,
-): Promise<void> {
-  try {
-    if (typeof anchorPaneId !== 'string' || anchorPaneId === '') return;
-    if (typeof deps.getLiveTrackedPanes !== 'function') return;
-    // Only a POSITIVE liveness answer may authorise a close; anything else
-    // (absent dep, ok:false, thrown probe, missing paneIds) leaves it open.
-    let liveIds: string[] | null = null;
-    try {
-      const result = await deps.getLiveTrackedPanes(ctx.cwd);
-      if (result && result.ok === true && Array.isArray(result.paneIds)) {
-        liveIds = result.paneIds;
-      }
-    } catch {
-      liveIds = null; // fail-safe: unknown liveness → leave open
-    }
-    if (liveIds === null) return;
-    if (liveIds.includes(anchorPaneId)) return; // live tracked pane → leave open
-    if (typeof deps.closePane === 'function') {
-      await deps.closePane(anchorPaneId, ctx.cwd);
-    }
-  } catch {
-    // fail-open: root-pane cleanup must never block or fail the dispatch
-  }
-}
-
-/**
- * Default interactive liveness resolver (AC7): the ids of panes currently
- * hosting a TRACKED pi/shell session, derived from `herdr pane list`.
- *
- * A pane is a live tracked pane when it hosts a live pi agent (`agent`
- * present, status not terminal) OR its label marks a shell-command pane
- * (`Shell: …`, set by `run-in-pane.sh` via `buildShellPaneTitle`). A freshly
- * provisioned item tab's placeholder root pane hosts neither, so it is
- * excluded and may be closed; a reused tab's anchor is a live pi/shell pane
- * and is included, so it is never closed.
- *
- * Fail-safe: any herdr failure (missing binary, timeout, unparseable output)
- * resolves `{ok:false}` — the caller then leaves the anchor open rather than
- * risk closing a live pane on unknown state.
- */
-export async function defaultInteractiveLiveTrackedPanesResolver(
-  _cwd: string,
-): Promise<InteractiveLiveTrackedPanesResult> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    const { stdout } = await getExecFileAsync()(
-      herdrBin,
-      ['pane', 'list'],
-      { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
-    );
-    const panes = parseHerdrPaneListOutput(stdout);
-    if (panes === null) return { ok: false, error: 'herdr pane list parse failure' };
-    const paneIds = panes.filter(isLiveTrackedPane).map((p) => p.paneId);
-    return { ok: true, paneIds };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-/**
- * True when a parsed `herdr pane list` record is a live tracked pi/shell
- * pane (see {@link defaultInteractiveLiveTrackedPanesResolver}). A bare
- * placeholder root pane (no agent, no shell-command label) is NOT tracked.
- */
-function isLiveTrackedPane(rec: HerdrPaneRecord): boolean {
-  const status = (rec.agentStatus ?? '').toLowerCase();
-  const agentLive =
-    typeof rec.agent === 'string' &&
-    rec.agent !== '' &&
-    status !== 'done' &&
-    status !== 'exited';
-  const shellLive = typeof rec.label === 'string' && rec.label.startsWith('Shell: ');
-  return agentLive || shellLive;
-}
-
-/**
- * Default interactive pane-close dependency (AC7): `herdr pane close
- * <paneId>`. Fail-open at the caller — a failure resolves `false` and is
- * swallowed by {@link closeInteractiveTabRootPane}.
- */
-export async function defaultInteractiveClosePane(
-  paneId: string,
-  _cwd: string,
-): Promise<boolean> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    await getExecFileAsync()(herdrBin, ['pane', 'close', paneId], {
-      encoding: 'utf8',
-      timeout: DOWNTIME_WL_TIMEOUT_MS,
-    });
-    return true;
-  } catch {
-    return false; // fail-open: a failed close never throws
-  }
-}
-
-/**
- * Default running-downtime-panes liveness resolver (AC1/AC3, parent
- * WL-0MTYZXSLN008HZOW): counts live dispatched downtime panes from
- * `herdr pane list` — the machine-wide pane inventory — so the running-pane
- * bound holds across roots and leader/instance restarts. A pane counts as a
- * running downtime pane when its label starts with `Downtime` (set by
- * send-to-pi.sh via `herdr pane rename`) and it hosts a live pi agent
- * (status not `done`/`exited`).
- *
- * Fail-closed: any herdr failure (missing binary, timeout, unparseable
- * output) resolves `{ok:false}`, which the worker treats as the bound being
- * reached (no dispatch) rather than over-dispatching on unknown state.
- */
-export async function defaultRunningDowntimePanesResolver(
-  _cwd: string,
-): Promise<RunningPanesResult> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    const { stdout } = await getExecFileAsync()(
-      herdrBin,
-      ['pane', 'list'],
-      { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
-    );
-    const panes = parseHerdrPaneListOutput(stdout);
-    if (panes === null) return { ok: false, error: 'herdr pane list parse failure' };
-    const paneIds = countRunningDowntimePanes(panes);
-    // `records` carries the full parsed pane set so the item-scoped in-flight
-    // guard (WL-0MUBEZ6PE002WLP4 / F3) can resolve label suffixes without a
-    // second `herdr pane list` call. `count`/`paneIds` keep their existing
-    // meaning (owner-lease qualifier ONLY, never a dispatch limit).
-    return { ok: true, count: paneIds.length, paneIds, records: panes };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-/**
- * Extract the human-readable failure text from a herdr `execFile` error so
- * {@link classifyHerdrAgentFailure} can map it to a neutral resume reason.
- * Prefers stderr/stdout (where herdr writes its machine-readable codes) over
- * the generic Error message.
- */
-function herdrAgentErrorText(err: unknown): string {
-  if (err !== null && typeof err === 'object') {
-    const e = err as { stderr?: unknown; stdout?: unknown; message?: unknown };
-    const parts: string[] = [];
-    if (typeof e.stderr === 'string' && e.stderr !== '') parts.push(e.stderr);
-    if (typeof e.stdout === 'string' && e.stdout !== '') parts.push(e.stdout);
-    if (typeof e.message === 'string' && e.message !== '') parts.push(e.message);
-    if (parts.length > 0) return parts.join(' ');
-  }
-  return String(err);
-}
-
-/**
- * Default `herdr agent prompt` seam for the stalled-work resume orchestrator
- * (WL-0MUYMBPZ5004LBFX): submit a prompt to a LIVE agent
- * (`herdr agent prompt <paneId> <text>`). Rejects when the agent is blocked
- * (`agent_blocked`) and returns `agent_prompt_stalled` when an accepted
- * submission never reaches `working`/`blocked`. Both map to a NEUTRAL resume
- * failure reason (never a strike). Fail-safe: any herdr failure resolves
- * `{ok:false, reason}` rather than throwing.
- */
-export async function defaultStalledResumePromptAgent(
-  paneId: string,
-  text: string,
-): Promise<StalledResumeCliResult> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    await getExecFileAsync()(herdrBin, ['agent', 'prompt', paneId, text], {
-      encoding: 'utf8',
-      timeout: DOWNTIME_WL_TIMEOUT_MS,
-    });
-    return { ok: true };
-  } catch (err) {
-    const raw = herdrAgentErrorText(err);
-    return { ok: false, reason: classifyHerdrAgentFailure(raw), error: raw };
-  }
-}
-
-/**
- * Default `herdr agent start` seam for the stalled-work resume orchestrator
- * (WL-0MUYMBPZ5004LBFX): relaunch pi in an EXISTING pane whose agent has
- * exited, continuing the item's session
- * (`herdr agent start pi --kind pi --pane <paneId> -- --session <path>` or
- * `-- --continue`). Fail-safe: any herdr failure resolves `{ok:false, reason}`
- * (a vanished pane is mapped to `pane-vanished`) rather than throwing.
- */
-export async function defaultStalledResumeStartAgent(
-  paneId: string,
-  opts: StalledResumeStartOptions,
-): Promise<StalledResumeCliResult> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    await getExecFileAsync()(herdrBin, buildStalledResumeStartArgs(paneId, opts), {
-      encoding: 'utf8',
-      timeout: DOWNTIME_WL_TIMEOUT_MS,
-    });
-    return { ok: true };
-  } catch (err) {
-    const raw = herdrAgentErrorText(err);
-    return { ok: false, reason: classifyHerdrAgentFailure(raw), error: raw };
-  }
-}
-
-/**
- * Default machine-wide pane lister for the stalled-work scan
- * (WL-0MUYMBSA90092QV2): one `herdr pane list` read shared by the scan. Returns
- * `null` on any herdr failure (missing binary, timeout, unparseable output) so
- * the scan degrades to "no stalled resume" rather than crashing dispatch.
- */
-export async function defaultStalledPanesLister(): Promise<HerdrPaneRecord[] | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    const { stdout } = await getExecFileAsync()(herdrBin, ['pane', 'list'], {
-      encoding: 'utf8',
-      timeout: DOWNTIME_WL_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    return parseHerdrPaneListOutput(stdout);
-  } catch {
-    return null; // fail-safe: unreadable pane list → no stalled resume
-  }
-}
-
-/**
- * Best-effort decode of a pi session-log path back to its working directory.
- *
- * pi encodes the cwd into the session directory name by replacing path
- * separators with `-` and wrapping the result in `--…--` (e.g.
- * `--home-user-projects-app--`). The encoding is lossy for directories whose
- * names contain a literal hyphen, so the decoded path is only a HINT: the
- * caller runs it through `resolveWorklogRoot()`, which walks up to the nearest
- * valid `.worklog/` and returns `undefined` when the hint does not land in a
- * worklog tree. This keeps a wrong decode harmless (the pane is skipped).
- */
-export function worklogRootFromPiSessionPath(sessionPath: string): string | undefined {
-  if (typeof sessionPath !== 'string' || sessionPath === '') return undefined;
-  // Drop the `.jsonl` filename, then take the `--<enc>--` session directory.
-  const withoutFile = sessionPath.replace(/[\\/][^\\/]*$/, '');
-  const encoded = withoutFile.replace(/^.*[\\/]/, '');
-  if (!encoded.startsWith('--') || !encoded.endsWith('--')) return undefined;
-  const body = encoded.slice(2, -2);
-  if (body === '') return undefined;
-  // Leading separator: the body starts with the path without a leading slash
-  // (`home-user-…`); re-add `/` and replace the remaining separators.
-  const decoded = '/' + body.split('-').join('/');
-  return resolveWorklogRoot(decoded);
-}
-
-/**
- * Default worklog-root resolver for the stalled-work scan
- * (WL-0MUYMBSA90092QV2 AC5): prefer the pane's reported `cwd` (the pane's
- * working directory), then fall back to the pi session-log path in
- * `agent_session`. Returns `null` when neither resolves to a valid worklog
- * root — the scan then fails closed (skips the pane) rather than resuming
- * against the leader's root.
- */
-export function defaultStalledPaneRootResolver(
-  pane: HerdrPaneRecord,
-  _fallbackCwd: string,
-): string | null {
-  if (typeof pane.cwd === 'string' && pane.cwd !== '') {
-    const fromCwd = resolveWorklogRoot(pane.cwd);
-    if (fromCwd) return fromCwd;
-  }
-  const sessionPath = pane.agentSession?.value;
-  if (typeof sessionPath === 'string' && sessionPath !== '') {
-    const fromSession = worklogRootFromPiSessionPath(sessionPath);
-    if (fromSession) return fromSession;
-  }
-  return null;
-}
-
-/**
- * Collect the pane ids already handled by the dispatch monitor
- * (WL-0MU308WSF0002JWN) from the rolling dispatch log. Used to keep the
- * scheduled pane-close reaper from double-handling a pane the monitor has
- * already processed (parent constraint). Fail-safe: an unreadable log
- * yields an empty set.
- */
-async function readClosedPaneIds(cwd: string): Promise<Set<string>> {
-  try {
-    const entries = await readDowntimeLogEntries(cwd);
-    const ids = new Set<string>();
-    for (const entry of entries) {
-      if (
-        entry.entryType === 'pane-close' &&
-        typeof entry.paneId === 'string' &&
-        entry.paneId !== ''
-      ) {
-        ids.add(entry.paneId);
-      }
-    }
-    return ids;
-  } catch {
-    return new Set<string>();
-  }
-}
+export { configureWorklogTarget, uninitializedReport };
 
 /**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
@@ -1489,6 +517,12 @@ export function createDowntimeDeps(
     // (fail-closed) identically: no audit/implement dispatch during a
     // release; plan/intake continue.
     readCodeFreezeStatus: (cwd: string) => readCodeFreezeStatusForRoot(cwd),
+    // Host-CPU gate seam (WL-0MVK0UO3Q002TXW6 AC1/AC2): `/proc/stat` delta
+    // utilisation with a 1-min load-average fallback, read fresh on every
+    // dispatch tick. Fail-open: an unreadable/unparseable `/proc` resolves
+    // `{ ok: false }` (via the sampler), so the gate never blocks a tick it
+    // cannot evaluate.
+    readHostCpu,
     async getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult> {
       try {
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
@@ -1847,13 +881,24 @@ export function createDowntimeDeps(
         itemId?: string;
         anchorId?: string;
         priority?: string | null;
+        reservationTicketId?: string;
+        /** Per-turn locality preference forwarded to the pane (C4-AC1). */
+        localPreference?: LocalPreference;
       },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
         buildDowntimePaneArgs(kind, prompt, opts),
-        { cwd: opts.cwd, priority: opts.priority },
+        {
+          cwd: opts.cwd,
+          priority: opts.priority,
+          // Granted reservation ticket (slice C2 AC1): forwarded into the
+          // pane process env beside the `--reservation-ticket` arg.
+          ...(opts.reservationTicketId !== undefined
+            ? { reservationTicketId: opts.reservationTicketId }
+            : {}),
+        },
         spawnFn,
       );
     },
@@ -2267,45 +1312,6 @@ export function createDowntimeDeps(
   };
 }
 
-// Load settings
-const settings = loadSettings();
-
-/**
- * Resolve the worklog root starting from the given directory (or the
- * process CWD when not provided) and configure the fetcher so every child
- * `wl` invocation targets that root's database via `--worklog-dir`.
- *
- * The resolution itself is delegated to the shared
- * `resolveWorklogRoot()` (packages/shared/src/worklog-paths.ts) — the same
- * strategy the `wl` CLI uses — so the plugin and the CLI can never disagree
- * about what constitutes the project root.
- *
- * Returns the resolved project root, or undefined when no valid `.worklog/`
- * is found (in which case the fetcher falls back to default resolution).
- */
-export function configureWorklogTarget(startDir?: string): string | undefined {
-  if (startDir) {
-    process.stderr.write(`[worklog-plugin] resolving worklog root from HERDR_RESOLVED_CWD: ${startDir}\n`);
-  }
-  const wlRoot = resolveWorklogRoot(startDir);
-  if (wlRoot) {
-    setWorklogDir(join(wlRoot, '.worklog'));
-  }
-  return wlRoot;
-}
-
-/**
- * Report text emitted when no valid `.worklog/` directory is found in or
- * above the given start directory. Extracted so tests can assert the
- * uninitialized reporting without launching the full TUI.
- */
-export function uninitializedReport(startDir: string): string {
-  return [
-    `[worklog-plugin] No valid .worklog/ directory found in or above '${startDir}'`,
-    `[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.`,
-  ].join('\n') + '\n';
-}
-
 export async function main(): Promise<void> {
   // Check if wl is available
   const wlAvailable = await checkWlAvailable();
@@ -2427,9 +1433,19 @@ export async function main(): Promise<void> {
   // wins; default ~/.herdr/downtime/.
   const coordinationDir = getMachineCoordinationDir() ?? join(targetCwd, '.worklog');
 
+  // Local capacity reservation client (parent WL-0MVIKRFP0005JDL8, slice
+  // C2): `POST {proxyUrl}/llama/local/reserve` on the existing poll cadence.
+  // Wired here rather than into `createDowntimeDeps` so the proxy URL comes
+  // from the SAME `runSettings` snapshot as the status poller (a settings
+  // change applies on restart, exactly like the poller). Fail-open by
+  // construction: an older proxy answers 404 → the client resolves null and
+  // dispatch behaves exactly as before.
+  const downtimeDeps = createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE);
+  downtimeDeps.reserveLocalCapacity = createLocalReserver(runSettings.downtimeProxyUrl);
+
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
-    deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
+    deps: downtimeDeps,
     registry: createRoundRobinRegistry({
       worklogDir: join(targetCwd, '.worklog'),
     }),
@@ -2452,6 +1468,19 @@ export async function main(): Promise<void> {
         // the concurrency limiter.
         model: s.downtimeModel,
         cwd: targetCwd,
+        // Per-turn locality preference (slice C4 AC1), forwarded to every
+        // dispatched pane as `HERDR_LOCAL_PREFERENCE`. The extension turns it
+        // into the `X-Local-Preference` header and records the route log.
+        localPreference: s.downtimeLocalPreference,
+        // Locality precedence (WL-0MVNUIW77000VYAX AC2/AC4): an explicitly
+        // persisted `downtimeLocalPreference` is the operator's policy and
+        // wins for every dispatch; when the key is absent the dispatch
+        // boundary may apply the low-priority rule (`low` → `local-preferred`,
+        // everything else → the deployment default). Explicitness is derived
+        // by `loadSettings` and never persisted (AC3).
+        localPreferenceMode: s.downtimeLocalPreferenceExplicit
+          ? 'operator-setting'
+          : 'priority-rule',
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,
@@ -2472,6 +1501,10 @@ export async function main(): Promise<void> {
         // model. Both are re-read each tick (live).
         capacityStarvationAlertMs: s.downtimeCapacityStarvationAlertMs,
         longRunningThresholdMs: s.downtimeLongRunningThresholdMs,
+        // Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6 AC5): re-read each tick
+        // like the other downtime settings, so a threshold change (or `0` to
+        // disable) applies without a plugin restart.
+        cpuGatePercent: s.downtimeCpuGatePercent,
         browseItemCount: s.browseItemCount,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable

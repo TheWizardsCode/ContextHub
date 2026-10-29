@@ -57,6 +57,10 @@ import {
 } from './downtime-worker.js';
 import { loadSettings, defaultSettings, saveSettings } from './settings.js';
 import {
+  clampDowntimeCpuGatePercent,
+  DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
+} from './host-cpu.js';
+import {
   DOWNTIME_DISABLE_MARKER_FILE,
   writeDisableMarker,
 } from './downtime-disable-marker.js';
@@ -789,6 +793,73 @@ describe('downtime audit-batch setting (downtimeAuditBatchMax)', () => {
     try {
       saveSettings(path, { ...defaultSettings, downtimeAuditBatchMax: 4 });
       expect(loadSettings(path).downtimeAuditBatchMax).toBe(4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('downtime CPU gate setting (downtimeCpuGatePercent)', () => {
+  function writeConfig(body: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-cpu-gate-settings-'));
+    const path = join(dir, 'worklog-plugin.json');
+    writeFileSync(path, JSON.stringify(body), 'utf8');
+    return path;
+  }
+
+  it('defaults to 75', () => {
+    expect(DEFAULT_DOWNTIME_CPU_GATE_PERCENT).toBe(75);
+    expect(defaultSettings.downtimeCpuGatePercent).toBe(75);
+    expect(clampDowntimeCpuGatePercent(Number.NaN)).toBe(75);
+  });
+
+  it('clamps to [0, 100] and preserves `0` (gate disabled)', () => {
+    expect(clampDowntimeCpuGatePercent(-20)).toBe(0);
+    expect(clampDowntimeCpuGatePercent(0)).toBe(0);
+    expect(clampDowntimeCpuGatePercent(60)).toBe(60);
+    expect(clampDowntimeCpuGatePercent(100)).toBe(100);
+    expect(clampDowntimeCpuGatePercent(180)).toBe(100);
+  });
+
+  it('loadSettings parses a valid value', () => {
+    const path = writeConfig({ downtimeCpuGatePercent: 40 });
+    try {
+      expect(loadSettings(path).downtimeCpuGatePercent).toBe(40);
+    } finally {
+      rmSync(join(path, '..'), { recursive: true, force: true });
+    }
+  });
+
+  it('loadSettings clamps out-of-range values (never trusts the file)', () => {
+    const low = writeConfig({ downtimeCpuGatePercent: -5 });
+    const high = writeConfig({ downtimeCpuGatePercent: 250 });
+    try {
+      expect(loadSettings(low).downtimeCpuGatePercent).toBe(0);
+      expect(loadSettings(high).downtimeCpuGatePercent).toBe(100);
+    } finally {
+      rmSync(join(low, '..'), { recursive: true, force: true });
+      rmSync(join(high, '..'), { recursive: true, force: true });
+    }
+  });
+
+  it('loadSettings falls back to the default when missing or invalid', () => {
+    const missing = writeConfig({ browseItemCount: 12 });
+    const invalid = writeConfig({ downtimeCpuGatePercent: 'high' });
+    try {
+      expect(loadSettings(missing).downtimeCpuGatePercent).toBe(75);
+      expect(loadSettings(invalid).downtimeCpuGatePercent).toBe(75);
+    } finally {
+      rmSync(join(missing, '..'), { recursive: true, force: true });
+      rmSync(join(invalid, '..'), { recursive: true, force: true });
+    }
+  });
+
+  it('saveSettings persists the value so a reload reads it back', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-cpu-gate-save-'));
+    const path = join(dir, 'worklog-plugin.json');
+    try {
+      saveSettings(path, { ...defaultSettings, downtimeCpuGatePercent: 55 });
+      expect(loadSettings(path).downtimeCpuGatePercent).toBe(55);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

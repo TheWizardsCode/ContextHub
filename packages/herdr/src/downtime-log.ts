@@ -121,6 +121,36 @@ export interface CoordinationLogEntry {
   /** The most recent capacity-refusal reason in the episode. */
   lastCapacityReason?: string;
   /**
+   * Empty-offer attribution (WL-0MVR8FKMU009XTED AC1): recorded on an
+   * emptied `operation: 'checkin'` entry so a starved root is
+   * self-diagnosing. `reason` names the empty-offer reason (`empty-window`,
+   * `all-window-items-held`, `all-window-items-gated`, `code-freeze`,
+   * `review-queue-hold`, `attempt-budget-exhausted`, `in-flight-hold`,
+   * `non-terminal-cooldown`, `stalled-resume`, `wl-error`), `heldAssignees`
+   * carries the observed scheduling-hold sentinels (`Map`, …) when the whole
+   * window is held, and `dominantGate`/`gateCounts` name the gate that
+   * rejected the most candidates. Additive and optional: every earlier entry
+   * shape is unchanged.
+   */
+  windowSize?: number;
+  heldAssignees?: string[];
+  dominantGate?: string;
+  gateCounts?: Record<string, number>;
+  /**
+   * Per-offer dispatch-time rejections (WL-0MVR8FKMU009XTED AC2): recorded on
+   * the terminal decision entry so every coordination entry the leader
+   * rejected names its work item, worklog root and the gate that rejected it
+   * instead of collapsing into a bare `no-candidate`.
+   */
+  offerRejections?: Array<{
+    workItemId: string;
+    worklogRoot: string;
+    gate: string;
+    assignee?: string;
+  }>;
+  /** The wl/CLI error that caused an entry-kept check-in (`reason: 'wl-error'`). */
+  error?: string;
+  /**
    * Panes the long-running detector flagged when the starvation signal fired
    * (WL-0MVKNC2N50025HXE AC2/AC3): each entry names the pane, item, kind and
    * how long the item has gone without progress. Bounded; absent when the

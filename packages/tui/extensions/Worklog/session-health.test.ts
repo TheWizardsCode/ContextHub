@@ -63,6 +63,21 @@ vi.mock('./model-display.js', () => ({
   MODEL_DISPLAY_STATUS_KEY: 'worklog-0model',
 }));
 
+// ── Mock ./lib/work-item-title.js ──────────────────────────────────────
+// session-health.ts enriches the initial-prompt preview with the work item
+// title via the shared resolver (WL-0MVGB23MM004X501 AC3). Mocking it keeps
+// the footer tests from spawning the wl CLI.
+
+const titleMocks = vi.hoisted(() => ({
+  mockResolveWorkItemTitle: vi.fn(),
+}));
+
+vi.mock('./lib/work-item-title.js', () => ({
+  resolveWorkItemTitle: titleMocks.mockResolveWorkItemTitle,
+  TITLE_LOOKUP_TIMEOUT_MS: 5000,
+  resetTitleLookupCache: vi.fn(),
+}));
+
 // ── Module under test ─────────────────────────────────────────────────
 
 import {
@@ -145,7 +160,61 @@ describe('session-health', () => {
         registeredListeners[event].push(handler);
       }),
     };
+
+    // Default: no title can be resolved (raw ID stays in the preview).
+    titleMocks.mockResolveWorkItemTitle.mockReset();
+    titleMocks.mockResolveWorkItemTitle.mockResolvedValue(null);
   });
+
+  /**
+   * Helper: invoke the footer factory and return its render(…) result.
+   * Simulates what Pi TUI does: calls setFooter(factory), then calls
+   * factory(tui, theme, footerData) → { render(width) } → render(lines).
+   *
+   * @param ctx - Extension context
+   * @param initialPrompt - Optional initial user message to inject into
+   *   the session entries so the ticker's refreshState populates it.
+   */
+  function fabricateFooterLines(ctx: any, initialPrompt?: string | null, width: number = 500): string[] {
+    registerSessionHealth(mockPi);
+
+    // Override getBranch to return entries with the initial prompt
+    const sessionBranch = initialPrompt
+      ? [{ type: 'message', message: { role: 'user', content: initialPrompt } }]
+      : [];
+    const ctxWithPrompt = {
+      ...ctx,
+      sessionManager: {
+        getBranch: () => sessionBranch,
+      },
+    };
+
+    // Start a session to trigger footer setup
+    const sessionStartHandler = getHandler('session_start');
+    sessionStartHandler({}, ctxWithPrompt);
+
+    // Capture the factory passed to setFooter
+    expect(footerCalls.length).toBeGreaterThanOrEqual(1);
+    const factory = footerCalls[footerCalls.length - 1].factory;
+
+    // Call the factory to get the footer object
+    const footerObj = factory(
+      { requestRender: vi.fn() },
+      { fg: (color: string, text: string) => `[${color}${text}]` },
+      {
+        getExtensionStatuses: () => [],
+        onBranchChange: () => () => {},
+        requestRender: vi.fn(),
+      },
+    );
+
+    return footerObj.render(width);
+  }
+
+  /** Helper to strip ANSI dim/reset codes from a rendered footer line. */
+  function unstyle(line: string): string {
+    return line.replace(/\x1b\[[0-9;]*m/g, '');
+  }
 
   // ── Exports ─────────────────────────────────────────────────────────
 
@@ -1011,56 +1080,6 @@ describe('session-health', () => {
   // ── Model line in footer (Line 3) ──────────────────────────────────────
 
   describe('model line in footer', () => {
-    /**
-     * Helper: invoke the footer factory and return its render(…) result.
-     * Simulates what Pi TUI does: calls setFooter(factory), then calls
-     * factory(tui, theme, footerData) → { render(width) } → render(lines).
-     *
-     * @param ctx - Extension context
-     * @param initialPrompt - Optional initial user message to inject into
-     *   the session entries so the ticker's refreshState populates it.
-     */
-    function fabricateFooterLines(ctx: any, initialPrompt?: string | null, width: number = 500): string[] {
-      registerSessionHealth(mockPi);
-
-      // Override getBranch to return entries with the initial prompt
-      const sessionBranch = initialPrompt
-        ? [{ type: 'message', message: { role: 'user', content: initialPrompt } }]
-        : [];
-      const ctxWithPrompt = {
-        ...ctx,
-        sessionManager: {
-          getBranch: () => sessionBranch,
-        },
-      };
-
-      // Start a session to trigger footer setup
-      const sessionStartHandler = getHandler('session_start');
-      sessionStartHandler({}, ctxWithPrompt);
-
-      // Capture the factory passed to setFooter
-      expect(footerCalls.length).toBeGreaterThanOrEqual(1);
-      const factory = footerCalls[footerCalls.length - 1].factory;
-
-      // Call the factory to get the footer object
-      const footerObj = factory(
-        { requestRender: vi.fn() },
-        { fg: (color: string, text: string) => `[${color}${text}]` },
-        {
-          getExtensionStatuses: () => [],
-          onBranchChange: () => () => {},
-          requestRender: vi.fn(),
-        },
-      );
-
-      return footerObj.render(width);
-    }
-
-    /** Helper to strip ANSI dim/reset codes from a rendered footer line. */
-    function unstyle(line: string): string {
-      return line.replace(/\x1b\[[0-9;]*m/g, '');
-    }
-
     beforeEach(() => {
       // Reset mock return values before each test
       mocks.mockGetResolvedModel.mockReturnValue(null);
@@ -1343,6 +1362,65 @@ describe('session-health', () => {
 
       // requestRender should have been called by the after_provider_response handler
       expect(requestRender).toHaveBeenCalled();
+    });
+  });
+
+  // ── Initial-prompt title enrichment (WL-0MVGB23MM004X501 AC1/AC3/AC5) ──
+
+  describe('initial-prompt work item title enrichment', () => {
+    /** Await queued microtasks so the fire-and-forget resolver settles. */
+    function flush(): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    /** Re-render the footer after the async enrichment has settled. */
+    function renderAfterFlush(width: number = 500): string[] {
+      const factory = footerCalls[footerCalls.length - 1].factory;
+      const footerObj = factory(
+        { requestRender: vi.fn() },
+        { fg: (c: string, t: string) => `[${c}${t}]` },
+        { getExtensionStatuses: () => [], onBranchChange: () => () => {} },
+      );
+      return footerObj.render(width);
+    }
+
+    it('enriches the initial prompt with the resolved title via the shared resolver', async () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+      titleMocks.mockResolveWorkItemTitle.mockResolvedValue('AI cards should be face down');
+
+      fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
+        '/intake RISE-0MVCFSM9B0019M8L',
+        500,
+      );
+      await flush();
+
+      // The enrichment routes the ID through the shared resolver (AC3) …
+      expect(titleMocks.mockResolveWorkItemTitle).toHaveBeenCalledWith('RISE-0MVCFSM9B0019M8L');
+
+      // … and replaces the raw ID with "<ID> <title>" in the preview.
+      const lines = renderAfterFlush(500);
+      const un = unstyle(lines[1] || '');
+      expect(un).toContain('AI cards should be face down');
+    });
+
+    it('keeps the raw ID when the title cannot be resolved (AC5)', async () => {
+      mocks.mockGetResolvedModel.mockReturnValue('openai/gpt-4');
+      mocks.mockGetSelectedModel.mockReturnValue('code');
+      titleMocks.mockResolveWorkItemTitle.mockResolvedValue(null);
+
+      fabricateFooterLines(
+        { ...mockCtx, mode: 'tui', ui: { ...mockCtx.ui, theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) } } },
+        '/intake RISE-0MVCFSM9B0019M8L',
+        500,
+      );
+      await flush();
+
+      const lines = renderAfterFlush(500);
+      const un = unstyle(lines[1] || '');
+      expect(un).toContain('RISE-0MVCFSM9B0019M8L');
+      expect(un).not.toContain('AI cards should be face down');
     });
   });
 

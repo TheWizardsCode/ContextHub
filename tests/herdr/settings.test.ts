@@ -81,6 +81,13 @@ describe('defaultSettings', () => {
     expect(defaultSettings.downtimeProxyUrl).toBe('http://192.168.0.199:8000');
     expect(defaultSettings.downtimeModel).toBe('plan');
   });
+
+  it('defaults downtimeLocalPreference to remote-ok (WL-0MVNUHWH500196K1)', () => {
+    // Unattended downtime panes go remote rather than stalling on a contended
+    // local slot; `local-preferred` is the explicit per-deployment opt-in.
+    // This supersedes the C4-AC1 `local-only` default (WL-0MVLJTV03000KIQZ).
+    expect(defaultSettings.downtimeLocalPreference).toBe('remote-ok');
+  });
 });
 
 describe('loadSettings', () => {
@@ -107,6 +114,9 @@ describe('loadSettings', () => {
     expect(settings.autoRefresh).toBe(true);
     expect(settings.refreshIntervalMs).toBe(30000);
     expect(settings.syncIntervalMs).toBe(60000);
+    // An unconfigured deployment dispatches with the `remote-ok` default
+    // (WL-0MVNUHWH500196K1 AC3).
+    expect(settings.downtimeLocalPreference).toBe('remote-ok');
   });
 
   it('clamps browseItemCount when loading out-of-range persisted value', () => {
@@ -129,6 +139,28 @@ describe('loadSettings', () => {
     expect(settings.downtimeIdleThresholdMs).toBe(75000);
     expect(settings.downtimeRequiredFreeSlots).toBe(2);
     expect(settings.downtimeModel).toBe('plan');
+  });
+
+  it('accepts both local-preference values and clamps anything else to remote-ok', () => {
+    for (const value of ['local-preferred', 'remote-ok']) {
+      writeFileSync(settingsPath, JSON.stringify({ downtimeLocalPreference: value }), 'utf-8');
+      expect(loadSettings(settingsPath).downtimeLocalPreference).toBe(value);
+    }
+    // Absent keys and out-of-alphabet values resolve to the default
+    // (WL-0MVNUHWH500196K1 AC3).
+    writeFileSync(settingsPath, JSON.stringify({}), 'utf-8');
+    expect(loadSettings(settingsPath).downtimeLocalPreference).toBe('remote-ok');
+    writeFileSync(settingsPath, JSON.stringify({ downtimeLocalPreference: 'auto' }), 'utf-8');
+    expect(loadSettings(settingsPath).downtimeLocalPreference).toBe('remote-ok');
+    writeFileSync(settingsPath, JSON.stringify({ downtimeLocalPreference: 42 }), 'utf-8');
+    expect(loadSettings(settingsPath).downtimeLocalPreference).toBe('remote-ok');
+  });
+
+  it('AC3: a persisted local-only is rejected (clamped to remote-ok), not treated as an alias', () => {
+    writeFileSync(settingsPath, JSON.stringify({ downtimeLocalPreference: 'local-only' }), 'utf-8');
+    const settings = loadSettings(settingsPath);
+    expect(settings.downtimeLocalPreference).toBe('remote-ok');
+    expect(settings.downtimeLocalPreferenceExplicit).toBe(false);
   });
 
   it('merges partial downtime settings with defaults', () => {

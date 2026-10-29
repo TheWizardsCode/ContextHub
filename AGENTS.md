@@ -13,7 +13,9 @@ only (`wl update <id> --assignee <agent> --if-status completed --if-stage
 in_review --if-assignee ""`), so the item stays `completed`/`in_review`. A
 non-empty assignee is an intentional hold from auto-dispatch (producer sentinel
 `wl update <id> --assignee Map`; clear `--assignee ""` to release); claims
-clear the assignee on session end. See
+clear the assignee on session end. An all-held dispatch window is surfaced
+**read-only** in the worklist (header count + warning banner; never clears a
+hold, never changes dispatch — WL-0MVR8FN1D002SCIR). See
 [docs/dev/downtime-dispatcher.md](./docs/dev/downtime-dispatcher.md) and the
 global instructions (`~/.pi/agent/AGENTS.md`).
 

@@ -8,6 +8,12 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
+  DOWNTIME_LOCAL_PREFERENCE,
+  clampDowntimeLocalPreference,
+  isLocalPreference,
+  type LocalPreference,
+} from './local-preference.js';
+import {
   clampBrowseItemCount,
   DEFAULT_BROWSE_ITEM_COUNT,
   MIN_BROWSE_ITEM_COUNT,
@@ -58,6 +64,10 @@ import {
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  clampDowntimeCpuGatePercent,
+  DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
+} from './host-cpu.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -92,6 +102,31 @@ export interface PluginSettings {
   downtimeProxyUrl: string;
   /** pi model pattern for dispatched agent panes (default `plan`). */
   downtimeModel: string;
+  /**
+   * Per-turn locality preference for downtime-dispatched panes
+   * (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4; default flipped
+   * in WL-0MVNUHWH500196K1): `remote-ok` (default) lets unattended work go
+   * remote rather than queue a contended local slot; `local-preferred`
+   * (explicit opt-in) keeps a prompt local while it fits and defers it with
+   * a retryable 429 rather than going remote. Forwarded to the pane as
+   * `HERDR_LOCAL_PREFERENCE`, which the Worklog pi extension turns into the
+   * `X-Local-Preference` request header. `local-only` was retired in
+   * WL-0MVSI1RX2005O9NE and is NOT an alias: like any other out-of-alphabet
+   * value it clamps to `remote-ok`.
+   */
+  downtimeLocalPreference: LocalPreference;
+  /**
+   * Derived — NEVER persisted (WL-0MVNUIW77000VYAX AC3). True only when the
+   * settings file contains a valid `local-preferred`/`remote-ok`
+   * `downtimeLocalPreference` value; an absent key, a missing file and
+   * out-of-alphabet values — including the retired `local-only` — all resolve
+   * `false` so the low-priority rule applies. `saveSettings` strips it and `loadSettings` always recomputes it
+   * from the file, so it can never become a persisted second alphabet.
+   *
+   * The dispatch layer uses it to pick the locality precedence: explicit
+   * operator setting > priority rule > deployment default.
+   */
+  downtimeLocalPreferenceExplicit: boolean;
   /**
    * Full pause (no proxy polling, no idle tracking, no dispatch) after the
    * worker finds no candidate in either stage (genuine empty backlog).
@@ -152,6 +187,15 @@ export interface PluginSettings {
    */
   downtimeCapacityStarvationAlertMs: number;
   /**
+   * Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6): at or above this measured
+   * host CPU utilisation (percent, from `/proc/stat` deltas with a
+   * load-average fallback) the dispatcher refuses NEW audit/implement work on
+   * every dispatch path while intake/plan/risk-effort keep flowing. `0`
+   * disables the gate. Default **75**; clamped to [0, 100]; invalid/missing
+   * values fall back to the default. Re-read live on every dispatch tick.
+   */
+  downtimeCpuGatePercent: number;
+  /**
    * Progress window (WL-0MVKNC2N50025HXE AC2) before a live-agent pane whose
    * item has not advanced is reported as long-running on a starvation signal.
    * Panes are never resumed/closed from this signal. Default **3 h**; clamped
@@ -201,6 +245,10 @@ export const defaultSettings: PluginSettings = {
   downtimePollIntervalMs: DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
+  downtimeLocalPreference: DOWNTIME_LOCAL_PREFERENCE,
+  // Derived (never persisted): the default settings carry no persisted key,
+  // so the priority rule is free to apply (WL-0MVNUIW77000VYAX AC3).
+  downtimeLocalPreferenceExplicit: false,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -210,6 +258,7 @@ export const defaultSettings: PluginSettings = {
   downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   downtimeCapacityStarvationAlertMs: DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
   downtimeLongRunningThresholdMs: DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
+  downtimeCpuGatePercent: DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
   paneCloseEnabled: DEFAULT_PANE_CLOSE_ENABLED,
   paneCloseIdleThresholdMinutes: DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
   paneCloseGracePeriodMinutes: DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
@@ -297,6 +346,12 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         ? parsed.downtimeProxyUrl : defaultSettings.downtimeProxyUrl,
       downtimeModel: typeof parsed.downtimeModel === 'string' && parsed.downtimeModel.length > 0
         ? parsed.downtimeModel : defaultSettings.downtimeModel,
+      downtimeLocalPreference: clampDowntimeLocalPreference(parsed.downtimeLocalPreference),
+      // Derived explicitness signal (WL-0MVNUIW77000VYAX AC3): true ONLY when
+      // the file holds a valid two-value preference. Deliberately computed
+      // here (never read from the file, never persisted) so a clamped default
+      // is distinguishable from an operator's explicit choice.
+      downtimeLocalPreferenceExplicit: isLocalPreference(parsed.downtimeLocalPreference),
       downtimeNoCandidateCooldownMs: typeof parsed.downtimeNoCandidateCooldownMs === 'number'
         ? clampDowntimeNoCandidateCooldownMs(parsed.downtimeNoCandidateCooldownMs)
         : defaultSettings.downtimeNoCandidateCooldownMs,
@@ -325,6 +380,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         typeof parsed.downtimeLongRunningThresholdMs === 'number'
           ? clampDowntimeLongRunningThresholdMs(parsed.downtimeLongRunningThresholdMs)
           : defaultSettings.downtimeLongRunningThresholdMs,
+      downtimeCpuGatePercent: typeof parsed.downtimeCpuGatePercent === 'number'
+        ? clampDowntimeCpuGatePercent(parsed.downtimeCpuGatePercent)
+        : defaultSettings.downtimeCpuGatePercent,
       paneCloseEnabled: typeof parsed.paneCloseEnabled === 'boolean'
         ? parsed.paneCloseEnabled : defaultSettings.paneCloseEnabled,
       paneCloseIdleThresholdMinutes: typeof parsed.paneCloseIdleThresholdMinutes === 'number'
@@ -357,5 +415,18 @@ export function saveSettings(settingsPath: string, settings: PluginSettings): vo
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  // `downtimeLocalPreferenceExplicit` is a DERIVED signal
+  // (WL-0MVNUIW77000VYAX AC3): persisting it would turn every explicit
+  // deployment permanently explicit after one save. Strip it so the settings
+  // file keeps only the two-value `downtimeLocalPreference` alphabet, and keep
+  // the preference KEY absent for a deployment that was not explicit (its
+  // value is only the clamped default) so saving settings never silently
+  // disables the priority rule.
+  const {
+    downtimeLocalPreferenceExplicit: explicit,
+    downtimeLocalPreference,
+    ...rest
+  } = settings;
+  const persisted = explicit ? { ...rest, downtimeLocalPreference } : rest;
+  writeFileSync(settingsPath, JSON.stringify(persisted, null, 2), 'utf-8');
 }

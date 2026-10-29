@@ -4,7 +4,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 
 ## Features
 
-- **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
+- **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden — **critical items included**; a critical child is represented at the top level by its root ancestor ([Selection List Behaviour](#selection-list-behaviour)) — and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
 - **Filter by stage, priority, or recent dispatches** — Press `f` then an axis key (`s`=stage, `p`=priority, `d`=dispatches), then a value key, or type `/wl <stage>` / `/wl --priority <priority>` / `/wl dispatches`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Dispatches axis: `f d` shows the downtime dispatches from the local rolling log grouped into 4-hour time blocks (see [Recent dispatches view](#recent-dispatches-view)). Stage, priority, and dispatches filters are **mutually exclusive** (replace semantics — applying one clears the others); sprint (`f s s`, `f p s`, or bare `/wl`) clears all three. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage; log-derived rows for the dispatches view) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S, WL-0MUGLL9SS002E1D2)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp. **Child coverage (WL-0MUBVH8QG0020H9L):** a `completed`/`in_review` child whose direct parent has a fresh audit is *covered* — its list row and metadata Stage row show the parent's audit-result symbol in a dimmed/grey style (visually distinct from a bright own-audit icon) and the metadata panel adds a `Covered by <parent-id>` row. Coverage is **derived at read time** (`isCoveredByParent` over the parent's audit freshness inputs via the shared `isAuditFresh` predicate) — nothing is persisted and there is no schema migration. A child with its own audit always shows its own verdict; an uncovered child (no own audit, parent demoted/stale) keeps the plain `🔍` stage icon and is never dispatched (see [audit-tier selection](#audit-tier-dispatch)). In text-only (`noIcons`) mode the covered indicator renders as `[COVERED]`.
@@ -18,6 +18,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
 - **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against the panes of the current workspace (the pane title contains the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
 - **Per-request priority (`X-Priority`)** — The proxy's retired fast/cheap operating mode is replaced by a per-request priority. Herdr maps each dispatched work item's priority onto a request priority and conveys it as the pane-launch environment variable `HERDR_REQUEST_PRIORITY`, which the Worklog pi extension turns into the `X-Priority` provider header. See [Request priority](#request-priority-per-request-x-priority).
+- **Local capacity reservation** — Before launching a downtime pane the worker claims capacity atomically via `POST /llama/local/reserve`: a granted ticket travels into the pane as `PI_LOCAL_RESERVATION_TICKET` (its first request carries `X-Local-Reservation`), a `429` refusal defers with the proxy's `retry_after_s` and the decision log records the evidence, and an absent/failing endpoint fails open to the pre-reservation polling behaviour. An idle window admits at most one launch: a second launch needs a fresh status tick that shows the launched prefill registered plus its own granted ticket. See [Local capacity reservation](#downtime-worker-local-llm-idle-dispatch).
 - **Work-item pane indicator** — The selection list shows a green circle icon (🟢) in the icon prefix of every item with an open work-item pane in the current workspace: a pane whose title carries the work-item ID (the dispatch pane-title convention preserves the ID as a trailing suffix). The icon appears exactly when such a pane is open and never otherwise (producer's rule, WL-0MV1BWETT005GSUJ) — it is pane existence, not a live agent status. The worklist also records which pi agent pane is attached to each dispatched item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes (used for the hover tooltip). The icon occupies a fixed-width slot so the item-ID column never shifts. See [Green-circle icon (work-item pane open)](#green-circle-icon-work-item-pane-open).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
@@ -332,6 +333,16 @@ design and test map.
 
 ### Downtime worker (local-LLM idle dispatch)
 
+**Module layout:** the downtime worker is decomposed into a thin re-export
+barrel (`packages/herdr/src/downtime-worker.ts`, the public surface every
+consumer imports) over single-responsibility sibling modules
+(`downtime-worker.dispatch*.ts`, `.orchestrator*.ts`, `.coordination*.ts`,
+`.gates.ts`, `.pane.ts`, `.idle.ts`, `.poller.ts`, `.selection.ts`,
+`.parsers.ts`, `.constants.ts`, `.types.ts`, `.clamps.ts`, `.prompts.ts`); the
+full module → responsibility → key-exports table is in the
+[downtime dispatcher module layout](../../docs/dev/downtime-dispatcher.md#module-layout)
+(parent WL-0MVF3F9A7000HKP7).
+
 **Leader-election + shared coordination list (parent WL-0MST3OJ8S0001ROL):**
 since the refactor, ONE elected leader handles all llama-proxy polling and
 dispatches; the other herdr instances coordinate instead of polling:
@@ -434,6 +445,23 @@ dispatches; the other herdr instances coordinate instead of polling:
   `consecutiveCapacityRefusals`, `lastCapacityReason`). Observation only —
   the refusal reason/header token are unchanged. See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#capacity-starvation-signal--long-running-pane-detection-wl-0mvknc2n50025hxe).
+- **Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6)** — many concurrent
+  implement/audit panes can push the host towards CPU saturation even while
+  the local model is idle. At or above `downtimeCpuGatePercent` (default
+  75 %, `0` disables) measured host CPU utilisation, the dispatcher refuses
+  NEW **audit** and **implement** dispatch on every path (direct Herdr head,
+  critical-first scan, coordination offers, own-backlog fallback and
+  audit-batch continuation) and does **not** resume a stalled pane; intake,
+  plan and risk-effort keep dispatching and a manual/operator dispatch is
+  never gated. The reading is `/proc/stat` delta utilisation normalised
+  across all cores, falling back to `1-min load average ÷ cores × 100` when
+  `/proc/stat` is unavailable or the sampling window is under 1 s, and
+  failing open when neither signal is available. The tick is recorded with
+  the distinct neutral reason `cpu-saturated` plus `hostCpuPercent`,
+  `hostCpuSource` and `cpuGatePercent` evidence — never a CLI-error strike,
+  never a `no-candidate` cooldown, never an evicted coordination entry, and
+  deliberately NOT counted as local-model capacity starvation. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-cpu-dispatch-gate-wl-0mvk0uo3q002txw6).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -536,6 +564,25 @@ pacing* below).
 - `downtimeProxyUrl` — Base URL of the llama-proxy (default:
 `http://192.168.0.199:8000`)
 - `downtimeModel` — pi model pattern for dispatched panes (default: `plan`)
+- `downtimeLocalPreference` — Per-turn locality preference sent to the proxy by
+  every dispatched pane (default: `remote-ok`; the opt-in alternative is
+  `local-preferred`; anything else — including the removed `local-only` —
+  clamps back to `remote-ok`). It travels to the
+  pane as `HERDR_LOCAL_PREFERENCE`, where the Worklog pi extension turns it
+  into the `X-Local-Preference` request header and records the response route
+  headers in `.worklog/local-route.log` — see [Per-turn local preference and
+  route log](#per-turn-local-preference-x-local-preference-and-route-log-wl-0mvljtv03000kiqz).
+  An **explicitly persisted** value wins for every dispatch; when the key is
+  absent, `low`-priority candidates are dispatched `local-preferred` while every
+  other priority keeps the deployment default
+  (WL-0MVNUIW77000VYAX).
+
+  > **`local-only` was removed** (WL-0MVSI1RX2005O9NE). It is not a deprecated
+  > alias and is not normalised onto `local-preferred`: a settings file still
+  > holding it loads as `remote-ok` with
+  > `downtimeLocalPreferenceExplicit: false` (so the low-priority rule applies
+  > again) and the key is dropped on the next save. Rewrite the setting to
+  > `local-preferred` to keep local-first behaviour.
 - `downtimeNoCandidateCooldownMs` — Full pause (no proxy polling, no idle
   tracking, no dispatch) after the worker finds no candidate in either
   stage — a genuine empty backlog (default: `3600000` = 60 minutes, floor
@@ -581,6 +628,16 @@ pacing* below).
   pane whose non-terminal item has not advanced is reported on a starvation
   signal (default: `10800000` = 3 hours, clamped to 1 h – 48 h; observation
   only — a flagged pane is never resumed, prompted or closed)
+- `downtimeCpuGatePercent` — Host-CPU dispatch gate. At or above this
+  measured host CPU utilisation (percent, from `/proc/stat` deltas with a
+  1-min load-average fallback) the dispatcher refuses NEW **audit** and
+  **implement** dispatch (including critical implements) and skips the
+  stalled-pane resume, while **intake**, **plan** and **risk-effort** keep
+  dispatching. The refusal is neutral: reason `cpu-saturated`, never a
+  strike, never a no-candidate cooldown, never an evicted coordination
+  entry, and it is NOT reported as capacity starvation. `0` disables the
+  gate (default: `75`, clamped to 0 – 100; re-read live on every dispatch
+  tick). See the *Host-CPU dispatch gate* bullet above
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's
@@ -720,13 +777,34 @@ prefillCapacityBudget = 0                        when cap > 0 and inFlight >= ca
 - `prefill_gate_waiters > 0` → the gate is contended, exactly like a
   non-empty `contention_queue_depth`: no dispatch, reason `prefill-gate`,
   header token `prefill-gate` (distinct from `contention`).
-- The prefill-ETA guard's `queue_eta_seconds` (or any per-slot
-  `prefill_eta_seconds`) above `prefill_budget_seconds` → defer, reason
-  `prefill-eta`, header token `prefill-eta`. Both values must be present and
-  finite; a missing ETA or budget never blocks dispatch.
-- The effective budget is what the tier minimums see: with headroom `1` the
-  **audit** tier (≥ 2 free slots) is skipped and the implement tier
-  dispatches instead.
+- **ETA deferral is calibration-gated and occupancy-only.** The proxy's
+  `prefill_eta_calibrated` flag gates the guard: `false` (below the proxy's
+  `MIN_CALIBRATION_SAMPLES`, so its own admission guard is inert) → no ETA
+  deferral (fail open). When calibrated, only the **occupancy** term paces —
+  `queue_eta_occupancy_seconds`, the wait behind OTHER in-flight prefills;
+  the newcomer's own prefill never blocks dispatch, and a per-slot
+  `prefill_eta_seconds` counts only for slots that are actually busy. An
+  occupancy ETA (or a busy slot's ETA) above `prefill_budget_seconds` →
+  defer, reason `prefill-eta`, header token `prefill-eta`. Both values must
+  be present and finite; a missing ETA or budget never blocks dispatch, and
+  a legacy proxy (no calibration signal) keeps today's total-ETA behaviour.
+- The effective budget paces **only the single-pane tiers**
+  (`WL-0MVR8FI4Q0007CGR`): their ≥ 1 slot minimum keeps `effectiveBudget` as
+  its input, so a reduced prefill headroom still reduces single-pane
+  concurrency. The **audit** tier's ≥ 2 slot minimum is a *slot-count*
+  requirement (the audit pane plus its Phase 2 child at
+  `AUDIT_PHASE2_PARALLELISM=1`) and is evaluated against the **raw free-slot
+  budget** instead: with a prefill headroom of `1` and two genuinely free
+  slots the **audit tier dispatches** and the implement tier is not
+  consulted. Two panes can still run under a serialised prefill gate — their
+  prefills queue on the proxy's gate rather than preempting each other — so
+  capping a slot-count requirement with a prefill-concurrency number
+  conflated two unrelated resources and made the audit tier unreachable at
+  the default `local_max_concurrent_prefills: 1`. When the audit tier is
+  skipped because its slot minimum is unmet, the tick emits a distinct
+  `audit-tier-budget-skipped` observation token (never a bare
+  `no-candidate`). Full rationale, and that token's shape, live in
+  `docs/dev/downtime-dispatcher.md` (*Prefill serialisation pacing*).
 
 Pacing **only reduces concurrency**: it never raises the free-slot budget and
 never bypasses the fail-closed `slots-unavailable` / `capacity-saturated`
@@ -737,9 +815,64 @@ Malformed gate counters (`local_prefills_in_flight`,
 `local_max_concurrent_prefills`, `prefill_gate_waiters`) fail closed (poll
 treated as busy); malformed ETA fields are advisory and ignored. Every
 polled decision entry records `prefillsInFlight`, `maxConcurrentPrefills`,
-`prefillGateWaiters`, `prefillBudgetSeconds`, `queueEtaSeconds` and the
-per-slot `slotPrefillEtaSeconds` so a paced tick is diagnosable from the log
-alone.
+`prefillGateWaiters`, `prefillBudgetSeconds`, `queueEtaSeconds`,
+`queueEtaOccupancySeconds`, `queueEtaBusySlots`, `prefillEtaCalibrated` and
+the per-slot `slotPrefillEtaSeconds` so a paced tick is diagnosable from the
+log alone.
+
+**Local capacity reservation** (LP-0MVIKPCSG002B0NL, parent
+WL-0MVIKRFP0005JDL8 slice C2) — polling the status endpoint and then launching
+was racy: two herdr instances could both observe the same idle window and both
+launch, while the proxy's serialised prefill gate admitted only one. The worker
+therefore claims capacity atomically: after winning the CAS claim and **before**
+the success marker and the pane spawn it sends one
+`POST {proxyUrl}/llama/local/reserve` with
+`{ expected_tokens, priority: "background", cache_state: "unknown" }`.
+
+- **Granted** (`200 { ticket_id, ttl_s }`) → the pane launches carrying the
+  ticket: `send-to-pi.sh --reservation-ticket <id>` injects
+  `PI_LOCAL_RESERVATION_TICKET` into the pane process, so the session's first
+  request carries `X-Local-Reservation` (the header injection itself is the
+  per-turn preference slice, parent AC4). The dispatch marker records
+  `reservationTicketId` / `reservationGrantedAt`.
+- **Refused** (`429 { reason, retry_after_s }`) → **no launch**: the tick
+  defers by `retry_after_s`, the claim is rolled back (the item is re-selectable
+  next idle period) and the decision entry records the proxy's reason,
+  `admit: false`, `retryAfterS` and `projectedWaitS`.
+- **Absent / 500 / timeout / malformed** → fail open: exactly today's polling
+  behaviour, no ticket, no header, no retry loop. An older proxy is fully
+  supported.
+
+The call rides the existing single-flight status-poll cadence (at most one
+reserve request per poll, no new timer), never raises the free-slot budget and
+never bypasses the fail-closed `slots-unavailable` / `capacity-saturated` /
+prefill-gate checks that run earlier in the tick. A ticket is single-use: if it
+cannot be forwarded (marker/spawn failure) it is recorded as
+`reservationReleased` and dropped — never reused or leaked. See
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#local-capacity-reservation-lp-0mvikpcsg002b0nl-parent-wl-0mvikrfp0005jdl8-slice-c2).
+
+**One launch per idle window** (parent WL-0MVIKRFP0005JDL8 AC3, slice C3) — the
+reservation is the cross-instance arbiter (one atomic grant per window), and a
+per-instance fence makes the same rule hold within one dispatcher. A freshly
+launched pane takes seconds to start prefilling, so the next polls can still
+report the PRE-launch `local_prefills_in_flight`; launching off that stale
+headroom would spend the window twice. The worker therefore admits a further
+launch only when a **fresh status tick shows the launched prefill registered**
+(`local_prefills_in_flight` advanced past the admission value, and headroom
+exists again — `in_flight < cap`) **and a new ticket is granted for that
+specific launch**. A second launch from the same window is refused with decision
+reason `idle-window-spent` (header token `window-spent`) before any reserve
+request or spawn; the fence is inert when the proxy serves no prefill counters
+or the cap is `0`, releases when the window ends, and self-releases after a
+5-minute grace so a pane that never prefilled cannot wedge the dispatcher. It
+runs before BOTH dispatch paths (coordination-leader and own-backlog), holds no
+distributed lock and never admits a dispatch the per-slot / saturated / prefill
+gates refuse. A reservation refusal is recorded under the distinct token
+`reservation-lost` (`reservation-refused` reason, with the proxy's own reason in
+`reservationReason`, plus `admit: false` / `retryAfterS` / `projectedWaitS`), so
+a lost race is distinguishable from herdr's own `prefill-gate` / `prefill-cap`
+pacing in the header alone. See
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#one-launch-per-idle-window-parent-wl-0mvikrfp0005jdl8-ac3-slice-c3).
 
 **Per-tier free-slot minimums** (parent WL-0MT32F90V008UAD2 AC3) — at
 selection time, against the latest polled status, each dispatch tier
@@ -1090,6 +1223,95 @@ scheduled reaper over Herdr panes.
 (`WL-0MUJMXVPO0016DZM`) consumes `classifySession` / `extractFinalAssistantText`
 from this module rather than re-deriving idle state from the session log.
 
+### Per-turn local preference (`X-Local-Preference`) and route log (WL-0MVLJTV03000KIQZ)
+
+The llama-proxy accepts a **per-request locality preference** and reports the
+route it actually took. Herdr conveys the policy **per spawn**, and the
+Worklog pi extension turns it into the request header and the route log — so
+an agent turn either gets a local route or receives an immediate, recorded
+fallback decision instead of a silent ~120 s proxy-side wait.
+
+| Direction | Header | Meaning |
+|---|---|---|
+| request | `X-Local-Preference: local-preferred` | Work the operator marks local-first — the prompt stays local while it fits and is deferred with a retryable 429 (`Retry-After`) when the local slot is contended, never silently sent remote |
+| request | `X-Local-Preference: remote-ok` | Background work — may go remote without queuing local capacity |
+| response | `X-Local-Route` | The route the proxy took (e.g. `local`, `remote:<provider>`) |
+| response | `X-Local-Fallback-Reason` | Why the request left the local route (e.g. `queue-full`, `stall_after_reasoning`) |
+
+- **Policy knob.** `downtimeLocalPreference` (default `remote-ok` since
+  WL-0MVNUHWH500196K1; `local-preferred` is the explicit per-deployment opt-in)
+  governs downtime-dispatched panes. Scheduled-prompt panes and headless
+  background dispatches default to `remote-ok` (unattended work never queues
+  local capacity) and inherit an explicit knob — so a `local-preferred`
+  deployment also makes scheduled work local-preferred. Interactive panes carry
+  no preference unless the operator exports `HERDR_LOCAL_PREFERENCE`
+  themselves.
+- **Removed value (WL-0MVSI1RX2005O9NE).** `local-only` is no longer accepted on
+  any input surface (the setting, `--local-preference`, or the pane env). It is
+  **not** aliased to `local-preferred`: reads clamp it to `remote-ok` and drop
+  its explicitness, and `send-to-pi.sh` warns and drops it. Migration is a
+  one-line settings edit — `downtimeLocalPreference: 'local-preferred'`.
+- **Precedence (WL-0MVNUIW77000VYAX).** Explicit persisted setting > priority
+  rule > deployment default. When the operator persists a valid
+  `downtimeLocalPreference`, it is forwarded for every dispatch regardless of
+  priority. When the key is absent, a **`low`-priority** candidate is
+  dispatched `local-preferred` (cheap work absorbs local contention instead of
+  consuming remote capacity); `medium`/`high`/`critical` and scheduled prompts
+  (no work item, therefore no priority) keep the deployment default
+  `remote-ok`. The resolution happens once in `dispatchClaimedTier`, so the
+  coordination offer, own-backlog fallback, audit-batch continuation,
+  critical-first/normal scan and the legacy tier chain all agree.
+  Explicitness is derived by `loadSettings`
+  (`downtimeLocalPreferenceExplicit`) and never persisted; the persisted
+  alphabet and the `X-Local-Preference` wire contract are both
+  `local-preferred | remote-ok`.
+- **Marker evidence.** Each dispatch marker records the resolved
+  `localPreference` plus a `localPreferenceReason` (`operator-setting` |
+  `priority-low` | `default`), so the route log's `preference` value can be
+  traced to the rule that produced it. Legacy callers that pass a preference
+  without the mode opt-in add no marker fields, and readers ignore
+  unknown/absent fields.
+- **Transport.** `send-to-pi.sh --local-preference <local-preferred|remote-ok>`
+  injects `exec env HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`;
+  the headless path sets it directly on the spawn environment. An absent or
+  invalid value — including the removed `local-only` — omits the env var and
+  warns where applicable, so the pane launch stays byte-identical to
+  the pre-feature behaviour. The pane-spawn helper never **inherits** the
+  launcher's own `HERDR_LOCAL_PREFERENCE`/`PI_LOCAL_RESERVATION_TICKET`: it
+  strips both from the inherited environment and re-adds them only from the
+  resolved dispatch decision (WL-0MVP643Q4007BZJ8), so a worker running inside
+  a `local-preferred` pane cannot force every child pane local-preferred.
+- **Header injection + route capture.** The Worklog pi extension
+  (`packages/tui/extensions/local-preference/`) reads the env var on every
+  provider request (never cached, so a re-launched pane is never stale) and
+  sets `X-Local-Preference` through `before_provider_headers`; on
+  `after_provider_response` it parses `X-Local-Route` /
+  `X-Local-Fallback-Reason` and appends one bounded JSONL line per response to
+  `<cwd>/.worklog/local-route.log` (rolling, capped at 2000 entries).
+- **Route-log line.** `{ at, sessionId, preference, route, fallbackReason,
+  model, ticket? }` — the pi session id and, when one was forwarded, the
+  reservation ticket (`PI_LOCAL_RESERVATION_TICKET`), so a dispatcher decision
+  recorded in `.worklog/downtime-dispatches.log` (which records
+  `reservationTicketId`) can be correlated with the turns it produced. No
+  secrets/PII are written; the log is a per-root local artefact.
+- **Fail-open (no behaviour change without the feature).** No knob set → no
+  header, no route log, requests byte-identical to today. An older proxy that
+  serves no route headers → no log entry. A capture/write failure, a missing
+  `.worklog` directory or a stale context never throws into a turn.
+
+Tests: `packages/tui/extensions/local-preference/local-preference.test.ts`
+(pure module + hook behaviour, both preference values, the unset case, route
+parsing and the bounded log), `packages/herdr/src/local-preference.test.ts`
+(policy defaults/clamp plus the priority resolver and precedence table),
+`packages/herdr/src/downtime-worker.reserve.test.ts` (pane-arg/env forwarding
+and low-vs-high priority resolution + marker fields),
+`packages/herdr/src/coordination-dispatch.test.ts` (offer, own-backlog
+fallback and audit-batch continuation inheritance),
+`tests/herdr/send-to-pi.test.ts` (`--local-preference` passthrough, both
+values, invalid/absent fail-open) and `tests/herdr/settings.test.ts` (setting
+default + clamp; the derived explicitness signal is covered in
+`packages/herdr/src/settings.test.ts`).
+
 ### Request priority (per-request `X-Priority`)
 
 The llama-proxy retired its global **fast/cheap** operating mode. Cost and
@@ -1385,7 +1607,7 @@ leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
 | Lost CAS claim race (`--if-status`/`--if-stage` stale) | **none** — and **no marker, no pane, no success record** | the dispatch ABORTS with reason `claim-failed` (neutral — another pane won); the failure is observable via the outcome and a stderr line, never silently discarded (WL-0MSLWJ310000ND0X absorbed) |
 | Claim wl CLI failure (non-stale) | **none** — counts as a `wl-error` strike | dispatch aborts; three consecutive such failures pause the worker |
 | Marker write failure | **none** — and the claim is rolled back | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched). WL-0MT32F908002YFFA AC1 then rolls the successful CAS claim back to `open` + the original stage (audit tier: `completed`/`in_review`) so the next idle period re-selects the item — it is never stranded in `in_progress`. If the rollback is stale/fails (a concurrent agent already moved the item) the outcome stays `marker-write-failed` and the item is left as-is (fail-closed) |
-| Pane spawn failure / non-zero script exit (`send-to-pi.sh`) | marker already written (pre-spawn) + a `recordDispatchFailure` JSONL entry (`outcome: 'spawn-failed'` with the `error`/`exitCode` trace) | a spawn `error` (ENOENT/EACCES) or a non-zero script exit within the 500 ms probe window is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`, carrying the error/exit trace); the log distinguishes **attempted** from **opened**. The `spawn-failed` entry is **non-excluding** and the CAS claim is rolled back to its pre-claim status + stage (WL-0MT32F908002YFFA AC2/AC4), so the item is re-eligible on the next idle period rather than permanently removed (WL-0MSLWJ3I70031Z8U absorbed) |
+| Pane spawn failure / non-zero script exit (`send-to-pi.sh`) | marker already written (pre-spawn) + a `recordDispatchFailure` JSONL entry (`outcome: 'spawn-failed'` with the `error`/`exitCode` trace) | a spawn `error` (ENOENT/EACCES) or a non-zero script exit within the probe window (default 500 ms, overridable per call via `spawnDowntimePane`'s `probeMs` option — e.g. a generous window for real-spawn tests under host load, WL-0MVOTIJ2U000JI44) is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`, carrying the error/exit trace); the log distinguishes **attempted** from **opened**. The `spawn-failed` entry is **non-excluding** and the CAS claim is rolled back to its pre-claim status + stage (WL-0MT32F908002YFFA AC2/AC4), so the item is re-eligible on the next idle period rather than permanently removed (WL-0MSLWJ3I70031Z8U absorbed) |
 | `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
 
 Consequence: the log's *absence* of an entry is still ambiguous (it cannot
@@ -1638,7 +1860,7 @@ deferred until typing finishes.
 
 - **Shared predicate, checked on every background path** —
   `isInputActive(formState, shipItDialog, blockedNoticeActive)` in
-  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null
+  `worklist.state.ts` returns `true` when `formState !== null || shipItDialog !== null
   || blockedNoticeActive`. The 30s `refresh` and 60s `sync` scheduler ticks
   check it alongside the existing `paneGate.visible()` check and return early
   when it is true. The same predicate is also consulted **inside**
@@ -1686,7 +1908,8 @@ deferred until typing finishes.
   dispatch/switch inference mode; they never trigger a worklist list
   re-render while a modal is open, so gating them would only delay
   low-urgency background work with no keypress-loss benefit. See the audit
-  comments next to each task registration in `worklist.ts`.
+  comments next to each task registration in `worklist.ts` (the gate they
+  consult, `isInputActive`, lives in `worklist.state.ts`).
 
 ### Selection List Behaviour
 
@@ -1694,7 +1917,9 @@ The default (unfiltered) worklist always shows **all** critical-priority
 items and **all** completed/in_review items (the producer-review queue),
 regardless of the `browseItemCount` setting:
 
-- Items with `priority=critical` are always included.
+- Items with `priority=critical` are always included — a critical **root**
+  directly, a critical **child** through its substituted root ancestor (see
+  *Top level is root-only* below).
 - Items with `status=completed` **and** `stage=in_review` are always included.
 - Items with `status=blocked` at any non-done stage are always included
   (WL-0MV71WBHB007D8ZE): a blocked in_review item is release-blocking (the
@@ -1771,6 +1996,73 @@ above.
 
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
+
+#### Top level is root-only (critical items included)
+
+Every row at the **top level** of the default worklist is a root item: an
+item with a non-empty `parentId` is never rendered there, whatever its
+priority (WL-0MVN4WESM007T4XI). A critical child is therefore not shown twice
+(once standalone, once under its parent) — it appears only under its parent
+via expand (Tab/Enter), together with its siblings, and drill-down still
+returns children unchanged.
+
+Hiding critical children must not make release-blocking work invisible: the
+ship critical-items gate keeps blocking a release on a critical **child**
+(`wl list --priority critical` is unchanged and child-inclusive). The plugin
+preserves reachability by **root-ancestor substitution** — when a
+still-actionable critical child is dropped from the top level, its **root
+ancestor** (walking the `parentId` chain upward to the top-most non-child
+item) is shown in its place:
+
+- the substituted root joins the mandatory set, so it is always shown
+  whatever `browseItemCount` says, and it is sorted/grouped by its **own**
+  priority, status and stage — no badge, marker or indicator is added (the
+  producer's decision);
+- the root is shown **once**: a root already present in the list is never
+  duplicated;
+- resolution uses the in-process SQLite fast path first, with `wl show` only
+  as a fail-open fallback (memoised per refresh), so substitution adds no
+  `wl` spawn to the hot refresh path when the parent can be read in-process;
+- if the ancestor cannot be resolved (missing/deleted item, cyclic or
+  pathologically deep chain) the child is simply not shown at the top level —
+  the refresh never crashes and never falls back to rendering the child
+  there;
+- stage- and priority-filtered views are **exempt**: they are explicit,
+  already root-only filters and never inject a synthetic parent row.
+
+The `critical` subset of `wl worklist` stays deliberately **all parent
+levels**: it is the discovery feed telling the plugin which parents to
+surface, and making it root-only here would need a second query per refresh
+(`src/commands/worklist.ts`). The roots-only rule is a **rendering** rule
+applied by this plugin, not a filtering rule on the CLI, so other `wl`
+consumers keep their child-inclusive semantics.
+
+### Assignee scheduling-hold surface
+
+`assignee` doubles as the **scheduling hold**: a non-empty assignee means the
+item is deliberately parked and is never auto-dispatched at any tier
+(the producer sentinel is `wl update <id> --assignee Map`; clear it with
+`--assignee ""`). The refusal used to be completely silent, so a root whose
+entire dispatch window was parked looked exactly like an empty or broken
+backlog. The worklist now surfaces it (WL-0MVR8FN1D002SCIR):
+
+- **Header count (AC1)** — while any item in the dispatch window carries a
+  non-empty assignee, the header names how many and which sentinel(s):
+  `[held: 30 by Map]`.
+- **All-held warning (AC2)** — when the window has **zero** dispatchable items
+  *solely* because of assignee holds, an amber banner reads
+  `⚠ Assignee hold — all 30 of 30 dispatch-window item(s) held by Map; no
+  downtime dispatch possible`.
+
+The banner does **not** fire when at least one item is dispatchable, when the
+window is empty, or when any item is refused by a gate other than the assignee
+hold (AC3 — that story belongs to the empty-offer attribution below). The
+account is computed from the items the worklist has already fetched (no extra
+`wl` spawn), only on the unfiltered sprint view, and is **strictly read-only**:
+it never clears, demotes or mutates an `assignee`, and the dispatched-item set
+is byte-identical with and without it (AC4). The classification shares
+`classifyWindowHold` with the coordination log's `all-window-items-held` token
+(WL-0MVR8FKMU009XTED), so the TUI and the log cannot diverge.
 
 ### Review-queue-depth footer banner
 
@@ -2202,7 +2494,15 @@ packages/herdr/
 │   ├── md-note-edit.ts     # Inline-note marker edit helpers (insert/update/remove, LOCAL-<seq>, §7.3 sync)
 │   ├── command-log.ts      # Command log: record/get last command per work item
 │   ├── settings.ts         # User settings management
-│   └── worklist.ts         # List state, rendering, keyboard handling, command output
+│   ├── worklist.ts         # TUI loop, rendering, keyboard/mouse handling, command output (barrel)
+│   ├── worklist.state.ts   # `WorkItemListState` (the ONE mutable list state), display rows, gated-tick + input-active predicates
+│   ├── worklist.navigation.ts # `NavigationStack` (Escape history) + `StageFilter` (stage cycling)
+│   ├── worklist.meta.ts    # Metadata rows, compound-row pairing, description preview cache, panel content/height
+│   ├── worklist.detail.ts  # Detail view content/ToC + markdown Key Files viewer
+│   ├── worklist.format.ts  # Display-width helpers (visibleLength/truncateLine) + formatTimestamp
+│   ├── worklist.types.ts   # Leaf type declarations for the worklist family (no worklist imports)
+│   ├── worklist.constants.ts # Stage/priority maps, ANSI escape helper, mouse tuning constants
+│   └── worklist.layout.ts  # Metadata-panel height budget (computeMetadataPanelHeight) + getTermSize
 ├── scripts/
 │   ├── open.sh             # Open the worklist pane
 │   ├── open-worklog-tab.sh # Open the worklist pane in a tab renamed "Worklog"
@@ -2218,7 +2518,7 @@ packages/herdr/
 - **No direct database access** — The plugin uses the `wl` CLI as the backend data source, ensuring compatibility without duplicating data-access logic.
 - **Terminal UI via raw mode** — The TUI uses raw stdin mode and ANSI escape codes for rendering, making it compatible with any Herdr pane without additional dependencies.
 - **Fixed-height pane rendering** — The list renderer budgets its output to `rows - 1` lines (header + display rows (headings + items) + fill + footer), reserving the last row for the transient notification line (e.g. `[Synced]`, `[Refresh failed]`). The active stage filter is shown in the header only (` (filtered: <stage>)`) — there is no standalone filter bar or blank chrome row. Heading rows count against the budget, and the below/above-the-fold `▼ more`/`▲ more` indicator rows (WL-0MSG8YXYJ008PWJJ) are reserved in the budget before the visible window is trimmed, so the pane never scrolls the header or top items off the top of the view regardless of row count (see WL-0MSAAON63003N6LO, WL-0MSGTSPXK007POB1). The header line itself is truncated to the terminal width (`cols`) via an ANSI-aware `truncateLine` helper (WL-0MSNI6TQ5003JY1Z), so it always occupies exactly one physical row even in narrow panes (e.g. 40 cols) where the full concatenated header (count + filter + auto-refresh + downtime status) would otherwise wrap and push the pane content downward.
-- **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts`, fully testable without a terminal.
+- **Testable core** — All state management, formatting, and keyboard handling is pure logic in `worklist.ts` and its extracted sibling modules (`worklist.state.ts`, `worklist.navigation.ts`, `worklist.meta.ts`, `worklist.detail.ts`, `worklist.format.ts`), fully testable without a terminal.
 - **Toast notifications instead of bottom-line status** — Transient status feedback (refresh outcomes, sync outcomes, sent/skipped command feedback, errors) is surfaced via Herdr toast notifications (`herdr notification show`) instead of being appended to the bottom of the pane output. This keeps the rendered pane within the terminal height budget, so the list header and top lines are never pushed off the top of the pane. Toast delivery requires `ui.toast.delivery = "herdr"` in `~/.config/herdr/config.toml`; toasts appear in the bottom-right corner by default. The helper lives in `notify.ts` and is fire-and-forget (failures are tolerated silently).
 - **Command routing via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which routes it by prefix:
   - `!!`/`!` prefixed commands (shell-executed shortcuts such as audit approve/reject, priority updates, close/delete) are run **visibly in a new herdr pane** via `scripts/run-in-pane.sh` — the wrapper keeps the pane's process alive so the pane stays open (exit status reported; dismiss with Enter or close with `prefix+x`) so the user can inspect the command output.
@@ -2240,7 +2540,7 @@ packages/herdr/
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
   - Local entries are validated with the same rules as bundled entries: an invalid entry is **logged and skipped**, and a missing/malformed local file (bad JSON, non-array) falls back to bundled-only with an error logged — a broken local file never crashes the plugin.
   - When no worklog root is resolved (uninitialized project) or no local file exists, the registry is exactly the bundled defaults and all dispatch behaviour is unchanged.
-- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
+- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows` (`worklist.meta.ts`), so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
 - **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze
@@ -2429,15 +2729,16 @@ npx tsx packages/herdr/src/start.ts
 # Run tests
 #
 # The herdr package suite is a SEPARATE, opt-in gate — it is not part of the
-# canonical full suite (`tests/cli` + `tests/unit`), by producer decision on
+# canonical full suite (`npm --silent test -- tests`), by producer decision on
 # WL-0MVFZVIA50062TJ8. Run it through the sanctioned test-skill runner so the
 # run is cache-recorded and visible to the audit; an ad-hoc `npx vitest` run
 # is invisible to the audit.
 python3 <test-skill>/scripts/run_tests.py --type herdr --json    # types.herdr
 python3 <test-skill>/scripts/run_tests.py --group herdr --json   # groups.herdr
 
-# Other plugin/pane tests (not covered by the herdr profile)
-npx vitest run tests/herdr/ tests/unit/start-launcher.test.ts
+# Plugin/pane tests that live under tests/herdr/ ARE part of the canonical
+# full suite since WL-0MVG4FF9200346NR (the canonical command is the `tests/`
+# umbrella), so they run there — no separate npx invocation is needed.
 
 # Build TypeScript (compiles packages/shared first, then the plugin)
 cd packages/herdr && npm run build

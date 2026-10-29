@@ -33,10 +33,15 @@
  * under contention, so the pass/fail gate is CPU time: `process.resourceUsage`
  * (`user + system`) is recorded per process by the F1 spawn instrumentation
  * (WL-0MVFRR98A008MM19) and is load independent. The recorded p95 CPU time is
- * compared with `cpuHeadroomPct` headroom; wall time and peak RSS are checked
- * against the same budget with their own (wider) documented headroom. Every
- * measurement must also be a genuine fast-path invocation — the expected spawn
- * kind (`cache-hit`, or `version`) must be present for every sample.
+ * compared with `cpuHeadroomPct` headroom; wall time is checked against the
+ * recorded budget with its own (wider) documented headroom, **normalised by
+ * the host-load factor the same run's bare-node control measures** — a host
+ * that measures N times slower at its bare-node floor lifts the wall budget
+ * N times, so a saturated host cannot flake the ratchet (the
+ * WL-0MVS9Z965006MC4R failure). A faster host never tightens the budget
+ * (factor clamped at 1) and a wild control sample never masks a real wall
+ * regression (`maxHostLoadFactor` clamp, default 8). Peak RSS keeps its own
+ * headroom; every measurement must also be a genuine fast-path invocation.
  */
 
 import * as fs from 'fs';
@@ -96,7 +101,19 @@ export interface StartupAc1Targets {
   note: string;
 }
 
-/** Host-load tolerance policy for the measured regression test. */
+/**
+ * Host-load factor the wall budget is normalised by when the same run's
+ * bare-node control measures the host N times slower than the baseline did.
+ *
+ * Clamped to this maximum so a wild control sample (a one-off stall) cannot
+ * lift the wall limit so far that a real wall-path regression would be masked:
+ * CPU time remains the primary, load-independent regression gate.
+ */
+export const MAX_HOST_LOAD_FACTOR = 8;
+
+/**
+ * Host-load tolerance policy for the measured regression test.
+ */
 export interface StartupRegressionPolicy {
   /** Sample count the measured regression test uses. */
   runs: number;
@@ -111,6 +128,11 @@ export interface StartupRegressionPolicy {
   rssHeadroomPct?: number;
   /** Absolute wall-time slack (ms) on top of the percentage headroom. */
   wallFloorMs: number;
+  /**
+   * Upper bound on the host-load factor (default `MAX_HOST_LOAD_FACTOR`).
+   * Never below 1; a faster host never tightens the wall budget.
+   */
+  maxHostLoadFactor?: number;
   note: string;
 }
 
@@ -171,10 +193,13 @@ export function defaultStartupBudget(): StartupBudget {
       cpuHeadroomPct: 50,
       wallHeadroomPct: 200,
       wallFloorMs: 250,
+      maxHostLoadFactor: MAX_HOST_LOAD_FACTOR,
       note:
         'CPU time (process.resourceUsage user+system, from the F1 spawn records) is the ' +
         'load-independent regression gate: a shared/loaded host inflates wall time but not ' +
-        'the process CPU consumed. Wall and peak RSS get wider documented headroom.',
+        'the process CPU consumed. Wall and peak RSS get wider documented headroom; the wall ' +
+        'budget is also normalised by the host-load factor measured by that run\'s bare-node ' +
+        'control (clamped to maxHostLoadFactor).',
     },
     baselines: {},
   };
@@ -313,6 +338,11 @@ export interface BudgetEvaluation {
   target: string;
   checks: BudgetCheck[];
   violations: string[];
+  /**
+   * Host-load factor the wall budget was normalised by (1 = the host matched
+   * the baseline's bare-node floor; > 1 = the host measured slower).
+   */
+  hostLoadFactor: number;
 }
 
 /** The subset of a benchmark result the policy needs. */
@@ -328,6 +358,8 @@ export interface BudgetEvaluationInput {
     p95CpuMs: number | null;
     p95RssMb: number | null;
   }>;
+  /** Same-run bare-node control (the host-load reference for wall time). */
+  bareNode?: { p95WallMs: number } | null;
 }
 
 /** Format a check failure for the violation list. */
@@ -339,13 +371,42 @@ function violationText(check: BudgetCheck): string {
 }
 
 /**
+ * Host-load factor: how much slower the host was during this run than when
+ * the baseline was captured, measured by the same run's bare-node control.
+ *
+ * `1` when either reference is missing, the host measured at or faster than
+ * the baseline (a faster host never tightens the budget), or the ratio would
+ * exceed the `maxHostLoadFactor` clamp (a wild control sample must not mask a
+ * real wall regression — CPU time remains the load-independent gate).
+ */
+function hostLoadFactor(
+  result: Pick<BudgetEvaluationInput, 'bareNode'>,
+  baseline: Pick<StartupBaseline, 'bareNode'>,
+  maxFactor: number
+): number {
+  const current = result.bareNode?.p95WallMs;
+  const recorded = baseline.bareNode?.p95WallMs;
+  if (
+    current === undefined || current === null || current <= 0 ||
+    recorded === undefined || recorded === null || recorded <= 0
+  ) {
+    return 1;
+  }
+  const factor = current / recorded;
+  if (!(factor > 1)) return 1;
+  return Math.min(factor, Math.max(1, maxFactor));
+}
+
+/**
  * Evaluate measured startup numbers against the recorded budget.
  *
  * Rules (in order):
  *   1. every scenario must have a recorded baseline for the measured target;
  *   2. every sample must be a genuine fast-path invocation (expected spawn kind);
  *   3. p95 CPU time must stay within `cpuHeadroomPct` (the host-load-tolerant gate);
- *   4. p95 wall time must stay within `wallHeadroomPct` + `wallFloorMs` slack;
+ *   4. p95 wall time must stay within `wallHeadroomPct` + `wallFloorMs` slack,
+ *      after normalising the recorded wall budget by the host-load factor the
+ *      same run's bare-node control measured;
  *   5. p95 peak RSS must stay within `cpuHeadroomPct` headroom;
  *   6. when `ac1Targets.enforced` and the measured target is the recorded
  *      `measuredTarget`, the parent AC1 numbers are asserted too.
@@ -358,6 +419,11 @@ export function evaluateStartupBudget(
   const violations: string[] = [];
   const policy = budget.regression;
   const baseline = budget.baselines[result.target];
+  const loadFactor = hostLoadFactor(
+    result,
+    baseline ?? { bareNode: undefined },
+    policy.maxHostLoadFactor ?? MAX_HOST_LOAD_FACTOR
+  );
 
   const push = (check: BudgetCheck): void => {
     checks.push(check);
@@ -369,7 +435,7 @@ export function evaluateStartupBudget(
       `no recorded baseline for target '${result.target}' in ${BUDGET_RELATIVE_PATH} — ` +
         `regenerate it with \`npm run benchmark:wl-startup -- --target ${result.target} --update-budget\``
     );
-    return { ok: false, target: result.target, checks, violations };
+    return { ok: false, target: result.target, checks, violations, hostLoadFactor: 1 };
   }
 
   for (const scenario of result.scenarios) {
@@ -410,7 +476,11 @@ export function evaluateStartupBudget(
       });
     }
 
-    const wallLimit = recorded.p95WallMs * (1 + policy.wallHeadroomPct / 100) + policy.wallFloorMs;
+    const wallLimit =
+      recorded.p95WallMs *
+        loadFactor *
+        (1 + policy.wallHeadroomPct / 100) +
+      policy.wallFloorMs;
     push({
       scenario: scenario.name,
       metric: 'p95WallMs',
@@ -418,8 +488,11 @@ export function evaluateStartupBudget(
       limit: Math.round(wallLimit),
       ok: scenario.p95WallMs <= wallLimit,
       detail:
-        `recorded p95 ${recorded.p95WallMs} ms + ${policy.wallHeadroomPct}% wall headroom ` +
-        `+ ${policy.wallFloorMs} ms floor`,
+        `recorded p95 ${recorded.p95WallMs} ms × host-load factor ` +
+        `${loadFactor.toFixed(2)} (bare-node control ${String(
+          result.bareNode?.p95WallMs ?? '-')
+        } / ${String(baseline.bareNode?.p95WallMs ?? '-')} ms) + ` +
+        `${policy.wallHeadroomPct}% wall headroom + ${policy.wallFloorMs} ms floor`,
     });
 
     const rssHeadroomPct = policy.rssHeadroomPct ?? policy.cpuHeadroomPct;
@@ -458,7 +531,13 @@ export function evaluateStartupBudget(
     }
   }
 
-  return { ok: violations.length === 0, target: result.target, checks, violations };
+  return {
+    ok: violations.length === 0,
+    target: result.target,
+    checks,
+    violations,
+    hostLoadFactor: loadFactor,
+  };
 }
 
 export interface FastPathAllowlistResult {

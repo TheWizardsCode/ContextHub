@@ -15,6 +15,11 @@
  *   - the spawn-record kind, which proves the sample was a genuine fast-path
  *     invocation (`cache-hit`, or `version` for `--version`).
  *
+ * The bare-node floor doubles as the host-load reference: `evaluateStartupBudget`
+ * normalises the wall budget by how much slower/faster this run's control
+ * measured against the recorded floor, so a saturated host does not flake the
+ * ratchet (see `bench/startup-budget.ts`).
+ *
  * The read scenarios are warmed until the first cache hit before sampling, so
  * the numbers describe the served-cache fast path rather than a first-query
  * DB read. A bare `node -e` floor is measured with the same method as the

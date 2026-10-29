@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "provenance": {
+    "generatedBy": "npx tsx packages/shared/src/database/decomposition-guard.test.ts --write-baseline",
+    "sourceCommit": "be2d7771127bf5fc93282df91724a5c5c8c04e68",
+    "generatedAt": "2026-10-26T12:56:27.297Z",
+    "packageEntry": "packages/shared/dist/database.js",
+    "entrySource": "packages/shared/src/database.ts",
+    "specifier": "@worklog/shared"
+  },
+  "symbols": [
+    "GitTarget",
+    "JsonlImportResult",
+    "UpdateIfMatchesResult",
+    "WorklogDatabase",
+    "WorklogDatabaseOptions",
+    "WorklogDatabaseServices",
+    "normalizeTitleForMatch"
+  ]
+}

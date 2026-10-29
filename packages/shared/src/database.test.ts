@@ -102,13 +102,18 @@ describe('import() updatedAt preservation for whitespace-only diffs (WL-0MSORD6H
     expect(db.get(original.id)?.updatedAt).toBe(FIXED_TS);
   });
 
-  it('still persists the incoming (whitespace-differing) description content when the only diff is whitespace', () => {
+  it('does not rewrite an item whose only diff is whitespace (zero-write no-change import)', () => {
+    // WL-0MVK6S4HM005GBCO: `wl sync` must not rewrite semantically unchanged
+    // records. The whitespace-insensitive comparison means the incoming
+    // (whitespace-differing) description is NOT persisted — both variants are
+    // semantically equal, so the stored content and updatedAt are preserved and
+    // no write happens at all (previously every import re-saved every item).
     const original = makeItem();
     db.import([original]);
     db.import([{ ...original, description: original.description + '\n' }]);
     const stored = db.get(original.id);
     expect(stored?.updatedAt).toBe(FIXED_TS);
-    expect(stored?.description).toBe(original.description + '\n');
+    expect(stored?.description).toBe(original.description);
   });
 
   it('bumps updatedAt on a genuine description content change', () => {

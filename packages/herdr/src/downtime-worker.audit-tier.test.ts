@@ -1571,3 +1571,88 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
   });
 });
 
+// ── Audit tier vs prefill-concurrency budget (WL-0MVR8FI4Q0007CGR) ────
+//
+// Regression: the audit tier's ≥ 2 slot minimum is a SLOT-COUNT requirement
+// (parent + one Phase 2 child at `AUDIT_PHASE2_PARALLELISM=1`), so it must
+// be evaluated against the raw slot budget (`freeSlots`), never the
+// prefill-concurrency budget (`effectiveFreeSlots`). Conflating the two made
+// the audit tier permanently unreachable under the documented default
+// `local_max_concurrent_prefills: 1` (capacityBudget 1 clamps the effective
+// budget below the audit minimum even while two slots are genuinely free).
+describe('audit tier vs prefill-concurrency budget (WL-0MVR8FI4Q0007CGR)', () => {
+  const auditCandidate: DowntimeCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit',
+  };
+  const planCandidate: DowntimeCandidate = {
+    id: 'WL-PLAN',
+    title: 'Prep task',
+    stage: 'intake_complete',
+    status: 'open',
+  };
+
+  it('AC1/AC6: dispatches the audit tier with cap=1 headroom (freeSlots=2, effectiveFreeSlots=1)', async () => {
+    // cap=1, inFlight=0 → capacityBudget 1 → effectiveFreeSlots min(2,1)=1.
+    // The audit minimum is a slot-count requirement: 2 free slots satisfy it
+    // and the audit tier dispatches instead of falling through / no-candidate.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: 2,
+      effectiveFreeSlots: 1,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('WL-AUD');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it('AC2: the audit minimum uses the RAW slot budget, never the prefill budget', async () => {
+    // Raw budget 1 (< 2) → audit ineligible; a prefill budget can never raise
+    // a slot-count requirement. The audit lookup is not consulted and the
+    // single-pane plan tier dispatches instead.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: 1,
+      effectiveFreeSlots: 1,
+    });
+
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('AC6: cap=0 (gate disabled) is unchanged — effective equals the slot budget, audit dispatches', async () => {
+    // cap=0 → `evaluatePrefillPacing` leaves `capacityBudget` undefined, so
+    // `effectiveFreeSlots === freeSlots` and the audit minimum sees 2 slots.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: 2,
+      effectiveFreeSlots: 2,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+  });
+});
+

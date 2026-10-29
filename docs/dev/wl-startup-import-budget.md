@@ -133,12 +133,36 @@ contention, so the pass/fail gate is **CPU time** — `user + system` from the
 F1 spawn instrumentation, which is load independent:
 
 - **p95 CPU** ≤ recorded p95 + `cpuHeadroomPct` (default 50 %) — the gate;
-- **p95 wall** ≤ recorded p95 + `wallHeadroomPct` (default 200 %) + 250 ms —
-  catches gross regressions while tolerating a loaded host;
+- **p95 wall** ≤ recorded p95 × **host-load factor** + `wallHeadroomPct`
+  (default 200 %) + 250 ms — catches gross regressions while tolerating a
+  loaded host;
 - **p95 peak RSS** ≤ recorded p95 + `cpuHeadroomPct`;
 - every sample must be a genuine fast-path invocation (expected spawn kind);
 - parent AC1's 700 ms / 68 MB is asserted for the `measuredTarget` only once
   `ac1Targets.enforced` is true.
+
+### Host-load normalisation of the wall budget
+
+Contention inflates the wall clock of the `wl` invocation and of the bare-node
+control (`node -e …`) alike, so the **same run's** bare-node floor is used as
+an on-the-spot host-speed reference (fix for `WL-0MVS9Z965006MC4R`, where a
+fully-saturated host pushed `wl --version` to 3.4× its recorded p95 — 7512.9 ms
+vs an un-normalised 6903 ms limit — while CPU time stayed flat):
+
+```
+host-load factor = measured bare-node p95 wall / recorded bare-node p95 wall
+wall limit       = recorded p95 wall × factor × (1 + wallHeadroomPct/100)
+                  + wallFloorMs
+```
+
+The factor is **never below 1** (a host faster than the baseline must not
+tighten the budget) and **clamped at `maxHostLoadFactor` (default 8)** so a
+wild control sample (a one-off stall) cannot lift the limit far enough to mask
+a genuine wall-path regression — CPU time remains the primary gate. The
+residual limitation is that the control runs *after* the scenarios; a load
+spike that ends before the control is measured legitimately (if unluckily)
+still tightens the normalised budget, but the observed failure mode —
+multi-minute host saturation from concurrent suites — is captured.
 
 `tests/cli/startup-import-budget.test.ts` applies this policy to a real
 measured `src` run (`regression.runs` samples, default 4) — CPU time is the
