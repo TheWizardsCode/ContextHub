@@ -199,6 +199,21 @@ describe('sync split guard — live tree', () => {
     }
   });
 
+  it('documents every sync-family module with a top-level JSDoc header (AC5)', () => {
+    // AC5 covers the whole family, not only the files an extraction child
+    // created: `src/sync/merge-utils.ts` predates the split but must still
+    // open with a header naming its concern, so a reader landing in any
+    // sync-family module knows what it owns without reading the body.
+    const modules = splitFamilyModules(index);
+    expect(modules.map((m) => m.file)).toEqual(
+      expect.arrayContaining([SYNC_BARREL, 'src/sync/merge-utils.ts']),
+    );
+    const missing = modules
+      .filter((m) => !hasLeadingJsDoc(fs.readFileSync(path.join(repoRoot, m.file), 'utf-8')))
+      .map((m) => m.file);
+    expect(missing).toEqual([]);
+  });
+
   it('only ever shrinks the sync split allowlist', () => {
     expect(findAllowlistViolations(SPLIT_ALLOWLIST)).toEqual([]);
     expect([...SPLIT_ALLOWLIST_CEILING]).toEqual(['sync.ts']);
