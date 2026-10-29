@@ -788,9 +788,23 @@ prefillCapacityBudget = 0                        when cap > 0 and inFlight >= ca
   defer, reason `prefill-eta`, header token `prefill-eta`. Both values must
   be present and finite; a missing ETA or budget never blocks dispatch, and
   a legacy proxy (no calibration signal) keeps today's total-ETA behaviour.
-- The effective budget is what the tier minimums see: with headroom `1` the
-  **audit** tier (≥ 2 free slots) is skipped and the implement tier
-  dispatches instead.
+- The effective budget paces **only the single-pane tiers**
+  (`WL-0MVR8FI4Q0007CGR`): their ≥ 1 slot minimum keeps `effectiveBudget` as
+  its input, so a reduced prefill headroom still reduces single-pane
+  concurrency. The **audit** tier's ≥ 2 slot minimum is a *slot-count*
+  requirement (the audit pane plus its Phase 2 child at
+  `AUDIT_PHASE2_PARALLELISM=1`) and is evaluated against the **raw free-slot
+  budget** instead: with a prefill headroom of `1` and two genuinely free
+  slots the **audit tier dispatches** and the implement tier is not
+  consulted. Two panes can still run under a serialised prefill gate — their
+  prefills queue on the proxy's gate rather than preempting each other — so
+  capping a slot-count requirement with a prefill-concurrency number
+  conflated two unrelated resources and made the audit tier unreachable at
+  the default `local_max_concurrent_prefills: 1`. When the audit tier is
+  skipped because its slot minimum is unmet, the tick emits a distinct
+  `audit-tier-budget-skipped` observation token (never a bare
+  `no-candidate`). Full rationale, and that token's shape, live in
+  `docs/dev/downtime-dispatcher.md` (*Prefill serialisation pacing*).
 
 Pacing **only reduces concurrency**: it never raises the free-slot budget and
 never bypasses the fail-closed `slots-unavailable` / `capacity-saturated`

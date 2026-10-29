@@ -1712,9 +1712,11 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
   };
 
   /**
-   * The audit tier plus an implement fallback: with the free-slot budget
-   * clamped to the prefill headroom the audit tier (≥ 2 free slots) is
-   * skipped and the implement tier dispatches instead.
+   * The audit tier plus an implement fallback candidate, so a tick can
+   * assert which tier it picked: the audit tier dispatches while its
+   * slot-count minimum is met, and the implement tier is the fallback
+   * whenever the audit tier is skipped (WL-0MVR8FI4Q0007CGR reversed the
+   * old clamp of that minimum to the prefill headroom).
    */
   function auditTierDeps(): Partial<DowntimeWorkerDeps> {
     return {
