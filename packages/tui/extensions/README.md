@@ -340,6 +340,14 @@ and then on the body's polarity:
 - **No signal at all** → terminal, i.e. the pre-existing behaviour. Only a
   body that states it is resumable is treated as resumable.
 
+Both proxy gates that defer a `local-preferred` prompt — the prefill-ETA
+admission guard and the dispatch/lease gate (`local_lease_active`) — surface as
+this same refusal class, so the pane cannot (and need not) tell them apart:
+each carries a server-requested `Retry-After` and each is retried. The full
+chain (busy slot → `429` → hinted wait → local completion with zero remote
+dispatch) was verified live on WL-0MVSNHCSM004JYEY; the reproduction procedure
+is in `docs/dev/downtime-dispatcher.md` (*Observing a deferral*).
+
 #### Where the polarity is read from (and why the message is not enough)
 
 The polarity is read from the **captured HTTP response body**, not (only) from

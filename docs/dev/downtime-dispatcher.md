@@ -1744,6 +1744,63 @@ route headers → no entry; a capture/write failure (unwritable log, stale ctx,
 malformed headers) never throws into the turn. There is no new polling loop —
 logging is per response.
 
+**Observing a deferral (operator reproduction, WL-0MVSNHCSM004JYEY).** A
+*deferred* pane and a *stalled* pane both look idle, so confirm the former from
+the proxy's deferral records rather than the pane's appearance. Two proxy gates
+produce the same client-visible refusal class, `429 "Local admission refused"`:
+
+- the **dispatch/lease gate** — `local_dispatch_denied … owner=<session>` while
+  another session holds the slot. The request queues for up to 60 s and then
+  `contention_queue_fallback_after_queue … queued_duration=… preference=…
+  reason=local_lease_active` plus
+  `local_preference_resolved … outcome=deferred reason=local_lease_active`;
+- the **prefill-ETA admission guard** —
+  `local_admission_guard decision=reject … projected_wait_s=… budget_s=…`
+  (`eta_prefill_s` / `eta_occupancy_s` are its inputs), or the pre-coalesced
+  `local_only_refused … verdict=deferrable`. This one is calibration-gated:
+  while `prefill_eta_calibrated: false` (`insufficient_samples`, below the
+  proxy's `MIN_CALIBRATION_SAMPLES: 5`) the guard admits rather than defers, so
+  a young proxy shows no ETA deferrals.
+
+A direct request that meets the lease gate **without** queueing gets
+`503 no_slots_available` (`local_lease_active`) instead; the queued path is
+what surfaces the `429` class to the pane. To reproduce a deferral:
+
+1. **Send a prompt that only the local route can serve**, sized to fit the
+   local token budget but large enough to be a real prefill (≈ 18 k tokens on
+   the reference pool), and keep other local traffic running so the slot is
+   contended — a dispatched audit pane or a concurrent local generation is
+   enough. Prefills are serialised by default
+   (`local_max_concurrent_prefills: 1`).
+2. **Read the proxy.** `GET /llama/local/status` carries the inputs
+   (`prefill_eta_seconds`, `queue_eta_seconds`, `prefill_budget_seconds`,
+   `prefill_gate_waiters`, `prefill_eta_calibrated`, `slots[].owner_session_id`).
+   The proxy log path is deployment-specific — do not assume
+   `/var/log/llama-proxy/proxy.log`; the `llama-proxy` exposes
+   `GET /logs/tail?lines=N` (SSE, `data: {"initial": …}`, optionally
+   `&session=<pi-session-id>`).
+3. **Read the pane.** Every refused attempt prints
+   `Error: 429 "Local admission refused"` followed by
+   `Retry attempt N (backoff <d>s — server-requested)`; it must **never** print
+   `Non-retryable error: 429 "Local admission refused"`. The hinted delay is
+   honoured (upward jitter ≤ 25 %, ceiling 6 h), so consecutive attempts are
+   spaced by the advertised wait. The admitted turn then logs
+   `local_preference_resolved … outcome=local` and
+   `Stream finished: … provider=local model=<local model>`, and writes a
+   `<cwd>/.worklog/local-route.log` line carrying
+   `"preference":"local-preferred"` and `"route":"local"` with no
+   `fallbackReason`.
+
+The refused attempts have **no** route-log line — `after_provider_response`
+does not fire when the provider throws on a non-2xx — so the proxy log is the
+only record of the deferral itself; the route log records the admitted turn.
+
+> **Headless caveat.** Route logging runs from the extension's
+> `after_provider_response` context; a `pi -p` (headless) session on this build
+> records the preference header and the deferral retries but produced no
+> route-log line, so reproduce with an interactive pane when the route log is
+the artefact you need.
+
 **Tests.** `packages/tui/extensions/local-preference/local-preference.test.ts`
 (pure module and hooks: both values, the unset case, absent/malformed headers,
 bounded log, session/ticket correlation, never-throw);
