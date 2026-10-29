@@ -58,25 +58,40 @@ typically `~/projects/SorraAgents/skill/audit`), so its contract can move ahead
 of (or behind) this repository between installs.
 
 The test therefore probes the **installed** helper's contract
-(`inspect.signature` + `_AUDIT_CONTENT_FINGERPRINT_SCHEMA`):
+(`inspect.signature` + `_AUDIT_CONTENT_FINGERPRINT_SCHEMA`) through the shared
+probe in `src/audit-fingerprint-installed.ts`:
 
 | Installed helper | Result |
 |---|---|
 | schema 2, accepts `work_item=` | digests compared; a mismatch **fails** |
-| schema ≠ 2 | **skip** with an actionable message naming the installed path, its schema and the expected one |
-| cannot accept `work_item=` | **skip** naming the installed signature |
-| skill or `python3` missing | **skip** naming what is missing |
+| schema ≠ 2 (ahead **or** behind) | **fail** with an actionable message naming the installed path, its schema, the expected schema and the remediation |
+| schema undeclared (`_AUDIT_CONTENT_FINGERPRINT_SCHEMA` lookup returned nothing, i.e. a pre-v2 install) | **fail** — an undeclared schema cannot be proven compatible (fail-safe) |
+| cannot accept `work_item=` | **fail** naming the installed signature |
+| skill or `python3` missing (or the helper is unimportable) | **skip** naming what is missing |
 
-A skew is reported, never silently passed, and never masquerades as a code
-regression. Remediation on a skewed host:
+Fail-on-skew is the contract: any schema skew **fails** the parity test loudly,
+with the installed and expected schema plus the remediation, and never
+masquerades as a code regression. `wl doctor` reports the same skew as the
+warning-level `audit-fingerprint.schema-skew` check, built on the same probe, so
+operators who never run the suite still see it. Only genuine environment
+unavailability (no scripts directory, no `python3`, or an unimportable helper)
+is not a failure, keeping CI images without the agent framework green.
+
+Remediation on a skewed host:
 
 ```sh
 # Re-install the agent framework skills from the canonical source
 cd ~/projects/SorraAgents && git pull
 scripts/install_pi.sh          # from this repo, or the framework's installer
-# ...or point the test at a specific install for one run:
+# ...or point the test and wl doctor at a schema-2 install:
 AUDIT_SKILL_SCRIPTS=/path/to/skill/audit/scripts npm --silent test -- tests/unit/audit-fingerprint-parity.test.ts
 ```
+
+A host whose installed skill is **ahead** of this repository (e.g. schema 3)
+fails by design: the message names both schemas, and the remedy is to port this
+repository forward to that schema (bump `AUDIT_CONTENT_FINGERPRINT_SCHEMA` and
+`computeContentFingerprint`, and update the parity fixtures) — not to suppress
+the test.
 
 To re-run just the parity check and the fingerprint unit tests:
 

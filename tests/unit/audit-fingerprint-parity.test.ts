@@ -13,9 +13,15 @@
  * audit skill and this repository is a **hard failure** (not a skip) because a
  * stale or ahead fingerprint algorithm cannot be trusted.  An undeclared
  * schema (pre-v2 install) is also a failure — the algorithm cannot be proven
- * compatible (fail-safe).  Genuine environment unavailability (no scripts
+ * compatible (fail-safe) — and a helper whose signature cannot accept
+ * `work_item=` fails too.  Genuine environment unavailability (no scripts
  * dir, no python3, or unimportable module) remains a **skip** so CI images
  * stay green.  At the same schema, any digest mismatch still fails.
+ *
+ * The probe lives in `src/audit-fingerprint-installed.ts` and is shared with
+ * `wl doctor`'s `audit-fingerprint.schema-skew` warning, so the two cannot
+ * disagree about what "skewed" means; remediation is documented in
+ * `docs/dev/audit-fingerprint.md` § "Parity check and host tooling skew".
  */
 
 import { describe, it, expect } from 'vitest';
