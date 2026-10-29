@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.0.24 (2026-10-29)
+> **Release focus:** This release focuses on making background and downtime work more reliable and responsive, with smarter dispatch to local or remote capacity, automatic retries, and fixes for stalls, idle workers, and idle leaders. It also improves sync speed, memory safety during large database loads, save-data import handling, and overall stability during heavy activity.
+### Features
+- Syncing when nothing changed is now instant instead of taking minutes. (WL-0MVK3WRY9009KV6P)
+- Downtime work now starts only when capacity is truly free, so jobs no longer stall or silently fall back. (WL-0MVIKRFP0005JDL8)
+- Low-priority jobs now stay on the local slot, while urgent work keeps the fast remote route. (WL-0MVNUIW77000VYAX)
+- Keeps the game running smoothly by preventing CPU overload during heavy activity. (WL-0MVK0UO3Q002TXW6)
+- Unattended background work now runs on remote capacity by default instead of stalling when the local slot is busy. (WL-0MVNUHWH500196K1)
+- Local-first work now waits for local capacity instead of failing, and resumes automatically when it frees up. (WL-0MVSI1JMN002CGC0)
+- The full test suite now covers all tests, so fewer bugs slip through to release. (WL-0MVG4FF9200346NR)
+- Downtime dispatch is now split into smaller, safer modules, making future fixes and improvements to background work more reliable. (WL-0MVF3F9A7000HKP7)
+### Bug Fixes
+- Worklog sync now accepts commits from the team's shared author, so updates flow again. (WL-0MVMZP6A5005PB66)
+- View refreshes stay responsive even during long background syncs. (WL-0MVMSE2S0006L56D)
+- Fixed a save-data issue that could cause imports to fail or duplicate entries. (WL-0MVM9E3SV003III0)
+- Large database loads now stay within safe memory limits, preventing slowdowns and crashes. (WL-0MVMSE5LN003KCPQ)
+- Fixed a rare issue where downtime activities could incorrectly report success instead of failure. (WL-0MVOTIJ2U000JI44)
+- Idle leaders now step down so active players can take over, and peers no longer wait 60 minutes for work. (WL-0MVP7QHUB003ZA2A)
+- Fixed a bug where running tasks in parallel could wipe shared game files and break the work tracker. (WL-0MVPADZ1Z000FOSG)
+- Improved reliability of performance monitoring so lag spikes are detected more consistently. (WL-0MVS5CZFT001GHK9)
+- Fixed slow startup times when launching the game repeatedly. (WL-0MVS9Z965006MC4R)
+- Fixed a flaky test that could fail during automated checks, keeping builds reliable. (WL-0MVSLXT79008D4X6)
+- Critical child items no longer appear twice in the worklist; their parent is shown instead. (WL-0MVN4WESM007T4XI)
+- Idle workers now explain why they're not dispatching, and audits no longer get stuck behind the queue. (WL-0MVR8EXR6009F05V)
+- Temporary local model congestion now retries automatically instead of ending your turn. (WL-0MVSBF5XZ001H7V7)
+- Idle machines now start queued work instead of waiting forever. (WL-0MVPRZU0A000TSWD)
+- Agents can now sync worklog data without manual workarounds. (WL-0MVM92MZ50075E6B)
+- Work item titles now reliably appear in the footer, even for items from other projects. (WL-0MVGB23MM004X501)
+
 ## v1.0.23 (2026-10-23)
 > **Release focus:** This release focuses on performance and responsiveness across the app, with faster `wl` commands, quicker tests, and lower CPU use in Herdr panes and the Work Items pane. It also improves GPU scheduling so downtime tasks start promptly and run one at a time, ensures your own dispatched work jumps ahead of background tasks, and fixes several reliability issues including late-joining agent status, test gate failure messages, and long-running AI sessions blocking overnight work.
 ### Features
