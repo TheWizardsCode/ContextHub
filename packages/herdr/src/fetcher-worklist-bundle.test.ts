@@ -182,10 +182,10 @@ function ids(items: WorkItem[]): string[] {
 // root does (mandatory, kept in its OWN priority group, no badge/marker),
 // and an unresolvable root means the child is simply not shown (fail-open).
 //
-// RED WITNESS: the substitution step is the implementation feature
-// WL-0MVSSANRK000V00S (WL-0MVN4WESM007T4XI-F4). Every spec below asserts
-// post-substitution behaviour and is committed with `it.fails`; F4 flips
-// each `it.fails` to `it` (same test-first convention as
+// IMPLEMENTED BY WL-0MVSSANRK000V00S (WL-0MVN4WESM007T4XI-F4): every spec
+// below asserts post-substitution behaviour and was committed RED (`it.fails`)
+// by the test-first feature WL-0MVSSAM5H001VMQN, which F4 then flipped to a
+// plain `it` (same test-first convention as
 // WL-0MVSSAIO5004ERW3 / WL-0MVFE0T0M009ZCPM). The filtered-view spec is a
 // plain `it`: it guards the *absence* of substitution in explicit filters
 // and must stay green throughout.
@@ -524,7 +524,7 @@ describe('fetchReviewQueueState: derived from the consolidated read', () => {
 });
 
 describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4XI)', () => {
-  it.fails('bundle path: replaces a critical child with its root ancestor at the top level', async () => {
+  it('bundle path: replaces a critical child with its root ancestor at the top level', async () => {
     mockWl(substitutionRespond());
 
     const items = await fetchNextItems(20);
@@ -540,7 +540,7 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(shown).toContain('N-OTHER');
   });
 
-  it.fails('bundle path: shows the substituted root even when browseItemCount would cut it', async () => {
+  it('bundle path: shows the substituted root even when browseItemCount would cut it', async () => {
     mockWl(substitutionRespond());
 
     const items = await fetchNextItems(1);
@@ -550,7 +550,7 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(ids(items)).not.toContain('N-CRIT-KID');
   });
 
-  it.fails('bundle path: shows a root that is already browsable exactly once', async () => {
+  it('bundle path: shows a root that is already browsable exactly once', async () => {
     mockWl(substitutionRespond({ rootInBrowse: true }));
 
     const items = await fetchNextItems(20);
@@ -560,7 +560,7 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(ids(items)).not.toContain('N-CRIT-KID');
   });
 
-  it.fails('bundle path: keeps the substituted root in its own priority group with no critical marker', async () => {
+  it('bundle path: keeps the substituted root in its own priority group with no critical marker', async () => {
     mockWl(substitutionRespond());
 
     const items = await fetchNextItems(20);
@@ -587,7 +587,38 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     }
   });
 
-  it.fails('bundle path: resolves the parent in-process with no wl show spawn', async () => {
+  it('bundle path: promotes the TOP-MOST ancestor for a nested critical child', async () => {
+    // A critical grandchild must promote the ROOT, never the intermediate
+    // parent: the top level may only contain root items.
+    const grandchild = item('N-DEEP-KID', {
+      priority: 'critical',
+      stage: 'idea',
+      parentId: 'N-MID-PARENT',
+    });
+    const intermediate = item('N-MID-PARENT', {
+      priority: 'medium',
+      stage: 'idea',
+      parentId: 'N-TOP-ROOT',
+    });
+    const topRoot = item('N-TOP-ROOT', { priority: 'low', stage: 'idea' });
+    mockWl(
+      substitutionRespond({
+        criticalChildren: [grandchild],
+        resolvableRoots: { 'N-MID-PARENT': intermediate, 'N-TOP-ROOT': topRoot },
+      }),
+    );
+
+    const items = await fetchNextItems(20);
+    const shown = ids(items);
+
+    expect(shown).not.toContain('N-DEEP-KID');
+    // The intermediate parent is itself a child — never rendered at top level.
+    expect(shown).not.toContain('N-MID-PARENT');
+    expect(shown).toContain('N-TOP-ROOT');
+    expect(items.filter((i) => i.parentId)).toHaveLength(0);
+  });
+
+  it('bundle path: resolves the parent in-process with no wl show spawn', async () => {
     const seeded = seedSubstitutionDb();
     setWorklogDir(seeded.worklogDir);
     const criticalChild = item(seeded.childId, { priority: 'critical', parentId: seeded.rootId });
@@ -604,7 +635,7 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(calls.some((c) => c.args.includes('show'))).toBe(false);
   });
 
-  it.fails('bundle path: falls back to wl show and memoises the parent lookup', async () => {
+  it('bundle path: falls back to wl show and memoises the parent lookup', async () => {
     const calls = mockWl(
       substitutionRespond({
         criticalChildren: [substitutionItems.critKid, substitutionItems.critKid2],
@@ -624,7 +655,7 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(rootLookups).toHaveLength(1);
   });
 
-  it.fails('bundle path: fails open when the parent cannot be resolved', async () => {
+  it('bundle path: fails open when the parent cannot be resolved', async () => {
     const calls = mockWl(
       substitutionRespond({
         criticalChildren: [substitutionItems.orphanKid],
@@ -645,7 +676,7 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     ).toBe(true);
   });
 
-  it.fails('per-subset fallback: applies the same parent substitution', async () => {
+  it('per-subset fallback: applies the same parent substitution', async () => {
     mockWl(substitutionRespond({ bundleUnavailable: true }));
 
     const items = await fetchNextItems(20);
@@ -658,7 +689,7 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(items.filter((i) => i.parentId)).toHaveLength(0);
   });
 
-  it.fails('per-subset fallback: the substituted root stays mandatory under a tight count', async () => {
+  it('per-subset fallback: the substituted root stays mandatory under a tight count', async () => {
     mockWl(substitutionRespond({ bundleUnavailable: true }));
 
     const items = await fetchNextItems(1);
