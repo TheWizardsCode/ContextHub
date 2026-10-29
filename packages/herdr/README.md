@@ -4,7 +4,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 
 ## Features
 
-- **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
+- **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden — **critical items included**; a critical child is represented at the top level by its root ancestor ([Selection List Behaviour](#selection-list-behaviour)) — and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
 - **Filter by stage, priority, or recent dispatches** — Press `f` then an axis key (`s`=stage, `p`=priority, `d`=dispatches), then a value key, or type `/wl <stage>` / `/wl --priority <priority>` / `/wl dispatches`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Dispatches axis: `f d` shows the downtime dispatches from the local rolling log grouped into 4-hour time blocks (see [Recent dispatches view](#recent-dispatches-view)). Stage, priority, and dispatches filters are **mutually exclusive** (replace semantics — applying one clears the others); sprint (`f s s`, `f p s`, or bare `/wl`) clears all three. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage; log-derived rows for the dispatches view) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S, WL-0MUGLL9SS002E1D2)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp. **Child coverage (WL-0MUBVH8QG0020H9L):** a `completed`/`in_review` child whose direct parent has a fresh audit is *covered* — its list row and metadata Stage row show the parent's audit-result symbol in a dimmed/grey style (visually distinct from a bright own-audit icon) and the metadata panel adds a `Covered by <parent-id>` row. Coverage is **derived at read time** (`isCoveredByParent` over the parent's audit freshness inputs via the shared `isAuditFresh` predicate) — nothing is persisted and there is no schema migration. A child with its own audit always shows its own verdict; an uncovered child (no own audit, parent demoted/stale) keeps the plain `🔍` stage icon and is never dispatched (see [audit-tier selection](#audit-tier-dispatch)). In text-only (`noIcons`) mode the covered indicator renders as `[COVERED]`.
@@ -1917,7 +1917,9 @@ The default (unfiltered) worklist always shows **all** critical-priority
 items and **all** completed/in_review items (the producer-review queue),
 regardless of the `browseItemCount` setting:
 
-- Items with `priority=critical` are always included.
+- Items with `priority=critical` are always included — a critical **root**
+  directly, a critical **child** through its substituted root ancestor (see
+  *Top level is root-only* below).
 - Items with `status=completed` **and** `stage=in_review` are always included.
 - Items with `status=blocked` at any non-done stage are always included
   (WL-0MV71WBHB007D8ZE): a blocked in_review item is release-blocking (the
@@ -1994,6 +1996,46 @@ above.
 
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
+
+#### Top level is root-only (critical items included)
+
+Every row at the **top level** of the default worklist is a root item: an
+item with a non-empty `parentId` is never rendered there, whatever its
+priority (WL-0MVN4WESM007T4XI). A critical child is therefore not shown twice
+(once standalone, once under its parent) — it appears only under its parent
+via expand (Tab/Enter), together with its siblings, and drill-down still
+returns children unchanged.
+
+Hiding critical children must not make release-blocking work invisible: the
+ship critical-items gate keeps blocking a release on a critical **child**
+(`wl list --priority critical` is unchanged and child-inclusive). The plugin
+preserves reachability by **root-ancestor substitution** — when a
+still-actionable critical child is dropped from the top level, its **root
+ancestor** (walking the `parentId` chain upward to the top-most non-child
+item) is shown in its place:
+
+- the substituted root joins the mandatory set, so it is always shown
+  whatever `browseItemCount` says, and it is sorted/grouped by its **own**
+  priority, status and stage — no badge, marker or indicator is added (the
+  producer's decision);
+- the root is shown **once**: a root already present in the list is never
+  duplicated;
+- resolution uses the in-process SQLite fast path first, with `wl show` only
+  as a fail-open fallback (memoised per refresh), so substitution adds no
+  `wl` spawn to the hot refresh path when the parent can be read in-process;
+- if the ancestor cannot be resolved (missing/deleted item, cyclic or
+  pathologically deep chain) the child is simply not shown at the top level —
+  the refresh never crashes and never falls back to rendering the child
+  there;
+- stage- and priority-filtered views are **exempt**: they are explicit,
+  already root-only filters and never inject a synthetic parent row.
+
+The `critical` subset of `wl worklist` stays deliberately **all parent
+levels**: it is the discovery feed telling the plugin which parents to
+surface, and making it root-only here would need a second query per refresh
+(`src/commands/worklist.ts`). The roots-only rule is a **rendering** rule
+applied by this plugin, not a filtering rule on the CLI, so other `wl`
+consumers keep their child-inclusive semantics.
 
 ### Assignee scheduling-hold surface
 

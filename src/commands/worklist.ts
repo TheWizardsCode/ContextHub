@@ -36,7 +36,7 @@
  *   "worklogDir": "/abs/path/.worklog",
  *   "requestedCount": 20,
  *   "subsets": {
- *     "critical": [ /* WorkItem[]: priority critical, any parent level *\/ ],
+ *     "critical": [ /* WorkItem[]: priority critical, any parent level (discovery feed) *\/ ],
  *     "reviewQueue": [ /* WorkItem[]: completed|in-progress, stage in_review, roots *\/ ],
  *     "inProgressRoots": [ /* WorkItem[]: status in-progress, roots *\/ ],
  *     "blockedRoots": [ /* WorkItem[]: status blocked, roots *\/ ],
@@ -61,13 +61,27 @@ export const WORKLIST_DEFAULT_BROWSE_COUNT = 20;
  * separate `wl list` spawns today (`packages/herdr/src/fetcher.ts`):
  *
  *   - critical          — `--priority critical --status open,in-progress,blocked,completed`
- *                         (all parent levels: a critical child is as urgent as a
- *                         critical root)
+ *                         (deliberately ALL parent levels: a critical child is as
+ *                         urgent as a critical root)
  *   - reviewQueue       — `--status completed,in-progress --stage in_review --root-only`
  *   - inProgressRoots   — `--status in-progress --root-only`
  *   - blockedRoots      — `--status blocked --root-only`
  *
  * Order matters only for documentation/help; every subset is always returned.
+ *
+ * Why `critical` is the only subset without `rootOnly`
+ * (WL-0MVN4WESM007T4XI): it doubles as the **discovery feed** that tells the
+ * Herdr layer which parents the still-actionable critical children hang off.
+ * Keeping it all-parent-levels costs one query; making it root-only here
+ * would need a second query per refresh to rediscover those parents. The
+ * **top-level-only invariant** — nothing with a non-empty `parentId` rendered
+ * in the Herdr selection list — is therefore enforced by the Herdr consumer,
+ * not by this query: the fetcher partitions the subset, hides critical
+ * children and substitutes each one's ROOT ancestor
+ * (`packages/herdr/src/fetcher.ts`, `substituteCriticalRoots`). Other
+ * consumers of this payload — and of `wl list --priority critical`, e.g. the
+ * ship critical-items gate — still see children; that is intentional and must
+ * not change.
  */
 export const WORKLIST_LIST_SUBSET_QUERIES: Readonly<Record<string, WorkItemQuery>> = Object.freeze({
   critical: { priority: 'critical', status: ['open', 'in-progress', 'blocked', 'completed'] },
