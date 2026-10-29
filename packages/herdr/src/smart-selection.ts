@@ -68,13 +68,23 @@ export function selectWorkItems<T extends Pick<WorkItem, 'priority' | 'status' |
   items: T[],
   browseItemCount: number,
 ): T[] {
-  // Defensive root-only filter for non-critical items (WL-0MS964SIA0057ABR):
-  // child items are hidden from the top-level worklist — they are only
-  // visible under their parent via expand. HOWEVER, critical items are an
-  // exception: child critical items must always be visible so the team can
-  // see blocking items (e.g., untriaged test-failures) that the ship
-  // critical-items gate detects.
-  const nonCriticals = items.filter((i) => !i.parentId || i.priority === 'critical');
+  // Root-only top level for ALL items (WL-0MS964SIA0057ABR, WL-0MVN4WESM007T4XI):
+  // the top-level worklist contains only root items — an item with a
+  // non-empty `parentId` is never returned here, critical items included; it
+  // is reachable through its parent via expand. The critical exception of
+  // commit cae8ea8a ("show child critical items in the selection list") is
+  // gone: a critical child would otherwise be rendered twice, once at top
+  // level and once under its parent.
+  //
+  // Reachability contract (parent substitution, implemented in fetcher.ts):
+  // hiding a critical child must not make release-blocking work invisible, so
+  // the fetcher resolves each critical child's ROOT ancestor (walking
+  // `parentId` to the top-most non-child item) and injects it into the
+  // mandatory set before calling this function. The substituted root is
+  // always shown, is sorted by its own priority/group (it is not marked
+  // critical), and is omitted when already present — so the ship
+  // critical-items gate keeps blocking releases without a duplicate row.
+  const nonCriticals = items.filter((i) => !i.parentId);
   const actionable = nonCriticals.filter((i) => i.stage !== 'done');
   const criticals = actionable.filter((i) => i.priority === 'critical');
   const reviews = actionable.filter((i) => i.stage === 'in_review' && i.status === 'completed' && i.priority !== 'critical');

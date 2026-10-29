@@ -508,12 +508,11 @@ describe('selectWorkItems — smart selection algorithm', () => {
     // reachable through its root ancestor (substituted in the fetcher), never as
     // a duplicate top-level row.
     //
-    // RED WITNESS: the current root filter still carries the
-    // `|| i.priority === 'critical'` exception, so this spec is committed as
-    // `it.fails`; the implementation feature (WL-0MVN4WESM007T4XI-F2) removes the
-    // exception and flips it to `it` (same test-first convention as
-    // WL-0MVFE0T0M009ZCPM).
-    it.fails('hides a child critical item (parentId set) even when priority=critical', () => {
+    // GREEN: the implementation feature (WL-0MVN4WESM007T4XI-F2 /
+    // WL-0MVSSAKAU001RC2Z) removed the `|| i.priority === 'critical'`
+    // exception, so this spec is a plain `it` (previously an `it.fails` RED
+    // witness; same test-first convention as WL-0MVFE0T0M009ZCPM).
+    it('hides a child critical item (parentId set) even when priority=critical', () => {
       const items = [
         critical('C1'),
         inReview('R1'),
@@ -531,9 +530,9 @@ describe('selectWorkItems — smart selection algorithm', () => {
       expect(result.every(i => !i.parentId)).toBe(true);
     });
 
-    // RED WITNESS (same as above): hiding must hold even when the root ancestor
-    // is absent from the input — the child is never a fallback top-level row.
-    it.fails('hides a critical child even when its root ancestor is absent from the input', () => {
+    // Hiding must hold even when the root ancestor is absent from the input —
+    // the child is never a fallback top-level row (GREEN since F2).
+    it('hides a critical child even when its root ancestor is absent from the input', () => {
       const items = [
         other('O1'),
         other('O2'),
