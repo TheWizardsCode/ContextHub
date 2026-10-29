@@ -277,8 +277,7 @@ configuration.
 
 | Category | Default Action | Description |
 |----------|---------------|-------------|
-| `rateLimit` (429) | NOT retried | Informative error shown to the user |
-| `serverError` (5xx) | Retried | Exponential backoff with configurable delay |
+| `rateLimit` (429) | NOT retried | Informative error shown to the user || `serverError` (5xx) | Retried | Exponential backoff with configurable delay |
 | `authError` (401/403) | NOT retried | Checkpoint saved + terminal error displayed |
 | `contextLength` | Compact + Continue | `/compact` triggered, then auto-continue |
 | `quotaExhausted` | NOT retried | Checkpoint saved + terminal error displayed |
@@ -308,6 +307,41 @@ Recovery behaviour is driven by `DEFAULT_RECOVERY_CONFIG` in
   }
 }
 ```
+
+### Local-Admission Refusals (the 429 exception)
+
+A `429` is normally terminal, with one deliberate exception: an
+**llm-proxy local-admission refusal** is capacity backpressure, not a rate
+limit (WL-0MVSBF5XZ001H7V7). When the proxy's prefill-ETA admission guard
+declines to admit a `local-preferred` prompt onto a contended local slot it
+answers `429` with a machine-readable body:
+
+```json
+{"error": "Local admission refused", "code": "local_admission_reject",
+ "reason": "eta_exceeds_budget", "retryable": true, "retry_after": 15,
+ "projected_wait_seconds": 74.4, "budget_seconds": 60.0}
+```
+
+The classifier (`isLocalAdmissionRefusal()` /
+`isRetryableLocalAdmissionRefusal()` in `error-patterns.ts`) keys off the
+stable proxy prose — `local_admission_reject` / "Local admission refused" —
+and then on the body's polarity:
+
+- **`retryable: true`** (or a `Retry-After` / `retry_after` hint) →
+  `SERVER_ERROR`, so the retry loop waits exactly as long as the proxy asked
+  (see [Server-Requested Retry Delays](#server-requested-retry-delays-retry-after))
+  and the turn resumes once local capacity frees up. No "Non-retryable
+  error" notification, no abandoned turn, no cloud fallback.
+- **`retryable: false`** (`prefill_budget_exceeded`, `context_too_large`) →
+  terminal. Waiting cannot heal a prompt that exceeds the admission budget;
+  the proxy's `suggested_action` (compaction guidance) is what the operator
+  sees, and no backoff time is burned.
+- **No signal at all** → terminal, i.e. the pre-existing behaviour. Only a
+  body that states it is resumable is treated as resumable.
+
+Plain `429` rate limits, `401/403`, quota-exhausted and terminated messages
+are unaffected. Because the refusal is not provider exhaustion, it records
+**no** durable model-cooldown marker.
 
 ### Server-Requested Retry Delays (`Retry-After`)
 

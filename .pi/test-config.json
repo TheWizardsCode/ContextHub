@@ -5,8 +5,20 @@
   "timeoutPerCommand": 3600,
   "groups": {
     "herdr": {
-      "commands": ["npm --silent test -- packages/herdr/src"],
-      "paths": ["packages/herdr/**"]
+      "commands": [
+        "npm --silent test -- packages/herdr/src"
+      ],
+      "paths": [
+        "packages/herdr/**"
+      ]
+    },
+    "tui-extensions": {
+      "commands": [
+        "npm --silent test -- packages/tui/extensions"
+      ],
+      "paths": [
+        "packages/tui/extensions/**"
+      ]
     }
   }
 }

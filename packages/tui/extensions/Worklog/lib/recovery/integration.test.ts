@@ -168,3 +168,36 @@ describe('no false positives (non-retryable → not classified as retryable)', (
     expect(classifyError({ role: 'assistant', stopReason: 'stop' })).toBe(ErrorCategory.UNKNOWN);
   });
 });
+
+// ── Local-admission refusal → retry path, not "Non-retryable error" ───
+//
+// The proxy's admission guard answers 429. A time-healable refusal must reach
+// the retry loop (SERVER_ERROR) so the `Retry-After` hint is honoured and the
+// turn is not abandoned; a refusal waiting cannot heal stays on the terminal
+// branch (WL-0MVSBF5XZ001H7V7).
+
+describe('local-admission refusal dispatch mapping', () => {
+  const RETRYABLE_REFUSAL =
+    '429: {"error": "Local admission refused", "code": "local_admission_reject", ' +
+    '"reason": "eta_exceeds_budget", "retryable": true, "retry_after": 15}';
+  const NON_RETRYABLE_REFUSAL =
+    '429: {"error": "Local admission refused", "code": "local_admission_reject", ' +
+    '"reason": "prefill_budget_exceeded", "retryable": false}';
+
+  it('a retryable refusal is classified as SERVER_ERROR (retried, hint honoured)', () => {
+    const msg = makeAssistantMsg(RETRYABLE_REFUSAL);
+    expect(classifyError(msg)).toBe(ErrorCategory.SERVER_ERROR);
+    expect(classifyError(msg)).not.toBe(ErrorCategory.RATE_LIMIT);
+    expect(classifyError(msg)).not.toBe(ErrorCategory.UNKNOWN);
+  });
+
+  it('a non-retryable refusal stays terminal (no backoff burn)', () => {
+    const msg = makeAssistantMsg(NON_RETRYABLE_REFUSAL);
+    expect(classifyError(msg)).toBe(ErrorCategory.TERMINATED);
+    expect(classifyError(msg)).not.toBe(ErrorCategory.SERVER_ERROR);
+  });
+
+  it('a plain 429 rate limit is unaffected (regression)', () => {
+    expect(classifyError(makeAssistantMsg('429 Too Many Requests'))).toBe(ErrorCategory.RATE_LIMIT);
+  });
+});
