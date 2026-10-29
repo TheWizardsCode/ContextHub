@@ -69,6 +69,14 @@ probe in `src/audit-fingerprint-installed.ts`:
 | cannot accept `work_item=` | **fail** naming the installed signature |
 | skill or `python3` missing (or the helper is unimportable) | **skip** naming what is missing |
 
+The fail-on-skew policy is enforced by a **live-host gate** in the same file
+(`liveHostSkewFailure`): when the probe returns `fail` the suite goes **red on
+the machine running it**, quoting the probe's actionable message. A skew is
+therefore never silent — probing the install and then quietly skipping the
+digest comparison is exactly how a schema-1 host shipped a false-stale audit
+badge (`LP-0MVKSXR4P001V0CM`). `skip` stays green so CI images without the
+agent framework are unaffected.
+
 Fail-on-skew is the contract: any schema skew **fails** the parity test loudly,
 with the installed and expected schema plus the remediation, and never
 masquerades as a code regression. `wl doctor` reports the same skew as the

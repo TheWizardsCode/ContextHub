@@ -22,6 +22,12 @@
  * `wl doctor`'s `audit-fingerprint.schema-skew` warning, so the two cannot
  * disagree about what "skewed" means; remediation is documented in
  * `docs/dev/audit-fingerprint.md` § "Parity check and host tooling skew".
+ *
+ * The policy is only *enforced* by the live-host gate below: probing the
+ * installed helper and then quietly skipping the digest comparison is exactly
+ * how a skewed install shipped green and produced the false-stale audit badge
+ * (LP-0MVKSXR4P001V0CM). A `fail` outcome now turns this file red on the
+ * machine running the suite (WL-0MVOE11V60050Q6Y AC1/AC2).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -40,6 +46,7 @@ import {
   pythonAvailable,
   probeInstalledContract,
   evaluateInstalledContract,
+  type InstalledContractOutcome,
 } from '../../src/audit-fingerprint-installed.js';
 import { isAuditFresh } from '@worklog/shared/icons';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
@@ -53,6 +60,20 @@ const OUTCOME = evaluateInstalledContract(
   AUDIT_CONTENT_FINGERPRINT_SCHEMA,
   PYTHON,
 );
+
+/**
+ * Decision of the live-host gate: `null` means the suite may proceed, a string
+ * is the loud, actionable failure the suite must report.
+ *
+ * Kept pure so the fail-on-skew contract is pinned deterministically — CI
+ * cannot be handed a skewed host on demand — while the live test below applies
+ * it to the machine actually running the suite.
+ */
+function liveHostSkewFailure(
+  outcome: InstalledContractOutcome,
+): string | null {
+  return outcome.kind === 'fail' ? outcome.reason : null;
+}
 
 describe('installed-audit-skill skew policy', () => {
   const expected = AUDIT_CONTENT_FINGERPRINT_SCHEMA;
@@ -138,6 +159,50 @@ describe('installed-audit-skill skew policy', () => {
     );
   });
 
+  it('fails the live-host gate on every skew, and only on a skew', () => {
+    const params = ['runner', 'issue_id', 'worklog_dir', 'work_item'];
+
+    // Environment unavailability: unverifiable, so the gate stays quiet (CI
+    // images without the agent framework keep passing).
+    expect(
+      liveHostSkewFailure(evaluateInstalledContract(null, null, expected)),
+    ).toBeNull();
+    expect(
+      liveHostSkewFailure(
+        evaluateInstalledContract(null, '/tmp/audit/scripts', expected, false),
+      ),
+    ).toBeNull();
+
+    // A matching helper passes.
+    expect(
+      liveHostSkewFailure(
+        evaluateInstalledContract(
+          { schema: expected, params },
+          '/tmp/audit/scripts',
+          expected,
+        ),
+      ),
+    ).toBeNull();
+
+    // Ahead, behind and undeclared schemas all fail the gate with the
+    // actionable probe message (installed schema, expected schema, scripts
+    // dir, remediation) — never a silent skip.
+    for (const schema of [expected + 1, expected - 1, null]) {
+      const reason = liveHostSkewFailure(
+        evaluateInstalledContract(
+          { schema, params },
+          '/tmp/audit/scripts',
+          expected,
+        ),
+      );
+      expect(reason, `schema ${String(schema)} must fail the gate`).toContain(
+        '/tmp/audit/scripts',
+      );
+      expect(reason).toContain(`schema ${expected}`);
+      expect(reason).toContain('install_pi.sh');
+    }
+  });
+
   it('skips (never fails) when the skill or python is missing', () => {
     const r1 = evaluateInstalledContract(null, null, expected);
     expect(r1.kind).toBe('skip');
@@ -150,6 +215,30 @@ describe('installed-audit-skill skew policy', () => {
     const r3 = evaluateInstalledContract(null, '/tmp/audit/scripts', expected);
     expect(r3.kind).toBe('skip');
     expect((r3 as { kind: 'skip'; reason: string }).reason).toContain('could not import');
+  });
+});
+
+/**
+ * Live-host enforcement of the fail-on-skew contract
+ * (WL-0MVOE11V60050Q6Y AC1/AC2).
+ *
+ * The matrix above proves the *policy*; this block makes it bite on the host
+ * running the suite. A skewed install must turn this file **red** with the
+ * probe's actionable message instead of the digest comparison quietly
+ * skipping — the exact silence that let a schema-1 host ship a false-stale
+ * audit badge (LP-0MVKSXR4P001V0CM). Environment unavailability remains a
+ * skip (AC3): CI images without the agent framework stay green.
+ */
+describe('live installed audit skill (fail-on-skew)', () => {
+  it('passes only when the installed helper matches or is unverifiable', () => {
+    // Failing here means this host's installed audit skill is skewed. The
+    // remediation is in the message: reinstall the framework
+    // (`cd ~/projects/SorraAgents && git pull && scripts/install_pi.sh`) or
+    // point AUDIT_SKILL_SCRIPTS at a schema-2 install.
+    expect(
+      liveHostSkewFailure(OUTCOME),
+      `installed audit skill at ${AUDIT_SCRIPTS ?? '<not found>'}`,
+    ).toBeNull();
   });
 });
 

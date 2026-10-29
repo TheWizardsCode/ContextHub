@@ -22,6 +22,7 @@ import {
   writeInitSemaphore,
 } from './cli-helpers.js';
 import * as os from 'os';
+import { probeAuditFingerprintSkewFinding } from '../../src/doctor/audit-fingerprint-skew-check.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -176,7 +177,15 @@ describe('wl doctor pending-upgrade notice', () => {
 
     const { stdout } = await execAsync(`tsx ${cliPath} doctor`);
 
-    expect(stdout).toContain('Doctor: no issues found.');
+    // A host whose *installed* audit skill declares a different fingerprint
+    // schema legitimately adds the global `audit-fingerprint.schema-skew`
+    // warning (WL-0MVOE11V60050Q6Y), which replaces the all-clear line. The
+    // upgrade contract asserted here is unaffected either way.
+    if (probeAuditFingerprintSkewFinding()) {
+      expect(stdout).toContain('Installed audit skill at');
+    } else {
+      expect(stdout).toContain('Doctor: no issues found.');
+    }
     expect(stdout).not.toContain('pending upgrades detected');
     expect(stdout).not.toContain('Pending migrations');
   });
