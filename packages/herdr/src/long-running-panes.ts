@@ -38,6 +38,16 @@ import {
   resolveLastActivityAt,
   stalledPaneKindFromLabel,
 } from './stalled-work.js';
+import type { LongRunningPaneObservation, LongRunningScanOptions } from './downtime-worker.types.js';
+
+// Re-exported so `long-running-panes.ts` keeps its public surface for every
+// existing consumer (WL-0MVLII2080074S5L moved the declarations to the shared
+// types module — the extracted orchestrator's capacity-starvation signal
+// consumes them without importing this in-baseline module).
+export type {
+  LongRunningPaneObservation,
+  LongRunningScanOptions,
+} from './downtime-worker.types.js';
 import type {
   DowntimeItemInfo,
   DowntimeItemResult,
@@ -156,30 +166,6 @@ export function classifyLongRunningPane(
     agentStatus: pane.agentStatus ?? '',
     stage: itemInfo.stage ?? '',
   };
-}
-
-/** One flagged pane, carrying its OWN worklog root. */
-export interface LongRunningPaneObservation {
-  paneId: string;
-  itemId: string;
-  /** The item's worklog root (resolved from the pane's cwd / agent_session). */
-  cwd: string;
-  kind: DowntimeSkillKind;
-  lastActivityAt: number;
-  stalledForMs: number;
-  agentStatus: string;
-  stage: string;
-  title?: string;
-}
-
-/** Options for {@link scanLongRunningPanes}. */
-export interface LongRunningScanOptions {
-  /** Progress window before a pane is reported (ms). */
-  thresholdMs: number;
-  /** Injectable clock (defaults to `Date.now`). */
-  now?: number;
-  /** Upper bound on returned observations (default 10; `0` = unlimited). */
-  maxObservations?: number;
 }
 
 /**

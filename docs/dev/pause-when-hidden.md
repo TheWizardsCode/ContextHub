@@ -21,7 +21,7 @@ Two pollers were fixed:
 | Poller | File | Cadence | Fix |
 |--------|------|---------|-----|
 | Pi extension browse selection widget | `packages/tui/extensions/Worklog/lib/browse.ts` | 5s interval (4–5 wl spawns/tick) | **Idle gating**: pause fetch + `wl sync --if-idle` after 30s without keypresses (`IDLE_PAUSE_MS`); resume immediately on the next keypress. |
-| Herdr worklist pane | `packages/herdr/src/worklist.ts` | 30s refresh + 60s sync timers (~4–5 wl spawns/tick per pane) | **Tab-focus gating**: skip timer ticks when the pane's tab is hidden (`HERDR_TAB_ID` → `herdr tab get` → `result.tab.focused === false`); fail-open otherwise. **Typing gating** (WL-0MTV67MZU003H7SH): skip the same ticks while any text-input overlay is open so background re-render cannot drop keypresses. |
+| Herdr worklist pane | `packages/herdr/src/worklist.ts` (typing gate: `packages/herdr/src/worklist.state.ts`) | 30s refresh + 60s sync timers (~4–5 wl spawns/tick per pane) | **Tab-focus gating**: skip timer ticks when the pane's tab is hidden (`HERDR_TAB_ID` → `herdr tab get` → `result.tab.focused === false`); fail-open otherwise. **Typing gating** (WL-0MTV67MZU003H7SH): skip the same ticks while any text-input overlay is open so background re-render cannot drop keypresses. |
 
 ## Behavior summary
 
@@ -109,7 +109,7 @@ while any text-input overlay is open.
 
 - **Shared predicate, enforced on every background path** —
   `isInputActive(formState, shipItDialog, blockedNoticeActive)` in
-  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null
+  `worklist.state.ts` returns `true` when `formState !== null || shipItDialog !== null
   || blockedNoticeActive`. It is defined once and exported for unit testing.
   The scheduler checks it at the top of both the `refresh` (30s) and `sync`
   (60s) task callbacks, alongside the existing `paneGate.visible()` check. The
@@ -158,7 +158,8 @@ while any text-input overlay is open.
   the worklist while a modal is open, so gating it would only delay
   low-urgency background work with no keypress-loss benefit. The audit
   decision is recorded in a code comment next to the task registration in
-  `worklist.ts`.
+  `worklist.ts`, and the gate it consults (`isInputActive`) lives in
+  `worklist.state.ts`.
 - **No settings toggle** — the typing gate is always on. Manual actions are
   never gated.
 

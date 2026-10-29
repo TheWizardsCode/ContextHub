@@ -55,6 +55,11 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
  *   `dist/` there in future is a reviewed decision, not a silent slip.
  * - `cli-inproc.ts` strips the CLI entry token from command strings for the
  *   in-process runner; it never spawns a subprocess.
+ * - `missing-shared-dist.test.ts` must exercise the **multi-file** build
+ *   layout (a bundle inlines the shared import, which the preflight cannot
+ *   guard). It copies the built `dist/` tree into a temporary install and
+ *   transpiles the current `src/cli.ts` over it, so a stale on-disk build can
+ *   never mask the behaviour under test (WL-0MVPADZ1Z000FOSG).
  * - `no-stale-dist-spawn.test.ts` is this scanner — its own patterns and
  *   allowlist necessarily contain the tokens it looks for.
  */
@@ -79,6 +84,10 @@ const ALLOWLIST = new Map<string, string>([
   [
     path.join('tests', 'unit', 'no-stale-dist-spawn.test.ts'),
     'this scanner',
+  ],
+  [
+    path.join('tests', 'cli', 'missing-shared-dist.test.ts'),
+    'exercises the multi-file dist build layout from a temp copy, with current src/cli.ts transpiled over it',
   ],
 ]);
 

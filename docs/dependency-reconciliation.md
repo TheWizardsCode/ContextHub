@@ -8,21 +8,30 @@ When a work item's status or stage changes, the database layer automatically rec
 
 ## Key Functions
 
-All reconciliation logic lives in `packages/shared/src/database.ts`:
+The reconciliation logic lives in
+`packages/shared/src/database/dependencies.ts` (extracted from
+`packages/shared/src/database.ts` by WL-0MVOBP6K0007574C; the `WorklogDatabase`
+members of the same name are thin delegates to these functions):
 
-| Function | Line | Purpose |
-|---|---|---|
-| `reconcileDependentsForTarget(targetId)` | ~2587 | Entry point: finds all dependents of `targetId` and reconciles each one |
-| `reconcileDependentStatus(dependentId)` | ~2544 | Determines whether a dependent should be blocked or unblocked |
-| `reconcileBlockedStatus(itemId)` | ~2522 | Sets or clears `blocked` status based on active blockers |
-| `isDependencyActive(item)` | ~2455 | Returns `true` if an item is an active blocker (not completed, not deleted, not in `in_review` or `done` stage) |
-| `hasActiveBlockers(itemId)` | ~2511 | Returns `true` if any inbound dependency edges point to active items |
-| `getInboundDependents(targetId)` | ~2499 | Returns IDs of items that depend on `targetId` |
-| `listDependencyEdgesTo(targetId)` | ~2451 | Returns all dependency edges where `targetId` is the prerequisite |
+| Function | Purpose |
+|---|---|
+| `reconcileDependentsForTarget(targetId)` | Entry point: finds all dependents of `targetId` and reconciles each one |
+| `reconcileDependentStatus(dependentId)` | Determines whether a dependent should be blocked or unblocked |
+| `reconcileBlockedStatus(itemId)` | Sets or clears `blocked` status based on active blockers |
+| `isDependencyActive(item)` | Returns `true` if an item is an active blocker (not completed, not deleted, not in `in_review` or `done` stage) |
+| `hasActiveBlockers(itemId)` | Returns `true` if any inbound dependency edges point to active items |
+| `getInboundDependents(targetId)` | Returns IDs of items that depend on `targetId` |
+| `listDependencyEdgesTo(targetId)` | Returns all dependency edges where `targetId` is the prerequisite |
+
+Dependency-edge CRUD (`addDependencyEdge`, `removeDependencyEdge`,
+`listDependencyEdgesFrom`, `listDependencyEdgesTo`, `getAllDependencyEdges`)
+lives in the same module. `EdgeCache` construction stays in
+`packages/shared/src/database/context.ts` (`buildEdgeCache`); this module only
+reads its `outbound` slice.
 
 ## How It Works
 
-1. **Trigger**: `db.update()` (line ~1076) and `db.deleteSingle()` (line ~1143) check whether the status or stage changed. If so, they call `reconcileDependentStatus(id)` to reconcile the item itself, then `reconcileDependentsForTarget(itemId)` to reconcile the item's dependents.
+1. **Trigger**: `db.update()` and `db.deleteSingle()` check whether the status or stage changed. If so, they call `reconcileDependentStatus(id)` to reconcile the item itself, then `reconcileDependentsForTarget(itemId)` to reconcile the item's dependents.
 
 2. **Self-reconciliation**: `reconcileDependentStatus(id)` checks if the item itself should be blocked or unblocked based on its own dependency edges. For example, when a completed item is reopened and its prerequisite is still active, it gets re-blocked.
 

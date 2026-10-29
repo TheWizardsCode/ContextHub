@@ -454,3 +454,43 @@ describe('startup-ramp survival (AC4)', () => {
     }
   });
 });
+
+// ── Local-admission refusal (429) retry hint (WL-0MVSBF5XZ001H7V7) ──
+
+/** The llm-proxy retryable local-admission refusal as it reaches the retry loop. */
+const LOCAL_ADMISSION_REFUSAL_429 =
+  '429: {"error": "Local admission refused", "code": "local_admission_reject", ' +
+  '"reason": "eta_exceeds_budget", "eta_prefill_seconds": 11.2, "budget_seconds": 60.0, ' +
+  '"projected_wait_seconds": 74.4, "retryable": true, "retry_after": 15, ' +
+  '"retry_at": "2026-10-28T15:45:39Z"}';
+
+describe('local-admission refusal retry hint', () => {
+  it('parses the refusal retry_after body field', () => {
+    expect(parseServerRetryDelayMs(LOCAL_ADMISSION_REFUSAL_429)).toBe(15000);
+  });
+
+  it('resolveRetryDelay honours the refusal hint as the retry delay', () => {
+    const result = resolveRetryDelay(
+      1,
+      LOCAL_ADMISSION_REFUSAL_429,
+      DEFAULT_BACKOFF_CONFIG,
+      () => 0,
+      undefined,
+      1_000_000,
+    );
+    expect(result.serverHintMs).toBe(15000);
+    expect(result.hintSource).toBe('message');
+    expect(result.delayMs).toBe(15000);
+  });
+
+  it('a non-retryable refusal body is not mistaken for a wait hint', () => {
+    // `retryable: false` carries no Retry-After on the wire; even if a stray
+    // hint text were present the classifier keeps it terminal — here we pin
+    // that the plain body yields no hint to sleep on.
+    const budget =
+      '429: {"error": "Local admission refused", "code": "local_admission_reject", ' +
+      '"reason": "prefill_budget_exceeded", "retryable": false, ' +
+      '"suggested_action": "compact the context and retry"}';
+    expect(parseServerRetryDelayMs(budget)).toBeUndefined();
+  });
+});

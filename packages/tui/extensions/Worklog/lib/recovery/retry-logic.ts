@@ -24,7 +24,7 @@ import {
   clearModelCooldown,
   type ModelCooldownKind,
 } from '@worklog/shared/model-cooldown';
-import { isExhaustionServerError, DEFAULT_RECOVERY_CONFIG, type RecoveryCooldownConfig } from './error-patterns.js';
+import { isExhaustionServerError, DEFAULT_RECOVERY_CONFIG, setCapturedLocalAdmissionRefusalBody, type RecoveryCooldownConfig } from './error-patterns.js';
 
 // ── Backoff configuration ─────────────────────────────────────────────
 
@@ -248,6 +248,69 @@ export function parseRetryAfterHeaders(
 }
 
 /**
+ * Upper bound on the number of response-body bytes inspected for a
+ * local-admission refusal's machine-readable polarity fields
+ * (WL-0MVTESPHB0021SI7). Refusal bodies are a few hundred bytes; the bound
+ * keeps a hostile or oversized error body from being buffered in memory.
+ */
+export const MAX_CAPTURED_REFUSAL_BODY_BYTES = 8192;
+
+/**
+ * Read at most `maxBytes` of a response body without consuming it.
+ *
+ * The response is cloned, so the caller's body stream is untouched — this is
+ * only ever used for non-2xx responses, never for streamed 2xx bodies. Any
+ * failure (no body, no `clone`, a read error) yields `undefined` rather than
+ * throwing: body capture must never turn a provider error into a crash.
+ */
+async function readBoundedBodyText(
+  response: Response,
+  maxBytes: number,
+): Promise<string | undefined> {
+  try {
+    if (!response.body || typeof response.clone !== 'function') return undefined;
+    const clone = response.clone();
+    const reader = clone.body?.getReader();
+    if (!reader) return undefined;
+
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    let truncated = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      const remaining = maxBytes - received;
+      if (value.byteLength > remaining) {
+        chunks.push(value.subarray(0, remaining));
+        received += remaining;
+        truncated = true;
+        break;
+      }
+      chunks.push(value);
+      received += value.byteLength;
+    }
+    if (truncated) {
+      // Stop pulling the rest of an oversized body. Deliberately not awaited:
+      // the clone is a `tee()` branch, and its cancel promise only settles
+      // once the caller's branch is cancelled too — awaiting it would stall
+      // the response the caller is waiting for. Only the clone is affected.
+      void reader.cancel().catch(() => undefined);
+    }
+
+    const merged = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(merged);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Wrap a `fetch` implementation so retryable provider responses report the
  * server-requested retry delay (`Retry-After` / `Retry-After-Ms` on 429/5xx)
  * to `onHint`. Successful (2xx) responses report `undefined` so a stale hint
@@ -256,6 +319,16 @@ export function parseRetryAfterHeaders(
  *
  * This is the transport-level source of the retry hint for providers that
  * throw before an extension event can observe the response headers.
+ *
+ * It is also the transport-level source of the local-admission refusal's
+ * **polarity** (WL-0MVTESPHB0021SI7): on a 429/5xx the (bounded) response body
+ * is captured into the classifier's refusal-body store, because the SDK
+ * renders the proxy's string-`error` refusal body as
+ * `429 "Local admission refused"` and drops `retryable` / `retry_after` from
+ * the assistant message. A body-derived `retry_after` also feeds `onHint`
+ * when the `Retry-After` header is absent. Every 2xx — and every non-2xx that
+ * cannot be a refusal — replaces the captured body, so a later unrelated
+ * error never inherits a previous refusal's polarity.
  *
  * @param originalFetch - The fetch implementation to delegate to
  * @param onHint - Called with the parsed delay in ms (or undefined to clear)
@@ -273,12 +346,25 @@ export function createRetryHintCapturingFetch(
     const response = await originalFetch(input, init);
     if (response && typeof response.status === 'number') {
       if (response.status === 429 || response.status >= 500) {
-        onHint(parseRetryAfterHeaders(response.headers));
+        const headerHint = parseRetryAfterHeaders(response.headers);
+        const body = await readBoundedBodyText(response, MAX_CAPTURED_REFUSAL_BODY_BYTES);
+        // An empty/whitespace-only body carries no signal: record `undefined`
+        // so a previous refusal cannot survive an empty response.
+        const captured = body !== undefined && body.trim().length > 0 ? body : undefined;
+        setCapturedLocalAdmissionRefusalBody(captured);
+        // The header hint wins when both are present; a body-only
+        // `retry_after` still schedules the advertised wait.
+        onHint(headerHint ?? parseServerRetryDelayMs(captured));
       } else if (response.status >= 200 && response.status < 300) {
+        setCapturedLocalAdmissionRefusalBody(undefined);
         onHint(undefined);
         // A 2xx is the success signal that clears the durable cooldown
         // (WL-0MV5638J1006URXA). A retryable 5xx without a hint must NOT.
         onSuccess?.();
+      } else {
+        // A non-2xx that cannot be a refusal: replace (clear) any captured
+        // body so a later error cannot inherit the previous polarity.
+        setCapturedLocalAdmissionRefusalBody(undefined);
       }
     }
     return response;

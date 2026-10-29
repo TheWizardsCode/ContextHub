@@ -391,7 +391,7 @@ in-process failure degrades to it). Ten concurrent reads at 145 MB each is a
 | Per-spawn peak RSS | measured per profile/target in `large-db-budget.json` (`peakRssPerSpawnMb`; full-scale: ≤ ~130–145 MB baseline) | F1 refresh ratchet (`large-db-refresh-budget.test.ts`) |
 | **Concurrent `wl` read spawns per pane** | **`DEFAULT_WL_SPAWN_CAP = 1`** (`fetcher.ts` semaphore, FIFO, microtask handover) | **fetcher production code** + spawn-burst ratchet (`large-db-spawn-cap.test.ts`) |
 | **Aggregate spawn-RSS bound** | **cap × worst-case cold per-spawn peak ≤ ~145–176 MB ≤ 300 MB ceiling** | spawn-burst policy (`evaluateSpawnCapReport`) |
-| Event-loop blocking with a spawn-heavy burst | ≤ ~200 ms (parent AC 1) | spawn-burst measured event-loop probe |
+| Event-loop blocking with a spawn-heavy burst | ≤ ~200 ms (parent AC 1) | spawn-burst measured event-loop probe (CPU-attributed on-CPU time) |
 
 The cap was **2** in F5 (`WL-0MVJV2PC2008PY64`); **F8
 (`WL-0MVKVJYV6008SL9G`) tightened it to 1** after F7's end-to-end verification
@@ -454,6 +454,21 @@ ceiling and independent of the cold per-spawn peak's run-to-run variation
 100 MB children), while the capped phase stays at 140 ms: bound the
 concurrency and you bound the input lag too.
 
+The event-loop column above is the probe's raw wall reading on a quiet
+reference host (where wall ≈ on-CPU). The ratchet gate itself uses the
+probe's **CPU-attributed** on-CPU time: at 1 ms resolution the probe also
+counts OS descheduling as "blocked", so on a shared machine (other agents'
+suites) a wall reading describes the host, not the plugin — the absolute
+≤ ~200 ms bound would then flake with nothing wrong in the code
+(WL-0MVMSE5LN003KCPQ). On-CPU time is load-independent (F1 gates regressions
+on CPU time for the same reason); the raw wall figure is still reported for
+diagnostics. The probe's CPU-attribution tests burn a fixed amount of
+**loop CPU** (not wall time) when fabricating a synchronous block: a
+wall-clock busy-wait is itself load-dependent, since a descheduled thread
+yields less CPU per wall second and the (correctly) CPU-attributed reading
+would then fall short of its threshold on a contended host — the flake fixed
+in WL-0MVS5CZFT001GHK9.
+
 ### AC coverage
 
 - AC1 (per-spawn or aggregate budget confirmed): the aggregate budget is the
@@ -469,7 +484,9 @@ concurrency and you bound the input lag too.
   tick never calls the fetch path).
 - AC5 (spawns off the event loop; queued reads never block input): the queue
   is promise-based with microtask handover; the spawn-burst measured phase
-  asserts total event-loop blocking ≤ 200 ms. F3's sync isolation is
+  asserts on-CPU event-loop blocking ≤ 200 ms (host descheduling on a shared
+  machine is excluded from the gate — raw wall delay is reported, not
+  gated, WL-0MVMSE5LN003KCPQ). F3's sync isolation is
   unaffected (`wl sync` is not in the capped command set).
 - AC6 (no new heavy dependency): the cap is a promise FIFO — no library,
   no new import in the Pane graph, and reads keep preferring the in-process
@@ -535,20 +552,32 @@ pane-side isolation only.
   counter, settling clears the notice, auto-sync disabled shows nothing, and a
   sync already in flight when the pane starts is adopted.
 - `auto-sync-isolation.test.ts` — `runSyncInFlightScenario` at the default
-  profile with the operator-observed ~36 s figure: spawn blocks the event loop
-  ≤ 200 ms (measured ~0), the notice shows "syncing…" for every with-sync
-  refresh, every refresh ends with ≥ half the sync duration still remaining
-  (no wait gap), refresh wall/event-loop stay inside the documented F1
-  headroom of their own no-sync baseline, the refresh path still issues
+  profile with the operator-observed ~36 s figure: the spawn blocks the event
+  loop ≤ 200 ms when the host was measured quiet (~0 ms), the notice shows
+  "syncing…" for every with-sync refresh, every refresh ends with ≥ half the
+  sync duration still remaining (no wait gap), refresh wall stays inside the
+  documented F1 headroom of its own no-sync baseline and event-loop blocking
+  stays inside the baseline's **rate** headroom, the refresh path still issues
   exactly one consolidated `wl worklist` spawn (the sync adds none), and the
   hook settles to `synced`. `runSyncLockContentionScenario` asserts the same
-  relative budget while the file lock and a real write transaction are held.
+  wall/rate budget while the file lock and a real write transaction are held.
 
 Like F1, the absolute AC numbers (refresh ≤ 1.5 s wall p95, ≤ 200 ms event-loop
 blocking at full scale) stay gated behind `acTargets.enforced` (flipped once F7
-records a compliant full-scale baseline); F3's tests prove **non-interference**
-(the no-wait-gap invariant, absolute) plus host-load-tolerant relative
-headroom, which is the actual F3 deliverable.
+records a compliant full-scale baseline) and are quoted from the quiet-host
+`--ac-report` AC3 verdict; F3's default-suite tests prove **non-interference**
+(the no-wait-gap invariant, absolute) plus host-tolerant relative headroom,
+which is the actual F3 deliverable.
+
+Both scenarios report the host conditions measured ACROSS their window
+(`hostConditions`): per-core load sampled before/during/after (max, not just a
+trailing post-run read), `/proc/stat` CPU utilisation for the window (via
+`src/host-cpu.ts`, falling back to the load signal off Linux), and an
+idle-loop canary quantifying the probe's ambient noise. The pure predicates
+`hostContendedForAbsoluteTiming()` (quiet-host gate for absolute assertions)
+and `eventLoopHeadroomOk()` (window-length-independent blocking-rate headroom)
+keep the decision deterministic and unit-tested. Rationale and the failure
+that motivated it: `WL-0MVMSE2S0006L56D`.
 
 ### `wl sync` persist phases
 
@@ -562,11 +591,19 @@ npx tsx packages/herdr/test/perf/wl-sync-phase-probe.ts --worklog-dir <dir>/.wor
 ```
 
 On the F1 full-scale fixture (2,600 items / 26,000 comments / 123.7 MB DB) the
-persist phases take ~97 % of the pipeline, and 78–90 % of that CPU is
-`upsertFtsEntry` — every item's FTS row is rebuilt even when nothing changed,
-so a no-change sync pays the whole cost. The fix is a separate work item
-(`WL-0MVK3WRY9009KV6P`, blocked by F2) per the epic's scope guardrail; the
-probe is the before/after measurement tool for it.
+persist phases took ~97 % of the pipeline, and 78–90 % of that CPU was
+`upsertFtsEntry` — every item's FTS row was rebuilt even when nothing changed,
+so a no-change sync paid the whole cost. That is **fixed** by the differential
+persist work (`WL-0MVK3WRY9009KV6P`: implementation in
+`WL-0MVK6S9TN00500UL`, write-detection regression tests in
+`WL-0MVK6S4HM005GBCO`, phase-timing observability in `WL-0MVK6SD5O001K901`):
+only records whose merged value differs are written, FTS upkeep is proportional
+to the changed ids, and a no-change sync performs zero record writes and zero
+FTS writes. The probe remains the re-runnable measurement tool; the
+before/after numbers (persist total **0.68 s vs 141.4 s** re-measured at the
+pre-fix commit, ~1.2 % of F2's 57.4 s quiet-host baseline, and **zero
+`upsertFtsEntry` self time** on the no-change profile) are recorded in
+[`docs/dev/sync-persist-performance.md`](./sync-persist-performance.md).
 
 ## F7 — end-to-end parent AC verification (WL-0MVJV2QHO003K6H3)
 
@@ -620,6 +657,20 @@ run, cached for the audit).
   loop blocking and 2.2 s write → reflect with no code change; the report
   records the host + load average so a reading can be judged. The regression
   ratchet remains CPU-time based (load independent), as documented above.
+- **Why the isolation tests use a blocking-RATE headroom.** The 1 ms
+  event-loop probe sums every delay beyond its 2 ms tolerance, so its total
+  grows with the measured window: on a host that stretches the refresh (a
+  loaded host makes the `tsx` CLI spawn slower) the absolute total inflates
+  with no product change. `WL-0MVMSE2S0006L56D` was exactly that — 402 ms in
+  a refresh against an absolute 200 ms assertion, at the same blocked ÷ wall
+  rate as its own baseline. The default-suite assertions therefore compare the
+  **rate** (`eventLoopHeadroomOk`: ≤ max(25 % of wall, 3 × baseline rate)) and
+  only gate ABSOLUTE numbers on a host measured quiet across the window. A
+  single trailing 1-min load read is not a sufficient quiet signal: on this
+  shared multi-agent host the load average read 0.69/core while `/proc/stat`
+  showed 73–100 % utilisation, so the harness samples load before/during/after
+  (max), CPU utilisation over the window, and an idle-loop canary
+  (`hostContendedForAbsoluteTiming`).
 - **AC5 route choice.** The per-spawn peak (145–176 MB cold, measured on
   `dist`) is not below the pre-change baseline, so AC5 is satisfied by the
   bounded fan-out route: F8 (`WL-0MVKVJYV6008SL9G`) tightened the read-spawn

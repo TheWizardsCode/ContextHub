@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "provenance": {
+    "generatedBy": "npx tsx packages/herdr/test/split-guard/index-family.ts --write-baseline",
+    "sourceCommit": "490d51d24e483bef4406f622bce7d355fd02a28a",
+    "generatedAt": "2026-10-26T04:32:29.709Z",
+    "barrel": "packages/herdr/src/index.ts",
+    "consumerGlobs": [
+      "src/**/*.ts",
+      "packages/herdr/src/**/*.ts",
+      "tests/**/*.ts",
+      "scripts/**/*.ts"
+    ]
+  },
+  "symbols": [
+    "CAPTURE_TIMEOUT_MS",
+    "buildBackgroundLogPath",
+    "buildRunInPaneArgs",
+    "buildSendToPiArgs",
+    "capturePaneIdFromFile",
+    "claimItemForAgentCommand",
+    "closeInteractiveTabRootPane",
+    "configureWorklogTarget",
+    "createDowntimeDeps",
+    "defaultInteractiveLiveTrackedPanesResolver",
+    "defaultStalledPaneRootResolver",
+    "defaultStalledPanesLister",
+    "extractWorkItemId",
+    "formatBackgroundFailure",
+    "parsePaneIdFile",
+    "resolveInteractiveDispatchPriority",
+    "resolveInteractiveItemAnchor",
+    "resolveInteractiveWorkspaceId",
+    "routeCommand",
+    "setHostCpuSamplerForTests",
+    "spawnBackgroundPi",
+    "spawnBackgroundShell",
+    "stripAgentPromptPrefix",
+    "stripCommandPrefix",
+    "uninitializedReport",
+    "worklogRootFromPiSessionPath"
+  ],
+  "cycles": [
+    [
+      "packages/herdr/src/agent-tracker.ts",
+      "packages/herdr/src/code-freeze.ts",
+      "packages/herdr/src/dispatch-view.ts",
+      "packages/herdr/src/downtime-worker.ts",
+      "packages/herdr/src/fetcher.ts",
+      "packages/herdr/src/hydrator.ts",
+      "packages/herdr/src/long-running-panes.ts",
+      "packages/herdr/src/md-note-edit.ts",
+      "packages/herdr/src/settings.ts",
+      "packages/herdr/src/ship-guard.ts",
+      "packages/herdr/src/smart-selection.ts",
+      "packages/herdr/src/stalled-work.ts",
+      "packages/herdr/src/visibility.ts",
+      "packages/herdr/src/worklist.ts"
+    ]
+  ],
+  "typeOnlyEdges": [
+    {
+      "from": "packages/herdr/src/downtime-worker.ts",
+      "to": "packages/herdr/src/stalled-work.ts"
+    }
+  ]
+}

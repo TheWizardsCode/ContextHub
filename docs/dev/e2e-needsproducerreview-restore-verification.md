@@ -61,7 +61,9 @@
 
 ## 6. Full project suite passes (`/skill:test` gate)
 
-- Canonical gate (`run_tests.py` full scope → `tests/cli` + `tests/unit`)
+- Canonical gate (`run_tests.py` full scope → `tests/cli` + `tests/unit` at the
+  time of this run; since WL-0MVG4FF9200346NR the canonical gate is the single
+  `npm --silent test -- tests` umbrella)
   green after F8: suite success true. herdr suite (108 files, 3518 tests)
   green; shared restored corpus green.
 

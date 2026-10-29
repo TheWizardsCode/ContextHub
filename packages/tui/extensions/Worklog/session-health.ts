@@ -20,7 +20,7 @@ import type {
 import { detectWorkItemId } from './activity-indicator.js';
 import { truncateToTerminalWidth, truncateWorkItemId, visibleWidth } from './terminal-utils.js';
 import { getResolvedModel, getSelectedModel, onModelChange } from './model-display.js';
-import { runWl } from '../wl-integration.js';
+import { resolveWorkItemTitle } from './lib/work-item-title.js';
 
 // ── Status constants ──────────────────────────────────────────────────────
 
@@ -508,15 +508,16 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
         if (!state.initialPrompt) {
           state.initialPrompt = extractInitialPrompt(entries);
 
-          // Fire-and-forget: resolve any work item ID to its title
-          // so the footer shows "WL-123 Title" instead of just "WL-123"
+          // Fire-and-forget: resolve any work item ID to its title via the
+          // shared resolver (cross-project aware, WL-0MVGB23MM004X501 AC3)
+          // so the footer shows "WL-123 Title" instead of just "WL-123".
           if (state.initialPrompt) {
             const wlId = detectWorkItemId(state.initialPrompt);
             if (wlId) {
-              runWl('show', [wlId], { timeout: 2000 })
-                .then(result => {
-                  if (result?.title && state.initialPrompt) {
-                    const enriched = `${wlId} ${result.title}`;
+              resolveWorkItemTitle(wlId)
+                .then(title => {
+                  if (title && state.initialPrompt) {
+                    const enriched = `${wlId} ${title}`;
                     state.initialPrompt = state.initialPrompt.replace(
                       wlId,
                       enriched,

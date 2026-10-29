@@ -13,8 +13,8 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
-import { STAGES } from './worklist.js';
-import type { Stage } from './worklist.js';
+import { STAGES } from './worklist.constants.js';
+import type { Stage } from './worklist.constants.js';
 import type { AgentState } from './agent-tracker.js';
 import { isActiveBlocker } from './hydrator.js';
 import { parseDepListBlockersOutput } from './downtime-worker.js';
@@ -1177,12 +1177,183 @@ function pendingWorklistBundle(): Promise<WorklistBundle> | null {
   return inflight.promise;
 }
 
+// ── Critical-child root-ancestor substitution (WL-0MVN4WESM007T4XI) ────
+//
+// The top level may only contain ROOT items (`selectWorkItems` drops every
+// item with a `parentId`), so without a substitution step a critical child
+// would silently disappear from the default worklist while the ship
+// critical-items gate keeps blocking a release on it. Substitution keeps that
+// work reachable without rendering the child twice: the child stays hidden at
+// the top level, its ROOT ancestor is shown in its place.
+
+/** Maximum `parentId` hops walked when resolving a critical child's root. */
+const MAX_ANCESTOR_HOPS = 32;
+
+/** Result of the display-layer critical-child substitution. */
+interface RootSubstitution {
+  /**
+   * The mandatory set to merge: the input list minus critical children, plus
+   * every resolved root ancestor (always shown, whatever `browseItemCount`).
+   */
+  mandatory: WorkItem[];
+  /** The substituted roots, used to keep them past the browse window. */
+  roots: WorkItem[];
+}
+
 /**
- * Assemble the default worklist from a consolidated bundle, applying the same
- * merge/enrich/select/regroup pipeline as the per-subset path:
+ * Partition the critical items of a mandatory list into root criticals (kept)
+ * and critical children (dropped from the top level). `done` children are
+ * skipped: `selectWorkItems` already excludes them, so resolving their
+ * ancestors would only cost lookups.
+ */
+function partitionCriticalItems(mandatory: WorkItem[]): {
+  kept: WorkItem[];
+  children: WorkItem[];
+} {
+  const kept: WorkItem[] = [];
+  const children: WorkItem[] = [];
+  for (const item of mandatory) {
+    if (item.priority === 'critical' && item.parentId) {
+      if (item.stage !== 'done') children.push(item);
+      continue;
+    }
+    kept.push(item);
+  }
+  return { kept, children };
+}
+
+/**
+ * Walk `parentId` upward to the top-most non-child item (the ROOT ancestor).
+ *
+ * Returns `null` when any link cannot be resolved (fail-open) or the chain is
+ * cyclic / deeper than {@link MAX_ANCESTOR_HOPS} (corrupt data must never hang
+ * a refresh). The lookup is injected so the caller controls resolution order
+ * (merged candidate set → in-process memo → `wl show`).
+ */
+async function walkToRootAncestor(
+  parentId: string,
+  lookup: (id: string) => WorkItem | null | Promise<WorkItem | null>,
+): Promise<WorkItem | null> {
+  const seen = new Set<string>();
+  let currentId: string | undefined = parentId;
+  while (currentId && !seen.has(currentId) && seen.size < MAX_ANCESTOR_HOPS) {
+    seen.add(currentId);
+    const parent = await lookup(currentId);
+    if (!parent) return null;
+    if (!parent.parentId) return parent;
+    currentId = parent.parentId;
+  }
+  return null;
+}
+
+/**
+ * Display-layer substitution of critical children by their ROOT ancestors
+ * (WL-0MVN4WESM007T4XI, WL-0MVSSANRK000V00S):
+ *
+ *  - the critical subset is partitioned into root criticals (kept) and
+ *    critical children (dropped from the top level);
+ *  - for each still-actionable critical child the root ancestor is resolved by
+ *    walking `parentId` upward to the top-most non-child item;
+ *  - every resolved root not already in the mandatory set joins it, so the
+ *    root is always shown and never cut by `browseItemCount`.
+ *
+ * Resolution order: the merged candidate set (free), then the in-process
+ * SQLite fast path (`withInProcessDb` → `db.get`, ONE connection for all
+ * chains), then `wl show` as the fail-open fallback. Every lookup is memoised
+ * per refresh (hits AND misses), so sibling critical children sharing a
+ * root/chain cost ONE lookup — no new hot-path spawn when the in-process read
+ * succeeds (WL-0MVI0IT4S0070G78 / WL-0MV5CBQ6L005SPAG).
+ *
+ * Display-layer only: nothing is written back, and the substituted root keeps
+ * its own `priority`/`status`/`stage` and group — no badge, marker or
+ * indicator is attached. Fail-open: an unresolvable parent (missing/deleted)
+ * means the child is simply not shown; the refresh never crashes and never
+ * falls back to rendering the child at the top level.
+ */
+async function substituteCriticalRoots(
+  mandatory: WorkItem[],
+  candidates: WorkItem[],
+): Promise<RootSubstitution> {
+  const { kept, children } = partitionCriticalItems(mandatory);
+  if (children.length === 0) return { mandatory: kept, roots: [] };
+
+  const knownById = new Map<string, WorkItem>();
+  for (const item of [...candidates, ...kept]) {
+    if (!knownById.has(item.id)) knownById.set(item.id, item);
+  }
+
+  // Per-refresh memo: parent id → item, or null when it does not exist. Both
+  // hits and misses are kept so a shared chain is never looked up twice.
+  const memo = new Map<string, WorkItem | null>();
+
+  // In-process SQLite fast path: ONE connection pre-resolves every ancestor
+  // reachable from an actionable critical child. Skipped entirely when each
+  // child's parent is already in the merged candidate set (nothing to read).
+  if (children.some((child) => !child.parentId || !knownById.has(child.parentId))) {
+    await withInProcessDb((db) => {
+      for (const child of children) {
+        let currentId = child.parentId;
+        while (currentId && !knownById.has(currentId) && !memo.has(currentId)) {
+          const raw = db.get(currentId);
+          if (!raw) break;
+          const parent = normalizeItem(raw);
+          memo.set(currentId, parent);
+          currentId = parent.parentId;
+        }
+      }
+      return null;
+    });
+  }
+
+  const lookup = async (id: string): Promise<WorkItem | null> => {
+    const known = knownById.get(id);
+    if (known) return known;
+    if (memo.has(id)) return memo.get(id) ?? null;
+    // Fail-open fallback: `fetchItemDetails` runs `wl show` and resolves null
+    // on any failure, memoised so sibling children never repeat the spawn.
+    const item = await fetchItemDetails(id);
+    memo.set(id, item);
+    return item;
+  };
+
+  const roots: WorkItem[] = [];
+  const rootIds = new Set<string>();
+  const mandatoryIds = new Set(kept.map((item) => item.id));
+  for (const child of children) {
+    const parentId = child.parentId;
+    if (!parentId) continue;
+    const root = await walkToRootAncestor(parentId, lookup);
+    if (!root) continue; // Fail-open: the child is not shown at top level.
+    if (mandatoryIds.has(root.id) || rootIds.has(root.id)) continue;
+    rootIds.add(root.id);
+    roots.push(root);
+  }
+  return { mandatory: [...kept, ...roots], roots };
+}
+
+/**
+ * Guarantee every substituted root is rendered even when the browse window
+ * (`browseItemCount`) would otherwise cut it. Roots join the mandatory set
+ * BEFORE selection; this final pass only restores a root the "other" slice
+ * dropped, never duplicating a root that was already selected (the caller
+ * regroups afterwards, so ordering is unaffected).
+ */
+function ensureSubstitutedRoots(selected: WorkItem[], roots: WorkItem[]): WorkItem[] {
+  if (roots.length === 0) return selected;
+  const selectedIds = new Set(selected.map((item) => item.id));
+  const missing = roots.filter((root) => !selectedIds.has(root.id));
+  return missing.length === 0 ? selected : [...selected, ...missing];
+}
+
+/**
+ * Shared tail of BOTH default-view fetch paths (the consolidated bundle and
+ * the per-subset fallback): apply the critical-child root substitution to the
+ * mandatory subsets, merge with the browse feed, then select and regroup.
  *
  *  - mandatory subsets (critical, review queue, in-progress roots, blocked
- *    roots) are always included, whatever the browse window;
+ *    roots) are always included, whatever the browse window; a critical child
+ *    is represented by its substituted root ancestor instead
+ *    (WL-0MVN4WESM007T4XI);
  *  - items shared with a mandatory subset take the richer `wl list`-style
  *    audit fields (`auditResult`, `auditedAt`, `fingerprint`,
  *    `currentFingerprint`) so the audit-bucket sort classifies them exactly as
@@ -1190,7 +1361,49 @@ function pendingWorklistBundle(): Promise<WorklistBundle> | null {
  *  - the count limits only the remaining "other" items, and the final set is
  *    regrouped so no duplicate section headings render (WL-0MSAK8YLB0025EGW).
  */
-function assembleDefaultWorklist(bundle: WorklistBundle, count?: number): WorkItem[] {
+async function mergeMandatoryAndSelect(
+  items: WorkItem[],
+  mandatory: WorkItem[],
+  count: number,
+): Promise<WorkItem[]> {
+  const candidates = mergeUniqueById(items, mandatory);
+  const substituted = await substituteCriticalRoots(mandatory, candidates);
+  // Audit-metadata merge (WL-0MUWDW0N6003KF6G): `wl next` does not emit the
+  // audit content fingerprints (`fingerprint`/`currentFingerprint`) that
+  // `wl list` does. Deduplication below keeps the FIRST occurrence, so without
+  // this enrichment the default worklist would silently drop the fingerprint
+  // metadata for any item also present in a mandatory `wl list` subset — the
+  // in_review 6-bucket sort then degrades to the timestamp gate only, which
+  // can rank a fingerprint-fresh (but time-stale) item into the wrong bucket
+  // and reorder it ahead of a higher-priority item. Prefer the richer
+  // `wl list` representation for audit fields so the default worklist and the
+  // stage-filtered view (`fetchItemsByStage`) classify buckets identically.
+  const mandatoryById = new Map(substituted.mandatory.map((item) => [item.id, item]));
+  const enrichedItems = items.map((item) => {
+    const rich = mandatoryById.get(item.id);
+    if (!rich) return item;
+    return {
+      ...item,
+      auditResult: rich.auditResult,
+      auditedAt: rich.auditedAt,
+      fingerprint: rich.fingerprint,
+      currentFingerprint: rich.currentFingerprint,
+    };
+  });
+  const merged = mergeUniqueById(enrichedItems, substituted.mandatory);
+  const selected = selectWorkItems(merged, count);
+  return regroupWorkItems(ensureSubstitutedRoots(selected, substituted.roots));
+}
+
+/**
+ * Assemble the default worklist from a consolidated bundle, applying the same
+ * merge/enrich/substitute/select/regroup pipeline as the per-subset path (see
+ * {@link mergeMandatoryAndSelect}).
+ */
+async function assembleDefaultWorklist(
+  bundle: WorklistBundle,
+  count?: number,
+): Promise<WorkItem[]> {
   const items = bundle.browse;
   if (count === undefined) {
     // Count-less callers get the base feed unchanged (historical behaviour).
@@ -1203,20 +1416,7 @@ function assembleDefaultWorklist(bundle: WorklistBundle, count?: number): WorkIt
     bundle.inProgressRoots,
     bundle.blockedRoots,
   );
-  const mandatoryById = new Map(mandatory.map((item) => [item.id, item]));
-  const enrichedItems = items.map((item) => {
-    const rich = mandatoryById.get(item.id);
-    if (!rich) return item;
-    return {
-      ...item,
-      auditResult: rich.auditResult,
-      auditedAt: rich.auditedAt,
-      fingerprint: rich.fingerprint,
-      currentFingerprint: rich.currentFingerprint,
-    };
-  });
-  const merged = mergeUniqueById(enrichedItems, mandatory);
-  return regroupWorkItems(selectWorkItems(merged, count));
+  return mergeMandatoryAndSelect(items, mandatory, count);
 }
 
 /**
@@ -1278,10 +1478,14 @@ function reviewQueueArgs(): string[] {
  */
 async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   // Critical items: fetch ALL critical items across all statuses (open,
-  // in-progress, blocked, completed) regardless of root/child status. This
-  // ensures child critical items that block releases (e.g., untriaged
-  // test-failures) are always visible in the worklist — they are not filtered
-  // out by the rootOnly gate in selectWorkItems (WL-0MS964SIA0057ABR).
+  // in-progress, blocked, completed) at EVERY parent level (no --root-only).
+  // This ensures child critical items that block releases (e.g. untriaged
+  // test-failures) are discovered by the refresh: the display layer never
+  // renders a child at the top level (the rootOnly gate in selectWorkItems,
+  // WL-0MS964SIA0057ABR / WL-0MVSSAKAU001RC2Z) and instead substitutes the
+  // child's ROOT ancestor into the mandatory set (substituteCriticalRoots,
+  // WL-0MVN4WESM007T4XI) so the release-blocking work stays reachable.
+  // Making this query root-only would hide that discovery feed.
   //
   // We query all statuses because `wl list --priority critical` only returns
   // `open` and `completed` items by default, missing `in-progress` critical
@@ -1337,7 +1541,10 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
  * WL-0MV6KV22S004NYIU / WL-0MV71WBHB007D8ZE) and the count limits only the
  * remaining "other" items. The mandatory subsets are merged from explicit
  * `wl list` queries (see fetchMandatorySubsets), so a blocked item that ranks
- * below the `-n` window is still shown.
+ * below the `-n` window is still shown. A critical CHILD is never rendered at
+ * the top level; its root ancestor is substituted into the mandatory set
+ * instead (both fetch paths share {@link mergeMandatoryAndSelect},
+ * WL-0MVN4WESM007T4XI).
  */
 export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // ── Consolidated read (WL-0MVI0IT4S0070G78) ───────────────────────
@@ -1348,7 +1555,7 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   try {
     // A count-less call must mirror `wl next`'s default window (1 item).
     const bundle = await fetchWorklistBundle(count === undefined ? 1 : count);
-    return assembleDefaultWorklist(bundle, count);
+    return await assembleDefaultWorklist(bundle, count);
   } catch (error) {
     // A hung `wl` is not "unavailable": propagating the timeout keeps the
     // refresh latency bounded instead of paying the timeout again per subset.
@@ -1393,34 +1600,10 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // results (deduplicated by ID), then always show the mandatory set and
   // limit only the "other" items to fill the remaining count slots.
   //
-  // Audit-metadata merge (WL-0MUWDW0N6003KF6G): `wl next` does not emit the
-  // audit content fingerprints (`fingerprint`/`currentFingerprint`) that
-  // `wl list` does. Deduplication below keeps the FIRST occurrence, so without
-  // this enrichment the default worklist would silently drop the fingerprint
-  // metadata for any item also present in a mandatory `wl list` subset — the
-  // in_review 6-bucket sort then degrades to the timestamp gate only, which
-  // can rank a fingerprint-fresh (but time-stale) item into the wrong bucket
-  // and reorder it ahead of a higher-priority item. Prefer the richer
-  // `wl list` representation for audit fields so the default worklist and the
-  // stage-filtered view (`fetchItemsByStage`) classify buckets identically.
-  const mandatoryById = new Map(mandatory.map((item) => [item.id, item]));
-  const enrichedItems = items.map((item) => {
-    const rich = mandatoryById.get(item.id);
-    if (!rich) return item;
-    return {
-      ...item,
-      auditResult: rich.auditResult,
-      auditedAt: rich.auditedAt,
-      fingerprint: rich.fingerprint,
-      currentFingerprint: rich.currentFingerprint,
-    };
-  });
-  const merged = mergeUniqueById(enrichedItems, mandatory);
-  const selected = selectWorkItems(merged, count);
-  // Regroup the final selected set so every displayed item (mandatory wl
-  // list items included) receives a correct group assignment and no
-  // duplicate section headings render (WL-0MSAK8YLB0025EGW).
-  return regroupWorkItems(selected);
+  // Identical tail to the consolidated bundle path (the SAME critical-child
+  // root substitution, audit-metadata merge and regroup) via
+  // {@link mergeMandatoryAndSelect} (WL-0MVN4WESM007T4XI).
+  return mergeMandatoryAndSelect(items, mandatory, count);
 }
 
 /**

@@ -1,5 +1,5 @@
 import { WorkItem } from '../types.js';
-import type { MergeOptions } from '../sync.js';
+import type { MergeOptions } from './types.js';
 
 /**
  * Check if a value appears to be a default/empty value

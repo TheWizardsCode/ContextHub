@@ -13,6 +13,8 @@ import {
   isRateLimit,
   isServerError,
   isExhaustionServerError,
+  isLocalAdmissionRefusal,
+  isRetryableLocalAdmissionRefusal,
   isAuthError,
   isContextLengthExceeded,
   isQuotaExhausted,
@@ -166,6 +168,110 @@ describe('isExhaustionServerError', () => {
   it('does not treat a timeout or a normal message as exhaustion', () => {
     expect(isExhaustionServerError(makeErrorMsg('Request timed out'))).toBe(false);
     expect(isExhaustionServerError(makeErrorMsg('', 'stop'))).toBe(false);
+  });
+});
+
+// ── Local-admission refusal (proxy capacity backpressure) ────────────
+//
+// The llm-proxy admission guard answers HTTP 429 with a machine-readable
+// body. A time-healable refusal (`retryable: true` + `Retry-After`) must be
+// retried, not abandoned as a rate limit; a refusal waiting cannot heal
+// (`retryable: false`, compaction required) must stay terminal
+// (WL-0MVSBF5XZ001H7V7).
+
+/** The exact llm-proxy refusal body as it reaches the extension. */
+const LOCAL_ADMISSION_REFUSAL_429 =
+  '429: {"error": "Local admission refused", "code": "local_admission_reject", ' +
+  '"reason": "eta_exceeds_budget", "eta_prefill_seconds": 11.2, "budget_seconds": 60.0, ' +
+  '"projected_wait_seconds": 74.4, "retryable": true, "retry_after": 15, ' +
+  '"retry_at": "2026-10-28T15:45:39Z"}';
+
+/** The same refusal as an SDK-folded, escaped-JSON message. */
+const LOCAL_ADMISSION_REFUSAL_ESCAPED =
+  '429: {\\"error\\": \\"Local admission refused\\", \\"code\\": \\"local_admission_reject\\", ' +
+  '\\"retryable\\": true, \\"retry_after\\": 15}';
+/** A refusal that waiting cannot heal: the prompt exceeds the admission budget. */
+const LOCAL_ADMISSION_REFUSAL_BUDGET =
+  '429: {"error": "Local admission refused", "code": "local_admission_reject", ' +
+  '"reason": "prefill_budget_exceeded", "retryable": false, ' +
+  '"suggested_action": "compact the context and retry"}';
+
+describe('isLocalAdmissionRefusal', () => {
+  it('detects the proxy refusal prose (code and message forms)', () => {
+    expect(isLocalAdmissionRefusal(makeErrorMsg(LOCAL_ADMISSION_REFUSAL_429))).toBe(true);
+    expect(isLocalAdmissionRefusal(makeErrorMsg('429: local_admission_reject'))).toBe(true);
+    expect(isLocalAdmissionRefusal(makeErrorMsg('Local admission refused'))).toBe(true);
+  });
+
+  it('does not treat a plain 429 rate limit as an admission refusal', () => {
+    expect(isLocalAdmissionRefusal(makeErrorMsg('429 Too Many Requests'))).toBe(false);
+    expect(isLocalAdmissionRefusal(makeErrorMsg('Rate limit exceeded'))).toBe(false);
+  });
+
+  it('is false for non-error messages', () => {
+    expect(isLocalAdmissionRefusal({ role: 'assistant', stopReason: 'stop' } as any)).toBe(false);
+  });
+});
+
+describe('isRetryableLocalAdmissionRefusal', () => {
+  it('is retryable when the body marks it retryable', () => {
+    expect(isRetryableLocalAdmissionRefusal(makeErrorMsg(LOCAL_ADMISSION_REFUSAL_429))).toBe(true);
+  });
+
+  it('is retryable from an escaped-JSON body', () => {
+    expect(isRetryableLocalAdmissionRefusal(makeErrorMsg(LOCAL_ADMISSION_REFUSAL_ESCAPED))).toBe(true);
+  });
+
+  it('is retryable when only a Retry-After hint is present', () => {
+    const hintOnly =
+      '429: {"error": "Local admission refused", "code": "local_admission_reject", "Retry-After": 15}';
+    expect(isRetryableLocalAdmissionRefusal(makeErrorMsg(hintOnly))).toBe(true);
+    expect(
+      isRetryableLocalAdmissionRefusal(
+        makeErrorMsg('429: local_admission_reject retry_after=15'),
+      ),
+    ).toBe(true);
+  });
+
+  it('is NOT retryable when the body says retryable:false, even with a hint', () => {
+    expect(isRetryableLocalAdmissionRefusal(makeErrorMsg(LOCAL_ADMISSION_REFUSAL_BUDGET))).toBe(false);
+    const contradictory =
+      '429: {"code": "local_admission_reject", "retryable": false, "retry_after": 15}';
+    expect(isRetryableLocalAdmissionRefusal(makeErrorMsg(contradictory))).toBe(false);
+  });
+
+  it('is NOT retryable when the refusal carries no retryable signal', () => {
+    expect(isRetryableLocalAdmissionRefusal(makeErrorMsg('429: Local admission refused'))).toBe(false);
+  });
+
+  it('is false for a plain 429 rate limit', () => {
+    expect(isRetryableLocalAdmissionRefusal(makeErrorMsg('429: retry_after 15'))).toBe(false);
+  });
+});
+
+describe('classifyError — local-admission refusal', () => {
+  it('classifies a retryable refusal as SERVER_ERROR, never RATE_LIMIT', () => {
+    const msg = makeErrorMsg(LOCAL_ADMISSION_REFUSAL_429);
+    expect(classifyError(msg)).toBe(ErrorCategory.SERVER_ERROR);
+    expect(classifyError(msg)).not.toBe(ErrorCategory.RATE_LIMIT);
+    // The generic 429 pattern still matches the text; the refusal check
+    // must win on ordering alone.
+    expect(isRateLimit(msg)).toBe(true);
+  });
+
+  it('classifies a non-retryable refusal as terminal (no backoff burn)', () => {
+    const msg = makeErrorMsg(LOCAL_ADMISSION_REFUSAL_BUDGET);
+    expect(classifyError(msg)).toBe(ErrorCategory.TERMINATED);
+    expect(classifyError(msg)).not.toBe(ErrorCategory.SERVER_ERROR);
+  });
+
+  it('leaves plain 429 rate limits terminal (regression guard)', () => {
+    expect(classifyError(makeErrorMsg('429 Too Many Requests'))).toBe(ErrorCategory.RATE_LIMIT);
+    expect(classifyError(makeErrorMsg('HTTP 429: rate limit exceeded'))).toBe(ErrorCategory.RATE_LIMIT);
+  });
+
+  it('does not classify the refusal as provider exhaustion (no cooldown marker)', () => {
+    expect(isExhaustionServerError(makeErrorMsg(LOCAL_ADMISSION_REFUSAL_429))).toBe(false);
   });
 });
 

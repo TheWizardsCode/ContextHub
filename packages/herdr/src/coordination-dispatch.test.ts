@@ -39,6 +39,8 @@ import {
 } from './downtime-worker.js';
 import { createLeaderElectionManager, LEASE_FILE } from './leader-election.js';
 import { writeDowntimeLog } from './downtime-worker.fixtures.js';
+import { readCoordinationLogEntries } from './downtime-log.js';
+import { defaultSettings } from './settings.js';
 import {
   writeCoordinationFile,
   readCoordinationFile,
@@ -86,6 +88,8 @@ function itemInfo(overrides: Partial<DowntimeItemInfo> & { id: string }): Downti
     updatedAt: overrides.updatedAt,
     sortIndex: overrides.sortIndex,
     needsProducerReview: overrides.needsProducerReview,
+    assignee: overrides.assignee,
+    deletedBy: overrides.deletedBy,
   };
 }
 
@@ -133,6 +137,8 @@ function headItem(overrides: Partial<DowntimeHerdrItem> & { id: string }): Downt
     updatedAt: overrides.updatedAt,
     sortIndex: overrides.sortIndex,
     needsProducerReview: overrides.needsProducerReview,
+    assignee: overrides.assignee,
+    deletedBy: overrides.deletedBy,
   };
 }
 
@@ -438,11 +444,14 @@ describe('dispatchFromCoordination', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('scheduled');
     // The prompt text is the dispatch payload — no work item wrap, pane
-    // named `Downtime <id>` (AC3 spawn path).
+    // named `Downtime <id>` (AC3 spawn path). Scheduled (background)
+    // dispatches default to `localPreference: 'remote-ok'`
+    // (WL-0MVLJTV03000KIQZ, C4-AC1).
     expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
       paneName: 'Downtime /skill:refactor',
+      localPreference: 'remote-ok',
     });
     // No pre-dispatch claim and NO coordination-tier work (AC3/AC4/AC6).
     expect(deps.claimItem).not.toHaveBeenCalled();
@@ -1031,6 +1040,346 @@ describe('runCoordinationCheckIn', () => {
   });
 });
 
+// ── Empty-offer attribution (WL-0MVR8FKMU009XTED AC1/AC5) ────────────
+//
+// Every emptied check-in records the machine-readable reason why nothing was
+// offered: `empty-window`, `all-window-items-held` (with the observed
+// scheduling-hold sentinels), `all-window-items-gated` (with the dominant
+// gate), and the dedicated hold tokens. The no-candidate result semantics (and
+// therefore the cooldown) are UNCHANGED — only the explanation is added.
+
+describe('runCoordinationCheckIn empty-offer attribution (WL-0MVR8FKMU009XTED)', () => {
+  /** Read the check-in entries written for this root (the writes are fire-and-forget). */
+  async function checkinEntries(root: string): Promise<Array<Record<string, unknown>>> {
+    const entries = await readCoordinationLogEntries(root);
+    return entries
+      .filter((entry) => entry.operation === 'checkin')
+      .map((entry) => entry as unknown as Record<string, unknown>);
+  }
+
+  it('AC5: a fully-held window yields all-window-items-held with the observed sentinel', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-held-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-H1', stage: 'idea', status: 'open', assignee: 'Map' }),
+            headItem({ id: 'WL-H2', stage: 'plan_complete', status: 'open', assignee: 'Map' }),
+          ],
+        }),
+      });
+      // Seed an own entry so the removal is observable.
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-H1', root)] });
+      const result = await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+      });
+      // The no-candidate semantics are unchanged: nothing is offered and the
+      // own entry is removed (the caller's cooldown decision is untouched).
+      expect(result.offered).toBe(null);
+      expect(result.updated).toBe(true);
+      expect(getEntry(testDir, 'inst-1')).toBe(null);
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied.length).toBeGreaterThan(0);
+        expect(emptied[emptied.length - 1]).toMatchObject({
+          reason: 'all-window-items-held',
+          windowSize: 2,
+          heldAssignees: ['Map'],
+          workItemId: null,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC5: a genuinely empty window still empties the entry and records empty-window', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-empty-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+      });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-A', root)] });
+      const result = await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+      });
+      expect(result.updated).toBe(true);
+      expect(getEntry(testDir, 'inst-1')).toBe(null);
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({
+          reason: 'empty-window',
+          windowSize: 0,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records all-window-items-gated with the gate that rejected the most items', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-gated-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-G1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'XL' }),
+            headItem({ id: 'WL-G2', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'XL' }),
+            headItem({ id: 'WL-G3', stage: 'idea', status: 'open', needsProducerReview: true }),
+          ],
+        }),
+      });
+      await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({
+          reason: 'all-window-items-gated',
+          windowSize: 3,
+          dominantGate: 'effort-cap',
+          gateCounts: { 'effort-cap': 2, 'producer-review': 1 },
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records the code-freeze token when every remaining offer is freeze-paused', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-freeze-'));
+    try {
+      const deps = makeCoordinationDeps({
+        readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [headItem({ id: 'WL-F1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' })],
+        }),
+      });
+      await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({
+          reason: 'code-freeze',
+          dominantGate: 'code-freeze',
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records the review-queue-hold token when the deep queue is the only reason', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-review-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getReviewQueueCount: vi.fn().mockResolvedValue(99),
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [headItem({ id: 'WL-R1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' })],
+        }),
+      });
+      await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+        browseItemCount: 2,
+      });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({ reason: 'review-queue-hold' });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records the attempt-budget-exhausted token when the budget is the only reason', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-budget-'));
+    try {
+      const attempts = Array.from({ length: 3 }, () => ({
+        kind: 'plan',
+        operation: 'dispatch',
+        itemId: 'WL-B1',
+        stage: 'intake_complete',
+        // Stale markers: the dispatched-marker exclusion only applies while
+        // the marker is FRESH, so an old timestamp leaves the attempt budget
+        // as the sole rejecting gate (the point of this pin).
+        dispatchedAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      }));
+      writeDowntimeLog(root, attempts as never);
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [headItem({ id: 'WL-B1', stage: 'intake_complete', status: 'open' })],
+        }),
+        markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+      });
+      await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+        maxAttempts: 3,
+      });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({ reason: 'attempt-budget-exhausted' });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records the in-flight-hold token when a live pane holds the only critical item', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-inflight-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({
+              id: 'WL-I1',
+              stage: 'plan_complete',
+              status: 'open',
+              priority: 'critical',
+              risk: 'Low',
+              effort: 'S',
+            }),
+          ],
+        }),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true,
+          count: 1,
+          paneIds: ['w1:p1'],
+          records: [
+            {
+              paneId: 'w1:p1',
+              label: 'Downtime triggered implement Crit WL-I1 - WL-I1',
+              agent: 'pi',
+              agentStatus: 'working',
+            },
+          ],
+        }),
+      });
+      await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({ reason: 'in-flight-hold' });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC1: a wl error keeps the entry and still records the wl-error reason', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-wlerror-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: false, error: 'wl exploded' }),
+      });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-KEPT', root)] });
+      const result = await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+      });
+      expect(result).toEqual({ offered: 'WL-KEPT', updated: false });
+      expect(getEntry(testDir, 'inst-1')?.workItemId).toBe('WL-KEPT');
+      await vi.waitFor(async () => {
+        const entries = await checkinEntries(root);
+        expect(entries[entries.length - 1]).toMatchObject({
+          reason: 'wl-error',
+          workItemId: 'WL-KEPT',
+          error: 'wl exploded',
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Leader per-offer rejection attribution (AC2) ───────────────────────
+//
+// Every coordination entry the leader rejects at dispatch time records its
+// work item, its worklog root and the gate that rejected it, so the terminal
+// reason can never collapse a starved offer list into a bare `no-candidate`.
+
+describe('dispatchFromCoordination per-offer rejection attribution (WL-0MVR8FKMU009XTED)', () => {
+  it('AC2: records every rejected offer with its root and gate; the reason is unchanged', async () => {
+    const entry = makeEntry('inst-held', 'WL-HELD', '/roots/held');
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'WL-HELD', status: 'open', stage: 'plan_complete', assignee: 'Map' }),
+      }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+    });
+    // Additive only: the terminal reason is exactly what it was before.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-HELD', worklogRoot: '/roots/held', gate: 'assignee-hold', assignee: 'Map' },
+    ]);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC3: an audit offer skipped by the slot budget is attributed as audit-slot-min', async () => {
+    const entry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+    // The offer must exist in the coordination file for the "entry kept"
+    // assertion below to mean anything.
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({
+          id: 'WL-AUD',
+          status: 'completed',
+          stage: 'in_review',
+          updatedAt: new Date().toISOString(),
+        }),
+      }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 1, // raw slot budget below DOWNTIME_AUDIT_MIN_FREE_SLOTS
+      effectiveFreeSlots: 1,
+    });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-AUD', worklogRoot: '/roots/audit', gate: 'audit-slot-min' },
+    ]);
+    // The offer is KEPT (still valid once a slot frees up).
+    expect(getEntry(testDir, 'inst-audit')).not.toBeNull();
+  });
+
+  it('AC2: a per-entry fetch failure is attributed as wl-error with its root', async () => {
+    const entry = makeEntry('inst-broken', 'WL-BROKEN', '/roots/broken');
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: false, error: 'wl timeout' }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+    });
+    expect(outcome.reason).toBe('wl-error');
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-BROKEN', worklogRoot: '/roots/broken', gate: 'wl-error' },
+    ]);
+  });
+});
+
 // ── Worker integration: leader vs non-leader (AC4) ────────────────────
 
 function makeStatusPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1166,6 +1515,53 @@ describe('downtime worker leader/non-leader orchestration (coordination mode)', 
     const a = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a' });
     await a.worker.tick();
     expect(a.worker.isLeader).toBe(true);
+  });
+
+  it('AC2: the terminal decision records each rejected offer with its root and gate', async () => {
+    // A peer offer held by the producer sentinel: the leader rejects it at
+    // dispatch time. The decision log must name the offer and the gate
+    // instead of collapsing it into a bare `no-candidate`.
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [makeEntry('inst-peer', 'WL-HELD', '/roots/held')],
+    });
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'WL-HELD', status: 'open', stage: 'plan_complete', assignee: 'Map' }),
+      }),
+      recordDecision,
+    });
+    const { worker } = makeCoordWorker({
+      coordinationDir: testDir,
+      instanceId: 'inst-a',
+      depsOverrides: deps,
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    try {
+      await worker.tick(); // election + first check-in (own head empty)
+      await worker.tick(); // idle run starts
+      vi.setSystemTime(10_000_000 + 60_001);
+      await worker.tick(); // idle threshold met → dispatch attempt
+      const terminal = recordDecision.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .filter((entry) => entry.operation === 'no-dispatch')
+        .find((entry) => entry.reason === 'no-candidate');
+      expect(terminal).toBeDefined();
+      expect(terminal?.offerRejections).toEqual([
+        {
+          workItemId: 'WL-HELD',
+          worklogRoot: '/roots/held',
+          gate: 'assignee-hold',
+          assignee: 'Map',
+        },
+      ]);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('non-leader instances perform the first check-in but never dispatch', async () => {
@@ -1339,8 +1735,155 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
       vi.useRealTimers();
     }
   });
+
+  // ── Peer-offer presence cancels the pause (parent WL-0MVP7QHUB003ZA2A
+  // AC2/AC3) ──────────────────────────────────────────────────────────
+  // Live incident (2026-10-26): leader `956ca7b9` had an EMPTY own root, so
+  // its no-candidate probe found nothing and armed the 60-minute full stop
+  // while ContextHub's offer (`WL-0MVK0UO3Q002TXW6`) sat in the shared file,
+  // undispatched, for the rest of the pause. The probe answers only "is the
+  // LEADER's own backlog empty?" — a peer entry holding a dispatchable item
+  // is NOT an empty backlog, so the pause must never arm on that cycle, and
+  // an offer appearing DURING a pause must cancel it at the leader's next
+  // check-in (the check-in runs before the cooldown gate).
+  //
+  // RED WITNESS: both specs below are `it.fails` — today the peer entry is
+  // invisible to the pause decision (own-root probe only), so the pause arms
+  // and starves the offer. Feature 4 (WL-0MVP9UJ6S009LLK4) flips them.
+  describe('peer-offer presence cancels the no-candidate pause (WL-0MVP7QHUB003ZA2A AC2/AC3)', () => {
+    /** A second instance offering its own root's head. */
+    const peerRoot = () => join(testDir, 'peer-root');
+
+    it('does not pause when a peer entry holds a dispatchable offer while the own root is empty (AC2)', async () => {
+      vi.useFakeTimers();
+      const T0 = 40_000_000;
+      vi.setSystemTime(T0);
+      try {
+        // The LEADER's own root is genuinely empty (no head to offer)…
+        const deps = makeCoordinationDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+          fetchItem: vi.fn().mockResolvedValue({
+            ok: true,
+            info: itemInfo({ id: 'WL-PEER', status: 'open', stage: 'intake_complete' }),
+          }),
+          // The peer's offer is classified DISPATCHABLE, but its CAS claim is
+          // lost this cycle (another pane won the race) — the offer is KEPT
+          // (still valid) and the cycle ends `no-candidate` because the
+          // leader's own root is empty. This is the exact starvation window:
+          // a live offer exists yet this cycle yielded nothing.
+          claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+        });
+        // …while a PEER's entry holds a dispatchable item. Its claim is lost
+        // this cycle (another pane won the CAS race), so the offer is KEPT
+        // and the cycle ends `no-candidate` — the exact starvation window.
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-b', 'WL-PEER', peerRoot())],
+        });
+        const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+        await worker.tick(); // election + empty check-in
+        expect(worker.isLeader).toBe(true);
+        vi.setSystemTime(T0 + 60_001);
+        const cycle = await worker.tick(); // no-candidate (own root empty)
+
+        expect(cycle.dispatched).toBe(false);
+        // The peer's offer survives the cycle — it is still dispatchable.
+        expect(getEntry(testDir, 'inst-b')).not.toBeNull();
+        // POST-FIX: a live peer offer means the pause must NOT arm (today it
+        // does → RED), so the offer list keeps being polled.
+        expect(worker.paused).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cancels a live pause at the next leader check-in when a peer offer appears, then dispatches it (AC3)', async () => {
+      vi.useFakeTimers();
+      const T0 = 50_000_000;
+      vi.setSystemTime(T0);
+      try {
+        const deps = makeCoordinationDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+          fetchItem: vi.fn().mockResolvedValue({
+            ok: true,
+            info: itemInfo({ id: 'WL-PEER', status: 'open', stage: 'intake_complete' }),
+          }),
+        });
+        const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+        // Genuinely nothing anywhere → the pause arms exactly as today.
+        await worker.tick();
+        vi.setSystemTime(T0 + 60_001);
+        await worker.tick();
+        expect(worker.paused).toBe(true);
+
+        // A peer's offer appears WHILE the leader is paused.
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-b', 'WL-PEER', peerRoot())],
+        });
+
+        // The leader's next check-in (4-min cadence, WL-0MTOCBP1D009P4U3)
+        // runs BEFORE the cooldown gate: a live peer entry must cancel the
+        // pause (today the check-in only inspects the leader's OWN entry →
+        // RED) and polling resumes immediately.
+        vi.setSystemTime(T0 + 60_001 + 4 * 60_000 + 1_000);
+        const resumed = await worker.tick();
+        expect(resumed.polled).toBe(true);
+        expect(worker.paused).toBe(false);
+
+        // The peer's offer then dispatches after a fresh full idle period —
+        // never starved for the 60-minute pause (the dispatch may land on the
+        // resume tick itself or on the next threshold tick).
+        vi.setSystemTime(T0 + 60_001 + 4 * 60_000 + 60_001 + 2_000);
+        await worker.tick();
+        expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+          expect.stringContaining('WL-PEER'),
+          expect.objectContaining({ cwd: peerRoot() }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('still pauses when the only entry is the leader’s own (no peer offer) (AC2 discriminator)', async () => {
+      vi.useFakeTimers();
+      const T0 = 60_000_000;
+      vi.setSystemTime(T0);
+      try {
+        const deps = makeCoordinationDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+          // The leader's own offer cannot be dispatched (lost CAS) → it is
+          // KEPT, the cycle ends `no-candidate`, and a SELF entry must not
+          // suppress the pause.
+          fetchItem: vi.fn().mockResolvedValue({
+            ok: true,
+            info: itemInfo({ id: 'WL-OWN', status: 'open', stage: 'intake_complete' }),
+          }),
+          claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+        });
+        const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+        // The leader's own check-in removes its own entry when it has
+        // nothing to offer, so the SELF entry is written AFTER tick 1 — it
+        // must then be present in the dispatch-time entry snapshot.
+        await worker.tick();
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-a', 'WL-OWN', '/repo')],
+        });
+        vi.setSystemTime(T0 + 60_001);
+        await worker.tick();
+
+        expect(getEntry(testDir, 'inst-a')).not.toBeNull();
+        expect(worker.paused).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
-// ── Review-queue depth gate on the live coordination path (WL-0MTTSWC1X005P4VD) ──
 // Root cause B2: the gate originally lived only in the legacy tier chain (dead
 // while the Herdr head is non-empty), so non-critical implements kept
 // dispatching into a deep review queue. These tests pin the gate on the live
@@ -2012,6 +2555,55 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
   );
 
   it(
+    'AC4: an own-backlog dispatch forwards the settings-default preference (remote-ok) to the pane',
+    async () => {
+      // `index.ts` supplies `loadSettings().downtimeLocalPreference`, so with
+      // no key persisted the settings default reaches the own-backlog pane
+      // (WL-0MVNUHWH500196K1 AC4).
+      expect(defaultSettings.downtimeLocalPreference).toBe('remote-ok');
+      const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-PREF')]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatchFromCoordination(deps, [], {
+        model: 'plan',
+        cwd: '/leader-root',
+        coordinationDir: testDir,
+        browseItemCount: SPRINT,
+        localPreference: defaultSettings.downtimeLocalPreference,
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-BACKLOG-PREF');
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        expect.stringContaining('/skill:implement WL-BACKLOG-PREF'),
+        expect.objectContaining({ localPreference: 'remote-ok' }),
+      );
+    },
+  );
+
+  it(
+    'AC5: an explicit local-preferred setting is forwarded verbatim by the own-backlog fallback',
+    async () => {
+      const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-LOCAL')]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatchFromCoordination(deps, [], {
+        model: 'plan',
+        cwd: '/leader-root',
+        coordinationDir: testDir,
+        browseItemCount: SPRINT,
+        localPreference: 'local-preferred',
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        expect.stringContaining('/skill:implement WL-BACKLOG-LOCAL'),
+        expect.objectContaining({ localPreference: 'local-preferred' }),
+      );
+    },
+  );
+
+  it(
     'AC1: falls back when every in-view item is filtered, not only when the view is literally empty',
     async () => {
       const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-FILTERED-BACKLOG')]);
@@ -2360,6 +2952,58 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(ownBacklogFlag(third)).toBe(true);
   });
 
+  it('AC4: every audit-batch continuation pane carries the settings-default preference (remote-ok)', async () => {
+    // Two ranked audits beyond the sprint view keep the batch armed
+    // (depth >= threshold); the first seed comes from the coordination offer.
+    const tail = [auditHead('WL-AUD-2P', 1), auditHead('WL-AUD-3P', 2)];
+    const getHerdrListHead = vi.fn(async (_cwd: string, limit = BATCH_SPRINT) => ({
+      ok: true as const,
+      items: limit <= BATCH_SPRINT ? [] : [...tail],
+    }));
+    const deps = makeCoordinationDeps({
+      getHerdrListHead,
+      // The offered item must classify as an AUDIT (the batch seed).
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-AUD-1P') }),
+    });
+
+    const first = await dispatchFromCoordination(
+      deps,
+      [makeEntry('inst-audit', 'WL-AUD-1P', '/leader-root')],
+      {
+        model: 'plan',
+        cwd: '/leader-root',
+        coordinationDir: testDir,
+        browseItemCount: BATCH_SPRINT,
+        auditBatchMax: 3,
+        localPreference: defaultSettings.downtimeLocalPreference,
+      },
+    );
+    expect(first.dispatched).toBe(true);
+    expect(first.kind).toBe('audit');
+    expect(first.auditBatch?.remaining).toBe(2);
+
+    // Continuation from the leader's own head consumes one unit of budget.
+    const second = await dispatchFromCoordination(deps, [], {
+      model: 'plan',
+      cwd: '/leader-root',
+      coordinationDir: testDir,
+      browseItemCount: BATCH_SPRINT,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+      localPreference: defaultSettings.downtimeLocalPreference,
+    });
+    expect(second.dispatched).toBe(true);
+    expect(second.candidate?.id).toBe('WL-AUD-2P');
+    expect(second.auditBatch?.remaining).toBe(1);
+
+    // Both the first audit pane and the continuation carry the default.
+    const spawnCalls = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls;
+    expect(spawnCalls).toHaveLength(2);
+    for (const call of spawnCalls) {
+      expect((call[1] as { localPreference?: string }).localPreference).toBe('remote-ok');
+    }
+  });
+
   it('AC6f: a dispatched marker in the leader own head prevents a duplicate continuation target', async () => {
     // The leader root is a REAL temp dir so the dispatch log marker is read.
     const leaderRoot = testDir;
@@ -2435,5 +3079,164 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(outcome.auditBatch?.remaining).toBe(1);
     // Mid-batch continuation -> leadership is NOT handed off yet (AC4).
     expect(ownBacklogFlag(outcome)).toBe(false);
+  });
+});
+
+// ── Priority-aware locality preference across dispatch paths ───────────
+// WL-0MVNUIW77000VYAX AC4: the preference is resolved ONCE at the dispatch
+// boundary, so the coordination offer, the own-backlog fallback and the
+// audit-batch continuation all inherit the same rule.
+describe('priority-aware locality preference at every dispatch path (WL-0MVNUIW77000VYAX AC4)', () => {
+  const SPRINT = 20;
+
+  const filteredInView = (): DowntimeHerdrItem[] =>
+    Array.from({ length: SPRINT }, (_, i) =>
+      headItem({
+        id: `WL-VIEW-PREF-${String(i).padStart(2, '0')}`,
+        status: 'open',
+        stage: 'plan_complete',
+        priority: 'high',
+        risk: 'Low',
+        effort: 'S',
+        needsProducerReview: true,
+        sortIndex: i,
+      }),
+    );
+
+  const backlogAt = (id: string, priority: string): DowntimeHerdrItem =>
+    headItem({
+      id,
+      status: 'open',
+      stage: 'plan_complete',
+      priority,
+      risk: 'Low',
+      effort: 'S',
+      sortIndex: 1000,
+    });
+
+  const rankedOwnRoot = (tail: readonly DowntimeHerdrItem[]) =>
+    vi.fn(async (_cwd: string, limit = SPRINT) => ({
+      ok: true as const,
+      items: limit <= SPRINT ? filteredInView() : [...filteredInView(), ...tail],
+    }));
+
+  it('AC4: a coordination offer resolves from the offered item priority', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({
+          id: 'WL-OFFER-LOW',
+          status: 'open',
+          stage: 'plan_complete',
+          priority: 'low',
+          risk: 'Low',
+          effort: 'S',
+        }),
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(
+      deps,
+      [makeEntry('inst-low', 'WL-OFFER-LOW', '/offer-root')],
+      {
+        model: 'plan',
+        cwd: '/leader-root',
+        coordinationDir: testDir,
+        localPreferenceMode: 'priority-rule',
+      },
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement WL-OFFER-LOW'),
+      expect.objectContaining({ localPreference: 'local-preferred' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectionPath: 'coordination-offer',
+        localPreference: 'local-preferred',
+        localPreferenceReason: 'priority-low',
+      }),
+    );
+  });
+
+  it('AC4: the own-backlog fallback applies the same rule to a low-priority item', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: rankedOwnRoot([backlogAt('WL-BACKLOG-LOW', 'low')]),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [], {
+      model: 'plan',
+      cwd: '/leader-root',
+      coordinationDir: testDir,
+      browseItemCount: SPRINT,
+      localPreferenceMode: 'priority-rule',
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-BACKLOG-LOW');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement WL-BACKLOG-LOW'),
+      expect.objectContaining({ localPreference: 'local-preferred' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectionPath: 'own-backlog',
+        localPreference: 'local-preferred',
+        localPreferenceReason: 'priority-low',
+      }),
+    );
+  });
+
+  it('AC4/AC5: an audit-batch continuation with no priority records the default reason', async () => {
+    const BATCH_SPRINT = 2;
+    const auditHead = (id: string, sortIndex = 0): DowntimeHerdrItem =>
+      headItem({
+        id,
+        status: 'completed',
+        stage: 'in_review',
+        updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        sortIndex,
+      });
+    const tail = [auditHead('WL-AUD-PREF-2', 1), auditHead('WL-AUD-PREF-3', 2)];
+    const getHerdrListHead = vi.fn(async (_cwd: string, limit = BATCH_SPRINT) => ({
+      ok: true as const,
+      items: limit <= BATCH_SPRINT ? [] : [...tail],
+    }));
+    const deps = makeCoordinationDeps({
+      getHerdrListHead,
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({
+          id: 'WL-AUD-PREF-1',
+          status: 'completed',
+          stage: 'in_review',
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      }),
+    });
+
+    const opts = {
+      model: 'plan',
+      cwd: '/leader-root',
+      coordinationDir: testDir,
+      browseItemCount: BATCH_SPRINT,
+      auditBatchMax: 3,
+      localPreferenceMode: 'priority-rule' as const,
+    };
+    const first = await dispatchFromCoordination(deps, [], {
+      ...opts,
+      auditBatchRemaining: 2,
+    });
+
+    expect(first.dispatched).toBe(true);
+    expect(first.candidate?.id).toBe('WL-AUD-PREF-2');
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'WL-AUD-PREF-2',
+        localPreference: 'remote-ok',
+        localPreferenceReason: 'default',
+      }),
+    );
   });
 });

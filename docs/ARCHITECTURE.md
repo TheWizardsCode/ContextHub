@@ -262,6 +262,86 @@ valid one, resolution now stops at the invalid directory (the CLI yields
 `<cwd>/.worklog`; previously it looked past to the repo root). Both
 consumers agree because they share the same resolver.
 
+## Sync Module Layout
+
+`src/sync.ts` is the stable public entry point for sync: a thin barrel of
+re-exports with no logic of its own. Every concern it used to contain lives in
+a focused module under `src/sync/`, so a merge fix does not require reading
+push code and a newcomer can read one concern in one sitting
+(WL-0MVGKGMU400631VZ).
+
+### Module responsibilities
+
+| Module | Responsibility | Public symbols re-exported by the barrel |
+|---|---|---|
+| `src/sync.ts` | Public barrel: re-exports the frozen 34-symbol surface and documents where each concern lives. | all 34 |
+| `src/sync/types.ts` | Shared type declarations (`GitTarget`, `SyncResult`, `MergeOptions`, …). | 9 types |
+| `src/sync/git-exec.ts` | Git subprocess plumbing: env sanitisation, async exec, stdout capture, shell escaping. | none (internal) |
+| `src/sync/merge-utils.ts` | Merge primitives: default-value detection, stable value/item keys, tag union. | none (internal) |
+| `src/sync/merge-predicates.ts` | Merge decision predicates: regression / default / terminal-stage tests. | `isRegressionDefault`, `isValueRegression`, `isEmptyMeaningfulField`, `isTerminalStage` |
+| `src/sync/field-merge.ts` | Field-level merge implementations: same-timestamp, different-timestamp and remote-item merges. | none (internal) |
+| `src/sync/merge.ts` | Public merge entry point. | `mergeWorkItems` |
+| `src/sync/merge-collateral.ts` | Collateral merges: comments, audit results and dependency edges. | `mergeComments`, `mergeAuditResults`, `mergeDependencyEdges` |
+| `src/sync/author-identity.ts` | Author-identity gate and whitelist logic. | `getRemoteAuthorCommits`, `checkAuthorIdentity`, `getConfiguredUserEmail`, `enforceAuthorIdentityGate` |
+| `src/sync/refs.ts` | Last-synced and remote-tracking ref bookkeeping. | `getLastSyncedRefPath`, `readLastSyncedRef`, `writeLastSyncedRef`, `getRemoteTrackingRefSha`, `_testOnly_getRemoteTrackingRef` |
+| `src/sync/prefix-filter.ts` | Cross-project item-ID prefix filtering. | `isOwnProjectItemId`, `filterRemoteDataByPrefix` |
+| `src/sync/repo-context.ts` | Repo-root resolution and the data-file cross-project assertion. | `assertDataFileInCwdRepo` |
+| `src/sync/worktree.ts` | Temporary-worktree lifecycle helpers. | none (internal) |
+| `src/sync/remote.ts` | Remote-ref reading and delta-chain replay. | `getRemoteDataFileContentWithRef`, `getRemoteDataFileContent`, `replayRemoteDeltaChain` |
+| `src/sync/push.ts` | Data-file push and rewrite-and-force-push paths. | `gitPushDataFileToBranch`, `rewriteAndForcePushDataFile` |
+
+### Cycle-safe layering
+
+The dependency direction is strictly bottom-up, so the import graph stays
+acyclic:
+
+```
+types / git-exec
+      ↓
+merge-predicates → merge-utils
+      ↓
+field-merge / merge / merge-collateral
+      ↓
+author-identity / refs / prefix-filter / repo-context   (mid-layer)
+      ↓
+worktree → remote → push
+      ↓
+src/sync.ts (barrel — imports the public modules; nothing imports it)
+```
+
+No module under `src/sync/` imports `../sync.js` at runtime (or, since
+WL-0MVP9PCOU004L8HN, even type-only), so the barrel can never be part of a
+cycle. `tests/sync/split-guard.test.ts` enforces this statically, alongside the
+1,000-line ceiling (no exemptions) and the frozen public surface.
+
+### The `merge-utils.ts` re-point
+
+`src/sync/merge-utils.ts` predates the split and used to type-import
+`MergeOptions` from the barrel (`'../sync.js'`). That was the only
+sync-family → barrel edge, and type-only or not it pointed the layering
+backwards (a leaf importing its own entry point). It now imports the type from
+`./types.js`, so `TYPE_ONLY_BARREL_ALLOWLIST` is empty and the whole family is
+import-cycle-free (WL-0MVP9PCOU004L8HN AC4).
+
+### Where to find X in the sync module
+
+| I want to… | Look in |
+|---|---|
+| change how two items are merged | `src/sync/field-merge.ts` / `src/sync/merge.ts` |
+| change the "is this a regression?" rule | `src/sync/merge-predicates.ts` |
+| change comment / audit-result / dependency merging | `src/sync/merge-collateral.ts` |
+| change the author-identity gate | `src/sync/author-identity.ts` |
+| change last-synced or remote-tracking refs | `src/sync/refs.ts` |
+| change the cross-project prefix filter | `src/sync/prefix-filter.ts` |
+| change repo-root resolution or the cross-project guard | `src/sync/repo-context.ts` |
+| change temporary-worktree handling | `src/sync/worktree.ts` |
+| change remote fetch / delta replay | `src/sync/remote.ts` |
+| change the push or rewrite-and-force-push path | `src/sync/push.ts` |
+| change the shared surface consumers import | `src/sync.ts` |
+
+See [docs/dev/worklog-sync.md](dev/worklog-sync.md) for the dev-facing
+orientation to this layout.
+
 ## File Structure
 
 ```
@@ -325,6 +405,11 @@ Two fingerprint providers exist; the CLI uses the counter-based one:
   integer in the cache dir. It is stable across reads (reads never touch it)
   and changes exactly when a write lands, so it is the CLI's fingerprint of
   record. The file fingerprint remains available for direct module use.
+  Writes are atomic (temp file + rename) and a writer never returns a value
+  below one it has already returned for the same counter (per-process
+  high-water mark, WL-0MVOGBJ7V00973BI); a concurrent writer's stale write
+  can still lower the on-disk value, which only causes extra invalidation —
+  never a stale hit — and the next bump re-raises it.
 
 ### Invalidation semantics (CLI wiring)
 
@@ -437,8 +522,8 @@ console.log(summariseSpawnRecords(process.env.WL_SPAWN_COUNT_FILE!));
 
 - Any **fresh** non-critical audit with `readyToClose === false` outranks **any** unaudited / `readyToClose === true` / stale non-critical item regardless of base priority (high/medium/low) or age/effort/recency.
 - `critical` is a hard boundary that no audit-not-ready boost can overtake.
-- Missing/`true`/stale audits receive no boost. Freshness is delegated to the single shared predicate `isAuditFresh` (`packages/shared/src/icons.ts`); the ordering tier passes no fingerprints, so the one-sided fallback time gate applies — fresh iff `auditedAt > updatedAt - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s), i.e. an audit at or after the content timestamp is fresh, and an audit older than a later content edit is stale. There is no competing `auditedAt`-vs-`updatedAt` comparison in `packages/shared/src/database.ts` (WL-0MUBVH7ZR009PP80).
-- The same tier is enforced in `packages/shared/src/database.ts` in `sortItemsByScore`/`computeScore` (batch audit `Map<id,AuditResult>` + tiered comparator) and in `selectBySortIndex` both when all `sortIndex` coincide (before effective-priority/age) and when they diverge (tier prefix before `sortIndex`), so `wl next --no-re-sort` and `wl next --json` preserve boosted order without requiring a prior `reSort`.
+- Missing/`true`/stale audits receive no boost. Freshness is delegated to the single shared predicate `isAuditFresh` (`packages/shared/src/icons.ts`); the ordering tier passes no fingerprints, so the one-sided fallback time gate applies — fresh iff `auditedAt > updatedAt - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s), i.e. an audit at or after the content timestamp is fresh, and an audit older than a later content edit is stale. There is no competing `auditedAt`-vs-`updatedAt` comparison anywhere in the ordering/audit path (the shared `isAuditNotReadyFresh` predicate lives in `packages/shared/src/database/audit.ts`; WL-0MUBVH7ZR009PP80).
+- The same tier is enforced in `packages/shared/src/database/sort.ts` in `sortItemsByScore`/`computeScore` (batch audit `Map<id,AuditResult>` + tiered comparator) and in `selectBySortIndex` both when all `sortIndex` coincide (before effective-priority/age) and when they diverge (tier prefix before `sortIndex`), so `wl next --no-re-sort` and `wl next --json` preserve boosted order without requiring a prior `reSort`. The audit-map builder the tier consumes lives in `packages/shared/src/database/audit.ts`.
 - `src/commands/grouping.ts` Critical Group placement is unchanged by design.
 
 ## Future Considerations

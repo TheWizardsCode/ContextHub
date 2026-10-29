@@ -14,6 +14,12 @@ registers the agent-side plugin modules that complement the Herdr plugin
 - [Skill-path Tool](#skill-path-tool)
 - [Error Recovery Module](#error-recovery-module) (`/retry`)
 - [Lease Release](#lease-release)
+- [Per-turn Local Preference and Route Log](#per-turn-local-preference-and-route-log)
+
+The package also ships a **second extension entry point**,
+`local-preference/index.ts` (declared in this package's `pi.extensions`), which
+is independent of the Worklog module above (see [Per-turn Local Preference and
+Route Log](#per-turn-local-preference-and-route-log)).
 
 > The Pi-based TUI browse UI (chat pane, action palette, `/wl` command,
 > `ctrl+shift+b` shortcut, settings overlay, auto-injection, and periodic
@@ -46,6 +52,43 @@ the directory path and Git branch info.
 | Built-in Pi commands | `/model`, `/settings`, `/new` | Clears the indicator |
 | Free-form text | `Fix the login bug` | Clears the indicator |
 | Other extension commands | `/other-ext-cmd` | Not detectable (Pi limitation) |
+
+### Work Item Titles in the Footer
+
+When the input contains a work item ID (e.g. `/intake RISE-0MVCFSM9B0019M8L`),
+the indicator is enriched with the item's title:
+
+```
+⏵ /intake RISE...19M8L AI cards should be face down
+```
+
+The title is resolved by a single shared resolver
+(`Worklog/lib/work-item-title.ts`) used by both the activity status line and
+the session-health footer's initial-prompt preview:
+
+- **Cross-project IDs resolve.** If the ID's prefix (`RISE`, `POD`, `WL`, …) is
+  declared as `prefix: <PFX>` in a sibling project's
+  `<projects-root>/<project>/.worklog/config.yaml`, the resolver passes that
+  `.worklog` directory to `wl show` as `--worklog-dir`. This mirrors the
+  skills layer's `SIBLING_SCAN_ROOT` resolution
+  (`skill/shared/status_lifecycle.py`). Without it, a cross-project ID looked
+  up from the current project's cwd returned "Work item not found" and the
+  title silently disappeared from the footer (WL-0MVGB23MM004X501).
+- **Ambiguous prefixes never show a wrong title.** When several sibling
+  projects declare the same prefix (e.g. `POD`), each candidate is probed and
+  only the project that actually owns the ID is used.
+- **Sibling scan is memoised per process.** The prefix→directory mapping is
+  scanned once (per prefix) and cached for the process lifetime, so the
+  per-second footer refresh never re-scans the filesystem. The owning
+  directory for an ID is memoised too.
+- **Silent fallback.** Any lookup failure (unknown ID, timeout, missing
+  config, unreadable worklog) leaves the raw text in place — no error is
+  shown. The lookup budget is 5 s (`TITLE_LOOKUP_TIMEOUT_MS`), sized for a
+  cold `wl show` of a large item (an 18 KB item measured 2.36 s).
+
+The scan root is derived from the extension's own install location (the
+parent of the checkout that ships it) and can be overridden with the
+`WORKLOG_SIBLING_SCAN_ROOT` environment variable.
 
 ### Persistence
 
@@ -234,8 +277,7 @@ configuration.
 
 | Category | Default Action | Description |
 |----------|---------------|-------------|
-| `rateLimit` (429) | NOT retried | Informative error shown to the user |
-| `serverError` (5xx) | Retried | Exponential backoff with configurable delay |
+| `rateLimit` (429) | NOT retried | Informative error shown to the user || `serverError` (5xx) | Retried | Exponential backoff with configurable delay |
 | `authError` (401/403) | NOT retried | Checkpoint saved + terminal error displayed |
 | `contextLength` | Compact + Continue | `/compact` triggered, then auto-continue |
 | `quotaExhausted` | NOT retried | Checkpoint saved + terminal error displayed |
@@ -265,6 +307,90 @@ Recovery behaviour is driven by `DEFAULT_RECOVERY_CONFIG` in
   }
 }
 ```
+
+### Local-Admission Refusals (the 429 exception)
+
+A `429` is normally terminal, with one deliberate exception: an
+**llm-proxy local-admission refusal** is capacity backpressure, not a rate
+limit (WL-0MVSBF5XZ001H7V7). When the proxy's prefill-ETA admission guard
+declines to admit a `local-preferred` prompt onto a contended local slot it
+answers `429` with a machine-readable body:
+
+```json
+{"error": "Local admission refused", "code": "local_admission_reject",
+ "reason": "eta_exceeds_budget", "retryable": true, "retry_after": 15,
+ "projected_wait_seconds": 74.4, "budget_seconds": 60.0}
+```
+
+The classifier (`isLocalAdmissionRefusal()` /
+`isRetryableLocalAdmissionRefusal()` in `error-patterns.ts`) keys off the
+stable proxy prose — `local_admission_reject` / "Local admission refused" —
+and then on the body's polarity:
+
+- **`retryable: true`** (or a `Retry-After` / `retry_after` hint) →
+  `SERVER_ERROR`, so the retry loop waits exactly as long as the proxy asked
+  (see [Server-Requested Retry Delays](#server-requested-retry-delays-retry-after))
+  and the turn resumes once local capacity frees up. No "Non-retryable
+  error" notification, no abandoned turn, no cloud fallback.
+- **`retryable: false`** (`prefill_budget_exceeded`, `context_too_large`,
+  `resident_prefix_insufficient`) → terminal. Waiting cannot heal a prompt
+  that exceeds the admission budget; the proxy's `suggested_action`
+  (compaction guidance) is what the operator sees, and no backoff time is
+  burned.
+- **No signal at all** → terminal, i.e. the pre-existing behaviour. Only a
+  body that states it is resumable is treated as resumable.
+
+Both proxy gates that defer a `local-preferred` prompt — the prefill-ETA
+admission guard and the dispatch/lease gate (`local_lease_active`) — surface as
+this same refusal class, so the pane cannot (and need not) tell them apart:
+each carries a server-requested `Retry-After` and each is retried. The full
+chain (busy slot → `429` → hinted wait → local completion with zero remote
+dispatch) was verified live on WL-0MVSNHCSM004JYEY; the reproduction procedure
+is in `docs/dev/downtime-dispatcher.md` (*Observing a deferral*).
+
+#### Where the polarity is read from (and why the message is not enough)
+
+The polarity is read from the **captured HTTP response body**, not (only) from
+the assistant error message (WL-0MVTESPHB0021SI7). The refusal body carries
+its machine-readable fields as siblings of a **string** `error` field, and
+`openai`'s `APIError.makeMessage()` prefers `error.message` and otherwise
+`JSON.stringify(error)` — so the assistant message a client actually holds is
+exactly:
+
+```text
+429 "Local admission refused"
+```
+
+`code`, `retryable`, `retry_after` and `verdict` are all dropped, and the
+SDK's own `error.code` is `undefined` for the same reason. Classifying from
+the message text alone therefore finds no polarity and (before this fix)
+treated a deferrable refusal as terminal — the live symptom was
+`Error: Non-retryable error: 429 "Local admission refused"` with the turn
+abandoned after a single request.
+
+So the transport wrapper that already captures the `Retry-After` header
+(`createRetryHintCapturingFetch()` in `retry-logic.ts`) also captures the
+bounded (≤ 8 KiB) response body on a `429`/`5xx` and records it via
+`setCapturedLocalAdmissionRefusalBody()`. `isRetryableLocalAdmissionRefusal()`
+reads the message text first (some providers do fold the whole body into
+`error.message`) and falls back to the captured body when the text carries no
+polarity. A body-derived `retry_after` also feeds the retry-delay hint when
+the `Retry-After` header is absent.
+
+Scoping rules (pinned by `local-admission-refusal-body.test.ts`):
+
+- the capture always reflects the **most recent** provider response — every
+  `2xx` and every non-2xx that cannot be a refusal clears it, and a later
+  refusal replaces it, so an unrelated error can never inherit a previous
+  refusal's polarity;
+- the body is read from a **clone**, so the caller's response (including a
+  streamed `2xx`) is never consumed or buffered;
+- an explicit `retryable: false` in the message text still wins over a
+  captured retryable body.
+
+Plain `429` rate limits, `401/403`, quota-exhausted and terminated messages
+are unaffected. Because the refusal is not provider exhaustion, it records
+**no** durable model-cooldown marker.
 
 ### Server-Requested Retry Delays (`Retry-After`)
 
@@ -427,6 +553,47 @@ drift (WL-0MSGI7UIH008USVB).
   `packages/shared/src/lease-release.test.ts` (shared HTTP behavior).
 - The Herdr plugin runs the same release on pi-pane close — see
   `packages/herdr/README.md` ("Pi agent dispatch").
+
+## Per-turn Local Preference and Route Log
+
+`local-preference/index.ts` + `local-preference/local-preference.ts`
+(WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4) give an agent pane a
+per-turn capacity claim against the llama-proxy:
+
+- **Request** — reads `HERDR_LOCAL_PREFERENCE` (`local-preferred` | `remote-ok`,
+  set by the herdr runner per spawn via `--local-preference`) on every provider
+  request and sets `X-Local-Preference` through `before_provider_headers`.
+  `local-preferred` keeps the prompt local while it fits and is deferred with a
+  retryable 429 + `Retry-After` when the local slot is contended (never a silent
+  remote fallback); `remote-ok` lets background work go remote.
+- **Response** — parses `X-Local-Route` / `X-Local-Fallback-Reason` on
+  `after_provider_response` and appends one bounded JSONL line per response to
+  `<cwd>/.worklog/local-route.log` (rolling, capped at 2000 entries;
+  `{ at, sessionId, preference, route, fallbackReason, model, ticket? }`). The
+  session id and reservation ticket let a dispatcher decision be correlated
+  with the turns it produced.
+- **Fail-open** — with no knob set (an interactive pane), no header is sent and
+  no log is written; an older proxy with no route headers writes no entry; a
+  capture or write failure never throws into a turn. An **invalid** value —
+  including the retired `local-only` — is treated exactly like an absent knob:
+  no header, no route-log line.
+
+> **`local-only` is retired** (WL-0MVSI1S5P003UAMB, following herdr
+> WL-0MVSI1RX2005O9NE). It is **not** a deprecated alias and is **not**
+> normalised onto `local-preferred`: an older herdr that still forwards
+> `HERDR_LOCAL_PREFERENCE=local-only` sends no preference header, so the proxy
+> applies its default (remote-first), and no route-log line is written.
+> Migration is a one-line setting change —
+> `downtimeLocalPreference: 'local-preferred'` (equivalently
+> `HERDR_LOCAL_PREFERENCE=local-preferred`). See `packages/herdr/README.md`.
+
+See `packages/herdr/README.md` and `docs/dev/downtime-dispatcher.md` for the
+policy knob (`downtimeLocalPreference` — default `remote-ok`, `local-preferred`
+opt-in) and the transport. Precedence (WL-0MVNUIW77000VYAX): an explicitly
+persisted setting > the low-priority rule (`low` → `local-preferred`) > the
+deployment default, so a low-priority dispatch arrives here with
+`HERDR_LOCAL_PREFERENCE=local-preferred` and its route-log line records that
+`preference`.
 
 ## Pane-Closure Reaper (WL-0MUJL1NAH0042GOS)
 

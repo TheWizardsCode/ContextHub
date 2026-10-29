@@ -39,6 +39,26 @@
 #                        extension turns into the `X-Priority` provider
 #                        request header. Absent/invalid = no env var (the
 #                        proxy applies its own `medium` default).
+#   --reservation-ticket <id>
+#                        Granted local-capacity reservation ticket. Forwarded
+#                        into the pane process as PI_LOCAL_RESERVATION_TICKET
+#                        (parent WL-0MVIKRFP0005JDL8 AC1), which the Worklog
+#                        pi extension turns into the `X-Local-Reservation`
+#                        provider header on the pane's first request. Absent
+#                        (fail-open/older proxy) = no env var, byte-identical
+#                        launch to today.
+#   --local-preference <local-preferred|remote-ok>
+#                        Per-turn locality preference (parent
+#                        WL-0MVIKRFP0005JDL8 AC4, slice C4). Forwarded into
+#                        the pane process as HERDR_LOCAL_PREFERENCE, which the
+#                        Worklog pi extension turns into the
+#                        `X-Local-Preference` provider header on every request
+#                        (and records the response `X-Local-Route` /
+#                        `X-Local-Fallback-Reason` in the bounded route log).
+#                        The retired `local-only` value is rejected like any
+#                        other invalid input (WL-0MVSI1RX2005O9NE).
+#                        Absent/invalid = no env var, byte-identical launch to
+#                        today (fail-open).
 #   -h, --help           Show this help message
 #
 # Environment variables:
@@ -76,6 +96,8 @@ cwd_arg=""
 model_arg=""
 pane_id_file=""
 request_priority=""
+reservation_ticket=""
+local_preference=""
 anchor_arg=""
 resize=true
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
@@ -136,6 +158,22 @@ while [[ $# -gt 0 ]]; do
       request_priority="${1#*=}"
       shift
       ;;
+    --reservation-ticket)
+      reservation_ticket="${2:-}"
+      shift 2
+      ;;
+    --reservation-ticket=*)
+      reservation_ticket="${1#*=}"
+      shift
+      ;;
+    --local-preference)
+      local_preference="${2:-}"
+      shift 2
+      ;;
+    --local-preference=*)
+      local_preference="${1#*=}"
+      shift
+      ;;
     --model)
       model_arg="$2"
       shift 2
@@ -191,6 +229,36 @@ case "$request_priority" in
   *)
     echo "Warning: ignoring invalid --request-priority '$request_priority' (expected low|medium|high)" >&2
     request_priority=""
+    ;;
+esac
+
+# ── Validate the reservation ticket (fail-open) ───────────────────────
+# Only a token-safe ticket id is forwarded (no whitespace/control chars), so
+# a malformed proxy value can never corrupt the pane-launch command.
+# Invalid/empty = launched WITHOUT a ticket: an older or broken proxy must
+# never block a pane (parent AC2), and the dispatcher's fail-open path
+# already covers an absent endpoint.
+case "$reservation_ticket" in
+  "")
+    ;;
+  *[!A-Za-z0-9._:-]*)
+    echo "Warning: ignoring invalid --reservation-ticket (expected a token id)" >&2
+    reservation_ticket=""
+    ;;
+esac
+
+# ── Validate the locality preference (fail-open) ──────────────────────
+# Only the proxy's two preferences are forwarded; anything else is ignored so
+# the extension sends no header and the request stays exactly as today.
+# Never fails the launch (C4-AC3).
+case "$local_preference" in
+  local-preferred|remote-ok)
+    ;;
+  "")
+    ;;
+  *)
+    echo "Warning: ignoring invalid --local-preference '$local_preference' (expected local-preferred|remote-ok)" >&2
+    local_preference=""
     ;;
 esac
 
@@ -280,22 +348,32 @@ quoted_wrapper="$(printf '%q' "$wrapper_script")"
 quoted_lease_id="$(printf '%q' "$lease_session_id")"
 quoted_cmd="$(printf '%q' "$COMMAND")"
 # The pane process is launched by herdr's `pane run`, so an env var set on
-# this script does NOT reach pi. When a request priority was supplied it is
-# injected explicitly with `exec env HERDR_REQUEST_PRIORITY=<value>` so the
-# launched pi session (and the Worklog extension inside it) sees it.
+# this script does NOT reach pi. Optional variables are therefore injected
+# explicitly with `exec env VAR=<value> …`:
+#   HERDR_REQUEST_PRIORITY    -> Worklog extension -> `X-Priority` header
+#   PI_LOCAL_RESERVATION_TICKET -> Worklog extension -> `X-Local-Reservation`
+#                                header on the pane's first request (C2 AC1)
+#   HERDR_LOCAL_PREFERENCE    -> Worklog extension -> `X-Local-Preference`
+#                                header + route log (C4 AC1)
+env_words=()
 if [ -n "$request_priority" ]; then
-  quoted_priority="$(printf '%q' "$request_priority")"
-  if [ -n "$model_arg" ]; then
-    quoted_model="$(printf '%q' "$model_arg")"
-    "$herdr_bin" pane run "$np" exec env HERDR_REQUEST_PRIORITY="$quoted_priority" bash "$quoted_wrapper" "$quoted_lease_id" --model "$quoted_model" "$quoted_cmd"
-  else
-    "$herdr_bin" pane run "$np" exec env HERDR_REQUEST_PRIORITY="$quoted_priority" bash "$quoted_wrapper" "$quoted_lease_id" "$quoted_cmd"
-  fi
-elif [ -n "$model_arg" ]; then
-  quoted_model="$(printf '%q' "$model_arg")"
-  "$herdr_bin" pane run "$np" exec bash "$quoted_wrapper" "$quoted_lease_id" --model "$quoted_model" "$quoted_cmd"
+  env_words+=("HERDR_REQUEST_PRIORITY=$(printf '%q' "$request_priority")")
+fi
+if [ -n "$reservation_ticket" ]; then
+  env_words+=("PI_LOCAL_RESERVATION_TICKET=$(printf '%q' "$reservation_ticket")")
+fi
+if [ -n "$local_preference" ]; then
+  env_words+=("HERDR_LOCAL_PREFERENCE=$(printf '%q' "$local_preference")")
+fi
+pane_cmd=(bash "$quoted_wrapper" "$quoted_lease_id")
+if [ -n "$model_arg" ]; then
+  pane_cmd+=(--model "$(printf '%q' "$model_arg")")
+fi
+pane_cmd+=("$quoted_cmd")
+if [ ${#env_words[@]} -gt 0 ]; then
+  "$herdr_bin" pane run "$np" exec env "${env_words[@]}" "${pane_cmd[@]}"
 else
-  "$herdr_bin" pane run "$np" exec bash "$quoted_wrapper" "$quoted_lease_id" "$quoted_cmd"
+  "$herdr_bin" pane run "$np" exec "${pane_cmd[@]}"
 fi
 
 # ── Rename the pane ────────────────────────────────────────────────

@@ -69,7 +69,11 @@ The repository includes a Pi extension that auto-loads into every pi session
 agent-side capabilities that complement the Herdr plugin: an activity
 indicator and session health/model display in the pi footer, guardrails that
 protect worklog database files, a `skill_path` tool, automatic error recovery
-(`/retry`), and proactive Local Proxy model lease release. Work item browsing
+(`/retry`), and proactive Local Proxy model lease release. Work item titles in
+the footer resolve across sibling projects (an ID from another project's
+worklog is looked up with the project's own `--worklog-dir`, via the same
+prefix-to-sibling scan the skills layer uses — see
+[`docs/wl-integration.md`](docs/wl-integration.md)). Work item browsing
 and management is provided by the [Herdr plugin](packages/herdr/).
 
 Install the extension globally:

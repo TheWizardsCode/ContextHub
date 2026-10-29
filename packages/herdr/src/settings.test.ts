@@ -515,3 +515,87 @@ describe('downtimeStallScanEnabled / downtimeStallThresholdMs (WL-0MUYMBK6H005PY
     expect(loadSettings(path).downtimeStallThresholdMs).toBe(120_001);
   });
 });
+
+describe('downtimeLocalPreferenceExplicit — derived explicitness (WL-0MVNUIW77000VYAX AC3)', () => {
+  it('defaults to false and never surfaces a persisted value', () => {
+    expect(defaultSettings.downtimeLocalPreferenceExplicit).toBe(false);
+    const path = tempSettingsPath();
+    // Even a file that hand-writes the derived field is not trusted: it is
+    // recomputed from the presence of a valid downtimeLocalPreference.
+    writeFileSync(path, JSON.stringify({ downtimeLocalPreferenceExplicit: true }), 'utf-8');
+    expect(loadSettings(path).downtimeLocalPreferenceExplicit).toBe(false);
+  });
+
+  it('is false for a missing file and for an absent key', () => {
+    expect(loadSettings(tempSettingsPath()).downtimeLocalPreferenceExplicit).toBe(false);
+
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({}), 'utf-8');
+    expect(loadSettings(path).downtimeLocalPreferenceExplicit).toBe(false);
+  });
+
+  it('is true only when the file persists a valid two-value preference', () => {
+    for (const value of ['local-preferred', 'remote-ok'] as const) {
+      const path = tempSettingsPath();
+      writeFileSync(path, JSON.stringify({ downtimeLocalPreference: value }), 'utf-8');
+      const settings = loadSettings(path);
+      expect(settings.downtimeLocalPreference).toBe(value);
+      expect(settings.downtimeLocalPreferenceExplicit).toBe(true);
+    }
+  });
+
+  it('is false for out-of-alphabet values (they clamp to the default, not explicit)', () => {
+    for (const value of ['auto', '', 42, null, true]) {
+      const path = tempSettingsPath();
+      writeFileSync(path, JSON.stringify({ downtimeLocalPreference: value }), 'utf-8');
+      const settings = loadSettings(path);
+      expect(settings.downtimeLocalPreference).toBe('remote-ok');
+      expect(settings.downtimeLocalPreferenceExplicit).toBe(false);
+    }
+  });
+
+  it('saveSettings strips the derived field so it can never become persisted state', () => {
+    const path = tempSettingsPath();
+
+    // An explicit operator setting is persisted as the plain two-value knob;
+    // the derived field is not written, and re-reading re-derives `true` from
+    // the presence of that knob alone.
+    saveSettings(path, {
+      ...defaultSettings,
+      downtimeLocalPreference: 'local-preferred',
+      downtimeLocalPreferenceExplicit: true,
+    });
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    expect(raw.downtimeLocalPreference).toBe('local-preferred');
+    expect('downtimeLocalPreferenceExplicit' in raw).toBe(false);
+    expect(loadSettings(path).downtimeLocalPreferenceExplicit).toBe(true);
+
+    // A deployment that was NOT explicit keeps the key absent when saved, so
+    // saving settings never silently disables the priority rule.
+    saveSettings(path, { ...defaultSettings });
+    const reread = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    expect('downtimeLocalPreference' in reread).toBe(false);
+    expect('downtimeLocalPreferenceExplicit' in reread).toBe(false);
+    expect(loadSettings(path).downtimeLocalPreference).toBe('remote-ok');
+    expect(loadSettings(path).downtimeLocalPreferenceExplicit).toBe(false);
+
+    // Re-reading is stable: loading and re-saving preserves the signal.
+    expect(loadSettings(path).downtimeLocalPreferenceExplicit).toBe(false);
+  });
+
+  it('AC3: a persisted local-only is not explicit, clamps to remote-ok and is dropped on save', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ downtimeLocalPreference: 'local-only' }), 'utf-8');
+
+    const loaded = loadSettings(path);
+    expect(loaded.downtimeLocalPreference).toBe('remote-ok');
+    expect(loaded.downtimeLocalPreferenceExplicit).toBe(false);
+
+    // A save round-trip leaves the key absent: nothing is persisted for a
+    // non-explicit deployment, so the retired value cannot linger.
+    saveSettings(path, loaded);
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    expect('downtimeLocalPreference' in raw).toBe(false);
+    expect(loadSettings(path).downtimeLocalPreference).toBe('remote-ok');
+  });
+});

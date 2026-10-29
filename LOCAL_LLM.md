@@ -293,6 +293,30 @@ Prefer a hosted model (Foundry) candidates (tasks where larger-model reasoning, 
 - Double-check endpoint shape vs your OpenCode provider mode
 - Ensure the API key is present in the environment OpenCode is using
 
+### A local pane is refused with 429 “Local admission refused”
+
+With `X-Local-Preference: local-preferred` the llama-proxy **defers** local
+work instead of pinning it: when every local slot is busy it answers `429`
+with `code: local_admission_reject`, `retryable: true` and a `Retry-After`
+hint. That is capacity backpressure, not a rate limit — the recovery module
+in the Worklog pi extension retries after the hinted wait and the turn
+resumes once a local slot frees up (`packages/tui/extensions/README.md`,
+“Local-Admission Refusals”).
+
+What you should see and do:
+
+- **The pane waits, then continues on the local model.** Nothing to do; the
+  wait is honoured in full, with no cloud fallback.
+- **`retryable: false` with `prefill_budget_exceeded` / `context_too_large`.**
+  The prompt is above the admission budget and will *never* be admitted as-is;
+  the refusal is terminal and the proxy's `suggested_action` (compaction)
+  applies. Compact the context (or start a fresh session) rather than waiting
+  for a slot.
+- **Confirm the route afterwards:** each turn appends one line to
+  `<worklog-root>/.worklog/local-route.log` with the preference sent, the route
+  the proxy took and any fallback reason. `route: "local"` after a deferred
+  wait is the expected end-to-end sequence.
+
 ---
 
 ## Appendix: WSL networking setup for Foundry Local

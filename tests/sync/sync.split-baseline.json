@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "provenance": {
+    "generatedBy": "npx tsx tests/sync/split-guard-scan.ts --write-baseline",
+    "sourceCommit": "f40fcd7a3d8c9e42733eeb08df253a55f4ef6552",
+    "generatedAt": "2026-10-26T18:06:56.783Z",
+    "barrel": "src/sync.ts",
+    "consumerGlobs": [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "scripts/**/*.ts"
+    ]
+  },
+  "symbols": {
+    "value": [
+      "_testOnly_getRemoteTrackingRef",
+      "assertDataFileInCwdRepo",
+      "checkAuthorIdentity",
+      "enforceAuthorIdentityGate",
+      "filterRemoteDataByPrefix",
+      "getConfiguredUserEmail",
+      "getLastSyncedRefPath",
+      "getRemoteAuthorCommits",
+      "getRemoteDataFileContent",
+      "getRemoteDataFileContentWithRef",
+      "getRemoteTrackingRefSha",
+      "gitPushDataFileToBranch",
+      "isEmptyMeaningfulField",
+      "isOwnProjectItemId",
+      "isRegressionDefault",
+      "isTerminalStage",
+      "isValueRegression",
+      "mergeAuditResults",
+      "mergeComments",
+      "mergeDependencyEdges",
+      "mergeWorkItems",
+      "readLastSyncedRef",
+      "replayRemoteDeltaChain",
+      "rewriteAndForcePushDataFile",
+      "writeLastSyncedRef"
+    ],
+    "type": [
+      "AuthorIdentityOptions",
+      "AuthorIdentityResult",
+      "AuthorIdentityViolation",
+      "DeltaReplayResult",
+      "GitTarget",
+      "IncomingCommit",
+      "MergeOptions",
+      "SyncAllowedAuthors",
+      "SyncResult"
+    ]
+  }
+}

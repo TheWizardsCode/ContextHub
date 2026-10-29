@@ -44,6 +44,8 @@ function phase(overrides: Partial<SpawnCapPhaseReport> = {}): SpawnCapPhaseRepor
     aggregateRssBoundMb: 120,
     eventLoopBlockedMs: 60,
     maxEventLoopBlockedMs: 30,
+    eventLoopBusyBlockedMs: 30,
+    maxEventLoopBusyBlockedMs: 15,
     wallMs: 3_000,
     ...overrides,
   };
@@ -116,6 +118,12 @@ function syncInFlightReport(overrides: Partial<SyncInFlightReport> = {}): SyncIn
     noWaitGap: true,
     settledState: 'synced',
     lastOutcomeSuccess: true,
+    hostConditions: {
+      loadPerCore: { start: 0.2, max: 0.3, end: 0.2, samples: 5 },
+      cpuPercent: 10,
+      cpuSource: 'proc-stat',
+      idleNoise: { durationMs: 250, blockedMs: 0, maxBlockedMs: 0 },
+    },
     ...overrides,
   };
 }
@@ -230,7 +238,7 @@ describe('end-to-end parent AC report', () => {
 
   it('marks AC1 unmet when the capped spawn burst blocks input', () => {
     const inputs = acInputs({
-      spawnCap: { capped: phase({ eventLoopBlockedMs: 250 }) },
+      spawnCap: { capped: phase({ eventLoopBlockedMs: 250, eventLoopBusyBlockedMs: 250 }) },
     });
     expect(verdict(inputs, 'AC1')?.status).toBe('unmet');
   });

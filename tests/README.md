@@ -20,6 +20,18 @@ npm run test:timings
 node ./scripts/test-timings.cjs
 ```
 
+> **Canonical gate vs. bare vitest.** `npm test` runs the whole vitest suite
+> (every `tests/` and `packages/` test file). The *canonical* full suite that
+> the implement/test gates and the ship release use is declared in
+> `.pi/test-config.json` (`suiteCommands`) and is currently
+> `npm --silent test -- tests` — all 277 `tests/` files, since
+> WL-0MVG4FF9200346NR widened it from `tests/cli` + `tests/unit` (160 files).
+> `packages/herdr` stays a separate, opt-in profile (producer decision
+> WL-0MVFZVIA50062TJ8); `packages/tui` and `packages/shared` are not gated yet
+> (WL-0MVODOJWB004G03J). See
+> [docs/dev/test-suite-baseline.md](../docs/dev/test-suite-baseline.md#test-gates)
+> for the gate reference, coverage table and measured runtimes.
+
 ## Per-test timings
 
 Use `npm run test:timings` (or `node ./scripts/test-timings.cjs`) to run Vitest with the JSON reporter and write `test-timings.json` at the repository root.

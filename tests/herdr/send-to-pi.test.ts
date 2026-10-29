@@ -338,3 +338,171 @@ describe('send-to-pi.sh --request-priority forwarding (WL-0MVF3PYO3000EVJ3 AC4)'
     expect(log.some((line) => line.includes('HERDR_REQUEST_PRIORITY'))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Reservation-ticket passthrough (parent WL-0MVIKRFP0005JDL8 AC1, slice C2)
+//
+// The dispatcher only spawns a pane after the proxy granted a reservation
+// ticket, and forwards it as `--reservation-ticket <id>`. Like the request
+// priority, the value must be injected into the PANE process (an env var set
+// on send-to-pi.sh does not reach pi): the Worklog pi extension reads
+// PI_LOCAL_RESERVATION_TICKET and sends `X-Local-Reservation` on the session's
+// first request.
+// ---------------------------------------------------------------------------
+
+describe('send-to-pi.sh --reservation-ticket forwarding (C2 AC1)', () => {
+  it('passes PI_LOCAL_RESERVATION_TICKET into the pane process', () => {
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--reservation-ticket',
+      'tkt-granted-1',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    expect(
+      log.some(
+        (line) =>
+          line.includes('PI_LOCAL_RESERVATION_TICKET=tkt-granted-1') ||
+          (line.includes('PI_LOCAL_RESERVATION_TICKET') && line.includes('--env')),
+      ),
+    ).toBe(true);
+  });
+
+  it('forwarded alongside the request priority and the model', () => {
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--request-priority',
+      'low',
+      '--reservation-ticket',
+      'tkt-2',
+      '--model',
+      'code',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    const run = log.find((line) => line.includes('pane run'));
+    expect(run).toBeDefined();
+    expect(run).toContain('PI_LOCAL_RESERVATION_TICKET=tkt-2');
+    expect(run).toContain('HERDR_REQUEST_PRIORITY=low');
+    expect(run).toContain('--model');
+    expect(run).toContain('code');
+  });
+
+  it('omits PI_LOCAL_RESERVATION_TICKET when no ticket is supplied (backward compatible)', () => {
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '/skill:implement <id>']);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('PI_LOCAL_RESERVATION_TICKET'))).toBe(false);
+  });
+
+  it('ignores an invalid ticket (token-safe fail-open, launch not aborted)', () => {
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--reservation-ticket',
+      'bad ticket; rm -rf /',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('PI_LOCAL_RESERVATION_TICKET'))).toBe(false);
+    expect(log.some((line) => line.includes('pane run'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Local-preference passthrough (slice C4, parent WL-0MVIKRFP0005JDL8 AC4)
+//
+// Herdr conveys the per-turn locality preference per spawn. Like the request
+// priority and the reservation ticket, the value must be injected into the
+// PANE process (an env var set on send-to-pi.sh does not reach pi): the
+// Worklog pi extension reads HERDR_LOCAL_PREFERENCE, sends
+// `X-Local-Preference` on every request and records the response route
+// headers in `<cwd>/.worklog/local-route.log`.
+// ---------------------------------------------------------------------------
+
+describe('send-to-pi.sh --local-preference forwarding (C4-AC1)', () => {
+  it('passes both preference values into the pane process', () => {
+    for (const preference of ['local-preferred', 'remote-ok']) {
+      const { status, log } = runScript([
+        '--no-resize',
+        '--cwd',
+        '/tmp/project-root',
+        '--local-preference',
+        preference,
+        '/skill:implement <id>',
+      ]);
+      expect(status).toBe(0);
+      expect(
+        log.some(
+          (line) =>
+            line.includes(`HERDR_LOCAL_PREFERENCE=${preference}`) ||
+            (line.includes('HERDR_LOCAL_PREFERENCE') && line.includes('--env')),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('forwards the preference alongside the ticket, priority and model', () => {
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--request-priority',
+      'low',
+      '--reservation-ticket',
+      'tkt-2',
+      '--local-preference',
+      'local-preferred',
+      '--model',
+      'code',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    const run = log.find((line) => line.includes('pane run'));
+    expect(run).toBeDefined();
+    expect(run).toContain('HERDR_LOCAL_PREFERENCE=local-preferred');
+    expect(run).toContain('PI_LOCAL_RESERVATION_TICKET=tkt-2');
+    expect(run).toContain('HERDR_REQUEST_PRIORITY=low');
+  });
+
+  it('omits HERDR_LOCAL_PREFERENCE when none is supplied (byte-identical launch)', () => {
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '/skill:implement <id>']);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('HERDR_LOCAL_PREFERENCE'))).toBe(false);
+  });
+
+  it('ignores an invalid preference (fail-open, launch not aborted)', () => {
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--local-preference',
+      'auto; rm -rf /',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('HERDR_LOCAL_PREFERENCE'))).toBe(false);
+    expect(log.some((line) => line.includes('pane run'))).toBe(true);
+  });
+
+  it('AC4: rejects the retired local-only value instead of forwarding it (fail-open)', () => {
+    // `local-only` is not a deprecated alias — it must be dropped with a
+    // warning exactly like any other out-of-alphabet value, and the launch
+    // still succeeds with no env var on the wire (WL-0MVSI1RX2005O9NE).
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--local-preference',
+      'local-only',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('HERDR_LOCAL_PREFERENCE'))).toBe(false);
+    expect(log.some((line) => line.includes('pane run'))).toBe(true);
+  });
+});

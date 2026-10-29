@@ -335,6 +335,28 @@ describe('pruneStateDir', () => {
       expect(readStateCounter(cacheDir, worklogDir)).toBeGreaterThan(0);
     });
 
+    it('never returns a value below one this process already returned, even after another writer lands a stale lower value', () => {
+      // A slow concurrent writer can compute N+1 from a stale read and rename
+      // it over a newer value, which used to regress the counter a writer
+      // returns (COUNTER REGRESSION … last=20 value=19, WL-0MVOGBJ7V00973BI).
+      // This pins the per-process high-water guarantee deterministically by
+      // simulating that stale write between bumps.
+      const worklogDir = worklogDirFor('stale-writer');
+      for (let i = 0; i < 5; i++) bumpStateCounter(cacheDir, worklogDir);
+      const before = readStateCounter(cacheDir, worklogDir);
+      expect(before).toBe(5);
+
+      // Simulate a concurrent writer that read 1 earlier and just renamed its
+      // stale value over the current 5.
+      fs.writeFileSync(stateCounterFilePath(cacheDir, worklogDir), JSON.stringify({ state: 2 }), 'utf-8');
+
+      // The bump must never return (or write) below 5: it raises the counter
+      // back above this process's high-water mark.
+      const after = bumpStateCounter(cacheDir, worklogDir);
+      expect(after).toBeGreaterThan(before);
+      expect(readStateCounter(cacheDir, worklogDir)).toBe(after);
+    });
+
     it('tolerates concurrent cross-process writers and pruners', async () => {
       // The child lives at the shared tests/ root, alongside the other
       // cross-process cache helpers (tests/read-cache-concurrent-child.ts).

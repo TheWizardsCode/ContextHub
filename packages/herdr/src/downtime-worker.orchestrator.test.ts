@@ -18,7 +18,7 @@
  * `downtime-worker.fixtures.ts`; no setup logic is re-implemented here.
  */
 
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
@@ -43,7 +43,7 @@ import {
 } from './downtime-worker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import { LEASE_FILE, LEADER_LOCK_FILE, isLeaseValid } from './leader-election.js';
-import { writeCoordinationFile } from './coordination.js';
+import { writeCoordinationFile, getEntry } from './coordination.js';
 import {
   idleAllSlotsFree,
   perSlotAllFree,
@@ -55,6 +55,33 @@ import {
   createTempDirTracker,
   writeDowntimeLog,
 } from './downtime-worker.fixtures.js';
+
+// ── releaseLeadership() spy (parent WL-0MVP7QHUB003ZA2A AC1) ────────────
+// The worker owns the leader-election manager, so the worker loop is the
+// only layer that can observe a voluntary `releaseLeadership()` hand-off.
+// Wrap `createLeaderElectionManager` (the real implementation still runs —
+// the rest of the module is spread through) so the empty-own-backlog
+// step-down specs can count releases per dispatch cycle without reaching
+// into the worker's private closure.
+const { releaseLeadershipSpy } = vi.hoisted(() => ({ releaseLeadershipSpy: vi.fn() }));
+
+vi.mock('./leader-election.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./leader-election.js')>();
+  return {
+    ...actual,
+    createLeaderElectionManager: (
+      opts: Parameters<typeof actual.createLeaderElectionManager>[0],
+    ) => {
+      const manager = actual.createLeaderElectionManager(opts);
+      const release = manager.releaseLeadership.bind(manager);
+      manager.releaseLeadership = () => {
+        releaseLeadershipSpy(manager.getInstanceId());
+        release();
+      };
+      return manager;
+    },
+  };
+});
 
 // ── Worker orchestrator (AC1/AC5) ─────────────────────────────────────
 
@@ -570,11 +597,17 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick();
     expect(worker.paused).toBe(true);
-    expect(worker.isLeader).toBe(true);
+    // Empty-leader hand-off (parent WL-0MVP7QHUB003ZA2A AC1): a genuinely
+    // empty cycle releases leadership, so `leaderState` is false here. With
+    // no peer competing, the leader block at the START of the next tick
+    // re-elects this instance (asserted below).
+    expect(worker.isLeader).toBe(false);
 
-    // Tick 3 during cooldown: lease should refresh (leader block runs first)
+    // Tick 3 during cooldown: the leader block runs first → re-election wins
+    // (no peer) → the lease is refreshed during the pause.
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000);
     await worker.tick();
+    expect(worker.isLeader).toBe(true);
 
     const leaseDuringPause = readLease(coordDir);
     expect(leaseDuringPause.leaderId).toBe('inst-a');
@@ -604,7 +637,15 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick();
     expect(worker.paused).toBe(true);
+    // Empty-leader hand-off (parent WL-0MVP7QHUB003ZA2A AC1): the genuinely
+    // empty cycle released leadership. Re-acquire it with one paused tick
+    // (no peer holds the lease) so this spec still exercises lease renewal
+    // while `leaderState === true`.
+    expect(worker.isLeader).toBe(false);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000);
+    await worker.tick();
     expect(worker.isLeader).toBe(true);
+    expect(worker.paused).toBe(true);
 
     // Stalled tick loop: advance time PAST lease TTL (300s) but still within
     // the cooldown (3.6M ms) — simulate a frozen tick loop mid-pause.
@@ -653,7 +694,15 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick();
     expect(worker.paused).toBe(true);
+    // Empty-leader hand-off (parent WL-0MVP7QHUB003ZA2A AC1): the genuinely
+    // empty cycle released leadership. Re-acquire it with one paused tick
+    // (no peer holds the lease yet) so this spec still exercises the
+    // per-tick re-derivation from a CACHED `leaderState === true`.
+    expect(worker.isLeader).toBe(false);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000);
+    await worker.tick();
     expect(worker.isLeader).toBe(true);
+    expect(worker.paused).toBe(true);
 
     // Mid-pause, B wins the election with a FRESH lease and a FRESH
     // coordination entry (a live instance refreshes its entry on its own
@@ -719,6 +768,492 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     expect(worker.isLeader).toBe(false);
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     expect(fetcher).not.toHaveBeenCalled(); // no poll
+  });
+
+  // ── Empty-own-backlog leadership step-down (parent WL-0MVP7QHUB003ZA2A AC1) ──
+  //
+  // In coordination mode the leader must release leadership (existing
+  // `releaseLeadership()`, exactly once per cycle) when a dispatch cycle
+  // yields NO dispatchable candidate from its own head/backlog AND the
+  // coordination offer scan also yielded none. The step-down must never fire
+  // on cycles that DID dispatch, nor on any non-empty terminal reason (hold /
+  // gate / fail-closed probe path) — and legacy mode has no manager to
+  // release.
+  //
+  // RED WITNESS (now GREEN): the pre-fix worker loop called
+  // `releaseLeadership()` ONLY for `outcome.ownBacklogDispatch === true`, so
+  // the positive spec below was committed as `it.fails` while the assertion
+  // was RED; the implementation child (WL-0MVP9UHCF005XHR2) added the
+  // empty-own-backlog trigger and flipped it to `it`. The negative specs are
+  // regression pins that hold in both states and must stay green.
+  describe('empty-own-backlog leadership step-down (WL-0MVP7QHUB003ZA2A AC1)', () => {
+    const START = 900_000_000;
+
+    /** An eligible non-critical implement head (plan_complete tier). */
+    const implementItem = () => ({
+      id: 'WL-PEER',
+      title: 'Peer implement item',
+      status: 'open',
+      stage: 'plan_complete',
+      priority: 'high',
+      risk: 'Low',
+      effort: 'S',
+    });
+
+    /** An eligible plan-tier head (intake_complete). */
+    const planItem = () => ({
+      id: 'WL-PEER',
+      title: 'Peer plan item',
+      status: 'open',
+      stage: 'intake_complete',
+      priority: 'medium',
+    });
+
+    /** A peer instance's coordination entry (another root's offer). */
+    function peerEntry(workItemId: string, directory: string) {
+      const at = new Date(START).toISOString();
+      return {
+        instanceId: 'inst-b',
+        workItemId,
+        directory,
+        assignedAt: at,
+        lastUpdated: at,
+      };
+    }
+
+    const fetchItemReturning = (info: Record<string, unknown>) =>
+      vi.fn().mockResolvedValue({ ok: true, info });
+
+    /** A non-terminal pane-close log entry (dispatch cooldown gate). */
+    const paneClose = () => ({
+      entryType: 'pane-close',
+      itemId: 'WL-PEER',
+      kind: 'implement',
+      stage: 'plan_complete',
+      reasonCode: 'agent-ended-no-terminal',
+      outcome: 'requires-attention',
+      timestamp: new Date(START).toISOString(),
+      closed: true,
+    });
+
+    /** One dispatch-attempt marker (per-item/per-kind attempt budget). */
+    const dispatchMarker = () => ({
+      itemId: 'WL-PEER',
+      kind: 'implement',
+      stage: 'plan_complete',
+      dispatchedAt: new Date(START).toISOString(),
+    });
+
+    it(
+      'steps down exactly once when the own head and the offer list are both genuinely empty (AC1)',
+      async () => {
+        const { worker, coordDir } = makeCoordinationWorker();
+        vi.setSystemTime(START);
+        releaseLeadershipSpy.mockClear();
+
+        await worker.tick(); // election: inst-a becomes leader
+        expect(worker.isLeader).toBe(true);
+
+        // Idle threshold met → dispatch attempt → empty offer list + empty
+        // own head + empty probe → the genuine empty-own-backlog cycle.
+        vi.setSystemTime(START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+        const cycle = await worker.tick();
+
+        expect(cycle.dispatched).toBe(false);
+        // The voluntary step-down fired exactly once for this cycle.
+        expect(releaseLeadershipSpy).toHaveBeenCalledTimes(1);
+        expect(releaseLeadershipSpy).toHaveBeenCalledWith('inst-a');
+        // leaderState is false after the tick, so the same tick cannot
+        // immediately re-elect itself (one step-down per empty cycle).
+        expect(worker.isLeader).toBe(false);
+        // The lease was actually released so another instance can win.
+        expect(existsSync(join(coordDir, LEASE_FILE))).toBe(false);
+
+        // Idempotent within the cycle: the next tick runs no dispatch cycle
+        // (the cooldown pause), so no second release is issued.
+        vi.setSystemTime(
+          START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+        );
+        await worker.tick();
+        expect(releaseLeadershipSpy).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('never steps down when the own-root probe still finds a candidate (transiently empty coordination file)', async () => {
+      const { worker, deps } = makeCoordinationWorker();
+      vi.setSystemTime(START);
+      releaseLeadershipSpy.mockClear();
+
+      await worker.tick(); // election
+      expect(worker.isLeader).toBe(true);
+
+      // The dispatch-time window is momentarily empty (the offer list was
+      // just drained), but the probe re-read still finds dispatchable work.
+      (deps.getHerdrListHead as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ ok: true, items: [] }) // dispatch head
+        .mockResolvedValueOnce({ ok: true, items: [] }) // extended window
+        .mockResolvedValue({ ok: true, items: [planItem()] }); // probe re-read
+
+      vi.setSystemTime(START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick();
+
+      expect(cycle.dispatched).toBe(false);
+      expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+      expect(worker.isLeader).toBe(true);
+      // The probe found work → no pause either (existing contract).
+      expect(worker.paused).toBe(false);
+    });
+
+    it('never steps down when the own-root probe fails (fail-closed three-strike path unchanged)', async () => {
+      const { worker, deps } = makeCoordinationWorker();
+      vi.setSystemTime(START);
+      releaseLeadershipSpy.mockClear();
+
+      await worker.tick(); // election
+      expect(worker.isLeader).toBe(true);
+
+      (deps.getHerdrListHead as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: false,
+        error: 'wl CLI failed',
+      });
+
+      vi.setSystemTime(START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick();
+
+      expect(cycle.dispatched).toBe(false);
+      expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+      expect(worker.isLeader).toBe(true);
+      // Fail-closed: a broken lookup is a strike (never a genuine-empty
+      // step-down) and never a cooldown pause on the first strike.
+      expect(deps.recordError).toHaveBeenCalledTimes(1);
+      expect(worker.paused).toBe(false);
+    });
+
+    it('never steps down on a cycle that DID dispatch an in-view/offer item', async () => {
+      const peerRoot = coordinationTmpDirs.make('peer-root-');
+      const { worker, deps, coordDir } = makeCoordinationWorker({
+        deps: { fetchItem: fetchItemReturning(planItem()) },
+      });
+      writeCoordinationFile(coordDir, { version: 1, entries: [peerEntry('WL-PEER', peerRoot)] });
+      vi.setSystemTime(START);
+      releaseLeadershipSpy.mockClear();
+
+      await worker.tick(); // election
+      vi.setSystemTime(START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick(); // dispatches the peer offer
+
+      expect(cycle.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        expect.stringContaining('WL-PEER'),
+        expect.objectContaining({ cwd: peerRoot }),
+      );
+      // The new empty-cycle trigger must never be confused with a dispatch.
+      expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+      expect(worker.isLeader).toBe(true);
+    });
+
+    // Every non-empty terminal reason is a NEUTRAL hold/skip: no cooldown,
+    // no strike, and — critically — no empty-cycle step-down.
+    const HOLD_CASES: Array<{
+      reason: string;
+      info: Record<string, unknown>;
+      deps?: Partial<DowntimeWorkerDeps>;
+      prepare?: (peerRoot: string) => void;
+    }> = [
+      {
+        reason: 'review-queue-hold',
+        info: implementItem(),
+        deps: { getReviewQueueCount: vi.fn().mockResolvedValue(999) },
+      },
+      {
+        reason: 'in-flight-pane',
+        info: { ...implementItem(), priority: 'critical' },
+        deps: {
+          getRunningDowntimePanes: vi.fn().mockResolvedValue({
+            ok: true,
+            count: 1,
+            paneIds: ['w1:p1'],
+            records: [
+              {
+                paneId: 'w1:p1',
+                label: 'Downtime triggered implement Peer item - WL-PEER',
+                agent: 'pi',
+                agentStatus: 'working',
+              },
+            ],
+          }),
+        },
+      },
+      {
+        reason: 'non-terminal-cooldown',
+        info: implementItem(),
+        prepare: (peerRoot) => writeDowntimeLog(peerRoot, [paneClose()]),
+      },
+      {
+        reason: 'attempt-budget-exhausted',
+        info: implementItem(),
+        prepare: (peerRoot) =>
+          writeDowntimeLog(peerRoot, [dispatchMarker(), dispatchMarker(), dispatchMarker()]),
+      },
+      {
+        reason: 'cpu-saturated',
+        info: implementItem(),
+        deps: {
+          readHostCpu: () => ({ ok: true, percent: 100, source: 'proc-stat' as const }),
+        },
+      },
+    ];
+
+    for (const holdCase of HOLD_CASES) {
+      it(`never steps down for the non-empty terminal reason '${holdCase.reason}'`, async () => {
+        const peerRoot = coordinationTmpDirs.make('peer-root-');
+        const { worker, coordDir } = makeCoordinationWorker({
+          deps: {
+            fetchItem: fetchItemReturning(holdCase.info),
+            ...holdCase.deps,
+          },
+        });
+        writeCoordinationFile(coordDir, { version: 1, entries: [peerEntry('WL-PEER', peerRoot)] });
+        holdCase.prepare?.(peerRoot);
+        vi.setSystemTime(START);
+        releaseLeadershipSpy.mockClear();
+
+        await worker.tick(); // election
+        vi.setSystemTime(START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+        const cycle = await worker.tick();
+
+        expect(cycle.dispatched).toBe(false);
+        expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+        expect(worker.isLeader).toBe(true);
+        // Neutral hold: the backlog is not empty, so no cooldown pause.
+        expect(worker.paused).toBe(false);
+        // The offered entry is KEPT (still a valid offer once the hold
+        // lifts) — the chance that this cycle was a genuine no-candidate
+        // (which would arm the pause) is excluded by `paused` above, and a
+        // removal would mean the offer was consumed, not held.
+        expect(getEntry(coordDir, 'inst-b')).not.toBeNull();
+      });
+    }
+
+    it("never steps down for the non-empty terminal reason 'code-freeze'", async () => {
+      const { worker } = makeCoordinationWorker({
+        deps: { readCodeFreezeStatus: vi.fn().mockReturnValue('frozen') },
+      });
+      vi.setSystemTime(START);
+      releaseLeadershipSpy.mockClear();
+
+      await worker.tick(); // election
+      vi.setSystemTime(START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick();
+
+      expect(cycle.dispatched).toBe(false);
+      expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+      expect(worker.isLeader).toBe(true);
+      expect(worker.paused).toBe(false);
+    });
+
+    it('legacy mode (no coordinationDir) never calls releaseLeadership() and leaves leaderState unchanged', async () => {
+      const { worker } = makeEmptyBacklogWorker();
+      vi.setSystemTime(START);
+      releaseLeadershipSpy.mockClear();
+
+      await worker.tick(); // idle run starts
+      vi.setSystemTime(START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick();
+
+      expect(cycle.dispatched).toBe(false);
+      expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+      // Legacy mode has no manager: the worker is unconditionally leader.
+      expect(worker.isLeader).toBe(true);
+      // The legacy no-candidate cooldown is unchanged.
+      expect(worker.paused).toBe(true);
+    });
+  });
+
+  // ── Peer-offer presence cancels the no-candidate cooldown (parent
+  // WL-0MVP7QHUB003ZA2A AC2/AC3) ────────────────────────────────────────
+  //
+  // The no-candidate probe answers only "is the LEADER's own backlog
+  // empty?" (orchestrator-dispatch.ts). An empty own root must NOT arm the
+  // 60-minute full-stop pause while a PEER's coordination entry holds a
+  // dispatchable offer (non-empty workItemId, instanceId !== self) — the
+  // pause suppresses the offer-list polling and starves that peer for up to
+  // 60 minutes. RED WITNESS: the two `it.fails` specs below assert
+  // post-implementation behaviour (pause not armed while a live peer offer
+  // exists; pause cancelled by the next leader check-in once a peer offer
+  // appears). Feature 4 (WL-0MVP9UJ6S009LLK4) flips them to `it`. The
+  // remaining specs are regression pins that hold on today's code.
+  describe('peer-offer presence cancels the no-candidate cooldown (WL-0MVP7QHUB003ZA2A AC2/AC3)', () => {
+    const PEER_START = 900_000_000;
+
+    /** A peer instance's coordination entry holding a stated offer. */
+    function peerOffer(workItemId: string, directory: string) {
+      const at = new Date(PEER_START).toISOString();
+      return {
+        instanceId: 'inst-b',
+        workItemId,
+        directory,
+        worklogRoot: directory,
+        assignedAt: at,
+        lastUpdated: at,
+      };
+    }
+
+    it(
+      'does not arm the cooldown while a live peer offer exists (AC2)',
+      async () => {
+        const peerRoot = coordinationTmpDirs.make('peer-root-');
+        const { worker, deps, coordDir } = makeCoordinationWorker({
+          deps: {
+            // The peer's offer is classified DISPATCHABLE, but the CAS
+            // claim is lost this cycle — the offer is KEPT (still
+            // valid) and the cycle ends 'no-candidate' (own head
+            // empty). This is the exact starvation window: the entry is
+            // live yet this cycle yielded nothing.
+            claimItem: vi.fn()
+              .mockResolvedValueOnce({ ok: false, reason: 'stale' })
+              .mockResolvedValue({ ok: true }),
+          },
+        });
+        writeCoordinationFile(coordDir, {
+          version: 1,
+          entries: [peerOffer('WL-PEER', peerRoot)],
+        });
+        vi.setSystemTime(PEER_START);
+
+        await worker.tick(); // election + first check-in
+        vi.setSystemTime(PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+        const cycle = await worker.tick(); // dispatch attempt → no-candidate
+
+        expect(cycle.dispatched).toBe(false);
+        // The claim was lost, not the offer: the peer entry is still in
+        // the file and must remain dispatchable.
+        expect(getEntry(coordDir, 'inst-b')).not.toBeNull();
+        // POST-FIX: a live peer offer means the cooldown must NOT arm
+        // (today this cycle arms it → RED).
+        expect(worker.paused).toBe(false);
+        // The arming-time peer check reuses the entries already read
+        // for the dispatch — no second full worklog CLI probe
+        // (`fetchItem` was called exactly once, for the dispatch's own
+        // classification read).
+        expect((deps.fetchItem as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it(
+      'cancels a live pause at the next leader check-in when a peer offer appears (AC3)',
+      async () => {
+        const peerRoot = coordinationTmpDirs.make('peer-root-');
+        // Genuinely empty everywhere at first: the own root is empty AND
+        // the offer list is empty → the 60-min pause arms exactly as
+        // today.
+        const { worker, deps, coordDir } = makeCoordinationWorker({
+          deps: {
+            // The leader classifies each offered entry by re-fetching its
+            // item; echo the requested id so the spawned prompt names the
+            // PEER's item.
+            fetchItem: vi.fn().mockImplementation(async (id: string) => ({
+              ok: true,
+              info: {
+                id,
+                title: `Peer offer ${id}`,
+                status: 'open',
+                stage: 'intake_complete',
+              },
+            })),
+          },
+        });
+        vi.setSystemTime(PEER_START);
+
+        await worker.tick(); // election + empty check-in
+        expect(worker.isLeader).toBe(true);
+        vi.setSystemTime(PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+        await worker.tick(); // genuine-empty → cooldown armed
+        expect(worker.paused).toBe(true);
+
+        // A peer's offer appears WHILE the leader is paused.
+        writeCoordinationFile(coordDir, {
+          version: 1,
+          entries: [peerOffer('WL-PEER', peerRoot)],
+        });
+
+        // The leader's next check-in (4-min cadence, WL-0MTOCBP1D009P4U3)
+        // runs BEFORE the cooldown gate — a live peer entry must cancel
+        // the pause so the offer list keeps being polled (today the
+        // check-in only inspects the leader's OWN entry → RED).
+        vi.setSystemTime(
+          PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 4 * 60_000 + 1_000,
+        );
+        const resumed = await worker.tick();
+
+        expect(resumed.polled).toBe(true);
+        expect(worker.paused).toBe(false);
+
+        // After a fresh full idle period the peer offer dispatches —
+        // never a 60-minute pause (the dispatch may land on the resume tick
+        // itself or on the next threshold tick).
+        vi.setSystemTime(
+          PEER_START +
+            DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS +
+            4 * 60_000 +
+            DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS +
+            2_000,
+        );
+        await worker.tick();
+        expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+          expect.stringContaining('WL-PEER'),
+          expect.objectContaining({ cwd: peerRoot }),
+        );
+      },
+    );
+
+    it('a self entry (instanceId === self) never counts as a peer offer — the genuine-empty cooldown still arms (AC2 discriminator)', async () => {
+      // The leader's check-in writes/removes its OWN entry, so the self
+      // entry is written AFTER tick 1 — it must then be present in the
+      // dispatch-time entry snapshot. The own item's CAS claim is lost
+      // (kept → no-candidate), exactly like the peer spec above.
+      const { worker, coordDir } = makeCoordinationWorker({
+        deps: {
+          claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+        },
+      });
+      vi.setSystemTime(PEER_START);
+
+      await worker.tick(); // election + check-in (own entry absent/removed)
+      writeCoordinationFile(coordDir, {
+        version: 1,
+        entries: [
+          {
+            ...peerOffer('WL-OWN', coordinationTmpDirs.make('self-root-')),
+            instanceId: 'inst-a',
+          },
+        ],
+      });
+      vi.setSystemTime(PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick();
+
+      expect(cycle.dispatched).toBe(false);
+      expect(getEntry(coordDir, 'inst-a')).not.toBeNull();
+      // Only a PEER offer suppresses the arm — a self entry does not.
+      expect(worker.paused).toBe(true);
+    });
+
+    it('an entry with an empty workItemId is not an offer — the cooldown still arms (AC2/AC5)', async () => {
+      const { worker, coordDir } = makeCoordinationWorker();
+      writeCoordinationFile(coordDir, {
+        version: 1,
+        entries: [peerOffer('', coordinationTmpDirs.make('null-root-'))],
+      });
+      vi.setSystemTime(PEER_START);
+
+      await worker.tick(); // election
+      vi.setSystemTime(PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick();
+
+      expect(cycle.dispatched).toBe(false);
+      // Nothing dispatchable anywhere → the pause still arms as today.
+      expect(worker.paused).toBe(true);
+    });
   });
 });
 

@@ -1,6 +1,8 @@
 # Downtime Dispatcher: Leader Election + Shared Coordination File
 
-The herdr plugin's **downtime worker** (`packages/herdr/src/downtime-worker.ts`)
+The herdr plugin's **downtime worker** (decomposed into a re-export barrel,
+`packages/herdr/src/downtime-worker.ts`, over ~24 sibling modules — see
+[Module layout](#module-layout))
 uses local-LLM idle compute to advance the worklog backlog automatically
 (dispatch `/skill:audit`, `/skill:plan`, `/skill:implement`, scheduled
 prompts). The 2026-08 refactor (work item **WL-0MST3OJ8S0001ROL**) changed the
@@ -12,6 +14,46 @@ This page is the deep-dive reference for operators and agents. The
 package-level overview lives in
 [`packages/herdr/README.md`](../../packages/herdr/README.md) *Downtime worker
 (local-LLM idle dispatch)*.
+
+## Module layout (WL-0MVF3F9A7000HKP7)
+
+`packages/herdr/src/downtime-worker.ts` is a **thin barrel** — a module-level
+doc comment plus re-export statements only, re-exporting exactly the symbols
+consumers import from `./downtime-worker.js` (Q2 refinement: unused exports
+stay internal to their module). Every behaviour lives in the sibling modules
+below; each one carries a doc comment stating its single responsibility.
+
+| Module | Single responsibility | Key exports (consumer-facing) |
+|---|---|---|
+| `downtime-worker.constants.ts` | Tuning constants, floors/maxima, tier ordering and decision helpers | `DEFAULT_DOWNTIME_POLL_INTERVAL_MS`, `DOWNTIME_AUDIT_STALE_WINDOW_MS`, `decisionHeaderToken`, `withTransientRetry` |
+| `downtime-worker.types.ts` | Pure-data type surface (status/slot/poller, candidates, claim/result, config/worker) | `LlamaStatus`, `DowntimeCandidate`, `DowntimeStage`, `RunningPanesResult`, `HerdrPaneRecord` |
+| `downtime-worker.clamps.ts` | The ten `clampDowntime*` settings normalisers (floors/ceilings) | `clampDowntimePollInterval`, `clampDowntimeAuditBatchMax`, … |
+| `downtime-worker.idle.ts` | Idle evaluation, idle-duration tracker, per-slot tracker, prefill pacing | `evaluateIdle`, `isIdleStatus`, `createIdleTracker`, `createPerSlotIdleTracker`, `evaluatePrefillPacing` |
+| `downtime-worker.poller.ts` | One `GET {proxyUrl}/llama/local/status` poll (fail-closed parse) | `parseLlamaStatus`, `fetchLocalStatus`, `createDowntimePoller` |
+| `downtime-worker.parsers.ts` | Raw `wl` CLI stdout → typed candidates/results | `parseNextCandidatesOutput`, `parseAuditCandidatesOutput`, `parseShowItemOutput`, `skillKindFromPrompt` |
+| `downtime-worker.selection.ts` | Per-tier candidate selection, rotation, critical-first, dependency frontier | `selectNextCandidate`, `selectAuditCandidate`, `selectWithRotation`, `resolveDependencyFrontier` |
+| `downtime-worker.pane.ts` | Pane identity, in-flight resolution, spawn invocation, pane-lifecycle monitor | `buildDowntimePaneArgs`, `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` |
+| `downtime-worker.gates.ts` | Every "may the worker dispatch X?" decision (holds, depth, attempt budget, classification) | `classifyItemForDispatch`, `evaluateCriticalFirstGuard`, `readReviewQueueGate`, `isAttemptBudgetExhausted` |
+| `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
+| `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
+| `downtime-worker.dispatch-cpu-gate.ts` | Host-CPU dispatch gate (host-utilisation seam) | `CPU_SATURATED_REASON` |
+| `downtime-worker.dispatch-claims.ts` | The claim → marker → spawn pipeline for one selected candidate | *(internal to the dispatch entry)* |
+| `downtime-worker.dispatch-contract.ts` | The dispatch pipeline's dependency boundary + event/outcome types | `DowntimeDispatchEvent`, `DowntimeErrorEvent`, … |
+| `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
+| `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
+| `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
+| `downtime-worker.coordination.ts` | The coordination OFFER computation (one item per instance per check-in) | `computeMostImportantItem`, `coordinationTierRank` |
+| `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
+| `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
+| `downtime-worker.launch-fence.ts` | One-per-idle-window launch fence (closes the stale-status launch window) | `createIdleWindowLaunchFence` |
+| `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
+| `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
+| `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
+
+Layering: extracted modules import concrete siblings — never the barrel — so
+the import graph stays acyclic (enforced by
+`packages/herdr/test/split-guard/scan.ts`, suite
+`downtime-worker.split-guard.test.ts`).
 
 ## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
 
@@ -135,15 +177,13 @@ review-queue hold. A gated own-backlog item is skipped exactly like an in-view
 one; a lost CAS race tries the next ranked candidate.
 
 **Leadership hand-off (AC4/AC5/AC6, assumption A3).** A successful dispatch
-sourced from the own backlog (and **only** then) is flagged machine-readably on
-the outcome (`ownBacklogDispatch: true`). After the claim, dispatch marker and
-pane spawn have completed, the worker loop calls the existing
+sourced from the own backlog is flagged machine-readably on the outcome
+(`ownBacklogDispatch: true`). After the claim, dispatch marker and pane spawn
+have completed, the worker loop calls the existing
 `LeaderElectionManager.releaseLeadership()` **exactly once** and sets
 `leaderState = false`, so another instance can win the next election. The
 step-down never rolls back the pending dispatch and never orphans the spawned
-pane. It is **not** called after a normal in-view dispatch, and **not** called
-when the fallback finds nothing — in that case leadership is retained and the
-pre-existing terminal reason is reported unchanged. **Exception — audit
+pane. It is **not** called after a normal in-view dispatch. **Exception — audit
 batching:** while an audit batch is armed a continuation audit sourced from the
 leader's own head does **not** step down mid-batch; the hand-off is deferred to
 batch end and fires once, on the batch-ending dispatch (see *Depth-aware audit
@@ -153,8 +193,40 @@ dispatch), the step-down is unconditional after a successful fallback dispatch;
 with no peer the same instance simply re-wins the normal election on a later
 tick, bounded by the existing election backoff.
 
+**Empty-leader step-down (WL-0MVP7QHUB003ZA2A AC1).** Leadership is a
+*transient* role granted to the instance with work to do — never a permanent
+perk of the instance that happened to win first. So the step-down fires on a
+**genuinely empty cycle** as well: when a dispatch cycle yields no in-view
+item, no coordination offer and no own-backlog dispatch, **and** the own-root
+probe confirms the leader's own head/backlog is empty, the worker loop calls
+the same `releaseLeadership()` and sets `leaderState = false` — exactly once
+per cycle (a repeat call in the same tick is a no-op because `leaderState` is
+already `false`, and `releaseLeadership()` itself is an idempotent stateless
+lock/lease file delete). A peer whose sprint view *does* hold dispatchable
+work can then win the next election and dispatch it. Contract details:
+
+- **Fail-safe.** The call is guarded by `leaderManager !== null &&
+  leaderState`; `releaseLeadership()` never throws, so nothing can escape the
+  dispatch attempt and no double-release is possible.
+- **Never on a dispatched cycle.** The trigger sits only in the
+  `no-candidate` arm, after the genuine-empty probe; a cycle that dispatched an
+  in-view or offer item never reaches it, and the `ownBacklogDispatch`
+  hand-off above is untouched (including the audit-batch deferral).
+- **Never on an unknown backlog.** A probe *failure* is a fail-closed
+  three-strike event, not an empty backlog, so it retains leadership.
+- **Never on a hold/gate.** `review-queue-hold`, `in-flight-pane`,
+  `non-terminal-cooldown`, `attempt-budget-exhausted`, `code-freeze` and
+  CPU-saturation each return their own neutral reason before this arm — the
+  backlog is *not* empty, so the leader keeps its role and keeps polling.
+- **No peer needed.** The step-down fires whether or not a peer has an offer:
+  with no peer the same instance simply re-wins the next election (the leader
+  block re-elects it on the following tick), which is cheap and keeps the
+  invariant "leadership follows work" simple. The no-candidate pause still
+  arms on that cycle unless a peer offer is live (see *No-candidate cooldown &
+  the empty offer file* below).
+
 **Scope: coordination/leader mode only.** The fallback lives on the
-coordination leader path (`dispatchFromCoordination`) and the step-down is
+coordination leader path (`dispatchFromCoordination`) and both step-downs are
 guarded by a non-null `leaderManager`. **Legacy mode** (no `coordinationDir`;
 `leaderManager === null`, `leaderState` hard-coded `true`) is unchanged — there
 is no manager and no peer to hand off to, so the direct/legacy path keeps the
@@ -302,7 +374,7 @@ authoritative**:
 | `capacity_hint: "saturated"` | defensive no-dispatch (reason `capacity-saturated`, header `saturated`), even if the per-slot detail looks inconsistent |
 | `capacity_hint: "idle"` / `"prefill_bound"` | not by themselves a stop; the per-slot free budget still applies |
 | `slots[].phase`, `slots[].context_tokens` | advisory evidence only — recorded in the decision log, never a gate |
-| `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | not availability gates; they feed the prefill-ETA deferral (`prefill-eta`, see *Prefill serialisation pacing* below) |
+| `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | not availability gates; they feed the calibration-gated, occupancy-only prefill-ETA deferral (`prefill-eta`, see *Prefill serialisation pacing* below) |
 
 With truthful lease state, the coarse global `local_lease_active` flag no
 longer blocks dispatch (`idle_leased` leases are exactly the case it
@@ -337,15 +409,17 @@ The proxy publishes the gate state on `GET /llama/local/status`:
 | `local_prefills_in_flight` | prefills currently in flight |
 | `local_max_concurrent_prefills` | effective cap; `1` = serialised (default), `0` = gate disabled |
 | `prefill_gate_waiters` | requests waiting for the prefill gate (the live gate queue depth) |
-| `queue_eta_seconds` / `prefill_budget_seconds` | the prefill-ETA guard's projected wait and admission budget (LP-0MVGDUV5E005UWBQ) |
-| `slots[].phase` / `slots[].prefill_eta_seconds` | per-slot prefill phase and calibrated prefill cost |
+| `queue_eta_seconds` / `prefill_budget_seconds` | the proxy's projected wait (own prefill + occupancy) and admission budget (LP-0MVGDUV5E005UWBQ); advisory evidence — the ETA alone is never a deferral trigger (see the calibration/occupancy rules below) |
+| `queue_eta_occupancy_seconds` / `queue_eta_busy_slots` | the wait behind OTHER in-flight prefills and the slots they occupy (LP-0MVGDUV5E005UWBQ); advisory — the only ETA term that can pace dispatch |
+| `prefill_eta_calibrated` | enough samples for the estimate to be actionable (`false` below the proxy's `MIN_CALIBRATION_SAMPLES`); advisory — `false` disables ETA deferral (fail open, see below) |
+| `slots[].phase` / `slots[].prefill_eta_seconds` | per-slot prefill phase and calibrated prefill cost (only busy slots count for pacing) |
 
 **Concurrency-budget contract.** On every poll the dispatcher computes an
 **effective local dispatch budget** and passes it to the tier chain (and to
 `dispatchFromCoordination`):
 
 ```
-effectiveBudget      = min(freeSlotBudget, prefillCapacityBudget)
+effectiveBudget      = min(freeSlotBudget, prefillCapacityBudget)   # single-pane tiers only
 freeSlotBudget       = countFreeUnownedSlots(slots)      # downtimeRequiredFreeSlots gate
 prefillCapacityBudget = 0                                 when cap > 0 and inFlight >= cap
                       = cap - inFlight                    otherwise (at least 1)
@@ -358,16 +432,52 @@ prefillCapacityBudget = 0                                 when cap > 0 and inFli
 - `prefill_gate_waiters > 0` → contention evidence, equivalent to a non-empty
   `contention_queue_depth`: no dispatch, reason `prefill-gate`, header token
   `prefill-gate` (deliberately distinct from `contention`).
-- `queue_eta_seconds` (or a per-slot `prefill_eta_seconds`) above
+- **ETA deferral is calibration-gated and paces on occupancy only.**
+  `prefill_eta_calibrated === false` → **no ETA deferral** (fail open): an
+  estimate below the proxy's calibration floor (`MIN_CALIBRATION_SAMPLES`)
+  mirrors the proxy's own admission guard, which is inert
+  (`insufficient_samples`) until then — deferring on an uncalibrated idle
+  pool would livelock it (never dispatch ⇒ never calibrate ⇒ stay
+  pessimistic). The paced queue term is the **occupancy wait**
+  (`queue_eta_occupancy_seconds` — the wait behind OTHER in-flight prefills),
+  never the newcomer's own prefill; a per-slot `prefill_eta_seconds` counts
+  only for slots that are actually busy (an idle pool has no in-flight slot
+  ETA to respect). When the occupancy term (or a busy slot's ETA) exceeds
   `prefill_budget_seconds` → defer, reason `prefill-eta`, header token
   `prefill-eta`. Both values must be present and finite; a missing ETA **or**
-  budget never blocks dispatch. This mirrors the proxy's own admission guard
-  instead of parking a pane behind a doomed wait.
-- The effective budget is what the dispatch tier sees, so a reduced budget
-  interacts directly with `downtimeRequiredFreeSlots` and the **per-tier
-  free-slot minimums**: with a prefill headroom of `1` the audit tier (≥ 2
-  free slots) is skipped and the implement tier dispatches instead, even
-  though more slots are physically free.
+  budget never blocks dispatch. Fallbacks (parent AC4): a legacy proxy (no
+  calibration signal) keeps today's total-`queue_eta_seconds` behaviour; a
+  calibration-aware proxy that did not serve the split uses the total only
+  when occupancy evidence exists (`local_prefills_in_flight > 0` or a busy
+  slot); any other shape is zero occupancy — an absent occupancy ETA never
+  means "unknown ⇒ defer".
+
+**The effective budget paces only the single-pane tiers**
+(WL-0MVR8FI4Q0007CGR): `effectiveFreeSlots` is passed alongside the raw
+`freeSlots` slot budget, and the two are never conflated again.
+
+- The **audit tier's ≥ 2 slot minimum** is a *slot-count* requirement
+  (parent pane + Phase 2 child at `AUDIT_PHASE2_PARALLELISM=1`) and is
+  evaluated against `freeSlotBudget` (the raw free-slot count) — **never**
+  against `effectiveFreeSlots`. A serialised prefill gate (`cap 1`) reduces
+  prefill concurrency, not slot count: two panes can still run, their
+  prefills simply queue serially on the proxy's gate. Capping a slot-count
+  requirement with a prefill-concurrency number made the audit tier
+  permanently unreachable at the documented default (`freeSlots 2`, `cap 1`,
+  `inFlight 0` → `effectiveFreeSlots 1 < 2` → audit always skipped).
+  **Reversed:** with a prefill headroom of `1` and two genuinely free slots
+  the **audit tier dispatches** and the implement tier is not consulted.
+- The **single-pane tier minimums** (≥ 1 slot) keep `effectiveFreeSlots` as
+  their input, so the reduced headroom still reduces single-pane concurrency
+  exactly as before.
+- When the audit tier is skipped because its slot minimum is unmet, the tick
+  emits a distinct **`audit-tier-budget-skipped`** observation token carrying
+  `freeSlots`, `capacityBudget`, `effectiveFreeSlots` and `skippedTier:
+  'audit'` — the skip is never collapsed into a bare `no-candidate`
+  (WL-0MVR8FI4Q0007CGR AC5). The token is emitted for **both** the direct and
+  the coordination dispatch path (the leader evaluates the same raw slot
+  budget the tick admitted), see [Empty-offer & skipped-tier
+  attribution](#empty-offer--skipped-tier-attribution-wl-0mvr8f-kmu009xted).
 
 **Pacing only reduces concurrency.** It never raises the free-slot budget,
 never bypasses `slots_stale` / `slots: []` (`slots-unavailable`) or
@@ -382,17 +492,167 @@ cap and budget, avoiding a second source of truth). Malformed gate counters
 
 **Observability.** Every polled decision entry records `prefillsInFlight`,
 `maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
-`queueEtaSeconds` (and the per-slot `slotPrefillEtaSeconds`) alongside the
-existing `capacityHint` / `contentionDepth` evidence, and the paced refusal
-carries its own `reason` (`prefill-gate` / `prefill-cap` / `prefill-eta`).
+`queueEtaSeconds`, the occupancy/calibration evidence
+`queueEtaOccupancySeconds`, `queueEtaBusySlots` and `prefillEtaCalibrated`
+(and the per-slot `slotPrefillEtaSeconds`) alongside the existing
+`capacityHint` / `contentionDepth` evidence, and the paced refusal carries
+its own `reason` (`prefill-gate` / `prefill-cap` / `prefill-eta`) — so an
+operator can tell *waiting behind other prefills* from *waiting on my own
+cold prefill* straight from the coordination log.
 
 **Tests.** `downtime-worker.parse.test.ts` pins the parser (gate counters
-fail-closed, ETA advisory, absent fields unchanged);
-`downtime-worker.idle.test.ts` pins `evaluatePrefillPacing` (budget 0 at the
-cap, headroom recovery, gate waiters, ETA deferral, missing budget/ETA
-non-blocking, cap absent/0 unbounded); `downtime-worker.test.ts` pins the tick
-reason/token, decision-log evidence, ETA deferral and the effective-budget
-clamp (audit vs implement tier).
+fail-closed, ETA advisory, absent fields unchanged) and the new
+occupancy/calibration advisories (present / absent / malformed →
+`undefined`, a malformed advisory never rejects the poll and never masks a
+fail-closed gate counter); `downtime-worker.idle.test.ts` pins
+`evaluatePrefillPacing` (budget 0 at the cap, headroom recovery, gate
+waiters, ETA deferral, missing budget/ETA non-blocking, cap absent/0
+unbounded) plus the calibration/occupancy contract (the idle-uncalibrated
+and idle-zero-occupancy fixtures never defer, an idle slot's stale per-slot
+ETA never defers, gate waiters and a saturated cap still defer while
+uncalibrated, and a real occupancy ETA above the budget still defers with
+`prefill-eta`); `downtime-worker.test.ts` pins the tick reason/token,
+decision-log evidence including the occupancy/calibration record fields,
+ETA deferral, the slot-budget audit contract (the audit tier's ≥ 2 minimum
+is evaluated against the raw `freeSlots` slot budget, not the prefill-paced
+`effectiveFreeSlots` — pinned at cap 1 and at cap 0, with the
+`audit-tier-budget-skipped` observation token) and the tick-level dispatch
+proof (an idle-uncalibrated poll now selects and dispatches a candidate,
+with the busy-occupancy twin still pacing).
+
+### Local capacity reservation (LP-0MVIKPCSG002B0NL, parent WL-0MVIKRFP0005JDL8, slice C2)
+
+**Problem (pre-reservation behaviour, now replaced by the handshake below):**
+polling `GET /llama/local/status` and then launching was racy — two herdr
+instances could observe the same idle window and both launch. With the prefill
+gate serialised (`local_max_concurrent_prefills: 1`) only one start was
+admissible, so the loser queued behind the winner's prefill and could fall back
+to a remote provider after a long wait. An idle window can be *observed* by N
+instances but *owned* by one.
+
+The proxy adds an atomic reservation handshake:
+
+```
+POST {proxyUrl}/llama/local/reserve
+     { "expected_tokens": <n>, "priority": "interactive" | "background",
+       "cache_state": "warm" | "cold" | "unknown" }
+
+200  -> { "ticket_id": "<id>", "ttl_s": <seconds> }      # granted
+429  -> { "reason": "<open vocabulary>", "retry_after_s": <seconds> }  # refused
+```
+
+**Dispatch gate.** After winning the CAS claim and **before** the success
+marker and the pane spawn, `dispatchClaimedTier` asks for ONE ticket:
+
+| Reserve outcome | Dispatcher behaviour |
+|---|---|
+| `200` granted | The ticket id is forwarded to the pane (`--reservation-ticket` / `PI_LOCAL_RESERVATION_TICKET`) and the spawn proceeds. The marker records `reservationTicketId` + `reservationGrantedAt`. |
+| `429` refused | **No launch.** The tick defers by the proxy's `retry_after_s`, the CAS claim is rolled back (the item is re-selectable next idle period), and the decision entry records `reason` = the proxy's reason (`reserved-fallback` / `prefill-gate` / `queue-full` / …), `admit: false`, `retryAfterS` and `projectedWaitS`. |
+| absent (404) / 500 / timeout / malformed | **Fail open** — the dispatch behaves exactly as before this feature: no ticket, no header, no behaviour change. Once per poll, no retry loop (a failed reserve is simply asked again on the next poll cadence). |
+
+**No new polling loop.** The reserve call rides the existing single-flight
+status-poll cadence: `dispatchClaimedTier` is reached at most once per tick
+with a won claim, so a poll issues **at most one** `POST /llama/local/reserve`.
+It never raises the free-slot budget and never bypasses the fail-closed
+`slots-unavailable` / `capacity-saturated` / prefill-gate checks, which all run
+earlier in the tick.
+
+**Ticket forwarding.** The pane's first request must carry
+`X-Local-Reservation: <ticket_id>`, but an env var set on the launching script
+does not reach the herdr pane process. The dispatcher therefore forwards the id
+as `--reservation-ticket <id>` (and sets `PI_LOCAL_RESERVATION_TICKET` on the
+spawn's env); `send-to-pi.sh` injects it into the pane process
+(`exec env PI_LOCAL_RESERVATION_TICKET=… bash run-pi-agent.sh …`), where the
+Worklog pi extension (parent slice C4) turns it into the request header.
+Ticket ids are validated token-safe (`[A-Za-z0-9._:-]`); an invalid or absent
+id is ignored (fail-open, the pane still launches).
+
+**Ticket lifetime.** A ticket is single-use. When it cannot be forwarded (the
+marker or spawn fails) it is dropped — the outcome records
+`reservationReleased: true` with the ticket evidence, and the next idle period
+asks for a fresh one. Tickets are never reused or leaked.
+
+**Observability.** Decision entries carry `reservationTicket` (`{ id,
+grantedAt }`), `admit`, `projectedWaitS` and `retryAfterS` alongside the
+existing capacity evidence (see [Decision-log
+entries](#decision-log-entries-audit-batch-tokens--metadata-parent-wl-0mvedm8ot007wdrs-ac5)).
+
+**Tests.** `downtime-worker.reserve.test.ts` pins the client (POST shape,
+grant, 429 refusal, 404/500/timeout/garbage fail-open), the dispatch gate
+(grant → launch with the ticket; refusal → defer, roll back and never spawn;
+fail-open per failure mode; at most one reserve per poll; prefill pacing
+unchanged) and the pane-arg/env forwarding;
+`tests/herdr/send-to-pi.test.ts` pins `--reservation-ticket` →
+`PI_LOCAL_RESERVATION_TICKET` in the pane process.
+
+### One launch per idle window (parent WL-0MVIKRFP0005JDL8 AC3, slice C3)
+
+**Problem (the residual half of the race).** The reservation handshake above is
+the *cross-instance* arbiter — two instances observing the same idle window ask
+for a ticket and exactly one is granted. But a `200` grant was not yet enough
+to guarantee *one pane per window*, because a freshly launched pane takes
+seconds to boot pi and start its prefill: for the next few polls the proxy's
+`local_prefills_in_flight` still reports the **pre-launch** value, so the same
+(or a permissive) dispatcher sees headroom that the launch has already spent
+and can be granted a second ticket against it. Observed impact: an idle window
+*observed* by N instances but *owned* by one.
+
+**The rule.** An idle window produces **at most one** launch for this instance,
+and a further launch is admitted only when BOTH hold:
+
+1. a **fresh status tick** whose `local_prefills_in_flight` has advanced past
+   the admission value — i.e. the proxy has REGISTERED the launch, so the
+   headroom it reports is demonstrably post-launch (with the serialised default
+   `local_max_concurrent_prefills: 1` this also means the pacing gate itself
+   refuses until the launched prefill finishes); and
+2. a **new reservation ticket granted for that specific launch** (the launch
+   carries its own ticket; nothing is reused).
+
+With a headroom-permitting proxy (`cap > 1`) the rule permits at most `cap`
+concurrent launches per window, matching the prefill headroom — it never
+raises the budget.
+
+**Implementation.** A per-instance fence (`createIdleWindowLaunchFence`) is fed
+by every usable poll (`idle`, `local_prefills_in_flight`,
+`local_max_concurrent_prefills`) and records each successful launch. It is
+consulted at the single machine-wide gate the worker runs **before BOTH dispatch
+paths** (coordination-leader and own-backlog), so the rule is identical on each:
+
+| Situation | Behaviour |
+|---|---|
+| No launch yet in this window | admit (subject to every existing gate) |
+| Launched, proxy still reports the pre-launch in-flight count | **refuse** — reason `idle-window-spent`, token `window-spent`: no reserve request, no spawn, no strike, no cooldown, claim never taken |
+| Launched, proxy now counts the launched prefill | admit (the pacing gate then decides on the real headroom) |
+| Window ended (busy poll), counters absent / `cap: 0`, or no registration within the 5-minute grace | admit (fail-open — an older proxy and a dead pane can never wedge the dispatcher) |
+
+**Evidence.** A refusal on the `dispatchClaimedTier` reserve gate is recorded
+under the grouped reason `reservation-refused` with header token
+`reservation-lost`, and the proxy's own vocabulary is preserved in
+`reservationReason` (`prefill-gate` / `queue-full` / `reserved-fallback` / …)
+alongside `admit: false`, `retryAfterS` and `projectedWaitS`. The token is
+deliberately distinct from herdr's OWN paced stops (`prefill-gate` /
+`prefill-cap` / `prefill-eta`) and from the fence hold (`window-spent`), so an
+operator can tell a lost reservation race from a paced stop from the herdr
+header alone. The coordination-leader path returns that refusal directly
+instead of falling through to the own-backlog fallback (which would retry other
+items and replace the evidence with a generic terminal reason).
+
+**Composition with the coordination leader.** The fence holds no distributed
+lock and never claims capacity: the proxy remains the arbiter (an atomic
+grant), the coordination leader remains the only dispatcher, and the fence only
+ever *adds* refusals on top of the per-slot / saturated / prefill gates — it
+never admits a dispatch they would refuse.
+
+**Tests.** `downtime-worker.launch-window.test.ts` pins the fence state machine
+(registration releases it, a busy poll ends the window, absent counters and
+`cap: 0` are inert, the bounded grace self-releases, `cap > 1` still requires
+registration first), the same-tick two-instance race (one spawn total from one
+shared mock-proxy ledger; the loser records `reservation-refused` with
+`admit: false` / `retryAfterS` / `reservationReason` under the
+`reservation-lost` token), later-tick suppression against a stale status,
+the positive path (registered headroom + its own ticket), and
+coordination-leader parity (evidence returned, not masked; the leader window
+fenced like the own-backlog window).
 
 ### Idle-age authority (`local_idle_seconds`, WL-0MVHSZR9C0012NQY)
 
@@ -494,6 +754,16 @@ are now recovered automatically:
 
 A STANDING success marker (no `outcome`) excludes the item for its tier **for a bounded lifetime**, so a dispatched item is never double-dispatched while its pane may still be running — and never stranded forever if it is not (see below).
 
+**Probe window (how `spawn-failed` is observed).** `spawnDowntimePane` waits
+for a spawn `error` (ENOENT/EACCES) or a non-zero child `exit` for
+`DOWNTIME_SPAWN_PROBE_MS` (default 500 ms) before assuming the pane started.
+The window is a caller-side fallback deadline, not a timing guarantee, and is
+overridable per call via `probeMs` (stripped before the opts reach the spawn
+boundary). A caller that spawns a real interpreter on a loaded host must widen
+it: real `node` startup has been observed at ~0.56 s under load average ~28,
+which would otherwise resolve `{ok: true}` before the exit event and hide a
+non-zero script exit (WL-0MVOTIJ2U000JI44).
+
 ### Status-neutral audit-tier claim (WL-0MV85WCJJ0087VMP)
 
 The AUDIT tier claim is deliberately STATUS-NEUTRAL: an audited
@@ -554,6 +824,23 @@ Rules:
   auto-dispatch. `status_lifecycle`'s failure-exit already clears; the
   dispatch claim/rollback paths clear it on every terminal outcome
   (WL-0MV85WD400091OZ6).
+- **Surfaced to the operator (WL-0MVR8FN1D002SCIR).** An all-held dispatch
+  window used to be indistinguishable from an empty or broken backlog: the
+  refusal is silent by design, so a root whose whole window was parked
+  produced a bare `no-candidate` for hours. The Herdr worklist now reports it:
+  the header names how many window items are held and by which sentinel(s)
+  (`[held: 30 by Map]`), and a banner warns when **zero** items in the window
+  are dispatchable *solely* because of assignee holds —
+  `Assignee hold — all 30 of 30 dispatch-window item(s) held by Map; no
+  downtime dispatch possible`. The surface is **strictly read-only**: it never
+  clears, demotes or mutates an `assignee`, and it cannot change a dispatch
+  decision (the dispatched-item set is byte-identical with and without it).
+  The window classification is the SHARED helper
+  (`classifyWindowHold` / `summariseDispatchWindowHold`) that also produces the
+  coordination log's `all-window-items-held` token, so the TUI and the log can
+  never diverge — see
+  [Empty-offer & skipped-tier
+  attribution](#empty-offer--skipped-tier-attribution-wl-0mvr8f-kmu009xted).
 
 ### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
 
@@ -936,6 +1223,77 @@ hours even when one slot is technically free. Operational levers: raise prefill
 concurrency, close/reap the long sessions, and/or enable the `pane-close`
 reaper (`paneCloseEnabled`) so abandoned sessions are eventually settled.
 
+### Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6)
+
+The dispatcher gates on local-LLM slot capacity, prefill pacing, the code freeze
+and pane state, but until this change it had **no host-CPU signal at all**: it
+would happily launch *more* implement/audit panes while the machine was already
+at or above 75 % CPU utilisation, slowing every agent (including the operator's
+own session). The gate adds one host-local reading per dispatch tick.
+
+**Metric (`packages/herdr/src/host-cpu.ts`).** Utilisation is a
+`/proc/stat` delta between two samples:
+
+- `parseProcStatCpu(text)` reads the aggregate `cpu` line
+  (`user nice system idle iowait irq softirq steal`); `guest*` counters are
+  excluded because they are already contained in `user`/`nice`. `busy` is
+  `total − (idle + iowait)`; per-CPU lines (`cpu0`, …) are ignored — the gate
+  measures the whole host.
+- `cpuPercentFromSamples(prev, next)` = `busyΔ / totalΔ × 100`, clamped to
+  `0–100`, `null` when the total counter did not advance.
+- `createHostCpuSampler()` holds the **previous sample in memory only** (no disk
+  state, no machine-wide marker, no cross-host coordination — the downtime
+  leader is the single dispatcher per host). Degradation order:
+  1. `/proc/stat` delta, when a previous sample exists **and** the window is at
+     least `1 s` (`HOST_CPU_MIN_SAMPLE_WINDOW_MS`; two dispatches inside one
+     tick would otherwise measure a misleading 0 %);
+  2. `1-min load average ÷ core count × 100` (capped at 100) from
+     `/proc/loadavg` — load is an upper-bound proxy, and the conservative
+     direction is the intended one for a *dispatch* gate;
+  3. `{ ok: false }` — **fail open**, dispatch unchanged.
+  The whole module never throws: unreadable/unparseable input, thrown readers,
+  `NaN`/non-finite values and an absent `/proc` all degrade to the next step.
+  The production seam in `index.ts` reads only the whitelisted absolute paths
+  `/proc/stat` and `/proc/loadavg` via `node:fs` and `os.cpus().length`.
+
+**Gate.** `isCpuGateActive(percent, threshold)` is
+`threshold > 0 && percent >= threshold` (equal blocks). While active it is
+applied like the code-freeze **split-by-skill safety gate**, not like the
+non-safety filters a critical item may bypass:
+
+- **refused**: `audit` and `implement` dispatch — including a CRITICAL
+  implement — on every path: the direct Herdr head (critical-first scan and
+  normal scan), the coordination leader's offer dispatch, the own-backlog
+  fallback and the audit-batch continuation;
+- **allowed**: `intake`, `plan` and `risk-effort` dispatch, and every
+  operator-initiated/manual dispatch;
+- **stalled resume skipped**: a gated tick does not resume a stalled pane in
+  place (that would wake an agent and add load). Once CPU falls below the
+  threshold the next idle tick resumes normally, unchanged.
+- **offers are NOT gated**: `computeMostImportantItem` still returns
+  candidates (only its stalled-resume step is skipped). Suppressing offers
+  would strip the leader's candidate list and, when everything is held, drive
+  the 60-minute `no-candidate` cooldown — dispatch would then not resume
+  promptly after CPU recovers.
+
+**Neutral token.** A gated tick reports the distinct reason
+**`cpu-saturated`** (header token of the same name) and records it in the
+decision log with `hostCpuPercent`, `hostCpuSource` (`proc-stat` / `loadavg`)
+and `cpuGatePercent`. It is never a CLI-error strike, never enters the
+`no-candidate` cooldown, never removes a coordination entry, and never rolls
+back or writes a dispatch marker. It is deliberately **NOT** counted as a
+capacity refusal in `CAPACITY_REFUSAL_REASONS` (`capacity-starvation.ts`): the
+local model may be perfectly idle while the host is busy, so a CPU-gated night
+must never be reported as local-model capacity starvation. If the code freeze
+and the CPU gate are both active, `code-freeze` keeps precedence.
+
+**Configuration.** `downtimeCpuGatePercent` (default **75**, clamped to
+`[0, 100]`, `0` disables) is re-read live on every dispatch tick and threaded
+through `DowntimeWorkerConfig.config()` into both dispatch entry points.
+`packages/herdr/README.md` documents the setting. No new dependency (`node:fs`
++ `node:os` only) and no persistent state: a worker restart simply re-seeds via
+the load-average fallback on the first tick.
+
 ### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
 
 Automated downtime panes spawn **inside the owning project's herdr
@@ -1252,6 +1610,206 @@ the parent contract (WL-0MVE1NZ4J000H5NH):
   (`mode`/`slotBudget`/`freeSlots`/`concurrentDispatchCap`) plumbing are
   gone. Free-slot dispatch gating is unchanged.
 
+### Per-turn local preference and route log (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4, slice C4)
+
+**Problem.** A dispatched pane's turns were previously sent with no locality
+claim: when the local slot was contended the proxy silently waited (up to
+120 s) and only then fell back, so a turn could look stuck with no evidence of
+which route it took. The reservation handshake (C2) claims capacity for a
+pane's *first* request; this slice records the *per-turn* decision for every
+request the pane makes.
+
+**Wire contract** (pinned by C1, shared with the proxy change
+`LP-0MVIKPCSG002B0NL`):
+
+| Direction | Header | Meaning |
+|---|---|---|
+| request | `X-Local-Preference: local-preferred` | Work the operator marks local-first: the prompt stays local while it fits and is deferred with a retryable 429 (`Retry-After`) when the local slot is contended, instead of being silently sent remote |
+| request | `X-Local-Preference: remote-ok` | Background work: may go remote without queuing local capacity |
+| response | `X-Local-Route` | Route the proxy took (e.g. `local`, `remote:<provider>`) |
+| response | `X-Local-Fallback-Reason` | Why the request left the local route |
+
+**Policy knob.** `downtimeLocalPreference` (herdr setting, clamped to the two
+values, default `remote-ok` since WL-0MVNUHWH500196K1; `local-preferred` is the
+explicit per-deployment opt-in) is read live on every tick and threaded
+through `DowntimeWorkerConfig.config()` → both dispatch paths →
+`dispatchClaimedTier` → `spawnAgentPane` → `buildDowntimePaneArgs` /
+`buildDowntimeSpawnOptions`:
+
+- **Downtime backlog panes** carry the resolved value (see the priority rule
+  below); with no persisted key a `medium`/`high`/`critical` item still
+  forwards `remote-ok` — unattended work goes remote rather than stall on a
+  contended local slot — while a `low`-priority item becomes `local-preferred`.
+- **Scheduled-prompt panes** and **headless background dispatches**
+  (`spawnBackgroundPi`) default to `remote-ok`: unattended work never queues
+  local capacity the operator may need. They also *inherit the knob when it
+  is present* — so an explicit `local-preferred` deployment also makes scheduled
+  work local-preferred. For an unconfigured deployment the knob and the
+  background fallback agree on `remote-ok`.
+- **Interactive panes** carry no preference unless the operator exports
+  `HERDR_LOCAL_PREFERENCE` — requests stay byte-identical to today.
+
+Downtime-spawned panes take both pane-launch knobs (`HERDR_LOCAL_PREFERENCE`,
+`PI_LOCAL_RESERVATION_TICKET`) from the **resolved dispatch decision only**:
+`buildDowntimeSpawnOptions` strips them from the inherited environment before
+re-adding an explicit value (WL-0MVP643Q4007BZJ8). A worker that itself runs
+inside a `local-preferred` pane therefore cannot leak its own preference into
+every child — that would bypass the priority rule and violate the fail-open
+contract that an absent value omits the env var.
+
+**Priority rule and precedence (WL-0MVNUIW77000VYAX).** The preference is
+resolved **once** at the dispatch boundary (`dispatchClaimedTier`, from the
+already-resolved candidate priority), so every dispatch path — coordination
+offer, own-backlog fallback, audit-batch continuation, critical-first/normal
+scan and the legacy tier chain — inherits the same decision. Precedence,
+highest first:
+
+1. **Explicit operator setting wins.** When `downtimeLocalPreference` is
+   *persisted* with a valid value (`local-preferred` or `remote-ok`), that value
+   is forwarded for every pane regardless of priority. Remove the key to opt
+   into the priority rule.
+2. **Priority rule.** With no persisted key, a `low`-priority candidate is
+   dispatched `local-preferred` (cheap work absorbs contention on the local slot
+   instead of consuming remote capacity); `medium`, `high`, `critical` and an
+   absent/unknown priority resolve to the deployment default
+   `DOWNTIME_LOCAL_PREFERENCE` (`remote-ok`).
+3. **Deployment default.** `remote-ok`, also used when no priority exists (a
+   scheduled prompt has no work item).
+
+Explicitness is a **derived, never-persisted** signal: `loadSettings` reports
+`downtimeLocalPreferenceExplicit` `true` only when the settings file holds a
+valid two-value preference (an absent key, a missing file and out-of-alphabet
+values are not explicit). The persisted alphabet is
+`local-preferred | remote-ok`, the setting's `remote-ok` default is unchanged,
+and the `X-Local-Preference` wire contract emits the same two values — the
+rule only chooses between them.
+
+> **`local-only` removed (WL-0MVSI1RX2005O9NE).** The retired value is not a
+> deprecated alias: it is rejected on every input surface. A settings file
+> still holding `local-only` loads as `downtimeLocalPreference: 'remote-ok'`
+> with `downtimeLocalPreferenceExplicit: false` (the low-priority rule applies
+> again) and a save round-trip drops the key; `send-to-pi.sh` warns and drops
+> `--local-preference local-only` while still exiting successfully (fail-open).
+> Migration: rewrite the setting to `local-preferred`.
+
+**Marker evidence.** The success marker in
+`.worklog/downtime-dispatches.log` records the resolved `localPreference` and a
+machine-readable `localPreferenceReason`:
+
+| reason | meaning |
+|---|---|
+| `operator-setting` | a persisted `downtimeLocalPreference` decided the value |
+| `priority-low` | the low-priority rule chose `local-preferred` |
+| `default` | the deployment default was kept (non-low or absent priority) |
+
+Scheduled-prompt markers record the same two fields (`default`, or
+`operator-setting` when the operator persisted the knob). Legacy callers that
+pass a preference without the new dispatch mode add no marker fields, and
+marker readers ignore unknown/absent fields, so existing logs stay valid. The
+route log's `preference` field therefore shows `local-preferred` for a low-priority
+dispatch and the deployment default for a high-priority one.
+
+> **Default flip (WL-0MVNUHWH500196K1).** The C4-AC1 downtime default of
+> `local-only` (WL-0MVLJTV03000KIQZ) is superseded by `remote-ok`. The
+> trade is deliberate: contended downtime work may now leave the box for a
+> remote (possibly metered) provider rather than silently not run. Persist
+> `local-preferred` where that spend/reach profile is unwanted; the route log
+> makes the actual route visible either way.
+
+**Transport.** `send-to-pi.sh --local-preference <local-preferred|remote-ok>`
+injects the value into the pane process (`exec env
+HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`); anything else —
+including the removed `local-only` — is ignored with a warning and the launch
+proceeds unchanged (fail-open). An absent flag omits the env var entirely.
+
+**Header injection + route capture.** The Worklog pi extension
+(`packages/tui/extensions/local-preference/`, loaded through the extension
+package's `pi.extensions` list) reads `HERDR_LOCAL_PREFERENCE` on every
+provider request (never cached) and sets `X-Local-Preference` via
+`before_provider_headers`. On `after_provider_response` it parses
+`X-Local-Route` / `X-Local-Fallback-Reason` and appends one JSONL line per
+response to `<cwd>/.worklog/local-route.log` (bounded rolling log, capped at
+`2000` entries, atomic temp+rename write): `{ at, sessionId, preference,
+route, fallbackReason, model, ticket? }`.
+
+**Dispatch correlation (AC4).** Each line carries the pi session id (the same
+`herdr-<ts>-<pid>-<rand>` id `run-pi-agent.sh` passes as `--session-id`) and,
+when one was forwarded, the reservation ticket (`PI_LOCAL_RESERVATION_TICKET`).
+The dispatch marker in `.worklog/downtime-dispatches.log` records
+`reservationTicketId` / `reservationGrantedAt`, so an operator can join the
+decision to the turns it produced. No secrets/PII are recorded.
+
+**Fail-open (AC3).** No knob → no header and no log; an older proxy with no
+route headers → no entry; a capture/write failure (unwritable log, stale ctx,
+malformed headers) never throws into the turn. There is no new polling loop —
+logging is per response.
+
+**Observing a deferral (operator reproduction, WL-0MVSNHCSM004JYEY).** A
+*deferred* pane and a *stalled* pane both look idle, so confirm the former from
+the proxy's deferral records rather than the pane's appearance. Two proxy gates
+produce the same client-visible refusal class, `429 "Local admission refused"`:
+
+- the **dispatch/lease gate** — `local_dispatch_denied … owner=<session>` while
+  another session holds the slot. The request queues for up to 60 s and then
+  `contention_queue_fallback_after_queue … queued_duration=… preference=…
+  reason=local_lease_active` plus
+  `local_preference_resolved … outcome=deferred reason=local_lease_active`;
+- the **prefill-ETA admission guard** —
+  `local_admission_guard decision=reject … projected_wait_s=… budget_s=…`
+  (`eta_prefill_s` / `eta_occupancy_s` are its inputs), or the pre-coalesced
+  `local_only_refused … verdict=deferrable`. This one is calibration-gated:
+  while `prefill_eta_calibrated: false` (`insufficient_samples`, below the
+  proxy's `MIN_CALIBRATION_SAMPLES: 5`) the guard admits rather than defers, so
+  a young proxy shows no ETA deferrals.
+
+A direct request that meets the lease gate **without** queueing gets
+`503 no_slots_available` (`local_lease_active`) instead; the queued path is
+what surfaces the `429` class to the pane. To reproduce a deferral:
+
+1. **Send a prompt that only the local route can serve**, sized to fit the
+   local token budget but large enough to be a real prefill (≈ 18 k tokens on
+   the reference pool), and keep other local traffic running so the slot is
+   contended — a dispatched audit pane or a concurrent local generation is
+   enough. Prefills are serialised by default
+   (`local_max_concurrent_prefills: 1`).
+2. **Read the proxy.** `GET /llama/local/status` carries the inputs
+   (`prefill_eta_seconds`, `queue_eta_seconds`, `prefill_budget_seconds`,
+   `prefill_gate_waiters`, `prefill_eta_calibrated`, `slots[].owner_session_id`).
+   The proxy log path is deployment-specific — do not assume
+   `/var/log/llama-proxy/proxy.log`; the `llama-proxy` exposes
+   `GET /logs/tail?lines=N` (SSE, `data: {"initial": …}`, optionally
+   `&session=<pi-session-id>`).
+3. **Read the pane.** Every refused attempt prints
+   `Error: 429 "Local admission refused"` followed by
+   `Retry attempt N (backoff <d>s — server-requested)`; it must **never** print
+   `Non-retryable error: 429 "Local admission refused"`. The hinted delay is
+   honoured (upward jitter ≤ 25 %, ceiling 6 h), so consecutive attempts are
+   spaced by the advertised wait. The admitted turn then logs
+   `local_preference_resolved … outcome=local` and
+   `Stream finished: … provider=local model=<local model>`, and writes a
+   `<cwd>/.worklog/local-route.log` line carrying
+   `"preference":"local-preferred"` and `"route":"local"` with no
+   `fallbackReason`.
+
+The refused attempts have **no** route-log line — `after_provider_response`
+does not fire when the provider throws on a non-2xx — so the proxy log is the
+only record of the deferral itself; the route log records the admitted turn.
+
+> **Headless caveat.** Route logging runs from the extension's
+> `after_provider_response` context; a `pi -p` (headless) session on this build
+> records the preference header and the deferral retries but produced no
+> route-log line, so reproduce with an interactive pane when the route log is
+the artefact you need.
+
+**Tests.** `packages/tui/extensions/local-preference/local-preference.test.ts`
+(pure module and hooks: both values, the unset case, absent/malformed headers,
+bounded log, session/ticket correlation, never-throw);
+`packages/herdr/src/local-preference.test.ts` (defaults + clamp);
+`packages/herdr/src/downtime-worker.reserve.test.ts` (pane args/env
+forwarding and the dispatch → spawn thread);
+`tests/herdr/send-to-pi.test.ts` (`--local-preference` passthrough and
+fail-open) and `tests/herdr/settings.test.ts` (setting default + clamp).
+
 ### No-candidate cooldown & the empty offer file
 
 The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
@@ -1278,6 +1836,23 @@ the worklog still holds dispatchable work. Therefore:
   a probe CLI error is a three-strike event (fail-closed — a broken
   lookup can never masquerade as an empty backlog, `deps.recordError` is
   called before any pause).
+- **Peer offer suppresses the pause (WL-0MVP7QHUB003ZA2A AC2).** The probe
+  answers only "is the **leader's own** root empty?". A peer entry in the
+  offer list with a non-empty `workItemId` means the backlog is not empty —
+  it is somebody else's root — so the pause must not arm: the pause is a full
+  stop that does not poll the offer list at all, and arming it would starve
+  that offer for up to the whole cooldown (the live 2026-10-26 incident: an
+  idle leader paused for 60 min while ContextHub's offer sat undispatched).
+  The arming check (`hasPeerOffer`, `coordination.ts`) is a cheap in-memory
+  scan of the coordination entries **already read for that dispatch** — never
+  a second worklog CLI probe. It is deliberately conservative/fail-open (a
+  stale peer entry only costs an idle tick); an instance's own entry never
+  counts, and neither does an entry with an empty `workItemId`. The cooldown
+  duration (`downtimeNoCandidateCooldownMs`, 60 min) is unchanged and still
+  arms when there is genuinely nothing anywhere. The empty-leader step-down
+  still fires on that cycle (see *Own-backlog fallback & leadership hand-off*
+  above) — the peer offer then dispatches after the hand-off instead of being
+  starved.
 - **Check-in is never suppressed:** the cooldown gate runs AFTER the
   leader-election/check-in block, so the coordination check-in
   (the only re-offer mechanism) still lands during a pause and the leader
@@ -1285,6 +1860,15 @@ the worklog still holds dispatchable work. Therefore:
   owned-but-expired lease — the zombie can never lose its renewal path).
   A successful re-offer
   (`checkIn.updated && offered !== null`) cancels the pause immediately.
+- **Coordination check-in cancels, peer presence cancels
+  (WL-0MVP7QHUB003ZA2A AC3):** the same check-in tick also cancels an armed
+  pause when the offer list holds a **peer** entry with a non-empty
+  `workItemId` (`hasPeerOffer`). An offer that appears *during* a pause is
+  therefore dispatchable on that very tick instead of waiting out the full
+  cooldown — the pause is cleared before the cooldown gate below reads it.
+  Fail-safe: an unreadable/corrupt coordination file resolves to an empty
+  entry list, so no peer is detected and the pause is left exactly as it is
+  today.
 - **Cooldown-exit renewal + re-derivation:** the first tick after the pause
   expires re-runs the leader block (self-heal refresh + per-tick leadership
   re-derivation) BEFORE reaching the cooldown gate, so every dispatch
@@ -1499,7 +2083,7 @@ The batch feature (parent WL-0MVEDM8OT007WDRS) was verified as one slice at
 | Command | Result |
 | --- | --- |
 | `npm --silent test -- packages/herdr/src` | **107 files / 3510 tests passed** (no failures, no unhandled rejections) |
-| `python3 run_tests.py --scope full` (the configured dev-push gate: `tests/cli` + `tests/unit`) | green |
+| `python3 run_tests.py --scope full` (the configured dev-push gate: `tests/cli` + `tests/unit` at the time of this run; since WL-0MVG4FF9200346NR the canonical gate is the single `tests/` umbrella) | green |
 | doc-consistency scan for stale "single-dispatch-only" claims | clean — the only `single-dispatch-per-window` mentions are the deliberate `1` = legacy/off descriptions |
 
 **AC traceability.**
@@ -1515,9 +2099,12 @@ The batch feature (parent WL-0MVEDM8OT007WDRS) was verified as one slice at
 | AC7 documentation | this document, `packages/herdr/README.md`, code comments | this verification record |
 | AC8 full suite | herdr package suite + configured gate | table above |
 
-Known gate gap (discovered, not fixed here): the configured dev-push gate runs
+Known gate gap (discovered, not fixed here): the configured dev-push gate ran
 `tests/cli` + `tests/unit` only, so the herdr package suite is invoked
-explicitly for herdr-touching items — tracked as WL-0MVGJ4WSS005BMSI.
+explicitly for herdr-touching items — tracked as WL-0MVGJ4WSS005BMSI. (Since
+WL-0MVG4FF9200346NR the canonical gate is the `tests/` umbrella command, which
+covers every `tests/` file but still not `packages/` — see the coverage table
+in `docs/dev/test-suite-baseline.md`.)
 
 ### Soft-delete exclusion (SA-0MUJBLZC60085DI9)
 
@@ -1579,7 +2166,7 @@ moment the queue thins.
 > client-side `parentId` exclusion in `selectAuditCandidate`). Durable reporting of
 > uncovered children is out of scope here (WL-0MUBVH9FV0027COG).
 - **Shared gate implementation** (`readReviewQueueGate` / `isImplementHeldByReviewGate` in
-  `downtime-worker.ts`): ONE bounded `wl list` per dispatch/offer computation, applied
+  `downtime-worker.gates.ts`): ONE bounded `wl list` per dispatch/offer computation, applied
   identically on every dispatch path — `dispatchFromHerdrList` (direct Herdr-head
 dispatch), `computeMostImportantItem` (coordination check-in offer) and
   `dispatchFromCoordination` (leader dispatch, gated per **offer's own root** via the
@@ -2037,31 +2624,31 @@ status refresh unchanged at 30s.**
 
 | Setting | Default | Source |
 |---|---|---|
-| Dispatch poll interval | **10 s** (`downtimePollIntervalMs`) | `DEFAULT_DOWNTIME_POLL_INTERVAL_MS`, floor 10 s (`downtime-worker.ts`) |
-| LLM continuous idle threshold | **75 s** (`downtimeIdleThresholdMs`) | `DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS`, floor 1 s (`downtime-worker.ts`) |
+| Dispatch poll interval | **10 s** (`downtimePollIntervalMs`) | `DEFAULT_DOWNTIME_POLL_INTERVAL_MS`, floor 10 s (`downtime-worker.constants.ts`) |
+| LLM continuous idle threshold | **75 s** (`downtimeIdleThresholdMs`) | `DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS`, floor 1 s (`downtime-worker.constants.ts`) |
 | Proxy status refresh | 30 s (`refreshIntervalMs`) | `settings.ts` (unchanged, pre-refactor cadence) |
 | Leader lease TTL | 5 min (`DEFAULT_LEASE_TTL_SECONDS = 300`) | `leader-election.ts` |
-| Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.ts`, `leader-election.ts` |
-| Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
-| No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
-| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
-| Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
-| Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
-| Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX`, `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.ts`) |
-| Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.ts`) |
-| Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`, `clampDowntimeStallThresholdMs` (`downtime-worker.ts`) |
+| Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.constants.ts`, `leader-election.ts` |
+| Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.constants.ts` |
+| No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.constants.ts` |
+| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
+| Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS` (`downtime-worker.constants.ts`), `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.clamps.ts`) |
+| Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (`downtime-worker.constants.ts`), `clampDowntimeMaxAttempts` (`downtime-worker.clamps.ts`), `countAttempts` (`downtime-log.ts`) |
+| Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (`downtime-worker.constants.ts`), `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.clamps.ts`) |
+| Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.constants.ts`) |
+| Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS` (`downtime-worker.constants.ts`), `clampDowntimeStallThresholdMs` (`downtime-worker.clamps.ts`) |
 | Capacity-starvation alert window | **2 h** (`downtimeCapacityStarvationAlertMs`; clamped to 5 min – 24 h; continuous capacity-refusal run that triggers a `capacity-starved` observation, WL-0MVKNC2N50025HXE) | `DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS`, `clampDowntimeCapacityStarvationAlertMs` (`capacity-starvation.ts`) |
 | Long-running pane window | **3 h** (`downtimeLongRunningThresholdMs`; clamped to 1 h – 48 h; progress window before a live `working` pane is reported on a starvation signal, WL-0MVKNC2N50025HXE) | `DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS`, `clampDowntimeLongRunningThresholdMs` (`long-running-panes.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **0 min** — idle close disabled (`paneCloseIdleThresholdMinutes`; clamped to 0 min – 24 h) | `pane-close-scheduler.ts` |
 | Pane-closure grace period | **5 min** (`paneCloseGracePeriodMinutes`; clamped to 1 min – 24 h; no pane is eligible for close within this window of first dispatch, WL-0MUMM5IUF003EVT8) | `pane-close-scheduler.ts` |
-| (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
+| (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.constants.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
 settings file (`~/.config/herdr/worklog-plugin.json`,
 `downtimePollIntervalMs` / `downtimeIdleThresholdMs`) and are clamped on
 load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
-`downtime-worker.ts`). The 75 s idle threshold exceeds the 1-minute
+`downtime-worker.clamps.ts`). The 75 s idle threshold exceeds the 1-minute
 slot-exhaustion cooldown so that existing sessions have a chance to reclaim
 the slot before a new work item is dispatched. The success-marker staleness
 window (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped
@@ -2086,7 +2673,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
-| `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim); stalled-work scan wiring (`resumeStalledWorkIfAble`, `STALLED_RESUME_REASON`) |
+| `packages/herdr/src/downtime-worker*.ts` | The downtime-worker module family: the barrel (`downtime-worker.ts`, re-exports only) over the sibling modules — worker tick orchestration (`downtime-worker.orchestrator*.ts`, `worker-contract.ts`, `launch-fence.ts`), dispatch (`dispatch.ts`, `dispatch-filter.ts`, `dispatch-claims.ts`, `dispatch-cpu-gate.ts`, `dispatch-contract.ts`), coordination (`coordination.ts`, `coordination-leader.ts`), gates/prompts/stalled-resume, pane, idle/poller, parsers/selection, constants/types/clamps (full layout: [Module layout](#module-layout)) |
 | `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
 | `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
@@ -2108,6 +2695,7 @@ likewise re-read live every tick and clamped on load
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
 | `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning (per worklog, retained) |
 | `<worklog-root>/.worklog/downtime-dispatches.log` | Dispatched items (per worklog, retained; includes `anchor-unavailable` neutral no-dispatch) |
+| `<worklog-root>/.worklog/local-route.log` | Per-response local-preference route evidence written by the Worklog pi extension (bounded at 2000 lines; `at`/`sessionId`/`preference`/`route`/`fallbackReason`/`model`/`ticket`, WL-0MVLJTV03000KIQZ) |
 | `<worklog-root>/.worklog/pane-close-ledger.jsonl` | Pane-closure reaper ledger (one JSONL row per evaluated pane, per worklog, WL-0MUJL1NAH0042GOS) |
 
 ## Troubleshooting / operations
@@ -2175,9 +2763,15 @@ rate limit: an identical reason inside `DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS`
 them, every entry also carries the capacity/prefill evidence
 (`capacityHint`, `statusSchemaVersion`, `prefillsInFlight`,
 `maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
-`queueEtaSeconds`, `slotPhases`, `slotPrefillEtaSeconds`); prefill pacing
+`queueEtaSeconds`, `queueEtaOccupancySeconds`, `queueEtaBusySlots`,
+`prefillEtaCalibrated`, `slotPhases`, `slotPrefillEtaSeconds`); prefill pacing
 refusals use the distinct reasons/tokens `prefill-gate`, `prefill-cap` and
-`prefill-eta`.
+`prefill-eta`. The reservation slices add two more distinct tokens:
+`reservation-refused` (header token `reservation-lost`, with the proxy's own
+reason in `reservationReason` plus `admit: false` / `retryAfterS` /
+`projectedWaitS`) and `idle-window-spent` (header token `window-spent`, with
+`pendingLaunches`) — see [One launch per idle
+window](#one-launch-per-idle-window-parent-wl-0mvikrfp0005jdl8-ac3-slice-c3).
 The header blocking
 token is still updated on **every refusal** and never on the observation
 tokens below.
@@ -2203,6 +2797,112 @@ absent.
  "ownerPresent":false,"runningPanes":1,"contentionDepth":0,
  "auditBatchDepth":7,"auditBatchCap":2,"auditBatchRemaining":1,
  "at":"2026-10-20T02:00:00.000Z"}
+```
+
+### Empty-offer & skipped-tier attribution (WL-0MVR8FKMU009XTED)
+
+A starved root must be **self-diagnosing**: "why is nothing being dispatched?"
+is answered from the log alone, without reading the dispatcher's source or
+re-running classification by hand. Two additive surfaces provide the answer.
+
+**1. The check-in records an empty-offer reason.** Every `operation:
+'checkin'` entry in `.worklog/downtime-coordination.log` that leaves
+`workItemId: null` carries a machine-readable `reason`. The entry itself
+already existed (one line per check-in), so this is **attribution on an
+existing line**, not a new line per cycle — the rolling 100-entry bound and the
+check-in cadence are unchanged.
+
+| `reason` | Meaning | Extra fields |
+|---|---|---|
+| `empty-window` | The Herdr head lookup returned no items at all. | `windowSize: 0` |
+| `all-window-items-held` | **Every** candidate was rejected solely by a non-empty `assignee` (the producer sentinel `Map`, …). | `heldAssignees` (sorted, deduplicated sentinels), `windowSize`, `dominantGate: 'assignee-hold'`, `gateCounts` |
+| `all-window-items-gated` | Candidates were rejected by other gates. | `dominantGate` (the gate that rejected the most items), `gateCounts`, `windowSize` |
+| `code-freeze` | Every rejection was the freeze split-by-skill pause. | `dominantGate`, `gateCounts` |
+| `review-queue-hold` | Every rejection was the deep review-queue hold. | `dominantGate`, `gateCounts` |
+| `attempt-budget-exhausted` | Every rejection was the per-item/per-kind attempt budget. | `dominantGate`, `gateCounts` |
+| `in-flight-hold` | Every rejection was the critical in-flight guard. | `dominantGate`, `gateCounts` |
+| `non-terminal-cooldown` | Every rejection was the non-terminal pane-close cooldown. | `dominantGate`, `gateCounts` |
+| `stalled-resume` | A stalled pane was resumed in place, so no new offer was made. | — |
+| `wl-error` | The offer computation failed; the existing entry was **kept** (fail-open). | `error`, `workItemId` (the kept offer) |
+
+The per-item gate tokens (`gateCounts` keys and `dominantGate`) are stable
+strings: `soft-deleted`, `producer-review`, `assignee-hold`,
+`not-dispatchable`, `audit-fresh`, `audit-recency`, `effort-cap`,
+`dispatched-marker`, `attempt-budget-exhausted`, `non-terminal-cooldown`,
+`code-freeze`, `cpu-saturated`, `audit-slot-min`, `review-queue-hold`,
+`in-flight-pane`, `slots-unavailable`, `wl-error`.
+
+**The result semantics are unchanged.** A fully-held window is still
+`noCandidate` (the 60-minute no-candidate cooldown behaves exactly as before,
+and the genuinely-empty-backlog path is byte-identical); only the explanation
+is added. The attribution is derived in memory from the window already read —
+no extra `wl` spawn.
+
+```json
+{"kind":"coordination","operation":"checkin","instanceId":"87558ae9",
+ "workItemId":null,"reason":"all-window-items-held","windowSize":30,
+ "heldAssignees":["Map"],"dominantGate":"assignee-hold",
+ "gateCounts":{"assignee-hold":30},"at":"2026-10-27T22:05:00.000Z"}
+```
+
+**2. The leader attributes every offer it rejects.** A coordination-mode
+decision entry whose terminal reason collapsed a rejected offer list (for
+example a bare `no-candidate`) additionally carries `offerRejections` — one
+element per rejected entry, with the entry's work item, its worklog root and
+the gate that rejected it:
+
+```json
+{"kind":"decision","operation":"no-dispatch","instanceId":"…",
+ "reason":"no-candidate","freeSlots":2,"totalSlots":2,
+ "offerRejections":[{"workItemId":"WL-ABC","worklogRoot":"/repo/a",
+                     "gate":"assignee-hold","assignee":"Map"}],
+ "at":"2026-10-27T22:06:00.000Z"}
+```
+
+`offerRejections` is evidence only: it is recorded on the **existing**
+rate-limited refusal line (an identical reason inside
+`DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS` is still suppressed), and the refusal
+token / header blocking token / dispatch decision are unchanged. The
+`audit-slot-min` gate attributes an audit offer skipped by the raw slot budget;
+the tick-level `audit-tier-budget-skipped` observation (see [Prefill
+serialisation pacing](#prefill-serialisation-pacing-wl-0mvhszrzq00482qx-wl-0mvr8fi4q0007cgr))
+carries the same budgets for **both** the direct and the coordination path.
+
+**Tests.** `downtime-worker.offer-attribution.test.ts` pins the aggregation
+tokens (empty window, all-held with sentinels, dominated gate, tie-break, sole
+dedicated gate, the shared `classifyWindowHold` helper);
+`coordination-dispatch.test.ts` pins each check-in token end-to-end (including
+the `wl-error` entry-kept path and the unchanged no-candidate/entry-removal
+semantics), the leader's per-offer rejections, and that they appear on the
+terminal decision entry.
+
+### Decision-log entries: reservation evidence (parent WL-0MVIKRFP0005JDL8 AC4, slice C2)
+
+Every polled decision entry produced by a dispatch attempt that asked the
+proxy for a capacity ticket carries the reservation evidence as **additive**
+fields:
+
+| Field | Meaning |
+|---|---|
+| `reservationTicket` | `{ id, grantedAt }` — the granted gate ticket (absent on a refusal). |
+| `admit` | `true` when the proxy granted this poll, `false` on a `429` refusal. |
+| `projectedWaitS` | The proxy's projected wait before local capacity: `0` on a grant, the refusal's `retry_after_s` on a refusal. |
+| `retryAfterS` | The refusal's `retry_after_s` deferral advice (refusals only). |
+| `reservationReleased` | `true` when a granted ticket could not be forwarded to a pane (marker/spawn failure) — the ticket is treated as released/expired and never reused. |
+
+A refusal uses the proxy's own reason as the entry `reason` (and therefore as
+the header blocking token): `reserved-fallback`, `prefill-gate` (shared with
+the pacing stop — the same underlying gate), `queue-full`, or any future
+reason the proxy introduces (the vocabulary is open and never branched on).
+Fail-open dispatches (older proxy: 404/500/timeout) record none of these
+fields, so the log shape is unchanged for a pre-feature proxy.
+
+```json
+{"kind":"decision","operation":"no-dispatch","instanceId":"…",
+ "reason":"queue-full","freeSlots":2,"totalSlots":4,
+ "ownerPresent":false,"runningPanes":1,"contentionDepth":0,
+ "admit":false,"retryAfterS":12,"projectedWaitS":12,
+ "at":"2026-10-24T02:00:00.000Z"}
 ```
 
 ### `DowntimeErrorEvent` fields (per-strike error log entries)

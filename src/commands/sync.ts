@@ -10,6 +10,7 @@ import { getRemoteDataFileContent, getRemoteDataFileContentWithRef, gitPushDataF
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
+import { createSyncPhaseTimer, formatSyncPhaseTimings } from '../sync-phase-timings.js';
 import { loadConfig } from '../config.js';
 import { applyClaimHold, resolveClaimHoldTtlHours, type ClaimHoldDecision } from '../claim-hold.js';
 import { readCurrentClaimRows } from '../claim-hold-read.js';
@@ -126,6 +127,16 @@ export async function performSync(
     }
   }
   
+  // Phase-timing observability (WL-0MVK6SD5O001K901): attribute the
+  // wall-clock cost of pull/persist-items/persist-comments/export/push so the
+  // F2 probe's before/after table (packages/herdr/test/perf/wl-sync-phase-probe.ts)
+  // lines up with the CLI. `pull` spans the local read through the
+  // fetch/parse/merge work; the other phases are locked in around their exact
+  // statements below. Timing is silent by default: log-line only (written to
+  // the sync log, never machine-readable stdout) plus added `--json` fields.
+  const phaseTimer = createSyncPhaseTimer();
+  phaseTimer.start('pull');
+
   const db = getDatabase(options.prefix);
   const localItems = db.getAll();
   const localComments = db.getAllComments();
@@ -291,6 +302,7 @@ export async function performSync(
     console.log('Merging audit results...');
   }
   const auditMergeResult = mergeAuditResults(localAudits, remoteAudits);
+  phaseTimer.end('pull');
   
   const itemsAdded = itemMergeResult.merged.length - localItems.length;
   const itemsUpdated = itemMergeResult.conflicts.filter(c => c.includes('Conflicting fields') || c.includes('Same updatedAt')).length;
@@ -307,10 +319,18 @@ export async function performSync(
     conflicts: itemMergeResult.conflicts,
     conflictDetails: itemMergeResult.conflictDetails
   };
+  result.phaseTimings = phaseTimer.timings();
   
   const finalizeLog = () => {
     logLine(`Sync summary itemsAdded=${result.itemsAdded} itemsUpdated=${result.itemsUpdated} itemsUnchanged=${result.itemsUnchanged}`);
     logLine(`Sync summary commentsAdded=${result.commentsAdded} commentsUnchanged=${result.commentsUnchanged}`);
+    const timings = phaseTimer.timings();
+    logLine(`Sync phase timings: ${formatSyncPhaseTimings(timings)}`);
+    // Timing is verbose-only on the console: it never pollutes `--json`
+    // (machine-readable) or default human output.
+    if (isVerbose && !isJsonMode && !isSilent) {
+      console.log(`Sync phase timings: ${formatSyncPhaseTimings(timings)}`);
+    }
     logLine(`--- sync end ${new Date().toISOString()} ---`);
   };
 
@@ -415,12 +435,25 @@ export async function performSync(
   }
   logLine(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
   if (remoteSyncKind === 'delta') {
+    // Delta persist: items + edges, comments, audits. The audit window folds
+    // into persist-items (item-derived records) so the phase set stays the
+    // documented five; the timer accumulates both item windows.
+    phaseTimer.start('persist-items');
     db.upsertItems(itemsToPersist, edgeMergeResult.merged);
+    phaseTimer.end('persist-items');
+    phaseTimer.start('persist-comments');
     db.upsertComments(commentMergeResult.merged);
+    phaseTimer.end('persist-comments');
+    phaseTimer.start('persist-items');
     db.importAuditResults(auditMergeResult.merged);
+    phaseTimer.end('persist-items');
   } else {
+    phaseTimer.start('persist-items');
     db.import(itemsToPersist, edgeMergeResult.merged, auditMergeResult.merged);
+    phaseTimer.end('persist-items');
+    phaseTimer.start('persist-comments');
     db.importComments(commentMergeResult.merged);
+    phaseTimer.end('persist-comments');
   }
   if (autoSyncEnabled) {
     db.setAutoSync(true, () => Promise.resolve());
@@ -542,7 +575,9 @@ export async function performSync(
 
   let jsonlPath: string | null = null;
   if (!zeroChangeFastPath) {
-    jsonlPath = await db.exportForSync({ mode: syncMode, onProgress: progressHandler });
+    jsonlPath = await phaseTimer.measureAsync('export', () =>
+      db.exportForSync({ mode: syncMode, onProgress: progressHandler })
+    );
   }
   
   if (options.push) {
@@ -557,7 +592,9 @@ export async function performSync(
       }
       
       try {
-        await gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget);
+        await phaseTimer.measureAsync('push', () =>
+          gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget)
+        );
         if (!isJsonMode && !isSilent) {
           console.log('Changes pushed successfully');
         }
@@ -619,6 +656,10 @@ export async function performSync(
     }
   }
   
+  // Attach the final per-phase timings (export/push may add windows after the
+  // initial snapshot taken at result creation).
+  result.phaseTimings = phaseTimer.timings();
+
   if (isJsonMode && !isSilent) {
     console.log(JSON.stringify({
       success: true,

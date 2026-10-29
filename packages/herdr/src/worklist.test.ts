@@ -289,6 +289,85 @@ describe('createListRenderer — review-queue depth banner (AH-0MUDYTQ55002NUSJ)
   });
 });
 
+// ── Assignee scheduling-hold surface (WL-0MVR8FN1D002SCIR) ────────────
+// The header names how many dispatch-window items are held by an `assignee`
+// (AC1) and a banner warns when the window is held ENTIRELY by assignee holds
+// (AC2). Both are display-only: the renderer never clears a hold.
+
+describe('createListRenderer — assignee scheduling hold (WL-0MVR8FN1D002SCIR)', () => {
+  const renderer = createListRenderer();
+  const BANNER =
+    'Assignee hold — all 30 of 30 dispatch-window item(s) held by Map; no downtime dispatch possible';
+
+  /** Render list mode with only the assignee-hold seams set (params 34–35). */
+  function renderHold(
+    hold: { status?: string | null; notice?: string | null },
+    term: { rows: number; cols: number } = { rows: 24, cols: 200 },
+  ): string {
+    return renderer(
+      [makeItem('A')],        // displayRows
+      0,                      // selectedIndex
+      0,                      // scrollOffset
+      term,                   // termSize
+      null,                   // activeFilter
+      'list',                 // mode
+      null,                   // detailItem
+      undefined,              // totalCount
+      undefined,              // chordState
+      undefined,              // detailScrollOffset
+      undefined,              // autoRefresh
+      undefined,              // expandedItems
+      undefined,              // chordHelpHints
+      undefined,              // navStackDepth
+      undefined,              // panePaused
+      undefined,              // codeFreezeActive
+      undefined,              // metaScrollOffset
+      undefined,              // metaLastCommand
+      undefined,              // readFile
+      undefined,              // downtimeStatus
+      undefined,              // detailToCIndex
+      undefined,              // detailToCFocus
+      undefined,              // detailRenderedIndex
+      undefined,              // showHelpText
+      undefined,              // codeFreezeAmbiguous
+      undefined,              // hoverTooltip
+      undefined,              // sprintComplete
+      undefined,              // sprintCompletedCount
+      undefined,              // browseItemCount
+      undefined,              // sprintAuditsOutstanding
+      undefined,              // metaBlockedBy
+      undefined,              // detailBlockedBy
+      undefined,              // syncNotice
+      hold.status,            // assigneeHoldStatus (AC1)
+      hold.notice,            // assigneeHoldNotice (AC2)
+    );
+  }
+
+  it('renders the all-held warning naming the sentinel and the count (AC2)', () => {
+    const output = renderHold({ status: '[held: 30 by Map]', notice: BANNER });
+    expect(output).toContain(BANNER);
+    expect(output).toContain('[held: 30 by Map]');
+  });
+
+  it('renders the held count in the header even when the window still dispatches (AC1)', () => {
+    const output = renderHold({ status: '[held: 4 by Map]', notice: null });
+    expect(output).toContain('[held: 4 by Map]');
+    expect(output).not.toContain('Assignee hold —');
+  });
+
+  it('truncates to a single banner row in an 80-column pane (rows - 1 invariant)', () => {
+    const output = renderHold({ status: '[held: 30 by Map]', notice: BANNER }, TERM_80x24);
+    expect(output).toContain('Assignee hold — all 30 of 30');
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+
+  it('renders neither segment when nothing is held (AC3)', () => {
+    const output = renderHold({ status: null, notice: null });
+    expect(output).not.toContain('[held:');
+    expect(output).not.toContain('Assignee hold —');
+  });
+});
+
 // ── Fold indicators (WL-0MSG8YXYJ008PWJJ) ─────────────────────────────
 // When the flattened item list overflows the visible list area, the renderer
 // emits dim `▲ more` / `▼ more` markers so users know items are hidden above

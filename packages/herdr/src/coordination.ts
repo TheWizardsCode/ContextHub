@@ -328,6 +328,35 @@ export function getEntry(
 }
 
 /**
+ * True when the offer list holds a PEER's entry with a stated offer.
+ *
+ * The `no-candidate` cooldown exists to stop the worker burning the proxy
+ * when there is genuinely nothing to do. It is a FULL STOP: while it holds,
+ * the offer list is not polled at all, so an offer sitting in the file is
+ * starved for the whole pause (parent WL-0MVP7QHUB003ZA2A AC2/AC3). A peer
+ * entry with a non-empty `workItemId` means the backlog is NOT empty — it is
+ * just somebody else's root — so the pause must not arm (and a live pause
+ * must be cancelled at the next leader check-in).
+ *
+ * Deliberately cheap and fail-open: it is a pure in-memory scan of entries
+ * the caller has already read (the dispatch attempt reads them once), so no
+ * second worklog CLI probe is issued. The predicate is intentionally
+ * conservative — a stale peer entry merely keeps the offer list polling, the
+ * failure mode that costs one idle tick, never a starvation.
+ *
+ * An instance's OWN entry never counts (that is what the empty-own-root
+ * probe is for), and an entry without a `workItemId` is not an offer.
+ */
+export function hasPeerOffer(
+  entries: readonly CoordinationEntry[],
+  instanceId: string,
+): boolean {
+  return entries.some(
+    (entry) => entry.instanceId !== instanceId && entry.workItemId.length > 0,
+  );
+}
+
+/**
  * @deprecated Time-based expiry removed (WL-0MTMPIQBE001J41P) — entries do
  * NOT expire by wall-clock age. The dispatcher validates eligibility at
  * dispatch time (fetchItem+classify), so an offer persists until

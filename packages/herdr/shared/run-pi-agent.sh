@@ -21,6 +21,16 @@
 #
 # The wrapper propagates pi's exit status so pane teardown behaves exactly
 # as it did when pi was the pane's direct command.
+#
+# Environment passthrough (parent WL-0MVIKRFP0005JDL8 AC1, slice C2):
+#   PI_LOCAL_RESERVATION_TICKET — a granted local-capacity reservation ticket.
+#   send-to-pi.sh injects it into the pane process (`exec env …`), so this
+#   wrapper and the pi session it starts inherit it; the Worklog pi extension
+#   turns it into `X-Local-Reservation` on the session's first request. Absent
+#   on a fail-open dispatch (older proxy) — nothing is synthesised here.
+#   HERDR_REQUEST_PRIORITY is inherited the same way (the `X-Priority` header).
+#   HERDR_LOCAL_PREFERENCE is inherited the same way (the per-turn
+#   `X-Local-Preference` header + route log, C4 AC1).
 
 set -uo pipefail
 

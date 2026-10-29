@@ -7,6 +7,10 @@
  *
  * Nine error categories are defined:
  * - Rate limits (429)        → NOT retried (informative error)
+ *   (exception: an llm-proxy local-admission refusal is capacity
+ *   backpressure, not a rate limit — a retryable one is classified
+ *   SERVER_ERROR so the `Retry-After` hint is honoured;
+ *   WL-0MVSBF5XZ001H7V7)
  * - Server errors (5xx)      → retried with configurable backoff
  * - Auth errors (401/403)    → NOT retried (checkpoint + terminal)
  * - Context-length exceeded  → /compact + auto-continue
@@ -161,6 +165,45 @@ export const EXHAUSTION_SERVER_ERROR_PATTERNS: RegExp[] = [
   /scheduled time window/i,
   /outside its available_times/i,
 ];
+
+/**
+ * Local-admission refusal prose (WL-0MVSBF5XZ001H7V7).
+ *
+ * When the llm-proxy's prefill-ETA admission guard refuses local admission it
+ * answers with HTTP `429` and a machine-readable body carrying
+ * `code: local_admission_reject` and the message "Local admission refused".
+ * The status code alone made {@link classifyError} classify it as
+ * {@link ErrorCategory.RATE_LIMIT} (terminal), so a time-healable capacity
+ * signal abandoned the turn instead of waiting out the `Retry-After` hint.
+ *
+ * These patterns identify the *refusal*; whether it is retryable is decided
+ * separately by {@link isRetryableLocalAdmissionRefusal} from the body's
+ * `retryable` flag / `Retry-After` hint, because the same guard also returns
+ * refusals that waiting can never heal (`prefill_budget_exceeded`,
+ * `context_too_large`).
+ */
+export const LOCAL_ADMISSION_REFUSAL_PATTERNS: RegExp[] = [
+  /local_admission_reject/i,
+  /local\s+admission\s+refused/i,
+];
+
+/**
+ * Explicit `"retryable": false` on a refusal body. Authoritative: it wins
+ * over any `Retry-After` hint in the same body, because the proxy only sets
+ * the flag for reasons waiting cannot heal (compaction is required instead).
+ * Tolerates the escaped-JSON form some SDKs fold into `error.message`
+ * (`\"retryable\": false`).
+ */
+const NON_RETRYABLE_REFUSAL_FLAG = /["\\]*retryable["\\]*\s*:\s*false/i;
+
+/** Explicit `"retryable": true` on a refusal body. */
+const RETRYABLE_REFUSAL_FLAG = /["\\]*retryable["\\]*\s*:\s*true/i;
+
+/**
+ * A `Retry-After` / `retry_after` hint (header echo or body field) — the
+ * proxy's other signal that the refusal is time-healable.
+ */
+const RETRY_HINT_PATTERN = /["\\]*retry["\\]*[-_]?after/i;
 
 const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
   /5\d{2}/,
@@ -396,6 +439,106 @@ export function isExhaustionServerError(message: unknown): boolean {
   return matchesAny(message.errorMessage, EXHAUSTION_SERVER_ERROR_PATTERNS);
 }
 
+/**
+ * True when the message is an llm-proxy **local-admission refusal** — the
+ * prefill-ETA admission guard declining to admit the prompt onto a contended
+ * local slot (`local_admission_reject` / "Local admission refused").
+ *
+ * This says nothing about retryability: the same guard refuses prompts that
+ * can never be admitted without compaction. Use
+ * {@link isRetryableLocalAdmissionRefusal} for the retry decision
+ * (WL-0MVSBF5XZ001H7V7).
+ */
+export function isLocalAdmissionRefusal(message: unknown): boolean {
+  if (!isAssistantMessage(message)) return false;
+  return matchesAny(message.errorMessage, LOCAL_ADMISSION_REFUSAL_PATTERNS);
+}
+
+/**
+ * Body text of the most recent provider response, captured by the transport
+ * wrapper (`createRetryHintCapturingFetch()`) for classification
+ * (WL-0MVTESPHB0021SI7).
+ *
+ * The refusal body carries its machine-readable polarity fields
+ * (`retryable`, `retry_after`) as **siblings of a string `error` field**:
+ *
+ * ```json
+ * {"error": "Local admission refused", "code": "local_admission_reject",
+ *  "retryable": true, "retry_after": 62}
+ * ```
+ *
+ * `openai`'s `APIError.makeMessage()` prefers `error.message` and otherwise
+ * `JSON.stringify(error)`, so the assistant message the extension actually
+ * receives is only `429 "Local admission refused"` — `code`, `retryable`,
+ * `retry_after` and `verdict` are all dropped. The classifier therefore reads
+ * the polarity from the response body captured at the transport layer, which
+ * is independent of how any SDK renders the message.
+ *
+ * Scoping: this always reflects the **most recent** provider response. The
+ * wrapper replaces it on every non-2xx (with `undefined` when that response
+ * carried no readable body) and clears it on every 2xx, so a later unrelated
+ * error can never inherit a previous refusal's polarity.
+ */
+let capturedLocalAdmissionRefusalBody: string | undefined;
+
+/**
+ * Record (or clear) the refusal body captured from the latest provider
+ * response. Called by `createRetryHintCapturingFetch()`; exposed for tests
+ * and for transports that cannot be wrapped.
+ */
+export function setCapturedLocalAdmissionRefusalBody(body: string | undefined): void {
+  capturedLocalAdmissionRefusalBody = body;
+}
+
+/** The refusal body captured from the most recent provider response, if any. */
+export function getCapturedLocalAdmissionRefusalBody(): string | undefined {
+  return capturedLocalAdmissionRefusalBody;
+}
+
+/** Clear the captured refusal body (e.g. on session reset). */
+export function clearCapturedLocalAdmissionRefusalBody(): void {
+  capturedLocalAdmissionRefusalBody = undefined;
+}
+
+/**
+ * Read the retry polarity of a refusal text (assistant message or captured
+ * body): `false` for an explicit `"retryable": false`, `true` for an explicit
+ * `"retryable": true` or a `Retry-After` / `retry_after` hint, and
+ * `undefined` when the text carries no polarity signal at all.
+ */
+function refusalRetryPolarity(text: string): boolean | undefined {
+  if (NON_RETRYABLE_REFUSAL_FLAG.test(text)) return false;
+  if (RETRYABLE_REFUSAL_FLAG.test(text) || RETRY_HINT_PATTERN.test(text)) return true;
+  return undefined;
+}
+
+/**
+ * True when a local-admission refusal is **time-healable** and must be
+ * retried rather than treated as terminal (WL-0MVSBF5XZ001H7V7,
+ * WL-0MVTESPHB0021SI7).
+ *
+ * A refusal is retryable when its body carries an explicit `"retryable":
+ * true` or a `Retry-After` / `retry_after` hint, and is **not** retryable when
+ * it carries an explicit `"retryable": false` (which wins over any hint).
+ *
+ * The polarity is read from the assistant message text first (some providers
+ * fold the whole body into `error.message`), and falls back to the refusal
+ * body captured from the actual HTTP response. That fallback is what makes
+ * the live wire shape work: `openai` renders the string-`error` body as
+ * `429 "Local admission refused"`, so the message alone carries no polarity.
+ * A refusal with no signal in **either** source stays terminal — the proxy
+ * always marks this class of refusal explicitly, so an unmarked body is not
+ * assumed to be resumable.
+ */
+export function isRetryableLocalAdmissionRefusal(message: unknown): boolean {
+  if (!isLocalAdmissionRefusal(message)) return false;
+  const text = (message as { errorMessage: string }).errorMessage;
+  const fromMessage = refusalRetryPolarity(text);
+  if (fromMessage !== undefined) return fromMessage;
+  if (capturedLocalAdmissionRefusalBody === undefined) return false;
+  return refusalRetryPolarity(capturedLocalAdmissionRefusalBody) ?? false;
+}
+
 export function isAuthError(message: unknown): boolean {
   if (!isAssistantMessage(message)) return false;
   return matchesAny(message.errorMessage, DEFAULT_AUTH_ERROR_PATTERNS);
@@ -451,6 +594,18 @@ export function classifyError(message: unknown): ErrorCategory {
   if (!message || typeof message !== 'object') return ErrorCategory.UNKNOWN;
 
   try {
+    // Local-admission refusal is proxy **capacity backpressure**, not a rate
+    // limit: the wire status is 429, but the guard marks the time-healable
+    // case retryable and hands back a `Retry-After` hint the retry loop
+    // already honours. Checked before every other category so the generic
+    // `\b429\b` rate-limit pattern cannot win (WL-0MVSBF5XZ001H7V7); a
+    // refusal that waiting cannot heal (`retryable: false`) stays terminal
+    // so it never burns backoff on a request that needs compaction.
+    if (isLocalAdmissionRefusal(message)) {
+      return isRetryableLocalAdmissionRefusal(message)
+        ? ErrorCategory.SERVER_ERROR
+        : ErrorCategory.TERMINATED;
+    }
     // Compaction gate is a proxy-level 4xx signal, distinct from the
     // model-level context-length signal (stopReason "length"). Gate
     // keywords must win over generic context-length patterns so the two

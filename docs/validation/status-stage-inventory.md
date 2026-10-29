@@ -69,9 +69,9 @@ Adding/removing dependency edges affects status based on the dependency stage.
 ## Selection/Filtering Rules (Implied)
 The next-item selection logic treats in_review specially and filters statuses.
 - Include all stage=in_review items (in_review items are now surfaced by default)
-  - Source: src/commands/next.ts (option), src/database.ts (findNextWorkItemFromItems)
+  - Source: src/commands/next.ts (option), packages/shared/src/database/next-pipeline.ts (findNextWorkItemFromItems; emitted as dist/database/next-pipeline.js)
 - Filter out status=deleted in next-item selection
-  - Source: src/database.ts (findNextWorkItemFromItems)
+  - Source: packages/shared/src/database/next-pipeline.ts (findNextWorkItemFromItems/filterCandidates; emitted as dist/database/next-pipeline.js)
 
 ## CLI/Docs References
 - CLI docs should reference config defaults for status/stage values.

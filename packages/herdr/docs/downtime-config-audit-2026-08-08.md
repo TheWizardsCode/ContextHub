@@ -67,6 +67,12 @@ above.
 Five worklist panes — one per project worklog root on this host — each with an
 active `.worklog/downtime-dispatches.log`:
 
+> **History note.** This table records the five roots observed during the
+> 2026-08-08 idle window and is kept verbatim. Since then the `open_source_llm`
+> checkout was renamed to `ContentCreator`, and the host's live dispatch logs
+> now sit under `AI_Hell`, `ContentCreator`, `Nova` and `tts` — the current
+> scan defaults (OSL-0MVOB9VGA005L9MI).
+
 | Worklog root | Log entries | Error entries | Last dispatch (UTC) |
 |---|---|---|---|
 | `/home/rgardler/projects/ContextHub` | 29 | 0 | 2026-08-09T13:49:30Z |
