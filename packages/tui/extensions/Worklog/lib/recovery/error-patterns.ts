@@ -455,21 +455,88 @@ export function isLocalAdmissionRefusal(message: unknown): boolean {
 }
 
 /**
+ * Body text of the most recent provider response, captured by the transport
+ * wrapper (`createRetryHintCapturingFetch()`) for classification
+ * (WL-0MVTESPHB0021SI7).
+ *
+ * The refusal body carries its machine-readable polarity fields
+ * (`retryable`, `retry_after`) as **siblings of a string `error` field**:
+ *
+ * ```json
+ * {"error": "Local admission refused", "code": "local_admission_reject",
+ *  "retryable": true, "retry_after": 62}
+ * ```
+ *
+ * `openai`'s `APIError.makeMessage()` prefers `error.message` and otherwise
+ * `JSON.stringify(error)`, so the assistant message the extension actually
+ * receives is only `429 "Local admission refused"` — `code`, `retryable`,
+ * `retry_after` and `verdict` are all dropped. The classifier therefore reads
+ * the polarity from the response body captured at the transport layer, which
+ * is independent of how any SDK renders the message.
+ *
+ * Scoping: this always reflects the **most recent** provider response. The
+ * wrapper replaces it on every non-2xx (with `undefined` when that response
+ * carried no readable body) and clears it on every 2xx, so a later unrelated
+ * error can never inherit a previous refusal's polarity.
+ */
+let capturedLocalAdmissionRefusalBody: string | undefined;
+
+/**
+ * Record (or clear) the refusal body captured from the latest provider
+ * response. Called by `createRetryHintCapturingFetch()`; exposed for tests
+ * and for transports that cannot be wrapped.
+ */
+export function setCapturedLocalAdmissionRefusalBody(body: string | undefined): void {
+  capturedLocalAdmissionRefusalBody = body;
+}
+
+/** The refusal body captured from the most recent provider response, if any. */
+export function getCapturedLocalAdmissionRefusalBody(): string | undefined {
+  return capturedLocalAdmissionRefusalBody;
+}
+
+/** Clear the captured refusal body (e.g. on session reset). */
+export function clearCapturedLocalAdmissionRefusalBody(): void {
+  capturedLocalAdmissionRefusalBody = undefined;
+}
+
+/**
+ * Read the retry polarity of a refusal text (assistant message or captured
+ * body): `false` for an explicit `"retryable": false`, `true` for an explicit
+ * `"retryable": true` or a `Retry-After` / `retry_after` hint, and
+ * `undefined` when the text carries no polarity signal at all.
+ */
+function refusalRetryPolarity(text: string): boolean | undefined {
+  if (NON_RETRYABLE_REFUSAL_FLAG.test(text)) return false;
+  if (RETRYABLE_REFUSAL_FLAG.test(text) || RETRY_HINT_PATTERN.test(text)) return true;
+  return undefined;
+}
+
+/**
  * True when a local-admission refusal is **time-healable** and must be
- * retried rather than treated as terminal (WL-0MVSBF5XZ001H7V7).
+ * retried rather than treated as terminal (WL-0MVSBF5XZ001H7V7,
+ * WL-0MVTESPHB0021SI7).
  *
  * A refusal is retryable when its body carries an explicit `"retryable":
  * true` or a `Retry-After` / `retry_after` hint, and is **not** retryable when
  * it carries an explicit `"retryable": false` (which wins over any hint).
- * A refusal with neither signal stays terminal, matching the pre-existing
- * behaviour — the proxy always marks this class of refusal explicitly, so an
- * unmarked body is not assumed to be resumable.
+ *
+ * The polarity is read from the assistant message text first (some providers
+ * fold the whole body into `error.message`), and falls back to the refusal
+ * body captured from the actual HTTP response. That fallback is what makes
+ * the live wire shape work: `openai` renders the string-`error` body as
+ * `429 "Local admission refused"`, so the message alone carries no polarity.
+ * A refusal with no signal in **either** source stays terminal — the proxy
+ * always marks this class of refusal explicitly, so an unmarked body is not
+ * assumed to be resumable.
  */
 export function isRetryableLocalAdmissionRefusal(message: unknown): boolean {
   if (!isLocalAdmissionRefusal(message)) return false;
   const text = (message as { errorMessage: string }).errorMessage;
-  if (NON_RETRYABLE_REFUSAL_FLAG.test(text)) return false;
-  return RETRYABLE_REFUSAL_FLAG.test(text) || RETRY_HINT_PATTERN.test(text);
+  const fromMessage = refusalRetryPolarity(text);
+  if (fromMessage !== undefined) return fromMessage;
+  if (capturedLocalAdmissionRefusalBody === undefined) return false;
+  return refusalRetryPolarity(capturedLocalAdmissionRefusalBody) ?? false;
 }
 
 export function isAuthError(message: unknown): boolean {

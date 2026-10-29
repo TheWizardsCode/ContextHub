@@ -332,12 +332,53 @@ and then on the body's polarity:
   (see [Server-Requested Retry Delays](#server-requested-retry-delays-retry-after))
   and the turn resumes once local capacity frees up. No "Non-retryable
   error" notification, no abandoned turn, no cloud fallback.
-- **`retryable: false`** (`prefill_budget_exceeded`, `context_too_large`) →
-  terminal. Waiting cannot heal a prompt that exceeds the admission budget;
-  the proxy's `suggested_action` (compaction guidance) is what the operator
-  sees, and no backoff time is burned.
+- **`retryable: false`** (`prefill_budget_exceeded`, `context_too_large`,
+  `resident_prefix_insufficient`) → terminal. Waiting cannot heal a prompt
+  that exceeds the admission budget; the proxy's `suggested_action`
+  (compaction guidance) is what the operator sees, and no backoff time is
+  burned.
 - **No signal at all** → terminal, i.e. the pre-existing behaviour. Only a
   body that states it is resumable is treated as resumable.
+
+#### Where the polarity is read from (and why the message is not enough)
+
+The polarity is read from the **captured HTTP response body**, not (only) from
+the assistant error message (WL-0MVTESPHB0021SI7). The refusal body carries
+its machine-readable fields as siblings of a **string** `error` field, and
+`openai`'s `APIError.makeMessage()` prefers `error.message` and otherwise
+`JSON.stringify(error)` — so the assistant message a client actually holds is
+exactly:
+
+```text
+429 "Local admission refused"
+```
+
+`code`, `retryable`, `retry_after` and `verdict` are all dropped, and the
+SDK's own `error.code` is `undefined` for the same reason. Classifying from
+the message text alone therefore finds no polarity and (before this fix)
+treated a deferrable refusal as terminal — the live symptom was
+`Error: Non-retryable error: 429 "Local admission refused"` with the turn
+abandoned after a single request.
+
+So the transport wrapper that already captures the `Retry-After` header
+(`createRetryHintCapturingFetch()` in `retry-logic.ts`) also captures the
+bounded (≤ 8 KiB) response body on a `429`/`5xx` and records it via
+`setCapturedLocalAdmissionRefusalBody()`. `isRetryableLocalAdmissionRefusal()`
+reads the message text first (some providers do fold the whole body into
+`error.message`) and falls back to the captured body when the text carries no
+polarity. A body-derived `retry_after` also feeds the retry-delay hint when
+the `Retry-After` header is absent.
+
+Scoping rules (pinned by `local-admission-refusal-body.test.ts`):
+
+- the capture always reflects the **most recent** provider response — every
+  `2xx` and every non-2xx that cannot be a refusal clears it, and a later
+  refusal replaces it, so an unrelated error can never inherit a previous
+  refusal's polarity;
+- the body is read from a **clone**, so the caller's response (including a
+  streamed `2xx`) is never consumed or buffered;
+- an explicit `retryable: false` in the message text still wins over a
+  captured retryable body.
 
 Plain `429` rate limits, `401/403`, quota-exhausted and terminated messages
 are unaffected. Because the refusal is not provider exhaustion, it records
