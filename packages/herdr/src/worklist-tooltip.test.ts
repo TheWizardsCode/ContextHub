@@ -373,3 +373,30 @@ describe('AgentTracker — command persistence (AC4/AC6/AC7)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+// ── Assignee prefix on the tooltip title line (WL-0MVTPEB3A0091RDH AC2) ──
+// The tooltip's ID+Title line routes through the shared
+// `formatTitleWithAssignee` helper, so an assigned item reads `[Map] <title>`
+// in the tooltip just like the list row, preview and detail header.
+
+describe('formatTooltipLines — assignee title prefix (WL-0MVTPEB3A0091RDH)', () => {
+  it('prefixes the title with the assignee, after the ID', () => {
+    const item = makeItem('WL-ABCD', { assignee: 'Map' });
+    const titleLine = strip(formatTooltipLines(item, undefined, undefined, 100)[0]);
+    expect(titleLine).toBe('WL-ABCD [Map] Title for WL-ABCD');
+  });
+
+  it('leaves the title line byte-identical when unassigned (AC3)', () => {
+    const plain = formatTooltipLines(makeItem('WL-ABCD'), undefined, undefined, 100);
+    for (const assignee of ['', '   ']) {
+      expect(formatTooltipLines(makeItem('WL-ABCD', { assignee }), undefined, undefined, 100)).toEqual(plain);
+    }
+    expect(strip(plain[0])).toBe('WL-ABCD Title for WL-ABCD');
+  });
+
+  it('still truncates an assigned tooltip line to the terminal width (AC4)', () => {
+    const item = makeItem('WL-ABCD', { assignee: 'Map', title: 'Long '.repeat(40).trim() });
+    for (const line of formatTooltipLines(item, undefined, undefined, 40)) {
+      expect(strip(line).length).toBeLessThanOrEqual(40);
+    }
+  });
+});

@@ -4,7 +4,8 @@
  *
  * Single responsibility: turn a line/timestamp into its display form —
  * `visibleLength` (terminal cell width), `truncateLine` (width-safe
- * truncation with an ellipsis) and `formatTimestamp` (`DD/MM/YY HH:MM`).
+ * truncation with an ellipsis), `formatTitleWithAssignee` (the shared
+ * `[assignee] title` prefix) and `formatTimestamp` (`DD/MM/YY HH:MM`).
  * Leaf module: imports the ANSI vocabulary from `worklist.constants.ts` only
  * (parent WL-0MVGKGD2Y0038S6B AC4 — no barrel imports, no new cycles).
  *
@@ -118,6 +119,27 @@ export function truncateLine(line: string, maxWidth: number): string {
   // Close open ANSI and append ellipsis
   result += `${ANSI.reset}…`;
   return result;
+}
+
+/**
+ * Format the title text for every title-bearing surface — selection-list
+ * rows, the metadata panel's `Title` row, the detail-view header and the
+ * hover tooltip (WL-0MVTPEB3A0091RDH AC2).
+ *
+ * An assigned item renders `[<assignee>] <title>` so a producer hold (`Map`)
+ * or an active agent claim is visible at a glance without opening the item.
+ * An unassigned item (undefined, null, empty or whitespace-only — assumption
+ * A3) returns the title **byte-identically**, so every existing surface is
+ * unchanged for unheld items (AC3). The assignee value itself is trimmed for
+ * the prefix only; the `Assignee` metadata row keeps the raw stored value.
+ *
+ * The caller applies its own styling around the returned string, so the
+ * prefix inherits the title's colour (AC4).
+ */
+export function formatTitleWithAssignee(title: string, assignee?: string | null): string {
+  const holder = (assignee ?? '').trim();
+  if (!holder) return title;
+  return `[${holder}] ${title}`;
 }
 
 /**

@@ -184,7 +184,7 @@ import {
   formatDetailContent,
   formatDetailToC,
 } from './worklist.detail.js';
-import { formatTimestamp, truncateLine, visibleLength } from './worklist.format.js';
+import { formatTimestamp, formatTitleWithAssignee, truncateLine, visibleLength } from './worklist.format.js';
 
 /**
  * Compute the dynamic list / metadata panel layout (WL-0MSQ44MDX008U69J).
@@ -280,8 +280,10 @@ export function formatItemLine(
       parts.text.slice(parts.stageEnd);
   }
 
-  // Apply priority colouring to both title and ID (same colour)
-  const colouredTitle = applyPriorityColour(item.title, item.priority);
+  // Apply priority colouring to both title and ID (same colour). The title
+  // carries the shared `[assignee] ` prefix (WL-0MVTPEB3A0091RDH AC2/AC4), so
+  // the prefix inherits the title's priority colour.
+  const colouredTitle = applyPriorityColour(formatTitleWithAssignee(item.title, item.assignee), item.priority);
   const priorityColouredId = applyPriorityColour(item.id, item.priority);
 
   const priorityStr = item.priority
@@ -416,8 +418,9 @@ export function formatTooltipLines(
   // documented-out-of-scope rather than silently divergent.
   const parts: string[] = [];
 
-  // ID + Title line.
-  const titleStr = item.title ? `${item.title}` : '';
+  // ID + Title line. The title carries the shared `[assignee] ` prefix
+  // (WL-0MVTPEB3A0091RDH AC2).
+  const titleStr = item.title ? formatTitleWithAssignee(item.title, item.assignee) : '';
   parts.push(`${ANSI.bold}${item.id}${ANSI.reset} ${titleStr}`);
 
   // Command.

@@ -24,7 +24,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Worklog tab** — The `open-worklog-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Worklog`** so it is instantly recognisable in the tab row among other open tabs. See [Worklog tab](#worklog-tab).
 - **Quit** — Press `q` to exit
-- **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, tags, audit info, its **active dependency blockers**, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
+- **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, **assignee**, tags, audit info, its **active dependency blockers**, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values). Actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
@@ -230,7 +230,7 @@ The shared event-driven agent-status tracker (`AgentTracker`, `.worklog/agent-pa
 | Field | Source |
 |-------|--------|
 | ID | `workItem.id` |
-| Title | `workItem.title` |
+| Title | `workItem.title`, prefixed `[<assignee>] ` when the item has an assignee (WL-0MVTPEB3A0091RDH) |
 | Command | recorded command dispatched to the pane (e.g. `/skill:implement WL-123`; omitted when none was recorded) |
 | Priority | `workItem.priority` |
 | Type | `workItem.issueType` |
@@ -2063,6 +2063,11 @@ it never clears, demotes or mutates an `assignee`, and the dispatched-item set
 is byte-identical with and without it (AC4). The classification shares
 `classifyWindowHold` with the coordination log's `all-window-items-held` token
 (WL-0MVR8FKMU009XTED), so the TUI and the log cannot diverge.
+- **Per-item assignee display (WL-0MVTPEB3A0091RDH)** — beside the
+  aggregate banner, each held item is identifiable on its own: an `Assignee`
+  metadata row plus a `[<assignee>] ` prefix on its title in the selection
+  list, the metadata panel, the detail-view header and the hover tooltip. See
+  [Metadata panel](#metadata-panel).
 
 ### Review-queue-depth footer banner
 
@@ -2172,9 +2177,9 @@ first rows), so a long list never scrolls off the top.
   it) — instead of item metadata; heading selections have no item, so the
   detail view is never opened from them.
 - Selecting an **item row** renders the item's fields:
-  metadata (status, stage, priority, type, risk, effort, children/parent
-  counts, tags, GitHub issue number, created/updated timestamps, and audit
-  state).
+  metadata (status, stage, priority, type, risk, effort, assignee,
+  children/parent counts, tags, GitHub issue number, created/updated
+  timestamps, and audit state).
 - Metadata values are rendered as **icon + text label** using the same icon
   helpers as the list rows, so the two sections can never diverge: e.g.
   `🔄 in_progress`, `⭐ high`, `📥 intake_complete`. The Stage row mirrors
@@ -2186,6 +2191,19 @@ first rows), so a long list never scrolls off the top.
   `❌ needs review`, …). When icons are disabled (`showIcons: false`) every
   metadata value falls back to **plain text** — no emoji and no bracketed
   fallbacks (unlike the list rows, which use `[OPEN]`-style labels).
+- **`Assignee` row and `[assignee]` title prefix (WL-0MVTPEB3A0091RDH)** —
+  an item with a non-empty `assignee` (the claim / scheduling hold: a producer
+  sentinel such as `Map`, or an active agent's name) shows an
+  `Assignee  <value>` row immediately after `Effort`, and every surface that
+  renders its title prefixes it with `[<assignee>] ` — the selection-list row,
+  this panel's `Title` row, the detail-view header and the hover tooltip. The
+  same `Assignee` row appears in the detail view's metadata table (both views
+  share `buildMetaRows`). The prefix inherits the title's priority colour, and
+  a whitespace-only assignee counts as unassigned. Items with no assignee
+  render exactly as before: no `[] ` prefix, no extra row. The extra row is
+  counted by `metadataPanelContentHeight`, so the `m`/`M` scroll clamp still
+  reaches it. Display-only — claims, holds, dispatch, sorting and filtering
+  are unchanged.
 - When the item's description has a `Key Files:` section containing one or
   more `.md` paths, the panel also shows a **`Related Docs`** row listing
   every markdown path (joined with `, `; long values are truncated to the
@@ -2540,7 +2558,7 @@ packages/herdr/
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
   - Local entries are validated with the same rules as bundled entries: an invalid entry is **logged and skipped**, and a missing/malformed local file (bad JSON, non-array) falls back to bundled-only with an error logged — a broken local file never crashes the plugin.
   - When no worklog root is resolved (uninitialized project) or no local file exists, the registry is exactly the bundled defaults and all dispatch behaviour is unchanged.
-- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows` (`worklist.meta.ts`), so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
+- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows` (`worklist.meta.ts`), so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Assignee` (WL-0MVTPEB3A0091RDH):** `buildMetaRows` emits an `Assignee` row (raw stored value) immediately after `Effort` whenever the assignee is a non-empty, non-whitespace string, and every title-bearing surface routes through the shared `formatTitleWithAssignee` helper (`worklist.format.ts`) for the `[<assignee>] ` prefix — the list row (`formatItemLine`, inside the priority-coloured title segment), the panel `Title` row, the detail header (`formatDetailContent`) and `formatTooltipLines`. **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
 - **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze

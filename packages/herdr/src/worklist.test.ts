@@ -59,6 +59,9 @@ import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './comma
 import { TaskScheduler } from './scheduler.js';
 import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
+// New leaf helper: imported from its own module so the frozen barrel
+// consumer baseline (worklist.split-baseline.json) is unchanged.
+import { formatTitleWithAssignee } from './worklist.format.js';
 import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
 import { appendDowntimeLogEntry } from './downtime-log.js';
 import { buildDispatchWorkItem } from './dispatch-view.js';
@@ -7148,5 +7151,155 @@ describe('podcast w-chord dispatch notice (OSL-0MUQ59IRF009ICIF)', () => {
 
     dataHandler?.(Buffer.from('q'));
     await p;
+  });
+});
+
+// ── Assignee display (WL-0MVTPEB3A0091RDH) ─────────────────────────────
+// `assignee` is the claim / scheduling-hold field (producer sentinel `Map`,
+// released with `--assignee ""`). The data layer already exposes it; these
+// surfaces render it: the shared `formatTitleWithAssignee` prefix on every
+// title-bearing surface plus an `Assignee` metadata row after `Effort`.
+
+describe('formatTitleWithAssignee — shared title prefix (AC2)', () => {
+  it('prefixes an assigned item with its assignee in square brackets', () => {
+    expect(formatTitleWithAssignee('Do the thing', 'Map')).toBe('[Map] Do the thing');
+  });
+
+  it('returns the title byte-identically when unassigned (AC3)', () => {
+    for (const assignee of [undefined, null, '', '   ', '\t\n']) {
+      expect(formatTitleWithAssignee('Do the thing', assignee as string | null | undefined)).toBe('Do the thing');
+    }
+  });
+
+  it('never emits a bare bracket pair, leading space or empty prefix (AC3)', () => {
+    const title = formatTitleWithAssignee('Do the thing', '');
+    expect(title).not.toContain('[]');
+    expect(title.startsWith(' ')).toBe(false);
+    expect(title).toBe('Do the thing');
+  });
+});
+
+describe('buildMetaRows — Assignee row (AC1)', () => {
+  const assigned = (over: Partial<WorkItem> = {}): WorkItem => ({
+    ...makeRichItem(),
+    assignee: 'Map',
+    ...over,
+  });
+
+  it('renders the raw assignee value in an Assignee row', () => {
+    expect(new Map(buildMetaRows(assigned())).get('Assignee')).toBe('Map');
+    // Raw value is carried verbatim (no trimming) — the row is evidence of the
+    // stored hold, not a normalised display value.
+    expect(new Map(buildMetaRows(assigned({ assignee: ' agent-x ' }))).get('Assignee')).toBe(' agent-x ');
+  });
+
+  it('positions the row immediately after Effort', () => {
+    const labels = buildMetaRows(assigned(), true).map(([label]) => label);
+    const effortIdx = labels.indexOf('Effort');
+    expect(effortIdx).toBeGreaterThanOrEqual(0);
+    expect(labels[effortIdx + 1]).toBe('Assignee');
+  });
+
+  it('omits the row when the assignee is absent, empty or whitespace-only', () => {
+    for (const assignee of [undefined, null, '', '   ']) {
+      const rows = buildMetaRows(assigned({ assignee: assignee as string | null | undefined }), true);
+      expect(rows.some(([label]) => label === 'Assignee'), `assignee=${JSON.stringify(assignee)}`).toBe(false);
+    }
+  });
+
+  it('is never absorbed or reordered by pairMetaRows compound pairing (AC1)', () => {
+    const paired = pairMetaRows(buildMetaRows(assigned(), true));
+    const labels = paired.map(([label]) => label);
+    expect(new Map(paired).get('Assignee')).toBe('Map');
+    expect(labels[labels.indexOf('Effort') + 1]).toBe('Assignee');
+    // The four compound rows are the only rows that change shape.
+    expect(paired.length).toBe(buildMetaRows(assigned(), true).length - 4);
+  });
+
+  it('prefixes the preview metadata Title row (AC2)', () => {
+    const rows = new Map(buildMetaRows({ ...makeItem('WL-A1'), title: 'Previewed title', assignee: 'Map' }, true));
+    expect(rows.get('Title')).toBe('[Map] Previewed title');
+  });
+
+  it('leaves the Title row untouched when unassigned (AC3)', () => {
+    const rows = new Map(buildMetaRows({ ...makeItem('WL-A1'), title: 'Previewed title' }, true));
+    expect(rows.get('Title')).toBe('Previewed title');
+    expect(rows.has('Assignee')).toBe(false);
+  });
+});
+
+describe('assignee display across render surfaces (AC2/AC5)', () => {
+  const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const assignedItem = (over: Partial<WorkItem> = {}): WorkItem => ({
+    ...makeItem('WL-ASGN1'),
+    title: 'Assigned title',
+    status: 'open',
+    priority: 'high',
+    assignee: 'Map',
+    ...over,
+  });
+
+  it('prefixes the selection-list row title (AC5)', () => {
+    expect(strip(formatItemLine(assignedItem(), 160))).toContain('[Map] Assigned title');
+  });
+
+  it('renders the prefix inside the title priority colour (AC4)', () => {
+    const line = formatItemLine(assignedItem({ priority: 'high' }), 160);
+    expect(line).toContain(`${ANSI.fg(208)}[Map] Assigned title${ANSI.reset}`);
+  });
+
+  it('keeps the prefix in noIcons mode without leaking icons (AC4)', () => {
+    const line = formatItemLine(assignedItem(), 160, false, true);
+    expect(strip(line)).toContain('[Map] Assigned title');
+    expect(line).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}]/u);
+  });
+
+  it('shows the Assignee row and the prefixed Title row in the metadata panel (AC5)', () => {
+    const panel = strip(formatMetadataPanel(assignedItem(), 80, 30, 0, undefined, true).join('\n'));
+    expect(panel).toMatch(/Assignee\s+Map/);
+    expect(panel).toMatch(/Title\s+\[Map\] Assigned title/);
+  });
+
+  it('prefixes the detail-view header title (AC5)', () => {
+    const lines = formatDetailContent(assignedItem(), 80).map(strip);
+    expect(lines).toContain(' [Map] Assigned title');
+    expect(lines).toContain(' WL-ASGN1');
+  });
+
+  it('renders the Assignee row in the detail-view metadata table (AC5)', () => {
+    const table = formatDetailContent(assignedItem(), 80).map(strip).join('\n');
+    expect(table).toMatch(/\|\s+Assignee\s+\|\s+Map\s+\|/);
+  });
+
+  it('counts the extra Assignee row in metadataPanelContentHeight (AC4)', () => {
+    const withAssignee = metadataPanelContentHeight(assignedItem(), 80, 30);
+    const withoutAssignee = metadataPanelContentHeight(assignedItem({ assignee: undefined }), 80, 30);
+    expect(withAssignee).toBe(withoutAssignee + 1);
+  });
+});
+
+describe('unassigned parity across render surfaces (AC3)', () => {
+  const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const base: WorkItem = { ...makeItem('WL-PARITY'), title: 'Parity title', status: 'open', priority: 'high' };
+
+  it('renders list rows byte-identically for absent, empty and whitespace assignees', () => {
+    const reference = formatItemLine(base, 160);
+    expect(formatItemLine({ ...base, assignee: '' }, 160)).toBe(reference);
+    expect(formatItemLine({ ...base, assignee: '   ' }, 160)).toBe(reference);
+    expect(strip(reference)).not.toContain('[]');
+    expect(strip(reference)).toContain('Parity title');
+  });
+
+  it('renders detail views byte-identically and adds no Assignee row', () => {
+    const reference = formatDetailContent(base, 80);
+    expect(formatDetailContent({ ...base, assignee: '   ' }, 80)).toEqual(reference);
+    expect(reference.map(strip).join('\n')).not.toContain('Assignee');
+    expect(reference.map(strip)).toContain(' Parity title');
+  });
+
+  it('renders the metadata panel byte-identically and adds no Assignee row', () => {
+    const reference = formatMetadataPanel(base, 80, 30, 0, undefined, true);
+    expect(formatMetadataPanel({ ...base, assignee: '' }, 80, 30, 0, undefined, true)).toEqual(reference);
+    expect(reference.join('\n').replace(/\x1b\[[0-9;]*m/g, '')).not.toContain('Assignee');
   });
 });

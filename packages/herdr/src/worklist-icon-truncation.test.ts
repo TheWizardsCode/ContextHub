@@ -169,3 +169,43 @@ describe('truncateLine consumers — metadata panel and detail view (WL-0MU3U1AM
     }
   });
 });
+// ── Assignee prefix width safety (WL-0MVTPEB3A0091RDH AC4) ─────────────
+// The `[assignee] ` title prefix lengthens every assigned row. Truncation
+// must still keep the row inside `maxCols` (display-width aware) and must not
+// mangle emoji or leave lone surrogates at ANY truncation point — including a
+// cut inside the prefix itself.
+
+describe('formatItemLine — assigned rows truncate safely (WL-0MVTPEB3A0091RDH)', () => {
+  const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+  it('fits within maxCols at every truncating width', () => {
+    const item = makeItem({ assignee: 'Map' });
+    for (const cols of [...NARROW_WIDTHS, WIDE]) {
+      const line = formatItemLine(item, cols);
+      expect(strip(line).length, `cols=${cols}`).toBeLessThanOrEqual(cols);
+      expect(hasLoneSurrogate(line), `cols=${cols}`).toBe(false);
+      expect(line).not.toContain('\uFFFD');
+    }
+  });
+
+  it('survives a truncation point inside a multi-width assignee', () => {
+    // A CJK assignee is 2 cells per character, so narrow widths cut through it.
+    const item = makeItem({ assignee: '生田' });
+    for (const cols of NARROW_WIDTHS) {
+      const line = formatItemLine(item, cols);
+      expect(hasLoneSurrogate(line), `cols=${cols}`).toBe(false);
+      expect(utf8RoundTripMangles(line), `cols=${cols}`).toBe(false);
+      expect(line).not.toContain('\uFFFD');
+    }
+  });
+
+  it('only widens the title segment by the prefix (short row, no truncation)', () => {
+    const short = (over: Partial<WorkItem> = {}): WorkItem =>
+      makeItem({ title: 'Short title', ...over });
+    const assigned = strip(formatItemLine(short({ assignee: 'Map' }), WIDE));
+    const unassigned = strip(formatItemLine(short(), WIDE));
+    // The prefix is the ONLY difference, and it sits immediately before the title.
+    expect(assigned).toBe(unassigned.replace('Short title', '[Map] Short title'));
+    expect(assigned.length).toBe(unassigned.length + '[Map] '.length);
+  });
+});
