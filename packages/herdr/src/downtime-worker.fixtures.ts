@@ -145,6 +145,47 @@ export const perSlotOneOfThreeFree: LlamaStatus = {
   ],
 };
 
+// ── Partial-idle 3-slot pool builders (parent WL-0MSORQ8Y4004YT63, C1) ─
+//
+// The leaf-aware audit dispatch relaxes the audit gate to ONE free slot, so
+// the later slices need the 3-slot pool in its partial-idle states as a
+// first-class fixture rather than an ad-hoc inline status per test. The
+// operator's session occupies slot-1, so the FREE slots are always the
+// trailing ones: `3 - freeSlots` processing slots, then `freeSlots` free.
+// `threeSlotPoolStatus(1)` reproduces the pre-existing
+// `perSlotOneOfThreeFree` fixture exactly (pinned by the C1 suite), so the
+// builder cannot drift away from the spare-capacity contract it reuses.
+
+/** Free-slot counts the audit gates distinguish on a 3-slot pool. */
+export type ThreeSlotFreeSlots = 1 | 2 | 3;
+
+/**
+ * A 3-slot proxy status with exactly `freeSlots` genuinely free slots, in
+ * per-slot form (the only availability source trusted under the fail-closed
+ * contract, WL-0MUXVPXAZ005RESW). `available_slots` is kept consistent with
+ * the `slots` array so a fixture can never disagree with itself.
+ */
+export function threeSlotPoolStatus(freeSlots: ThreeSlotFreeSlots): LlamaStatus {
+  const processing = 3 - freeSlots;
+  return {
+    ...idleAllSlotsFree,
+    available_slots: freeSlots,
+    total_slots: 3,
+    slots: Array.from({ length: 3 }, (_unused, i) => ({
+      slot_id: `slot-${i + 1}`,
+      is_processing: i < processing,
+    })),
+  };
+}
+
+/**
+ * 2 of 3 slots free — the spare-capacity state the audit gate already admits
+ * (the configured parent minimum, `DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2`).
+ * Kept beside the 1-free pool so C3/C4 can assert that a classified leaf
+ * dispatches in BOTH states while a parent only dispatches here.
+ */
+export const perSlotTwoOfThreeFree: LlamaStatus = threeSlotPoolStatus(2);
+
 // ── Owner-lease / contention fixtures (WL-0MTYZXSLN008HZOW) ───────────
 
 /**
@@ -710,6 +751,11 @@ export function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeW
     // tier proceeds). The dispatcher consults this dep only after F2 lands;
     // existing tests are unaffected either way.
     getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+    // Leaf-vs-parent audit scope (parent WL-0MSORQ8Y4004YT63, C1): the neutral
+    // default is `parent`, i.e. today's all-slots-style audit gate. Every
+    // existing suite therefore keeps its current behaviour byte-for-byte;
+    // only a test that explicitly opts into leaf-aware dispatch overrides it.
+    getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
     getNextImplementCandidate: vi.fn().mockResolvedValue(null),
     claimItem: vi.fn().mockResolvedValue({ ok: true }),
     spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),

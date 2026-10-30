@@ -6,9 +6,11 @@
  * this item right now?" — the dispatch-tier classifier
  * (`classifyItemForDispatch`, which applies the soft-delete, assignee and
  * producer-review holds owned by `downtime-worker.selection.ts`), the
- * critical-first escalation guard, the audit-batch depth/cap status, the
- * review-queue depth gate, the critical-only window-extension escape hatch and
- * the per-item dispatch-attempt budget.
+ * leaf-vs-parent audit-scope classifier (`classifyAuditScope`, the fail-closed
+ * mapping every leaf-aware audit gate reads), the critical-first escalation
+ * guard, the audit-batch depth/cap status, the review-queue depth gate, the
+ * critical-only window-extension escape hatch and the per-item
+ * dispatch-attempt budget.
  *
  * Moved verbatim out of `downtime-worker.ts` (parent WL-0MVF3F9A7000HKP7;
  * child WL-0MVLIHZZI004D7EK). No behaviour change: gate ordering, fail-closed
@@ -189,6 +191,53 @@ export const TIER_EXPECTED: Record<DowntimeSkillKind, DowntimeClaimExpected> = {
   intake: { status: 'open', stage: 'idea' },
   'risk-effort': { status: 'open', stage: 'plan_complete' },
 };
+
+// ── Leaf-vs-parent audit scope (parent WL-0MSORQ8Y4004YT63, C1/C2) ────
+//
+// A leaf audit is a SINGLE Pi session (1 slot); a parent audit fans out to
+// its children (2 slots at `AUDIT_PHASE2_PARALLELISM=1`). The scope lookup
+// itself (`getAuditCandidateScope`, `wl show <id> --children --json`) is a
+// dependency seam owned by the worker's dep boundary; everything below is
+// the pure, exhaustively-tested mapping the dispatch gates consume.
+
+/**
+ * How much capacity an audit candidate needs: a `leaf` audit runs one session,
+ * a `parent` audit fans out to its children (parent AC2/AC3,
+ * WL-0MSORQ8Y4004YT63).
+ */
+export type AuditScope = 'leaf' | 'parent';
+
+/**
+ * Result of the audit-candidate scope lookup (`DowntimeWorkerDeps.
+ * getAuditCandidateScope`). `{ ok: true, scope }` means a trustworthy
+ * classification was made; `{ ok: false }` means the lookup could not be
+ * trusted (CLI error, timeout, parse failure, missing/malformed `children`
+ * payload, or a non-root candidate) and MUST be treated as a parent.
+ *
+ * Declared here (structurally, like {@link DowntimeGateDeps}) so the pure
+ * classifier and its consumers never have to import the barrel.
+ */
+export interface AuditCandidateScopeResult {
+  ok: boolean;
+  scope?: AuditScope;
+}
+
+/**
+ * Map an audit-candidate scope lookup to the scope the gates use.
+ *
+ * **Fail-closed** (parent AC1/AC3): anything other than an explicit, trusted
+ * `'leaf'` — `{ ok: false }`, a missing `scope`, an unexpected token, or no
+ * result at all — is a `'parent'`, so an untrustworthy lookup always restores
+ * the conservative all-slots-style gate and never relaxes dispatch. Pure: no
+ * I/O, no deps, exhaustively covered by
+ * `downtime-worker.leaf-audit.test.ts`.
+ */
+export function classifyAuditScope(
+  result: AuditCandidateScopeResult | null | undefined,
+): AuditScope {
+  if (!result || result.ok !== true) return 'parent';
+  return result.scope === 'leaf' ? 'leaf' : 'parent';
+}
 
 // ── Review-queue depth gate — shared (WL-0MT2UQWOR007CYY9 gate re-wired
 // onto the live Herdr path by WL-0MTTSWC1X005P4VD) ────────────────────

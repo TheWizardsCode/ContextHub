@@ -19,6 +19,7 @@
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  */
 
+import type { AuditCandidateScopeResult } from './downtime-worker.gates.js';
 import type { HostCpuReading } from './host-cpu.js';
 import type { LocalPreference, LocalPreferenceMode } from './local-preference.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
@@ -117,6 +118,22 @@ export interface DowntimeWorkerDeps {
    * worklog root the dispatch log lives under.
    */
   getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult>;
+  /**
+   * Leaf-vs-parent scope lookup for an audit candidate (parent
+   * WL-0MSORQ8Y4004YT63 AC1, child C2): `wl show <itemId> --children --json`,
+   * mapped to `{ ok: true, scope: 'leaf' }` ONLY when a parsed `children`
+   * array is present and empty, `{ ok: true, scope: 'parent' }` for a
+   * non-empty array, and `{ ok: false }` for anything untrustworthy (CLI
+   * error, timeout, parse failure, missing/non-array `children`, non-root
+   * candidate). Every caller maps `{ ok: false }` to `'parent'` through
+   * `classifyAuditScope` (fail-closed, conservative all-slots-style gate).
+   *
+   * Optional for backward compatibility while the leaf-aware gates land
+   * (C1 declares the seam only; C2/C3/C4 wire it): when ABSENT the gates must
+   * keep today's parent gate. The `makeDeps` test fixture supplies a neutral
+   * `{ ok: true, scope: 'parent' }` default so existing suites are unchanged.
+   */
+  getAuditCandidateScope?(itemId: string, cwd: string): Promise<AuditCandidateScopeResult>;
   /**
    * Running-downtime-panes liveness query: count dispatched downtime panes
    * that are STILL ALIVE (a live pi agent in a `Downtime …`-labelled Herdr
