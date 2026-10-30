@@ -48,6 +48,10 @@ import {
   threeSlotPoolStatus,
 } from './downtime-worker.fixtures.js';
 import { classifyAuditScope, type AuditCandidateScopeResult } from './downtime-worker.gates.js';
+import {
+  DOWNTIME_AUDIT_MIN_FREE_SLOTS,
+  DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
+} from './downtime-worker.constants.js';
 
 describe('classifyAuditScope — leaf vs parent classification', () => {
   it.each<[string, AuditCandidateScopeResult, 'leaf' | 'parent']>([
@@ -151,5 +155,18 @@ describe('three-slot partial-idle pool fixtures', () => {
       false,
       false,
     ]);
+  });
+});
+
+describe('DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS — the leaf audit slot budget', () => {
+  it('requires exactly one free slot for a leaf audit and strictly fewer than a parent audit', () => {
+    // A leaf audit is a single Pi session; a parent audit fans out to
+    // parent + up to 2 children (AUDIT_PHASE2_PARALLELISM=1). The two budgets
+    // must stay distinct, or the leaf-aware gate degrades into the parent
+    // gate (or, worse, admits a parent audit on a single free slot).
+    expect(DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS).toBe(1);
+    expect(DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS).toBeLessThan(DOWNTIME_AUDIT_MIN_FREE_SLOTS);
+    // A leaf audit still needs a slot — 0 would mean "dispatch with none".
+    expect(DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS).toBeGreaterThan(0);
   });
 });

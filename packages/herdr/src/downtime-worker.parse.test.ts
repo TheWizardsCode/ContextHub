@@ -32,6 +32,7 @@ import {
   createDowntimeWorker,
   clampDowntimeMarkerStaleWindowMs,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  parseAuditCandidateScopeOutput,
   type LlamaStatus,
   type DowntimeHerdrItem,
 } from './downtime-worker.js';
@@ -1183,5 +1184,124 @@ describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MV
     expect(status!.queue_eta_occupancy_seconds).toBeUndefined();
     expect(status!.queue_eta_busy_slots).toBeUndefined();
     expect(status!.prefill_eta_calibrated).toBeUndefined();
+  });
+});
+
+// ── Audit-candidate scope parse (parent WL-0MSORQ8Y4004YT63, C2
+//    WL-0MVV1EZ8G006PSBE) ────────────────────────────────────────────
+//
+// `wl show <id> --children --json` is the ONLY trustworthy leaf-vs-parent
+// signal the audit tier has. The parser is the fail-closed boundary: a
+// payload it cannot fully trust (CLI error, malformed JSON, absent or
+// non-array `children`, missing `workItem`, or a NON-ROOT candidate — the
+// audit tier is root-only) must yield `{ ok: false }`, never a guessed
+// scope. Every caller then maps `{ ok: false }` to the conservative parent
+// gate through `classifyAuditScope`. The payloads below are the shapes the
+// real CLI emits (`children: []` for a root leaf, `children: [...]` for an
+// epic, `{ success: false, error }` for an unknown id).
+
+describe('parseAuditCandidateScopeOutput: wl show --children → leaf | parent (fail-closed)', () => {
+  /** The real `wl show <root leaf> --children --json` shape, trimmed. */
+  const leafPayload = {
+    success: true,
+    workItem: { id: 'WL-LEAF', title: 'A root leaf', parentId: '', status: 'completed', stage: 'in_review' },
+    auditResult: null,
+    auditWaiver: null,
+    comments: [],
+    children: [],
+    ancestors: [],
+  };
+
+  it('classifies a root with an EMPTY children array as a leaf', () => {
+    expect(parseAuditCandidateScopeOutput(JSON.stringify(leafPayload))).toEqual({
+      ok: true,
+      scope: 'leaf',
+    });
+  });
+
+  it('classifies a root with children as a parent', () => {
+    const payload = {
+      ...leafPayload,
+      workItem: { ...leafPayload.workItem, id: 'WL-EPIC' },
+      children: [
+        { id: 'WL-CHILD-1', title: 'Child one', status: 'completed' },
+        { id: 'WL-CHILD-2', title: 'Child two', status: 'open' },
+      ],
+    };
+    expect(parseAuditCandidateScopeOutput(JSON.stringify(payload))).toEqual({
+      ok: true,
+      scope: 'parent',
+    });
+  });
+
+  it('counts a single child as a parent (no off-by-one at the boundary)', () => {
+    const payload = {
+      ...leafPayload,
+      children: [{ id: 'WL-ONLY-CHILD', title: 'Only child' }],
+    };
+    expect(parseAuditCandidateScopeOutput(JSON.stringify(payload))).toEqual({
+      ok: true,
+      scope: 'parent',
+    });
+  });
+
+  it('fails closed on the real not-found payload (`success: false`, exit 0)', () => {
+    // `wl show WL-NOPE --children --json` exits 0 with this body — a parse
+    // that trusted any object would report an empty `children` absence as a
+    // leaf and relax the gate for an item that does not exist.
+    const stdout = JSON.stringify({ success: false, error: 'Work item not found: WL-NOPE' });
+    expect(parseAuditCandidateScopeOutput(stdout)).toEqual({ ok: false });
+  });
+
+  it('fails closed on malformed JSON', () => {
+    expect(parseAuditCandidateScopeOutput('not json')).toEqual({ ok: false });
+  });
+
+  it.each<[string, unknown]>([
+    ['a null payload', null],
+    ['a bare array payload', []],
+    ['a string payload', 'leaf'],
+  ])('fails closed on %s', (_name, payload) => {
+    expect(parseAuditCandidateScopeOutput(JSON.stringify(payload))).toEqual({ ok: false });
+  });
+
+  it('fails closed when the JSON has no workItem (absent children cannot be trusted)', () => {
+    expect(parseAuditCandidateScopeOutput(JSON.stringify({ success: true }))).toEqual({
+      ok: false,
+    });
+  });
+
+  it.each<[string, unknown]>([
+    ['the `children` field is absent', undefined],
+    ['`children` is null', null],
+    ['`children` is a string', '[]'],
+    ['`children` is an object', { count: 0 }],
+    ['`children` is a number', 0],
+  ])('fails closed when %s (a non-array is never a leaf)', (name, children) => {
+    const workItem = { id: 'WL-X', parentId: '' };
+    const payload: Record<string, unknown> = { success: true, workItem };
+    if (name !== 'the `children` field is absent') payload.children = children;
+    expect(parseAuditCandidateScopeOutput(JSON.stringify(payload))).toEqual({ ok: false });
+  });
+
+  it.each<[string, unknown]>([
+    ['a non-root candidate with an empty children array', { id: 'WL-CHILD', parentId: 'WL-PARENT' }],
+    ['a non-root candidate WITH children', { id: 'WL-CHILD', parentId: 'WL-PARENT' }],
+  ])('fails closed for %s (the audit tier is root-only)', (name, workItem) => {
+    const children = name.includes('WITH children') ? [{ id: 'WL-GRANDCHILD' }] : [];
+    expect(
+      parseAuditCandidateScopeOutput(JSON.stringify({ success: true, workItem, children })),
+    ).toEqual({ ok: false });
+  });
+
+  it('accepts a root whose parentId is absent or null (tolerant, not a guess)', () => {
+    expect(
+      parseAuditCandidateScopeOutput(JSON.stringify({ success: true, workItem: { id: 'WL-A' }, children: [] })),
+    ).toEqual({ ok: true, scope: 'leaf' });
+    expect(
+      parseAuditCandidateScopeOutput(
+        JSON.stringify({ success: true, workItem: { id: 'WL-A', parentId: null }, children: [] }),
+      ),
+    ).toEqual({ ok: true, scope: 'leaf' });
   });
 });

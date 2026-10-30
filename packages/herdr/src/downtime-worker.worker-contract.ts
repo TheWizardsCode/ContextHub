@@ -128,12 +128,12 @@ export interface DowntimeWorkerDeps {
    * candidate). Every caller maps `{ ok: false }` to `'parent'` through
    * `classifyAuditScope` (fail-closed, conservative all-slots-style gate).
    *
-   * Optional for backward compatibility while the leaf-aware gates land
-   * (C1 declares the seam only; C2/C3/C4 wire it): when ABSENT the gates must
-   * keep today's parent gate. The `makeDeps` test fixture supplies a neutral
+   * Required since C2 wires the real implementation: every deps object must
+   * supply the lookup, so a caller can never silently skip the fail-closed
+   * check. The `makeDeps` test fixture supplies a neutral
    * `{ ok: true, scope: 'parent' }` default so existing suites are unchanged.
    */
-  getAuditCandidateScope?(itemId: string, cwd: string): Promise<AuditCandidateScopeResult>;
+  getAuditCandidateScope(itemId: string, cwd: string): Promise<AuditCandidateScopeResult>;
   /**
    * Running-downtime-panes liveness query: count dispatched downtime panes
    * that are STILL ALIVE (a live pi agent in a `Downtime …`-labelled Herdr

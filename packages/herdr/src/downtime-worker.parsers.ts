@@ -12,10 +12,14 @@
  * child WL-0MVLIHYOU000YQ0R). No behaviour change: parser tolerance, accepted
  * output shapes and null/empty semantics are unchanged.
  *
- * Layering: this module imports TYPES ONLY, and never the barrel
- * (`downtime-worker.js`) nor `./stalled-work.js` (which imports values back
- * from the barrel), so the pre-existing type-only cycle cannot widen into a
- * runtime cycle.
+ * Layering: this module imports TYPES ONLY from `downtime-worker.types.js`,
+ * and never the barrel (`downtime-worker.js`) nor `./stalled-work.js` (which
+ * imports values back from the barrel), so the pre-existing type-only cycle
+ * cannot widen into a runtime cycle. `parseAuditCandidateScopeOutput` spells
+ * its result structurally rather than importing `AuditCandidateScopeResult`
+ * from `downtime-worker.gates.js`: gates → selection → parsers is already an
+ * edge, so a parsers → gates type edge would close a new split-family cycle
+ * the frozen guard rejects.
  */
 
 import type {
@@ -511,4 +515,63 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
     if (typeof a.readyToClose === 'boolean') info.auditResult = a.readyToClose;
   }
   return info;
+}
+
+/**
+ * Parse the stdout of `wl show <id> --children --json` into the audit-tier
+ * scope classification (parent WL-0MSORQ8Y4004YT63 AC1, child C2
+ * WL-0MVV1EZ8G006PSBE).
+ *
+ * `children` is the only trustworthy leaf-vs-parent signal: a root with an
+ * EMPTY array is a single-session leaf audit, a root with at least one child
+ * is a parent audit whose Phase 2 fans out. **Fail-closed**: every payload
+ * whose scope cannot be fully trusted yields `{ ok: false }` — malformed
+ * JSON, a non-object payload, the CLI's `{ success: false, error }`
+ * not-found body (which exits 0, so it must be checked explicitly), an
+ * absent or non-array `children` field, a missing `workItem`, or a NON-ROOT
+ * candidate (a non-empty `parentId`; the audit tier is root-only via
+ * `--root-only`, so a child here means the selection leaked). Callers map
+ * `{ ok: false }` to `'parent'` through `classifyAuditScope`, restoring the
+ * conservative all-slots-style gate; the parse never guesses `'leaf'`.
+ *
+ * Tolerant where tolerance cannot relax the gate: a root whose `parentId` is
+ * absent, `null` or `''` (the shapes `wl` emits for a root item) is accepted.
+ *
+ * The result type is spelled structurally (it is the same shape as
+ * `AuditCandidateScopeResult` in `downtime-worker.gates.ts`) to keep this
+ * module free of a gates type edge — see the module doc's layering note.
+ */
+export function parseAuditCandidateScopeOutput(
+  stdout: string,
+): { ok: true; scope: 'leaf' | 'parent' } | { ok: false } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return { ok: false };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false };
+  }
+  const payload = parsed as Record<string, unknown>;
+  // `wl show <unknown id>` exits 0 with `{ success: false, error }` — the
+  // shape has no workItem/children, but check it explicitly so a future
+  // tolerant payload cannot be mistaken for a leaf.
+  if (payload.success === false) return { ok: false };
+
+  const workItem = payload.workItem;
+  if (workItem === null || typeof workItem !== 'object' || Array.isArray(workItem)) {
+    return { ok: false };
+  }
+  const parentId = (workItem as Record<string, unknown>).parentId;
+  // Root-only contract: a candidate with a parent is a child that leaked
+  // past `wl list --root-only`; its empty `children` says nothing about the
+  // deliverable unit the producer reviews, so the scope is untrustworthy.
+  if (parentId !== undefined && parentId !== null && parentId !== '') {
+    return { ok: false };
+  }
+
+  const children = payload.children;
+  if (!Array.isArray(children)) return { ok: false };
+  return { ok: true, scope: children.length === 0 ? 'leaf' : 'parent' };
 }

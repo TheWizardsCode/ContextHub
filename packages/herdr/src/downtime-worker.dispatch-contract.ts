@@ -40,7 +40,7 @@ import type {
   ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
 import type { DowntimeSpawnResult } from './downtime-worker.pane.js';
-import type { DowntimeAuditBatchStatus } from './downtime-worker.gates.js';
+import type { DowntimeAuditBatchStatus, AuditCandidateScopeResult } from './downtime-worker.gates.js';
 import type { CoordinationOfferRejection } from './downtime-worker.offer-attribution.js';
 import type {
   DowntimeActiveAuditResult,
@@ -70,6 +70,13 @@ export interface DowntimeDispatchDeps {
   getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult>;
   /** Audit-tier candidate lookup (see `DowntimeWorkerDeps`). */
   getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult>;
+  /**
+   * Leaf-vs-parent scope lookup for an audit candidate (see
+   * `DowntimeWorkerDeps.getAuditCandidateScope`). `wl show <id> --children
+   * --json` mapped to `{ok:true, scope}` / `{ok:false}`; callers classify
+   * through `classifyAuditScope`, which treats `{ok:false}` as `'parent'`.
+   */
+  getAuditCandidateScope(itemId: string, cwd: string): Promise<AuditCandidateScopeResult>;
   /** Review-queue depth read (see `DowntimeWorkerDeps`). */
   getReviewQueueCount(cwd: string): Promise<number | null>;
   /** Active-audit single-flight read (see `DowntimeWorkerDeps`). */

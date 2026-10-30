@@ -74,6 +74,7 @@ import {
   spawnDowntimePane,
   parseNextCandidatesOutput,
   parseAuditCandidatesOutput,
+  parseAuditCandidateScopeOutput,
   parseImplementCandidatesOutput,
   parseCriticalCandidatesOutput,
   selectAuditCandidate,
@@ -112,6 +113,7 @@ import {
   createLocalReserver,
 } from './downtime-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
+import type { AuditCandidateScopeResult } from './downtime-worker.gates.js';
 import {
   appendDowntimeLogEntry,
   appendPaneCloseLogEntry,
@@ -572,6 +574,34 @@ export function createDowntimeDeps(
         // caller counts it as a strike (WL-0MSLWJ2KP0002SV0).
         // Capture error details for the three-strike pause log (WL-0MTL4PC0Y005GXTI).
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    // Leaf-vs-parent audit scope (parent WL-0MSORQ8Y4004YT63 AC1, child C2
+    // WL-0MVV1EZ8G006PSBE): `wl show <id> --children --json` is the only
+    // trustworthy signal for whether the audit candidate is a single-session
+    // LEAF (1 free slot) or a PARENT whose Phase 2 fans out (all-slots-style
+    // gate). Same wl discipline as every other wl-backed seam: per-root
+    // targeting (`<cwd>/.worklog`, WL-0MTQ14W7L003II5A — the candidate lives
+    // in ITS OWN worklog root), transient retry, and the bounded timeout
+    // (WL-0MSJIPHD0001L1J9) that kills a hung wl child. Fail-closed: any
+    // untrustworthy result (CLI error, timeout, parse failure, missing /
+    // non-array `children`, non-root candidate) resolves `{ok:false}`, which
+    // `classifyAuditScope` maps to `'parent'` — the gate can be relaxed only
+    // on a positively confirmed leaf, never by an unanswered lookup.
+    async getAuditCandidateScope(
+      itemId: string,
+      cwd: string,
+    ): Promise<AuditCandidateScopeResult> {
+      try {
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
+          'wl',
+          buildWlArgsForRoot(cwd, ['show', itemId, '--children', '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        ));
+        return parseAuditCandidateScopeOutput(stdout);
+      } catch {
+        // Fail-closed: an unanswerable lookup is never a leaf.
+        return { ok: false };
       }
     },
     async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {

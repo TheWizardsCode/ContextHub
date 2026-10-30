@@ -83,6 +83,19 @@ export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2;
  */
 export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
 /**
+ * Minimum free slots required for a LEAF audit dispatch (parent
+ * WL-0MSORQ8Y4004YT63 AC2, WL-0MVV1EZ8G006PSBE): a candidate with **no
+ * children** is audited by a single Pi session, so a single free slot
+ * suffices — the `AUDIT_PHASE2_PARALLELISM=1` child fan-out that
+ * `DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2` reserves capacity for cannot happen.
+ * Applied ONLY when the candidate's scope is a trusted `'leaf'`; a
+ * `'parent'` or an untrustworthy scope lookup keeps the
+ * `DOWNTIME_AUDIT_MIN_FREE_SLOTS` gate (fail-closed via
+ * `classifyAuditScope`). Never larger than the parent audit minimum: a leaf
+ * audit must not demand more slots than a parent audit.
+ */
+export const DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1;
+/**
  * Minimum free slots required for a single-pane dispatch (implement /
  * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3, F5
  * WL-0MTII48OV008P2QU single budget): each pane consumes exactly one local

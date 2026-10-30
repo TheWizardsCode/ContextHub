@@ -132,6 +132,7 @@ export {
 } from './downtime-worker.selection.js';
 export {
   criticalSkillKind,
+  parseAuditCandidateScopeOutput,
   parseAuditCandidatesOutput,
   parseCriticalCandidatesOutput,
   parseDepListBlockersOutput,

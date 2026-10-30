@@ -23,6 +23,9 @@ function deps(o: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
   return {
     getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Leaf-vs-parent audit scope (WL-0MVV1EZ8G006PSBE, C2): the neutral
+    // `parent` default keeps today's all-slots-style audit gate.
+    getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
     getNextImplementCandidate: vi.fn().mockResolvedValue(null),
     getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     claimItem: vi.fn().mockResolvedValue({ ok: true }),
