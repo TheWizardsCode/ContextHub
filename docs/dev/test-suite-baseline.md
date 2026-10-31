@@ -929,6 +929,38 @@ reduces the harness cost (WL-0MVVXG4B200968BF) flips `it.fails(` to `it(` when
 reuse lands — or adjusts the expectation together with its recorded re-scope
 finding.
 
+### Re-scope decision: no harness reuse (WL-0MVVXG4B200968BF)
+
+The harness-reduction child took the **production-startup / re-scope branch**,
+not the harness-side branch, and therefore lands **no** cross-call reuse in
+`tests/cli/cli-inproc.ts`:
+
+- On the regime the suite actually runs in (fresh temp store), the dominant
+  single phase of every data-access call is the **SQLite open incl. schema
+  creation/migrations** — 2.2 ms of 4.7 ms (47.3 %) for `list --json`, 1.8 ms
+  of 4.0 ms (44.8 %) for `status`, 2.1 ms of 5.1 ms (42.1 %) for `create` —
+  with a further ~0.2 ms of config (re)parsing. That is **production startup**:
+  `getDatabase()` re-parses the config and `WorklogDatabase` re-runs the store
+  bootstrap on every open.
+- Harness-side work is a minority of those calls (1.0–1.5 ms, 25–33 %), so the
+  entire addressable harness-side cost across the ~1200 in-process invocations
+  is **~1.2–1.8 s**, not the ~240 s implied by a ~200 ms/call figure. Caching a
+  `Command`, a plugin context or a DB handle could not move the suite by
+  minutes, and it would add exactly the cross-call state the reuse-safety
+  contract above exists to police.
+- The remaining per-call cost is therefore re-scoped into production code:
+  **WL-0MVWLBZG4003A803** — *Reduce per-command production startup: skip
+  repeated schema/migration bootstrap and config re-parse* (`discovered-from`
+  WL-0MVHVZMCH0092JCY). Its ACs require a schema-version fast path, a
+  change-keyed config cache and a ≥ 30 % drop in the warm `list --json` median,
+  with the migration slow path still covered by tests.
+
+The RED-pinned reuse-contract case in
+`tests/cli/inproc-harness-reuse.test.ts` remains the characterisation of the
+current per-call cost (one construction, one plugin context, one DB open per
+call). No harness-side workaround was added, so the saving in the follow-up item
+is real production saving rather than a test-only illusion.
+
 ### Caveats
 
 - **Same-host medians only.** Absolute values are load sensitive; the tables
@@ -1000,3 +1032,6 @@ Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
 - In-process harness reuse-safety contract + counters (red-first tests):
   WL-0MVVXG0EQ0068WQB — see
   [Reuse-safety contract and harness counters](#reuse-safety-contract-and-harness-counters-wl-0mvvxg0eq0068wqb)
+- Harness-cost re-scope decision (production startup, follow-up `src/` work):
+  WL-0MVVXG4B200968BF → WL-0MVWLBZG4003A803 — see
+  [Re-scope decision: no harness reuse](#re-scope-decision-no-harness-reuse-wl-0mvvxg4b200968bf)
