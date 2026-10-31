@@ -1,0 +1,1662 @@
+{
+  "schemaVersion": 1,
+  "workItem": "WL-0MVVXFXM6007QZ2L",
+  "capturedAt": "2026-10-31T11:38:11.169Z",
+  "host": {
+    "hostname": "rgardler-AI-Laptop",
+    "platform": "linux",
+    "release": "7.0.0-38-generic",
+    "cpuCount": 16,
+    "cpuModel": "AMD Ryzen 7 4800H with Radeon Graphics",
+    "totalMemoryMb": 30991,
+    "node": "v22.22.1",
+    "loadAverage": [
+      4.14,
+      6.56,
+      7.99
+    ]
+  },
+  "runs": 5,
+  "warmupRuns": 1,
+  "store": "fresh temporary worklog store per measured run (first-open schema + migrations included)",
+  "storeRegime": "fresh",
+  "sourceStore": null,
+  "invocation": "npx tsx bench/inproc-harness-profile.ts --runs 5",
+  "repoRoot": "/home/rgardler/projects/ContextHub/.worklog/worktrees/wl-WL-0MVVXFXM6007QZ2L-profile-and-attribute-in-process-harness",
+  "processWallMs": 681.3,
+  "profilingWallMs": 165.9,
+  "coldStart": {
+    "scenario": "help",
+    "label": "wl --help (no data access)",
+    "totalMs": 19.53,
+    "buckets": {
+      "argvAndOverride": 0.35,
+      "commanderRegistration": 9.85,
+      "pluginContext": 5.34,
+      "configLoad": 0,
+      "dbOpen": 0,
+      "dbClose": 0.01,
+      "commandAction": 3.39,
+      "harnessBookkeeping": 0.25
+    },
+    "sharePct": {
+      "argvAndOverride": 1.8,
+      "commanderRegistration": 50.4,
+      "pluginContext": 27.3,
+      "configLoad": 0,
+      "dbOpen": 0,
+      "dbClose": 0,
+      "commandAction": 17.3,
+      "harnessBookkeeping": 1.3
+    },
+    "note": "first in-process call in this process: also pays module-graph and JIT warm-up; warm per-call numbers exclude it"
+  },
+  "scenarios": [
+    {
+      "name": "help",
+      "label": "wl --help (no data access)",
+      "command": "node src/cli.ts --worklog-dir <temp-store>/.worklog --help",
+      "argv": [
+        "--help"
+      ],
+      "runs": [
+        {
+          "totalMs": 2.329648999999904,
+          "phases": {
+            "argv": {
+              "ms": 0.03715599999998176,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.012850999999955093,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.005377000000066801,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.04700400000001537,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.4733879999999999,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 1.1019670000000588,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 0.5495859999999766,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.05950499999994463,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.002375000000029104,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.00572700000009263,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 0,
+              "count": 0
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.04253300000004856,
+            "commanderRegistration": 1.1489710000000741,
+            "pluginContext": 0.4733879999999999,
+            "configLoad": 0,
+            "dbOpen": 0,
+            "dbClose": 0.002375000000029104,
+            "commandAction": 0.5495859999999766,
+            "harnessBookkeeping": 0.07808299999999235
+          },
+          "attributedMs": 2.2949360000001207,
+          "residualMs": 0.03471299999978328,
+          "residualSharePct": 1.5,
+          "reconciled": true
+        },
+        {
+          "totalMs": 2.447473000000059,
+          "phases": {
+            "argv": {
+              "ms": 0.0296130000000403,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.022489000000064152,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.005168000000026041,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.04630500000007487,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.5250019999999722,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 1.1267599999999902,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 0.5263990000000831,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.05727000000001681,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.0023740000000316286,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.004260999999928572,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 0,
+              "count": 0
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.03478100000006634,
+            "commanderRegistration": 1.173065000000065,
+            "pluginContext": 0.5250019999999722,
+            "configLoad": 0,
+            "dbOpen": 0,
+            "dbClose": 0.0023740000000316286,
+            "commandAction": 0.5263990000000831,
+            "harnessBookkeeping": 0.08402000000000953
+          },
+          "attributedMs": 2.345641000000228,
+          "residualMs": 0.10183199999983117,
+          "residualSharePct": 4.2,
+          "reconciled": true
+        },
+        {
+          "totalMs": 2.2072860000000674,
+          "phases": {
+            "argv": {
+              "ms": 0.017040999999949236,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.012500999999929263,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.0052379999999629945,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.042743000000086795,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.342296000000033,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 1.0649510000000646,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 0.6191489999999931,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.056292999999982385,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.0028640000000450527,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.005099000000086562,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 0,
+              "count": 0
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.02227899999991223,
+            "commanderRegistration": 1.1076940000001514,
+            "pluginContext": 0.342296000000033,
+            "configLoad": 0,
+            "dbOpen": 0,
+            "dbClose": 0.0028640000000450527,
+            "commandAction": 0.6191489999999931,
+            "harnessBookkeeping": 0.07389299999999821
+          },
+          "attributedMs": 2.168175000000133,
+          "residualMs": 0.03911099999993439,
+          "residualSharePct": 1.8,
+          "reconciled": true
+        },
+        {
+          "totalMs": 2.0267450000000053,
+          "phases": {
+            "argv": {
+              "ms": 0.0117329999999356,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.012921000000005733,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.004259999999931097,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.04127700000003642,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.294524000000024,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 1.0976369999999633,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 0.46556600000008075,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.05531499999995049,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.0013959999999997308,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.004329999999981737,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 0,
+              "count": 0
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.015992999999866697,
+            "commanderRegistration": 1.1389139999999998,
+            "pluginContext": 0.294524000000024,
+            "configLoad": 0,
+            "dbOpen": 0,
+            "dbClose": 0.0013959999999997308,
+            "commandAction": 0.46556600000008075,
+            "harnessBookkeeping": 0.07256599999993796
+          },
+          "attributedMs": 1.9889589999999089,
+          "residualMs": 0.037786000000096465,
+          "residualSharePct": 1.9,
+          "reconciled": true
+        },
+        {
+          "totalMs": 4.332717000000002,
+          "phases": {
+            "argv": {
+              "ms": 0.013968999999974585,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.012780999999904452,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.004749000000060732,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.04211499999996704,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.454462000000035,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 3.1227049999999963,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 0.5056560000000445,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.12117599999999129,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.0042600000000447835,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.01040699999998651,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 0,
+              "count": 0
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.018718000000035317,
+            "commanderRegistration": 3.1648199999999633,
+            "pluginContext": 0.454462000000035,
+            "configLoad": 0,
+            "dbOpen": 0,
+            "dbClose": 0.0042600000000447835,
+            "commandAction": 0.5056560000000445,
+            "harnessBookkeeping": 0.14436399999988225
+          },
+          "attributedMs": 4.292280000000005,
+          "residualMs": 0.04043699999999717,
+          "residualSharePct": 0.9,
+          "reconciled": true
+        }
+      ],
+      "runCount": 5,
+      "median": {
+        "totalMs": 2.33,
+        "phases": {
+          "argv": 0.02,
+          "harness_patch": 0.01,
+          "worklog_dir_override": 0.01,
+          "command_construction": 0.04,
+          "plugin_context": 0.45,
+          "register_commands": 1.1,
+          "command_action": 0.53,
+          "throttler_drain": 0.06,
+          "db_close": 0,
+          "harness_restore": 0.01,
+          "config_load": 0,
+          "db_open": 0
+        },
+        "buckets": {
+          "argvAndOverride": 0.02,
+          "commanderRegistration": 1.15,
+          "pluginContext": 0.45,
+          "configLoad": 0,
+          "dbOpen": 0,
+          "dbClose": 0,
+          "commandAction": 0.53,
+          "harnessBookkeeping": 0.08
+        },
+        "attributedMs": 2.29,
+        "residualMs": 0.04,
+        "residualSharePct": 1.7
+      },
+      "reconciled": true,
+      "worstResidualSharePct": 4.2,
+      "dominant": {
+        "bucket": "commanderRegistration",
+        "category": "harness-side",
+        "ms": 1.2,
+        "sharePct": 49.4,
+        "classification": "harness-side",
+        "verdict": "wl --help (no data access): dominant phase is Command construction + built-in registration — 1.2 ms, 49.4 % of the 2.3 ms call; so the fixable cost is harness-side (removable by reusing state across calls in the test harness)."
+      },
+      "categoryMs": {
+        "harness-side": 1.7,
+        "production-startup": 0,
+        "command-work": 0.53
+      },
+      "categorySharePct": {
+        "harness-side": 73,
+        "production-startup": 0,
+        "command-work": 22.7
+      }
+    },
+    {
+      "name": "list-json",
+      "label": "wl list --json",
+      "command": "node src/cli.ts --worklog-dir <temp-store>/.worklog list --json",
+      "argv": [
+        "list",
+        "--json"
+      ],
+      "runs": [
+        {
+          "totalMs": 4.871058999999946,
+          "phases": {
+            "argv": {
+              "ms": 0.013199999999983447,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.008240999999998166,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.004329999999981737,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.1781669999999167,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.46668399999998655,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 1.4179320000000644,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.4360189999999875,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.04707399999995232,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.25331600000004073,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.0033520000000635264,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 1.9627689999999802,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.017529999999965185,
+            "commanderRegistration": 1.596098999999981,
+            "pluginContext": 0.46668399999998655,
+            "configLoad": 0,
+            "dbOpen": 1.9627689999999802,
+            "dbClose": 0.25331600000004073,
+            "commandAction": 0.4732500000000073,
+            "harnessBookkeeping": 0.058667000000014013
+          },
+          "attributedMs": 4.828314999999975,
+          "residualMs": 0.04274399999997058,
+          "residualSharePct": 0.9,
+          "reconciled": true
+        },
+        {
+          "totalMs": 4.742969000000016,
+          "phases": {
+            "argv": {
+              "ms": 0.012361999999939144,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.008521000000087042,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.0052379999999629945,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.05538400000000365,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.2885870000000068,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 1.1004299999999603,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.8358639999999014,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.05727000000001681,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.31812999999999647,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.004189999999994143,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 2.2843920000000253,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.01759999999990214,
+            "commanderRegistration": 1.155813999999964,
+            "pluginContext": 0.2885870000000068,
+            "configLoad": 0,
+            "dbOpen": 2.2843920000000253,
+            "dbClose": 0.31812999999999647,
+            "commandAction": 0.5514719999998761,
+            "harnessBookkeeping": 0.06998100000009799
+          },
+          "attributedMs": 4.685975999999869,
+          "residualMs": 0.05699300000014773,
+          "residualSharePct": 1.2,
+          "reconciled": true
+        },
+        {
+          "totalMs": 3.9668850000000475,
+          "phases": {
+            "argv": {
+              "ms": 0.029473999999936495,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.011453999999957887,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.005726999999978943,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.05678100000000086,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.2618370000000141,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.7959889999999632,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.4726159999999027,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.04497800000001462,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.24807800000007774,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.0037710000000288346,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 2.0965159999999514,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.03520099999991544,
+            "commanderRegistration": 0.8527699999999641,
+            "pluginContext": 0.2618370000000141,
+            "configLoad": 0,
+            "dbOpen": 2.0965159999999514,
+            "dbClose": 0.24807800000007774,
+            "commandAction": 0.37609999999995125,
+            "harnessBookkeeping": 0.06020300000000134
+          },
+          "attributedMs": 3.9307049999998753,
+          "residualMs": 0.036180000000172186,
+          "residualSharePct": 0.9,
+          "reconciled": true
+        },
+        {
+          "totalMs": 4.577722999999992,
+          "phases": {
+            "argv": {
+              "ms": 0.06146099999989474,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.008101000000010572,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.003911000000016429,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.05789900000002035,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.2426309999999603,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.893978000000061,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.8472479999999223,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.07158800000001975,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.3479529999999613,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.008521000000087042,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 2.2377369999999246,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.06537199999991117,
+            "commanderRegistration": 0.9518770000000814,
+            "pluginContext": 0.2426309999999603,
+            "configLoad": 0,
+            "dbOpen": 2.2377369999999246,
+            "dbClose": 0.3479529999999613,
+            "commandAction": 0.6095109999999977,
+            "harnessBookkeeping": 0.08821000000011736
+          },
+          "attributedMs": 4.543290999999954,
+          "residualMs": 0.03443200000003799,
+          "residualSharePct": 0.8,
+          "reconciled": true
+        },
+        {
+          "totalMs": 4.8559040000000095,
+          "phases": {
+            "argv": {
+              "ms": 0.014527999999927488,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.011803999999983716,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.005726999999978943,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.09086500000000797,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.3163839999999709,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 1.1975810000000138,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.7735649999999623,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.05768999999997959,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.3391520000000128,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.006076000000007298,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0,
+              "count": 0
+            },
+            "db_open": {
+              "ms": 2.382029999999986,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.02025499999990643,
+            "commanderRegistration": 1.2884460000000217,
+            "pluginContext": 0.3163839999999709,
+            "configLoad": 0,
+            "dbOpen": 2.382029999999986,
+            "dbClose": 0.3391520000000128,
+            "commandAction": 0.3915349999999762,
+            "harnessBookkeeping": 0.0755699999999706
+          },
+          "attributedMs": 4.813371999999845,
+          "residualMs": 0.04253200000016477,
+          "residualSharePct": 0.9,
+          "reconciled": true
+        }
+      ],
+      "runCount": 5,
+      "median": {
+        "totalMs": 4.74,
+        "phases": {
+          "argv": 0.01,
+          "harness_patch": 0.01,
+          "worklog_dir_override": 0.01,
+          "command_construction": 0.06,
+          "plugin_context": 0.29,
+          "register_commands": 1.1,
+          "command_action": 2.77,
+          "throttler_drain": 0.06,
+          "db_close": 0.32,
+          "harness_restore": 0,
+          "config_load": 0,
+          "db_open": 2.24
+        },
+        "buckets": {
+          "argvAndOverride": 0.02,
+          "commanderRegistration": 1.16,
+          "pluginContext": 0.29,
+          "configLoad": 0,
+          "dbOpen": 2.24,
+          "dbClose": 0.32,
+          "commandAction": 0.47,
+          "harnessBookkeeping": 0.07
+        },
+        "attributedMs": 4.69,
+        "residualMs": 0.05,
+        "residualSharePct": 1.1
+      },
+      "reconciled": true,
+      "worstResidualSharePct": 1.2,
+      "dominant": {
+        "bucket": "dbOpen",
+        "category": "production-startup",
+        "ms": 2.2,
+        "sharePct": 47.3,
+        "classification": "production-startup",
+        "verdict": "wl list --json: dominant phase is database open incl. schema/migrations — 2.2 ms, 47.3 % of the 4.7 ms call; so the fixable cost is production startup (a src/ change, not a test-only fix)."
+      },
+      "categoryMs": {
+        "harness-side": 1.54,
+        "production-startup": 2.56,
+        "command-work": 0.47
+      },
+      "categorySharePct": {
+        "harness-side": 32.5,
+        "production-startup": 54,
+        "command-work": 9.9
+      }
+    },
+    {
+      "name": "create",
+      "label": "wl create -t <fixture item> --json",
+      "command": "node src/cli.ts --worklog-dir <temp-store>/.worklog create -t In-process profile fixture item --json",
+      "argv": [
+        "create",
+        "-t",
+        "In-process profile fixture item",
+        "--json"
+      ],
+      "runs": [
+        {
+          "totalMs": 5.455705999999964,
+          "phases": {
+            "argv": {
+              "ms": 0.013478999999961161,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.009917000000086773,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.02011400000003505,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.03429299999993418,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.23236400000007507,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.6782360000000835,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 4.020664000000011,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.08066700000006222,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.33251799999993636,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.003912000000013904,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.20386900000005426,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 2.1252920000000586,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.03359299999999621,
+            "commanderRegistration": 0.7125290000000177,
+            "pluginContext": 0.23236400000007507,
+            "configLoad": 0.20386900000005426,
+            "dbOpen": 2.1252920000000586,
+            "dbClose": 0.33251799999993636,
+            "commandAction": 1.6915029999998978,
+            "harnessBookkeeping": 0.0944960000001629
+          },
+          "attributedMs": 5.426164000000199,
+          "residualMs": 0.029541999999764812,
+          "residualSharePct": 0.5,
+          "reconciled": true
+        },
+        {
+          "totalMs": 6.135897,
+          "phases": {
+            "argv": {
+              "ms": 0.014178000000015345,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.01236200000005283,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.004818999999997686,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.0344319999999243,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.19262400000002344,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.5131289999999353,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 4.969535999999948,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.04351099999996677,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.31394000000000233,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.0034229999999979555,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.23802200000000084,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 2.4728950000001078,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.01899700000001303,
+            "commanderRegistration": 0.5475609999998596,
+            "pluginContext": 0.19262400000002344,
+            "configLoad": 0.23802200000000084,
+            "dbOpen": 2.4728950000001078,
+            "dbClose": 0.31394000000000233,
+            "commandAction": 2.2586189999998396,
+            "harnessBookkeeping": 0.05929600000001756
+          },
+          "attributedMs": 6.101953999999864,
+          "residualMs": 0.033943000000135726,
+          "residualSharePct": 0.6,
+          "reconciled": true
+        },
+        {
+          "totalMs": 4.632129999999961,
+          "phases": {
+            "argv": {
+              "ms": 0.01473600000008446,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.01005699999996068,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.004609000000073138,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.038273000000003776,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.1940909999999576,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.47206199999993714,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 3.499712000000045,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.046306000000072345,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.31743200000005345,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.004259999999931097,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.1947890000000143,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 1.8882480000000896,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.019345000000157597,
+            "commanderRegistration": 0.5103349999999409,
+            "pluginContext": 0.1940909999999576,
+            "configLoad": 0.1947890000000143,
+            "dbOpen": 1.8882480000000896,
+            "dbClose": 0.31743200000005345,
+            "commandAction": 1.416674999999941,
+            "harnessBookkeeping": 0.06062299999996412
+          },
+          "attributedMs": 4.601538000000119,
+          "residualMs": 0.0305919999998423,
+          "residualSharePct": 0.7,
+          "reconciled": true
+        },
+        {
+          "totalMs": 5.063054999999963,
+          "phases": {
+            "argv": {
+              "ms": 0.013199999999983447,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.016621999999983927,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.005238000000076681,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.03275600000006307,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.2005859999999302,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.4973449999999957,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 3.8900579999999536,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.046165000000087275,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.32434599999999136,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.004678999999896405,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.193253000000027,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 2.1463830000000144,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.01843800000006013,
+            "commanderRegistration": 0.5301010000000588,
+            "pluginContext": 0.2005859999999302,
+            "configLoad": 0.193253000000027,
+            "dbOpen": 2.1463830000000144,
+            "dbClose": 0.32434599999999136,
+            "commandAction": 1.5504219999999123,
+            "harnessBookkeeping": 0.06746599999996761
+          },
+          "attributedMs": 5.030994999999962,
+          "residualMs": 0.03206000000000131,
+          "residualSharePct": 0.6,
+          "reconciled": true
+        },
+        {
+          "totalMs": 4.670123999999987,
+          "phases": {
+            "argv": {
+              "ms": 0.0208829999999125,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.013827999999989515,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.005169000000023516,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.05789900000002035,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.18794500000001335,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.5095669999999473,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 3.5036929999999984,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.043441999999913605,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.2862119999999777,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.003911000000016429,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.18948100000000068,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 1.7384369999999763,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.026051999999936015,
+            "commanderRegistration": 0.5674659999999676,
+            "pluginContext": 0.18794500000001335,
+            "configLoad": 0.18948100000000068,
+            "dbOpen": 1.7384369999999763,
+            "dbClose": 0.2862119999999777,
+            "commandAction": 1.5757750000000215,
+            "harnessBookkeeping": 0.06118099999991955
+          },
+          "attributedMs": 4.632548999999813,
+          "residualMs": 0.03757500000017444,
+          "residualSharePct": 0.8,
+          "reconciled": true
+        }
+      ],
+      "runCount": 5,
+      "median": {
+        "totalMs": 5.06,
+        "phases": {
+          "argv": 0.01,
+          "harness_patch": 0.01,
+          "worklog_dir_override": 0.01,
+          "command_construction": 0.03,
+          "plugin_context": 0.19,
+          "register_commands": 0.51,
+          "command_action": 3.89,
+          "throttler_drain": 0.05,
+          "db_close": 0.32,
+          "harness_restore": 0,
+          "config_load": 0.19,
+          "db_open": 2.13
+        },
+        "buckets": {
+          "argvAndOverride": 0.02,
+          "commanderRegistration": 0.55,
+          "pluginContext": 0.19,
+          "configLoad": 0.19,
+          "dbOpen": 2.13,
+          "dbClose": 0.32,
+          "commandAction": 1.58,
+          "harnessBookkeeping": 0.06
+        },
+        "attributedMs": 5.03,
+        "residualMs": 0.03,
+        "residualSharePct": 0.6
+      },
+      "reconciled": true,
+      "worstResidualSharePct": 0.8,
+      "dominant": {
+        "bucket": "dbOpen",
+        "category": "production-startup",
+        "ms": 2.1,
+        "sharePct": 42.1,
+        "classification": "production-startup",
+        "verdict": "wl create -t <fixture item> --json: dominant phase is database open incl. schema/migrations — 2.1 ms, 42.1 % of the 5.1 ms call; so the fixable cost is production startup (a src/ change, not a test-only fix)."
+      },
+      "categoryMs": {
+        "harness-side": 0.82,
+        "production-startup": 2.64,
+        "command-work": 1.58
+      },
+      "categorySharePct": {
+        "harness-side": 16.2,
+        "production-startup": 52.2,
+        "command-work": 31.2
+      }
+    },
+    {
+      "name": "status",
+      "label": "wl status --json",
+      "command": "node src/cli.ts --worklog-dir <temp-store>/.worklog status --json",
+      "argv": [
+        "status",
+        "--json"
+      ],
+      "runs": [
+        {
+          "totalMs": 4.046084999999948,
+          "phases": {
+            "argv": {
+              "ms": 0.016272999999955573,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.014667000000031294,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.00523899999996047,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.0430229999999483,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.23173500000007152,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.7068010000000413,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.5929539999999633,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.09882700000002842,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.29431400000009944,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.005168000000026041,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.22251699999992525,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 2.048185999999987,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.021511999999916043,
+            "commanderRegistration": 0.7498239999999896,
+            "pluginContext": 0.23173500000007152,
+            "configLoad": 0.22251699999992525,
+            "dbOpen": 2.048185999999987,
+            "dbClose": 0.29431400000009944,
+            "commandAction": 0.32225100000005114,
+            "harnessBookkeeping": 0.11866200000008575
+          },
+          "attributedMs": 4.009001000000126,
+          "residualMs": 0.03708399999982248,
+          "residualSharePct": 0.9,
+          "reconciled": true
+        },
+        {
+          "totalMs": 3.412409000000025,
+          "phases": {
+            "argv": {
+              "ms": 0.014736999999968248,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.012920000000008258,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.012361999999939144,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.03436199999998735,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.20093499999995856,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.5032810000000154,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.264835000000062,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.04777200000000903,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.28104399999995167,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.004261000000042259,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.19870099999991453,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 1.7880250000000615,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.02709899999990739,
+            "commanderRegistration": 0.5376430000000028,
+            "pluginContext": 0.20093499999995856,
+            "configLoad": 0.19870099999991453,
+            "dbOpen": 1.7880250000000615,
+            "dbClose": 0.28104399999995167,
+            "commandAction": 0.27810900000008587,
+            "harnessBookkeeping": 0.06495300000005955
+          },
+          "attributedMs": 3.376508999999942,
+          "residualMs": 0.03590000000008331,
+          "residualSharePct": 1.1,
+          "reconciled": true
+        },
+        {
+          "totalMs": 6.535183999999958,
+          "phases": {
+            "argv": {
+              "ms": 0.012222999999949025,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.01040699999998651,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.01306000000010954,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.033314000000018495,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.1762109999999666,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 3.6940819999999803,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.250030000000038,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.04714400000000296,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.2628859999999804,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.0038420000000769505,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.1790050000000747,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 1.746050000000082,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.025283000000058564,
+            "commanderRegistration": 3.727395999999999,
+            "pluginContext": 0.1762109999999666,
+            "configLoad": 0.1790050000000747,
+            "dbOpen": 1.746050000000082,
+            "dbClose": 0.2628859999999804,
+            "commandAction": 0.3249749999998812,
+            "harnessBookkeeping": 0.06139300000006642
+          },
+          "attributedMs": 6.503199000000109,
+          "residualMs": 0.031984999999849606,
+          "residualSharePct": 0.5,
+          "reconciled": true
+        },
+        {
+          "totalMs": 4.021780999999919,
+          "phases": {
+            "argv": {
+              "ms": 0.012921000000005733,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.011873000000036882,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.005168999999909829,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.035829000000035194,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.27357099999994716,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.6980709999999135,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.647081000000071,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.044280000000071595,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.26002100000005157,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.00342200000000048,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.18976099999997587,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 2.1327649999999494,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.018089999999915563,
+            "commanderRegistration": 0.7338999999999487,
+            "pluginContext": 0.27357099999994716,
+            "configLoad": 0.18976099999997587,
+            "dbOpen": 2.1327649999999494,
+            "dbClose": 0.26002100000005157,
+            "commandAction": 0.3245550000001458,
+            "harnessBookkeeping": 0.05957500000010896
+          },
+          "attributedMs": 3.992238000000043,
+          "residualMs": 0.029542999999875974,
+          "residualSharePct": 0.7,
+          "reconciled": true
+        },
+        {
+          "totalMs": 3.475127000000043,
+          "phases": {
+            "argv": {
+              "ms": 0.012222000000065236,
+              "count": 1
+            },
+            "harness_patch": {
+              "ms": 0.010057000000074368,
+              "count": 1
+            },
+            "worklog_dir_override": {
+              "ms": 0.05196200000000317,
+              "count": 1
+            },
+            "command_construction": {
+              "ms": 0.03289500000005319,
+              "count": 1
+            },
+            "plugin_context": {
+              "ms": 0.17502400000000762,
+              "count": 1
+            },
+            "register_commands": {
+              "ms": 0.5011159999999109,
+              "count": 1
+            },
+            "command_action": {
+              "ms": 2.319242000000031,
+              "count": 1
+            },
+            "throttler_drain": {
+              "ms": 0.04805099999998674,
+              "count": 1
+            },
+            "db_close": {
+              "ms": 0.29445399999997335,
+              "count": 1
+            },
+            "harness_restore": {
+              "ms": 0.0042600000000447835,
+              "count": 1
+            },
+            "config_load": {
+              "ms": 0.21190100000001166,
+              "count": 1
+            },
+            "db_open": {
+              "ms": 1.7975930000000062,
+              "count": 1
+            }
+          },
+          "buckets": {
+            "argvAndOverride": 0.06418400000006841,
+            "commanderRegistration": 0.534010999999964,
+            "pluginContext": 0.17502400000000762,
+            "configLoad": 0.21190100000001166,
+            "dbOpen": 1.7975930000000062,
+            "dbClose": 0.29445399999997335,
+            "commandAction": 0.30974800000001323,
+            "harnessBookkeeping": 0.062368000000105894
+          },
+          "attributedMs": 3.4492830000001504,
+          "residualMs": 0.02584399999989273,
+          "residualSharePct": 0.7,
+          "reconciled": true
+        }
+      ],
+      "runCount": 5,
+      "median": {
+        "totalMs": 4.02,
+        "phases": {
+          "argv": 0.01,
+          "harness_patch": 0.01,
+          "worklog_dir_override": 0.01,
+          "command_construction": 0.03,
+          "plugin_context": 0.2,
+          "register_commands": 0.7,
+          "command_action": 2.32,
+          "throttler_drain": 0.05,
+          "db_close": 0.28,
+          "harness_restore": 0,
+          "config_load": 0.2,
+          "db_open": 1.8
+        },
+        "buckets": {
+          "argvAndOverride": 0.03,
+          "commanderRegistration": 0.73,
+          "pluginContext": 0.2,
+          "configLoad": 0.2,
+          "dbOpen": 1.8,
+          "dbClose": 0.28,
+          "commandAction": 0.32,
+          "harnessBookkeeping": 0.06
+        },
+        "attributedMs": 3.99,
+        "residualMs": 0.03,
+        "residualSharePct": 0.7
+      },
+      "reconciled": true,
+      "worstResidualSharePct": 1.1,
+      "dominant": {
+        "bucket": "dbOpen",
+        "category": "production-startup",
+        "ms": 1.8,
+        "sharePct": 44.8,
+        "classification": "production-startup",
+        "verdict": "wl status --json: dominant phase is database open incl. schema/migrations — 1.8 ms, 44.8 % of the 4 ms call; so the fixable cost is production startup (a src/ change, not a test-only fix)."
+      },
+      "categoryMs": {
+        "harness-side": 1.02,
+        "production-startup": 2.28,
+        "command-work": 0.32
+      },
+      "categorySharePct": {
+        "harness-side": 25.4,
+        "production-startup": 56.7,
+        "command-work": 8
+      }
+    }
+  ],
+  "decisionGate": {
+    "scenario": "list-json",
+    "label": "wl list --json",
+    "totalMs": 4.74,
+    "dominantBucket": "dbOpen",
+    "dominantCategory": "production-startup",
+    "dominantMs": 2.2,
+    "dominantSharePct": 47.3,
+    "classification": "production-startup",
+    "harnessSideMs": 1.54,
+    "harnessSideSharePct": 32.5,
+    "productionStartupMs": 2.56,
+    "productionStartupSharePct": 54,
+    "commandWorkMs": 0.47,
+    "commandWorkSharePct": 9.9,
+    "verdict": "wl list --json: dominant phase is database open incl. schema/migrations — 2.2 ms, 47.3 % of the 4.7 ms call; so the fixable cost is production startup (a src/ change, not a test-only fix)."
+  }
+}

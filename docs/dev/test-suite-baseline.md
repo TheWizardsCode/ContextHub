@@ -771,6 +771,165 @@ python3 <test-skill>/scripts/run_tests.py --suite pytest --force --json
   moves, so an idle CI host will show a smaller proportional win than the
   loaded measurements here — but a strictly faster suite in absolute terms.
 
+## In-process CLI harness cost (WL-0MVVXFXM6007QZ2L)
+
+**Work item:** WL-0MVVXFXM6007QZ2L (child of WL-0MVHVZMCH0092JCY — *Investigate
+in-process CLI harness cost*)
+**Machine-readable artefact:** `bench/inproc-harness-profile.json`
+**One command:** `npm run benchmark:inproc-harness -- --runs 5`
+**Profiler:** `bench/inproc-harness-profile.ts` (a bench script, not a vitest
+test — it is never run through `vitest`/`npm test`)
+**Captured:** 2026-10-31T11:38Z on `rgardler-AI-Laptop` (16-core AMD Ryzen 7
+4800H), node v22.22.1, **load average 4.14 / 6.56 / 7.99** (1/5/15 min)
+**Method:** median of **5 runs per scenario**, 1 discarded warmup run, one
+**fresh temporary worklog store per measured run** (never the repository
+`.worklog/`, which the profiler does not open even in its copy mode).
+
+### What is attributed
+
+Phase marks come from the harness itself: `tests/cli/cli-inproc.ts` takes them
+only when `WL_INPROC_PROFILE=1` is set (the switch is **off by default**, so the
+suite takes exactly the same code path and performs no timing calls). Buckets:
+
+| Bucket | Phases | Kind |
+|---|---|---|
+| `argvAndOverride` | argv split/normalisation + `--worklog-dir` override | harness-side |
+| `commanderRegistration` | `Command` construction + registration of the ~29 built-in commands | harness-side |
+| `pluginContext` | `createPluginContext(program)` | harness-side |
+| `configLoad` | `ctx.utils.getConfig()` (YAML parse; **nested** in the action) | production startup |
+| `dbOpen` | database open incl. schema creation/migrations (**nested** in the action) | production startup |
+| `dbClose` | database close | production startup |
+| `commandAction` | the command's own work, **excluding** the two nested phases | command work |
+| `harnessBookkeeping` | stream/console patch + restore, throttler drain | harness-side |
+
+`configLoad` and `dbOpen` are nested inside the `command_action` window, so
+they are counted in their own bucket **and** inside the action total but never
+added twice: the buckets sum to the top-level attribution, which is compared
+with the measured per-call wall time. The remainder is reported explicitly as
+**unattributed harness overhead** (timers, promise scheduling, GC, clock
+calls) — see the `residual` column. Reconciliation target: **≥ 90 %** of the
+call attributed; the profiler exits non-zero when a scenario misses it.
+
+### Attribution — fresh temporary store (the regime the suite uses)
+
+Milliseconds, median of 5 runs per scenario:
+
+| scenario | total | argv+ovr | cmdReg | pluginCtx | config | dbOpen | dbClose | cmdAction | bookkeeping | residual |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `wl --help` | 2.3 | 0.0 | 1.1 | 0.5 | 0.0 | 0.0 | 0.0 | 0.5 | 0.1 | 0.0 |
+| `wl list --json` | 4.7 | 0.0 | 1.2 | 0.3 | 0.0 | 2.2 | 0.3 | 0.5 | 0.1 | 0.1 |
+| `wl create -t <item> --json` | 5.1 | 0.0 | 0.6 | 0.2 | 0.2 | 2.1 | 0.3 | 1.6 | 0.1 | 0.0 |
+| `wl status --json` | 4.0 | 0.0 | 0.7 | 0.2 | 0.2 | 1.8 | 0.3 | 0.3 | 0.1 | 0.0 |
+
+Same numbers as a share of each call, with the attributed total:
+
+| scenario | argv+ovr | cmdReg | pluginCtx | config | dbOpen | dbClose | cmdAction | bookkeeping | attributed |
+|---|---|---|---|---|---|---|---|---|---|
+| `wl --help` | 0.9 % | 49.4 % | 19.3 % | 0.0 % | 0.0 % | 0.0 % | 22.7 % | 3.4 % | **98.3 %** |
+| `wl list --json` | 0.4 % | 24.5 % | 6.1 % | 0.0 % | 47.3 % | 6.8 % | 9.9 % | 1.5 % | **98.9 %** |
+| `wl create` | 0.4 % | 10.9 % | 3.8 % | 3.8 % | 42.1 % | 6.3 % | 31.2 % | 1.2 % | **99.4 %** |
+| `wl status` | 0.7 % | 18.2 % | 5.0 % | 5.0 % | 44.8 % | 7.0 % | 8.0 % | 1.5 % | **99.3 %** |
+
+Grouped by cost category (median share of the call):
+
+| scenario | harness-side | production startup | command work |
+|---|---|---|---|
+| `wl --help` | 1.7 ms (73.0 %) | 0.0 ms (0.0 %) | 0.5 ms (22.7 %) |
+| `wl list --json` | 1.5 ms (32.5 %) | 2.6 ms (54.0 %) | 0.5 ms (9.9 %) |
+| `wl create` | 0.8 ms (16.2 %) | 2.6 ms (52.2 %) | 1.6 ms (31.2 %) |
+| `wl status` | 1.0 ms (25.4 %) | 2.3 ms (56.7 %) | 0.3 ms (8.0 %) |
+
+The **first** in-process call in a process is recorded separately rather than
+averaged in, because it also pays module-graph and JIT warm-up: `wl --help`
+measured **19.5 ms** cold (commander registration 9.9 ms, plugin context
+5.3 ms, command action 3.4 ms) versus 2.3 ms warm. That difference — not a
+hidden per-call cost — is what the seed `~72 ms` figure for `--help` reflects.
+
+### Attribution — production-sized store (the parent's ~196–257 ms path)
+
+The seed measurements in the parent item (`list --json`, `create`, `status` at
+~196–257 ms) only reproduce against a **production-sized store**, not the
+small temp stores the suite creates. Measured against a copy of the
+repository's own 109 MiB `worklog.db` (median of 3 runs, load 4.21 / 6.23 /
+7.81, same host, source store copied per run and never opened):
+
+| scenario | total | cmdReg | pluginCtx | config | dbOpen | dbClose | cmdAction | bookkeeping | cmdAction share |
+|---|---|---|---|---|---|---|---|---|---|
+| `wl list --json` | 201.3 | 1.3 | 0.7 | 0.0 | 2.1 | 0.9 | **195.1** | 0.1 | **96.9 %** |
+| `wl create -t <item> --json` | 216.6 | 3.4 | 0.6 | 0.6 | 1.8 | 1.5 | **211.2** | 0.1 | **97.5 %** |
+| `wl status --json` | 143.6 | 1.2 | 0.3 | 0.4 | 2.3 | 1.2 | **139.1** | 0.1 | **96.9 %** |
+
+In this regime the harness-side buckets total **1.7–4.2 ms (1.1–1.9 %)** and
+production startup (config load + DB open + close) **3.0–3.9 ms (1.5–2.7 %)**.
+Opening even the 109 MiB store costs ~2 ms; reading/serialising thousands of
+work items in the command action costs ~140–210 ms. `create` is the slowest
+because it writes into that store.
+
+### Decision-gate verdict (parent AC 3)
+
+- **Dominant phase on the ~196–257 ms path:** the **command action** —
+  **195.1 ms, 96.9 %** of the 201.3 ms `wl list --json` call (211.2 ms / 97.5 %
+  for `create`, 139.1 ms / 96.9 % for `status`).
+- **Classification:** the call is **not** harness overhead and **not** startup.
+  Harness-side overhead is 2.2 ms (1.1 %) and production startup 3.0 ms
+  (1.5 %); the remainder is the command's own production work on a large
+  store. Reducing it would change what the test asserts, so the parent's
+  **re-scope branch** applies to this path: it is a `src/`/data-shape
+  decision, not a test-harness one.
+- **Harness-reuse ceiling on the suite's actual regime:** a fresh temp store
+  costs 4.0–5.1 ms per warm call, of which harness-side work is 1.0–1.5 ms
+  (~25–33 %). Across the ~1200 in-process invocations the parent estimated,
+  the entire addressable harness-side cost is therefore **~1.2–1.8 s**, not
+  the ~240 s attributed to a ~200 ms/call figure. Reuse can still remove part
+  of that 1.0–1.5 ms, but it cannot move the suite by minutes.
+- **Per-scenario dominant phases (fresh store):** `--help` → commander
+  registration (harness-side); `list --json` → DB open (production startup);
+  `create` → DB open (production startup); `status` → DB open (production
+  startup).
+
+### Caveats
+
+- **Same-host medians only.** Absolute values are load sensitive; the tables
+  above quote the load average captured with them. Compare only runs taken in
+  the same conditions, as medians — a single run proves nothing (the same
+  scenario varied 4.0–7.2 ms across loaded and quiet runs on this host).
+- **Reconciliation is a share rule applied to medians.** A single ~2 ms warm
+  call on a loaded host can lose up to a millisecond to timer granularity and
+  scheduling noise, which is more than 10 % of such a short call; the ≥ 90 %
+  attribution standard is therefore asserted on each scenario's median, not on
+  one sample.
+- **`db_open` covers the first-open path** (schema creation + migrations)
+  because every measured run uses a fresh store, matching a per-test
+  `beforeEach` fixture. Re-opening an existing store is cheaper.
+- **The copy regime is for reference.** It describes a production-sized store
+  (what an operator or a real-project test sees), not the suite's temp stores;
+  the profiler copies the named store's own files (`worklog.db`, `-wal`,
+  `-shm`, `config.yaml`, `config.defaults.yaml`, `initialized`) per run and
+  never opens, mutates or copies the rest of the directory.
+- **The earlier "~200 ms/call" note** in the test-suite runtime section above
+  is true only for a production-sized store; the suite's own temp stores cost
+  4–5 ms per warm in-process call.
+- **Bounded and safe to repeat.** A full run measured 0.7–4.3 s of process wall
+  time (the tsx compile of the CLI import graph dominates the first run), well
+  inside the 60 s bound; all stores are temporary and removed on exit.
+
+### Reproduce
+
+```bash
+# fresh-store regime (the suite's) — median of 5 runs, writes the artefact
+npm run benchmark:inproc-harness -- --runs 5
+
+# machine-readable only, nothing written
+npm run benchmark:inproc-harness -- --json --no-write
+
+# production-sized store: profiles a COPY of the given store per run
+npx tsx bench/inproc-harness-profile.ts --runs 3 --scenarios list-json,status \
+  --store <path-to-a-/.worklog> --no-write
+```
+
+Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
+`--out <path>`, `--no-write`, `--json`, `--keep`.
+
 ## Related
 
 - Parent epic: WL-0MV28X3BT0079JM3 — Deduplicate legacy `test/` vs `tests/`
@@ -793,3 +952,6 @@ python3 <test-skill>/scripts/run_tests.py --suite pytest --force --json
   WL-0MVODOJWB004G03J
 - Herdr package suite exclusion (producer decision, won't-fix):
   WL-0MVFZVIA50062TJ8
+- In-process CLI harness cost baseline (attribution, decision gate):
+  WL-0MVVXFXM6007QZ2L — see
+  [In-process CLI harness cost](#in-process-cli-harness-cost-wl-0mvvxfxm6007qz2l)

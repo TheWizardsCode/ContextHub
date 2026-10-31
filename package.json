@@ -36,6 +36,8 @@
     "sample:downtime-agreement": "tsx scripts/downtime-agreement-sample.ts",
     "benchmark:herdr-refresh": "tsx bench/herdr-refresh-cycle.ts",
     "benchmark:herdr-refresh:json": "tsx bench/herdr-refresh-cycle.ts --json",
+    "benchmark:inproc-harness": "tsx bench/inproc-harness-profile.ts",
+    "benchmark:inproc-harness:json": "tsx bench/inproc-harness-profile.ts --json",
     "test:perf:large": "tsx packages/herdr/test/perf/large-db-harness.ts --profile full"
   },
   "keywords": [
