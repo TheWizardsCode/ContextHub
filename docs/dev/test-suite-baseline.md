@@ -961,6 +961,36 @@ current per-call cost (one construction, one plugin context, one DB open per
 call). No harness-side workaround was added, so the saving in the follow-up item
 is real production saving rather than a test-only illusion.
 
+### Budget guard: harness per-call cost is ratcheted (WL-0MVVXG3UW00250V5)
+
+The per-call cost above is locked in by a checked-in budget, in the same shape
+as the startup import budget:
+
+| Piece | Path |
+|---|---|
+| Budget artefact (ratchet input) | `bench/inproc-harness-budget.json` |
+| Guard test | `tests/cli/inproc-harness-budget.test.ts` |
+| Policy module | `bench/inproc-harness-budget.ts` |
+| Regenerate (deliberate) | `npm run benchmark:inproc-harness -- --update-budget` |
+
+**The standing rule:** the in-process harness's per-call cost is budgeted. A
+change that slows a warm in-process call by an order of magnitude, that loses or
+edits the budget artefact, or that drops a scenario from it, fails
+`tests/cli/inproc-harness-budget.test.ts`. A deliberate change (for example the
+`src/` startup work in WL-0MVWLBZG4003A803) regenerates the artefact with the
+command above and records the before/after numbers on its work item.
+
+The guard is host-load tolerant. A fresh 3-run measurement of the four
+scenarios is compared with `baseline * (1 + headroomPct/100) * loadFactor`,
+where `loadFactor = clamp(load1minNow / load1minAtCapture, 1, maxHostLoadFactor)`
+— 1 on a quiet host, capped at 8 on a saturated one. With the documented
+`headroomPct` of 250 and the recorded medians (2.3–5.1 ms), the limit is **3.5x
+the recorded median on an idle host** and up to 28x on a saturated host: it
+catches a real regression without flaking on load noise, which is the
+appropriate ratchet while the recorded outcome is a **re-scope** (no harness
+improvement landed — see the decision above) rather than a measured win. The
+guard costs ~230 ms of suite time (190 ms of profiling) and writes nothing.
+
 ### Caveats
 
 - **Same-host medians only.** Absolute values are load sensitive; the tables
@@ -1002,7 +1032,7 @@ npx tsx bench/inproc-harness-profile.ts --runs 3 --scenarios list-json,status \
 ```
 
 Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
-`--out <path>`, `--no-write`, `--json`, `--keep`.
+`--out <path>`, `--no-write`, `--json`, `--keep`, `--update-budget`.
 
 ## Related
 
@@ -1035,3 +1065,5 @@ Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
 - Harness-cost re-scope decision (production startup, follow-up `src/` work):
   WL-0MVVXG4B200968BF → WL-0MVWLBZG4003A803 — see
   [Re-scope decision: no harness reuse](#re-scope-decision-no-harness-reuse-wl-0mvvxg4b200968bf)
+- Harness per-call cost budget guard (ratchet): WL-0MVVXG3UW00250V5 — see
+  [Budget guard: harness per-call cost is ratcheted](#budget-guard-harness-per-call-cost-is-ratcheted-wl-0mvwxg3uw00250v5)

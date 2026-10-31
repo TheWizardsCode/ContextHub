@@ -259,6 +259,13 @@ Use a *real* `tsx`/`dist` spawn only when the test must observe the real entry
 point or measure startup cost (`tests/cli/startup-import-budget.test.ts`,
 `tests/cli/entry-point-split.test.ts`).
 
+The in-process harness's own per-call cost is budgeted: `bench/inproc-harness-budget.json`
+records the measured per-scenario medians and `tests/cli/inproc-harness-budget.test.ts`
+fails on a lost/edited baseline or an order-of-magnitude regression. Regenerate
+deliberately with `npm run benchmark:inproc-harness -- --update-budget`; the
+numbers and the re-scope decision behind them are in
+[docs/dev/test-suite-baseline.md](docs/dev/test-suite-baseline.md#budget-guard-harness-per-call-cost-is-ratcheted-wl-0mvwxg3uw00250v5).
+
 `npm run test:timings` writes a per-test timing report to `test-timings.json`;
 the current baseline and the latest top-20 slow-test table are recorded in
 [docs/dev/test-suite-baseline.md](docs/dev/test-suite-baseline.md).

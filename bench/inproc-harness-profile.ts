@@ -41,6 +41,10 @@
  *   --no-write      Do not write the artefact (stdout only).
  *   --json          Machine-readable output on stdout.
  *   --keep          Keep the temporary stores for inspection.
+ *   --update-budget Also write `bench/inproc-harness-budget.json` (the checked-in
+ *                   guard artefact consumed by tests/cli/inproc-harness-budget.test.ts)
+ *                   from this run's medians (WL-0MVVXG3UW00250V5, child of
+ *                   WL-0MVHVZMCH0092JCY).
  */
 
 import * as fs from 'fs';
@@ -54,6 +58,10 @@ import {
   type InprocProfilePhase,
   type InprocProfileRecord,
 } from '../tests/cli/cli-inproc.js';
+import {
+  deriveInprocHarnessBudget,
+  INPROC_BUDGET_ARTEFACT_RELATIVE_PATH,
+} from './inproc-harness-budget.js';
 
 // ── Scenarios ────────────────────────────────────────────────────────
 
@@ -907,6 +915,7 @@ interface CliOptions extends InprocProfileOptions {
   json: boolean;
   write: boolean;
   out: string;
+  updateBudget: boolean;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -914,6 +923,7 @@ function parseArgs(argv: string[]): CliOptions {
     json: false,
     write: true,
     out: PROFILE_ARTEFACT_RELATIVE_PATH,
+    updateBudget: false,
   };
   const readValue = (index: number): string | undefined => {
     const value = argv[index + 1];
@@ -957,6 +967,9 @@ function parseArgs(argv: string[]): CliOptions {
       case '--keep':
         options.keep = true;
         break;
+      case '--update-budget':
+        options.updateBudget = true;
+        break;
       default:
         break;
     }
@@ -997,10 +1010,27 @@ async function main(): Promise<void> {
     written = true;
   }
 
+  let budgetPath: string | null = null;
+  if (options.updateBudget) {
+    budgetPath = path.join(repoRoot, INPROC_BUDGET_ARTEFACT_RELATIVE_PATH);
+    const budget = deriveInprocHarnessBudget(result);
+    fs.mkdirSync(path.dirname(budgetPath), { recursive: true });
+    fs.writeFileSync(budgetPath, `${JSON.stringify(budget, null, 2)}\n`, 'utf-8');
+  }
+
   if (options.json) {
-    console.log(JSON.stringify({ success: true, artefact: artefactPath, written, result }, null, 2));
+    console.log(
+      JSON.stringify(
+        { success: true, artefact: artefactPath, written, budget: budgetPath, result },
+        null,
+        2,
+      ),
+    );
   } else {
     console.log(renderTextReport(result, artefactPath, written));
+    if (budgetPath) {
+      console.log(`\nbudget artefact (guard input): ${budgetPath}`);
+    }
   }
 
   const unreconciled = result.scenarios.filter((scenario) => !scenario.reconciled);
