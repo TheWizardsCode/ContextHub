@@ -13,7 +13,16 @@
  *  - a pane TITLE containing the item ID  → untouched (genuinely being worked)
  *  - stage `in_review`                    → `status=completed`, stage `in_review`
  *  - an active outbound dependency blocker→ `status=blocked` (stage made compatible)
+ *  - a live claim holder (lock held)      → untouched (pane-less driven session)
  *  - otherwise                            → `status=open`, stage `intake_complete`
+ *
+ * The two busy signals are independent and both are checked: the pane rule is
+ * PRIMARY and evaluated first (a pane match short-circuits and never probes),
+ * and the claim holder is the second, mechanically verifiable signal
+ * (`WL-0MVWDAZL10025P8J` / `WL-0MVWDB3IG004NRIU`). `held` is evaluated AFTER
+ * `in_review` and `blocked`, so a live claim only suppresses the release to
+ * `open` and never overrides the audit-tier completion or the dependency
+ * `blocked` transition.
  *
  * Active detection (WL-0MV1BWETT005GSUJ): a single simple rule — if there
  * is a pane in the current workspace whose title contains the work-item ID
@@ -69,6 +78,30 @@
  * release-to-`open` branch while a claim is held (or ambiguous evidence
  * forces fail-open — never a release on uncertainty). The pane signal stays
  * primary and unchanged: a pane title match short-circuits and never probes.
+ *
+ * Fail-open rules for the probe (deliberate asymmetry: ambiguity ⇒ no
+ * demotion, proven death ⇒ release): an unreadable/unenumerable `locks/`
+ * directory, a corrupt lock file, an unexpected `fs`/`flock` error, an
+ * undecidable probe, a `claim-probe` step timeout or a missing per-item
+ * verdict each suppress demotion with a named reason. Heldness is the kernel
+ * `flock`, never file existence or `started_at` age (lock files persist after
+ * release). The recorded-`pid` fallback carries the PID-REUSE GUARD: it is
+ * trusted only when the lock's `started_at` is not earlier than the recorded
+ * process start time, otherwise the verdict is `held`
+ * (`pid-reuse-suspected`) so a recycled pid can never read as a live claim.
+ *
+ * Release trail (WL-0MVWDB7F2003SORI): every applied demotion also clears the
+ * scheduling hold (`--assignee ""`, CAS-guarded with `--if-assignee
+ * <observed holder>` so a concurrent assignee change is never clobbered) and
+ * writes a `herdr-hydrator` audit comment naming the deciding signal and the
+ * previous holder (`released because no pane and claim holder dead; previous
+ * assignee: implement`). A comment failure is tolerated — the demotion stands
+ * and the cycle continues.
+ *
+ * Non-goals (deliberate): no wall-clock TTL, no heartbeat, no new protocol, no
+ * change to dispatch, the worklist selection marker, the drive orchestrator or
+ * `implement.py`; orphaned-lock cleanup and hydrator log rotation are separate
+ * work items.
  *
  * Opening/closing a work-item pane does NOT touch the worklog DB, so the
  * DB-change-gated refresh tick can never update this marker for it. The

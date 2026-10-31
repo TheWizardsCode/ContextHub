@@ -16,7 +16,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (reused if it already exists) — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
-- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against the panes of the current workspace (the pane title contains the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
+- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items and decides *busy* from two independent signals: a pane in the current workspace whose title contains the work-item ID (**primary**, producer rule WL-0MV1BWETT005GSUJ) and a **live per-child claim holder** (`<worklog>/locks/child-<id>.lock` currently `flock`ed — the second signal that keeps a pane-less driven session busy, WL-0MVWDAZL10025P8J). Only when both are negative is the claim released — `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage — and every release clears the scheduling hold (`assignee`) and records the previous holder in a `herdr-hydrator` audit comment. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
 - **Per-request priority (`X-Priority`)** — The proxy's retired fast/cheap operating mode is replaced by a per-request priority. Herdr maps each dispatched work item's priority onto a request priority and conveys it as the pane-launch environment variable `HERDR_REQUEST_PRIORITY`, which the Worklog pi extension turns into the `X-Priority` provider header. See [Request priority](#request-priority-per-request-x-priority).
 - **Local capacity reservation** — Before launching a downtime pane the worker claims capacity atomically via `POST /llama/local/reserve`: a granted ticket travels into the pane as `PI_LOCAL_RESERVATION_TICKET` (its first request carries `X-Local-Reservation`), a `429` refusal defers with the proxy's `retry_after_s` and the decision log records the evidence, and an absent/failing endpoint fails open to the pre-reservation polling behaviour. An idle window admits at most one launch: a second launch needs a fresh status tick that shows the launched prefill registered plus its own granted ticket. See [Local capacity reservation](#downtime-worker-local-llm-idle-dispatch).
 - **Work-item pane indicator** — The selection list shows a green circle icon (🟢) in the icon prefix of every item with an open work-item pane in the current workspace: a pane whose title carries the work-item ID (the dispatch pane-title convention preserves the ID as a trailing suffix). The icon appears exactly when such a pane is open and never otherwise (producer's rule, WL-0MV1BWETT005GSUJ) — it is pane existence, not a live agent status. The worklist also records which pi agent pane is attached to each dispatched item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes (used for the hover tooltip). The icon occupies a fixed-width slot so the item-ID column never shifts. See [Green-circle icon (work-item pane open)](#green-circle-icon-work-item-pane-open).
@@ -296,10 +296,20 @@ The hydrator detects those claims and releases them:
 - **Cadence** — every 30 s (scheduler task `hydrate`, single-flight +
   watchdog `HYDRATOR_RUN_TIMEOUT_MS`); the check also runs **immediately**
   when the worklog tab regains focus (same runner as the tick).
-- **Signal** — fetch `wl list --status in-progress`, fetch
-  `herdr pane list --workspace <id>`, and match each item against a pane in
-  the **current workspace** whose **title contains** the work-item ID. No
-  matching pane → the claim is stale.
+- **Signal — two independent busy signals, pane first** — fetch `wl list
+  --status in-progress`, fetch `herdr pane list --workspace <id>`, and match
+  each item against a pane in the **current workspace** whose **title
+  contains** the work-item ID (primary signal, producer rule
+  WL-0MV1BWETT005GSUJ). Items with **no** pane match are then checked for a
+  **live claim holder**: their per-child lock `<worklog>/locks/child-<id>.lock`
+  is currently `flock`ed (or its recorded pid is alive and not recycled). A
+  driven `pi -p` session is headless and can never own a pane, so this second,
+  mechanically verifiable signal is what keeps its claim alive
+  (WL-0MVWDAZL10025P8J / WL-0MVWDB3IG004NRIU). Only when **both** signals are
+  negative is the claim stale. The probe is local `fs`/`flock` only — one
+  batched lock-directory read per cycle, no per-item `wl`/`herdr` spawn — and
+  its heldness comes from the kernel `flock`, never from file existence or
+  `started_at` age (lock files persist after release).
 - **Pane-title ID survival (F0)** — matching is keyed on the work-item ID, so
   the ID must survive wherever it appears. Every pane spawned for an item
   gets a title ending in ` - WL-<id>` (manual, shell, and downtime builders in
@@ -311,10 +321,29 @@ The hydrator detects those claims and releases them:
   active outbound dependency blocker → `blocked`; otherwise → `open` at the
   claimed stage (folded-in no-activity/claim-age timeout, WL-0MTTSWE0G008M1VA;
   a no-pane claim is released regardless of activity age). Stage is repaired
-  to a status-compatible value when needed.
+  to a status-compatible value when needed. The live-claim-holder check is
+  evaluated **after** the `in_review` and `blocked` branches, so a held claim
+  only suppresses the `open` release and never overrides those two.
+- **Release trail** (WL-0MVWDB7F2003SORI) — a release also clears the
+  scheduling hold (`--assignee ""`, CAS-guarded with `--if-assignee
+  <observed holder>`) and writes a `herdr-hydrator` audit comment naming the
+  deciding signal and the previous holder (e.g. `released because no pane and
+  claim holder dead; previous assignee: implement`). A released item is
+  therefore immediately dispatchable again and the release is explicable from
+  the item alone.
 - **Safety** — the cycle is fail-open: an unavailable/unparseable
   `wl`/`herdr` call aborts WITHOUT demoting; an item with a matching pane is
-  never touched; a hidden tab spawns zero processes.
+  never touched; a hidden tab spawns zero processes. The claim-holder probe
+  joins that rule: an unreadable lock directory, a corrupt lock file, an
+  unexpected `fs`/`flock` error, a probe step timeout or a missing verdict
+  each **suppress** demotion with a named reason. The asymmetry is
+  deliberate — ambiguity never releases, proven death does. The recorded-pid
+  fallback is guarded against pid reuse (trusted only when `started_at` is not
+  earlier than the process start time).
+- **Non-goals** — no wall-clock TTL, no heartbeat, no new protocol, no change
+  to dispatch / the selection marker / the drive orchestrator /
+  `implement.py`; orphaned-lock cleanup and hydrator log rotation are separate
+  items.
 - **Selection-list marker** (WL-0MV1BWETT005GSUJ) — the same pane-title lookup
   drives the selection list's in-progress marker: an item with a matching pane
   is rendered `in-progress` (marker + Group N) even when its worklog status is
