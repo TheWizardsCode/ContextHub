@@ -394,3 +394,87 @@ describe('Auto-unblock regression tests (WL-0MRNM8EBD000C2P1)', () => {
     });
   });
 });
+
+/**
+ * Derived blocked/open reconciliation matrix (WL-0MVTVZHFU000PRT6, parent
+ * WL-0MVTUKSJZ003WK82 AC4).
+ *
+ * The explicit-write regression matrix lives in
+ * `regression-explicit-blocked-status.test.ts`. This matrix pins the *derived*
+ * answer the explicit write must win over, for each edge topology:
+ *
+ * | topology              | derived reconcile |
+ * |-----------------------|-------------------|
+ * | no edges              | open              |
+ * | inbound edges only    | open              |
+ * | outbound non-terminal | blocked           |
+ * | outbound terminal     | open              |
+ *
+ * Together the two matrices prove the fix does not simply disable
+ * dependency-derived reconciliation: `dep rm` and blocker completion still
+ * unblock (the AC2 guarantees), while an explicit `--status` is authoritative.
+ */
+describe('Derived blocked/open reconciliation matrix (WL-0MVTVZHFU000PRT6)', () => {
+  let tempDir: string;
+  let dbPath: string;
+  let jsonlPath: string;
+  let db: WorklogDatabase;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    dbPath = createTempDbPath(tempDir);
+    jsonlPath = createTempJsonlPath(tempDir);
+    if (fs.existsSync(jsonlPath)) {
+      fs.unlinkSync(jsonlPath);
+    }
+    db = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
+  });
+
+  afterEach(() => {
+    db.close();
+    cleanupTempDir(tempDir);
+  });
+
+  it('unblocks a blocked item with no edges', () => {
+    const item = db.create({ title: 'Standalone', status: 'blocked' });
+
+    db.reconcileDependentStatus(item.id);
+
+    expect(db.get(item.id)?.status).toBe('open');
+  });
+
+  it('unblocks a blocked item with inbound edges only', () => {
+    const item = db.create({ title: 'Inbound target', status: 'blocked' });
+    const dependent = db.create({ title: 'Dependent', status: 'open' });
+    db.addDependencyEdge(dependent.id, item.id);
+
+    // Nothing blocks `item` itself, so the derived answer is `open`.
+    db.reconcileDependentStatus(item.id);
+
+    expect(db.get(item.id)?.status).toBe('open');
+  });
+
+  it('keeps a blocked item with an outbound non-terminal edge blocked', () => {
+    const item = db.create({ title: 'Dependent', status: 'blocked' });
+    const blocker = db.create({ title: 'Active blocker', status: 'open' });
+    db.addDependencyEdge(item.id, blocker.id);
+
+    db.reconcileDependentStatus(item.id);
+
+    expect(db.get(item.id)?.status).toBe('blocked');
+  });
+
+  it('unblocks a blocked item whose only outbound edge is terminal', () => {
+    const item = db.create({ title: 'Dependent', status: 'blocked' });
+    const blocker = db.create({
+      title: 'Completed blocker',
+      status: 'completed',
+      stage: 'done',
+    });
+    db.addDependencyEdge(item.id, blocker.id);
+
+    db.reconcileDependentStatus(item.id);
+
+    expect(db.get(item.id)?.status).toBe('open');
+  });
+});

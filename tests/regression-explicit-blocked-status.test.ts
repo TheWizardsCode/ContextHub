@@ -179,6 +179,168 @@ describe('explicit --status writes win over derived reconcile (WL-0MVTVYXZD002ND
   });
 });
 
+/**
+ * Regression matrix: every edge topology that the derived
+ * `blocked`/`open` reconciliation treats differently, crossed with the
+ * explicit `--status blocked` write and the `--if-status` CAS guard.
+ *
+ * Work item: WL-0MVTVZHFU000PRT6 (parent WL-0MVTUKSJZ003WK82 AC4/AC5).
+ *
+ * The topologies differ only in the item's dependency edges:
+ *
+ * | topology                  | derived reconcile would say |
+ * |---------------------------|-----------------------------|
+ * | no edges                  | open (nothing blocks it)    |
+ * | inbound edges only        | open (the original defect)  |
+ * | outbound non-terminal     | blocked                     |
+ * | outbound terminal         | open                        |
+ *
+ * In all four cases an explicit `--status blocked` must win over the derived
+ * answer, and must persist exactly what the JSON payload reports.
+ */
+type EdgeTopology =
+  | 'no edges'
+  | 'inbound edges only'
+  | 'outbound non-terminal edges'
+  | 'outbound terminal edges';
+
+describe('blocked-status regression matrix (WL-0MVTVZHFU000PRT6)', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    writeConfig(tempDir, 'Test Project', 'TEST');
+    writeInitSemaphore(tempDir);
+  });
+
+  afterEach(() => {
+    cleanupTempDir(tempDir);
+  });
+
+  async function createItem(title: string, flags = ''): Promise<string> {
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json create -t "${title}" ${flags}`,
+      { cwd: tempDir },
+    );
+    return JSON.parse(stdout).workItem.id as string;
+  }
+
+  async function persistedStatus(id: string): Promise<string> {
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json show ${id}`,
+      { cwd: tempDir },
+    );
+    return JSON.parse(stdout).workItem.status as string;
+  }
+
+  async function addEdge(item: string, dependsOn: string): Promise<void> {
+    await execAsync(
+      `tsx ${cliPath} --json dep add ${item} ${dependsOn}`,
+      { cwd: tempDir },
+    );
+  }
+
+  /**
+   * Build one matrix topology around a fresh item and leave the item in a
+   * known `open` state, so the explicit blocked write below is a real
+   * transition in every row.
+   */
+  async function buildTopology(topology: EdgeTopology): Promise<string> {
+    const item = await createItem(`Matrix item: ${topology}`);
+
+    switch (topology) {
+      case 'no edges':
+        return item;
+
+      case 'inbound edges only': {
+        // Another item depends on `item`; `item` depends on nothing — the
+        // exact shape that mis-fired the derived reconcile.
+        const dependent = await createItem('Inbound dependent');
+        await addEdge(dependent, item);
+        return item;
+      }
+
+      case 'outbound non-terminal edges': {
+        const blocker = await createItem('Active outbound blocker');
+        await addEdge(item, blocker);
+        // `dep add` auto-blocks the dependent; restore the known pre-write
+        // state with an explicit (authoritative) open write.
+        await execAsync(
+          `tsx ${cliPath} --json update ${item} --status open`,
+          { cwd: tempDir },
+        );
+        return item;
+      }
+
+      case 'outbound terminal edges': {
+        const blocker = await createItem(
+          'Completed outbound blocker',
+          '--status completed --stage done',
+        );
+        await addEdge(item, blocker);
+        return item;
+      }
+    }
+  }
+
+  const topologies: EdgeTopology[] = [
+    'no edges',
+    'inbound edges only',
+    'outbound non-terminal edges',
+    'outbound terminal edges',
+  ];
+
+  for (const topology of topologies) {
+    it(`persists an explicit --status blocked write and reports it: ${topology}`, async () => {
+      const item = await buildTopology(topology);
+      expect(await persistedStatus(item)).toBe('open');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json update ${item} --status blocked`,
+        { cwd: tempDir },
+      );
+      const parsed = JSON.parse(stdout);
+      expect(parsed.success).toBe(true);
+      expect(parsed.workItem.status).toBe('blocked');
+
+      // The payload must agree with the persisted record — the defect
+      // reported `blocked` while the store held `open`.
+      expect(await persistedStatus(item)).toBe('blocked');
+    });
+  }
+
+  it('applies a conditional --status blocked write when --if-status matches', async () => {
+    // The reported defect shape: inbound edge only, stored status `open`.
+    const item = await buildTopology('inbound edges only');
+
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json update ${item} --status blocked --if-status open`,
+      { cwd: tempDir },
+    );
+    const parsed = JSON.parse(stdout);
+    expect(parsed.success).toBe(true);
+    expect(parsed.workItem.status).toBe('blocked');
+    expect(await persistedStatus(item)).toBe('blocked');
+  });
+
+  it('fails stale with no write when --if-status does not match', async () => {
+    const item = await buildTopology('inbound edges only');
+
+    const run = await execAsync(
+      `tsx ${cliPath} --json update ${item} --status blocked --if-status completed`,
+      { cwd: tempDir },
+    ).catch((e) => e as { stdout: string; stderr: string });
+    const parsed = JSON.parse(
+      (run as { stderr: string }).stderr || (run as { stdout: string }).stdout,
+    );
+    expect(parsed.success).toBe(false);
+    expect(parsed.error).toBe('stale');
+
+    // CAS mismatch must not write — the stored status is untouched.
+    expect(await persistedStatus(item)).toBe('open');
+  });
+});
+
 describe('db.update reports the persisted post-reconcile record (WL-0MVTVYXZD002NDMP)', () => {
   let tempDir: string;
   let dbPath: string;
