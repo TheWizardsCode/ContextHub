@@ -39,10 +39,11 @@
  * keeps its current behaviour byte-for-byte.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 import {
   ago,
+  jsonResponseFixture,
   perSlotOneOfThreeFree,
   perSlotTwoOfThreeFree,
   makeDeps,
@@ -50,19 +51,27 @@ import {
 } from './downtime-worker.fixtures.js';
 import {
   auditItemEligible,
+  auditPinAdmits,
   classifyAuditScope,
   isLeafAuditSlotBand,
+  probeLeafAuditAdmission,
   type AuditCandidateScopeResult,
 } from './downtime-worker.gates.js';
 import {
+  createDowntimePoller,
+  createDowntimeWorker,
   dispatchDowntimeWork,
   type DowntimeCandidate,
   type DowntimeHerdrItem,
+  type DowntimeWorkerDeps,
 } from './downtime-worker.js';
 import {
+  DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
+  LEAF_AUDIT_PIN_HOLD_REASON,
 } from './downtime-worker.constants.js';
+import type { CoordinationLogEntry } from './downtime-log.js';
 
 describe('classifyAuditScope — leaf vs parent classification', () => {
   it.each<[string, AuditCandidateScopeResult, 'leaf' | 'parent']>([
@@ -478,5 +487,571 @@ describe('per-item audit minimum — the selection paths agree (AC3)', () => {
 
     expect(legacy.kind).toBe(expectedKind);
     expect(herdr.kind).toBe(expectedKind);
+  });
+});
+
+// ── Relaxed leaf-audit TICK admission (C4, WL-0MVV1F0HK009JQAP) ────────
+//
+// The tick normally requires `downtimeRequiredFreeSlots` (default 2 of 3)
+// continuously-free slots before ANY dispatch. C4 relaxes that requirement for
+// ONE positively classified LEAF audit candidate and pins the relaxed slot to
+// that item. The suite below pins: the admission itself (AC1), the single-tier
+// pin (AC2), every fail-closed case (AC3), the decision-log observations (AC4)
+// and the same-slot identity the per-slot tracker supplies (AC5).
+
+describe('probeLeafAuditAdmission — the leaf-band audit peek', () => {
+  const evidence = { freeSlots: 1, thresholdMetCount: 1, requiredFreeSlots: 2 };
+  const leafCandidate = { id: 'WL-LEAF', title: 'Leaf', stage: 'audit' as const };
+
+  const leafDeps = (overrides: Partial<Parameters<typeof probeLeafAuditAdmission>[0]> = {}) => ({
+    getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: leafCandidate }),
+    getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' as const }),
+    ...overrides,
+  });
+
+  it('admits a trusted LEAF and carries the slot/threshold evidence', async () => {
+    const deps = leafDeps();
+
+    await expect(probeLeafAuditAdmission(deps, '/repo', evidence)).resolves.toEqual({
+      kind: 'admitted',
+      admission: { itemId: 'WL-LEAF', ...evidence },
+    });
+    expect(deps.getActiveAudit).toHaveBeenCalledWith('/repo');
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledWith('/repo');
+    expect(deps.getAuditCandidateScope).toHaveBeenCalledWith('WL-LEAF', '/repo');
+  });
+
+  it.each<[string, AuditCandidateScopeResult]>([
+    ['a parent', { ok: true, scope: 'parent' }],
+    ['an untrustworthy { ok: false } lookup', { ok: false }],
+    ['a lookup with no scope', { ok: true }],
+  ])('reports %s as non-leaf (fail-closed)', async (_name, result) => {
+    const deps = leafDeps({ getAuditCandidateScope: vi.fn().mockResolvedValue(result) });
+
+    await expect(probeLeafAuditAdmission(deps, '/repo', evidence)).resolves.toEqual({
+      kind: 'non-leaf',
+      itemId: 'WL-LEAF',
+      scope: 'parent',
+    });
+  });
+
+  it('treats a throwing or absent scope lookup as a parent', async () => {
+    await expect(
+      probeLeafAuditAdmission(
+        leafDeps({ getAuditCandidateScope: vi.fn().mockRejectedValue(new Error('wl timeout')) }),
+        '/repo',
+        evidence,
+      ),
+    ).resolves.toEqual({ kind: 'non-leaf', itemId: 'WL-LEAF', scope: 'parent' });
+
+    await expect(
+      probeLeafAuditAdmission(
+        leafDeps({ getAuditCandidateScope: undefined }),
+        '/repo',
+        evidence,
+      ),
+    ).resolves.toEqual({ kind: 'non-leaf', itemId: 'WL-LEAF', scope: 'parent' });
+  });
+
+  it('reports no candidate when the audit tier is genuinely empty', async () => {
+    const deps = leafDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    await expect(probeLeafAuditAdmission(deps, '/repo', evidence)).resolves.toEqual({
+      kind: 'no-candidate',
+    });
+    // No candidate → no scope lookup, no relaxation.
+    expect(deps.getAuditCandidateScope).not.toHaveBeenCalled();
+  });
+
+  it('never relaxes for a budget-exhausted (needsProducerReview) candidate', async () => {
+    const deps = leafDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { ...leafCandidate, needsProducerReview: true },
+      }),
+    });
+
+    await expect(probeLeafAuditAdmission(deps, '/repo', evidence)).resolves.toEqual({
+      kind: 'no-candidate',
+    });
+  });
+
+  it('honours the active-audit single-flight check (no candidate lookup)', async () => {
+    const deps = leafDeps({
+      getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: true }),
+    });
+
+    await expect(probeLeafAuditAdmission(deps, '/repo', evidence)).resolves.toEqual({
+      kind: 'unavailable',
+    });
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['a failed active-audit lookup', { getActiveAudit: vi.fn().mockResolvedValue({ ok: false }) }],
+    [
+      'a failed candidate lookup',
+      { getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: false, error: 'wl' }) },
+    ],
+    [
+      'a throwing candidate lookup',
+      { getNextAuditCandidate: vi.fn().mockRejectedValue(new Error('wl timeout')) },
+    ],
+  ])('fails closed on %s', async (_name, overrides) => {
+    await expect(
+      probeLeafAuditAdmission(leafDeps(overrides as never), '/repo', evidence),
+    ).resolves.toEqual({ kind: 'unavailable' });
+  });
+});
+
+describe('auditPinAdmits — the single-tier pin', () => {
+  it('admits every candidate when no pin is in play', () => {
+    expect(auditPinAdmits(undefined, 'WL-ANY')).toBe(true);
+  });
+
+  it('admits only the pinned candidate when a relaxed tick pinned one', () => {
+    expect(auditPinAdmits('WL-LEAF', 'WL-LEAF')).toBe(true);
+    expect(auditPinAdmits('WL-LEAF', 'WL-OTHER')).toBe(false);
+  });
+});
+
+describe('dispatchDowntimeWork — the relaxed slot is pinned to one audit item', () => {
+  const auditCandidate: DowntimeCandidate = { id: 'WL-AUD', title: 'Audit me', stage: 'audit' };
+  const planCandidate: DowntimeCandidate = {
+    id: 'WL-PLAN',
+    title: 'Prep task',
+    stage: 'intake_complete',
+    status: 'open',
+  };
+  const planHead: DowntimeHerdrItem = {
+    id: 'WL-PLAN',
+    title: 'Plan WL-PLAN',
+    status: 'open',
+    stage: 'intake_complete',
+    sortIndex: 20,
+  };
+
+  it('dispatches the pinned LEAF audit on the legacy chain with 1 free slot', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: 1,
+      pinnedAuditItemId: 'WL-AUD',
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('WL-AUD');
+  });
+
+  it('never dispatches another tier under the pin — the slot stays reserved', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead] }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: 1,
+      pinnedAuditItemId: 'WL-AUD',
+    });
+
+    // plan/intake/implement are ineligible: the relaxed slot belongs to the
+    // pinned audit item only.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe(LEAF_AUDIT_PIN_HOLD_REASON);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it('does not dispatch a DIFFERENT audit candidate than the pinned one', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: 1,
+      pinnedAuditItemId: 'WL-SOMEONE-ELSE',
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe(LEAF_AUDIT_PIN_HOLD_REASON);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('leaves the unpinned behaviour byte-for-byte (plan still dispatches at 1 free slot)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+});
+
+describe('worker tick — leaf-aware admission with a single-tier pin (AC1/AC2)', () => {
+  /** Deterministic per-slot worker over a 3-slot pool. */
+  function makeLeafWorker(opts: {
+    requiredFreeSlots?: number;
+    thresholdMs?: number;
+    status?: unknown;
+    deps?: Partial<DowntimeWorkerDeps>;
+    recordDecision?: (entry: CoordinationLogEntry, cwd: string) => Promise<void>;
+  } = {}) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: opts.thresholdMs ?? DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: opts.requiredFreeSlots ?? 2,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(jsonResponseFixture(opts.status ?? threeSlotPoolStatus(1)));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      ...(opts.recordDecision ? { recordDecision: opts.recordDecision } : {}),
+      ...opts.deps,
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps, cfg, fetcher };
+  }
+
+  const leafCandidate = { id: 'WL-LEAF', title: 'Leaf', stage: 'audit' as const };
+  const planCandidate = {
+    id: 'WL-PLAN',
+    title: 'Prep task',
+    stage: 'intake_complete',
+    status: 'open',
+  };
+  const leafDeps = (overrides: Partial<DowntimeWorkerDeps> = {}): Partial<DowntimeWorkerDeps> => ({
+    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: leafCandidate }),
+    getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+    getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('dispatches a leaf audit with only 1 of 3 slots continuously free, and nothing else', async () => {
+    const { worker, deps, cfg } = makeLeafWorker({ requiredFreeSlots: 2, deps: leafDeps() });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // the single free slot's run starts
+
+    vi.setSystemTime(start + cfg.thresholdMs - 1);
+    expect((await worker.tick()).dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+
+    expect(at.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain(
+      '/skill:audit WL-LEAF',
+    );
+    // The relaxed single slot was NOT offered to the plan tier.
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it('still requires the full threshold in the relaxed band (no early admission)', async () => {
+    const { worker, deps, cfg } = makeLeafWorker({ requiredFreeSlots: 2, deps: leafDeps() });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+
+    vi.setSystemTime(start + cfg.thresholdMs / 2);
+    const mid = await worker.tick();
+
+    expect(mid.dispatched).toBe(false);
+    expect(mid.idle).toBe(true);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('does not relax when the per-slot band is not reached (2 slots free → unchanged path)', async () => {
+    const { worker, deps, cfg } = makeLeafWorker({
+      requiredFreeSlots: 2,
+      // 2 of 3 free = the configured minimum, so the relaxed band is never
+      // entered: no peek, and the audit dispatches on the normal path.
+      status: threeSlotPoolStatus(2),
+      deps: leafDeps(),
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // slot-2 + slot-3 free
+    vi.setSystemTime(start + cfg.thresholdMs);
+    const at = await worker.tick();
+
+    // 2 continuously-free slots already satisfy the configured minimum: the
+    // relaxed band is never consulted (no peek) and the audit dispatches.
+    expect(at.dispatched).toBe(true);
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1); // the dispatch lookup only
+    expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain(
+      '/skill:audit WL-LEAF',
+    );
+  });
+
+  it('resets only the timer of a slot that starts processing (same-slot identity, AC5)', async () => {
+    const { worker, deps, cfg, fetcher } = makeLeafWorker({
+      requiredFreeSlots: 2,
+      deps: leafDeps(),
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // slot-3 free at t0
+
+    // slot-3 starts processing and slot-2 frees up 5 s before the threshold:
+    // the free COUNT stays 1, but no single slot has been free the full run.
+    const swapAt = start + cfg.thresholdMs - 5_000;
+    fetcher.mockResolvedValue(
+      jsonResponseFixture({
+        ...threeSlotPoolStatus(1),
+        slots: [
+          { slot_id: 'slot-1', is_processing: true },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: true },
+        ],
+      }),
+    );
+    vi.setSystemTime(swapAt);
+    await worker.tick();
+
+    vi.setSystemTime(start + cfg.thresholdMs + 4_000);
+    expect((await worker.tick()).dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // slot-2 must now complete its OWN full run before anything dispatches.
+    vi.setSystemTime(swapAt + cfg.thresholdMs);
+    expect((await worker.tick()).dispatched).toBe(true);
+  });
+
+  it('records a non-blocking leaf-audit-admission observation (AC4)', async () => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const { worker, cfg } = makeLeafWorker({
+      requiredFreeSlots: 2,
+      deps: leafDeps(),
+      recordDecision,
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + cfg.thresholdMs);
+    await worker.tick();
+
+    const admission = recordDecision.mock.calls
+      .map((call) => call[0] as CoordinationLogEntry)
+      .find((entry) => entry.reason === 'leaf-audit-admission');
+
+    expect(admission).toMatchObject({
+      reason: 'leaf-audit-admission',
+      freeSlots: 1, // the live free-slot count
+      thresholdMetCount: 1, // the same slot, free for the full threshold
+      requiredFreeSlots: 2,
+      leafAuditItemId: 'WL-LEAF',
+      leafAuditScope: 'leaf',
+    });
+    // An observation, never a refusal: the header token is untouched.
+    expect(worker.blockReason).toBeNull();
+  });
+});
+
+describe('worker tick — every fail-closed case restores today\'s behaviour (AC3)', () => {
+  const leafCandidate = { id: 'WL-LEAF', title: 'Leaf', stage: 'audit' as const };
+  const planCandidate = {
+    id: 'WL-PLAN',
+    title: 'Prep task',
+    stage: 'intake_complete',
+    status: 'open',
+  };
+  const baseDeps = (overrides: Partial<DowntimeWorkerDeps> = {}): Partial<DowntimeWorkerDeps> => ({
+    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: leafCandidate }),
+    getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+    getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    ...overrides,
+  });
+
+  /** Run the 3-slot band to the threshold and return the tick result + deps. */
+  async function tickThroughBand(opts: {
+    status?: unknown;
+    deps?: Partial<DowntimeWorkerDeps>;
+    recordDecision?: (entry: CoordinationLogEntry, cwd: string) => Promise<void>;
+  }) {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(jsonResponseFixture(opts.status ?? threeSlotPoolStatus(1)));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      ...(opts.recordDecision ? { recordDecision: opts.recordDecision } : {}),
+      ...opts.deps,
+    });
+    const thresholdMs = DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS;
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      config: () => ({
+        enabled: true,
+        thresholdMs,
+        requiredFreeSlots: 2,
+        model: 'plan',
+        cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
+        browseItemCount: 20,
+      }),
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + thresholdMs);
+    const result = await worker.tick();
+    return { result, deps, worker };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('no candidate: no relaxation and no plan dispatch', async () => {
+    const { result, deps } = await tickThroughBand({
+      deps: baseDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      }),
+    });
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, AuditCandidateScopeResult]>([
+    ['a parent candidate', { ok: true, scope: 'parent' }],
+    ['an untrustworthy scope lookup', { ok: false }],
+  ])('%s: no relaxation, a plan pane never takes the slot', async (_name, scopeResult) => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const { result, deps } = await tickThroughBand({
+      deps: baseDeps({ getAuditCandidateScope: vi.fn().mockResolvedValue(scopeResult) }),
+      recordDecision,
+    });
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+    // The relaxed band still reports WHY the audit tier was skipped.
+    const skip = recordDecision.mock.calls
+      .map((call) => call[0] as CoordinationLogEntry)
+      .find((entry) => entry.reason === 'audit-tier-budget-skipped');
+    expect(skip).toMatchObject({
+      reason: 'audit-tier-budget-skipped',
+      skippedTier: 'audit',
+      freeSlots: 1,
+      thresholdMetCount: 1,
+      requiredFreeSlots: 2,
+      leafAuditItemId: 'WL-LEAF',
+      leafAuditScope: 'parent',
+    });
+    // ...and never claims an admission it did not make.
+    expect(
+      recordDecision.mock.calls
+        .map((call) => call[0] as CoordinationLogEntry)
+        .some((entry) => entry.reason === 'leaf-audit-admission'),
+    ).toBe(false);
+  });
+
+  it('an active audit (single-flight) blocks the relaxation', async () => {
+    const { result, deps } = await tickThroughBand({
+      deps: baseDeps({
+        getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: true }),
+      }),
+    });
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('live contention blocks the relaxation (never relax past a refusal)', async () => {
+    const { result, deps } = await tickThroughBand({
+      status: { ...threeSlotPoolStatus(1), contention_queue_depth: 1 },
+      deps: baseDeps(),
+    });
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('a saturated prefill gate blocks the relaxation', async () => {
+    const { result, deps } = await tickThroughBand({
+      status: { ...threeSlotPoolStatus(1), local_max_concurrent_prefills: 1, local_prefills_in_flight: 1 },
+      deps: baseDeps(),
+    });
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['an empty slots array', { slots: [] }],
+    ['stale slot detail', { slots_stale: true }],
+    ['a saturated pool', { capacity_hint: 'saturated' }],
+  ])('%s fails closed before any relaxation', async (_name, overrides) => {
+    const { result, deps, worker } = await tickThroughBand({
+      status: { ...threeSlotPoolStatus(1), ...overrides },
+      deps: baseDeps(),
+    });
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(worker.blockReason).not.toBeNull();
+  });
+
+  it('a relaxed tick whose pinned candidate disappears stays neutral (no cooldown, no strike)', async () => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    // The peek sees the leaf; the dispatch re-selection returns a different
+    // (also leaf) candidate, which the pin refuses.
+    const getNextAuditCandidate = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, candidate: leafCandidate })
+      .mockResolvedValueOnce({ ok: true, candidate: { ...leafCandidate, id: 'WL-OTHER' } });
+    const { result, deps } = await tickThroughBand({
+      deps: baseDeps({ getNextAuditCandidate }),
+      recordDecision,
+    });
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    const reasons = recordDecision.mock.calls.map((call) => (call[0] as CoordinationLogEntry).reason);
+    expect(reasons).toContain('leaf-audit-admission');
+    expect(reasons).toContain(LEAF_AUDIT_PIN_HOLD_REASON);
+    expect(reasons).not.toContain('no-candidate');
   });
 });

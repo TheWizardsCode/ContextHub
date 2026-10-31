@@ -164,6 +164,17 @@ export function decisionHeaderToken(reason: string): string {
   }
 }
 /**
+ * Neutral outcome reason for a relaxed leaf-audit tick whose pinned candidate
+ * could not be dispatched (WL-0MVV1F0HK009JQAP C4): the slot was reserved for
+ * the pinned audit item and nothing else may consume it, so the tick ends
+ * WITHOUT a candidate rather than with a competing tier.
+ *
+ * Deliberately distinct from `no-candidate`: the backlog is not empty and the
+ * relaxed slot is a reservation, so this must never enter the no-candidate
+ * cooldown (or count as a strike) — polling resumes on the next idle band.
+ */
+export const LEAF_AUDIT_PIN_HOLD_REASON = 'leaf-audit-pin-hold';
+/**
  * Schema-v2 capacity evidence attached to a no-dispatch decision entry
  * (LP-0MVGDUVGE0024YAI): the pool summary, payload version and the observed
  * per-slot lease/phase/ETA detail. Purely observability — no gate reads it.
@@ -280,6 +291,19 @@ export interface DecisionEntryFields extends CapacityEvidence {
   capacityBudget?: number;
   effectiveFreeSlots?: number;
   skippedTier?: string;
+  /**
+   * Leaf-audit tick-admission evidence (WL-0MVV1F0HK009JQAP C4). On the
+   * non-blocking `leaf-audit-admission` observation: the pinned audit item and
+   * its classified scope, the per-slot `thresholdMetCount` that admitted it and
+   * the configured `downtimeRequiredFreeSlots` the tick relaxed. The same four
+   * fields annotate the `audit-tier-budget-skipped` observation emitted when the
+   * relaxed band held only a parent candidate. Together they make a relaxed
+   * tick — and its fail-closed counterpart — diagnosable from the log alone.
+   */
+  leafAuditItemId?: string;
+  leafAuditScope?: string;
+  thresholdMetCount?: number;
+  requiredFreeSlots?: number;
   /**
    * Per-offer dispatch-time rejections (WL-0MVR8FKMU009XTED AC2): present on a
    * coordination-mode refusal that rejected one or more offers, so each

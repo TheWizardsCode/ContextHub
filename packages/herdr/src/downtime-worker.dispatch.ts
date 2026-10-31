@@ -29,11 +29,13 @@ import {
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_PANE_MIN_FREE_SLOTS,
+  LEAF_AUDIT_PIN_HOLD_REASON,
 } from './downtime-worker.constants.js';
 import { clampDowntimeAuditBatchMax } from './downtime-worker.clamps.js';
 import {
   REVIEW_QUEUE_HOLD_REASON,
   auditItemEligible,
+  auditPinAdmits,
   computeAuditEligibleDepth,
   fetchExtendedHerdrItems,
   finalizeAuditBatchOutcome,
@@ -311,6 +313,18 @@ export async function dispatchDowntimeWork(
      * legacy fixed forwarding.
      */
     localPreferenceMode?: LocalPreferenceMode;
+    /**
+     * Relaxed leaf-audit admission pin (WL-0MVV1F0HK009JQAP C4): set when the
+     * tick relaxed its `downtimeRequiredFreeSlots` requirement for ONE
+     * positively classified LEAF audit candidate
+     * (`probeLeafAuditAdmission`). The relaxed single slot is then reserved
+     * for THAT item alone: every non-audit tier is ineligible for this
+     * dispatch (implement/plan/intake, critical and the scheduled-prompt /
+     * stalled-resume paths) and the audit tier admits no other candidate, so
+     * no other pane can consume the spare slot under the relaxed policy.
+     * Absent = no relaxation (today's behaviour, byte-for-byte).
+     */
+    pinnedAuditItemId?: string;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Per-process PIPELINE single-flight gate (F3, WL-0MT50LKAK001EF5Q): at
@@ -359,8 +373,13 @@ export async function dispatchDowntimeWork(
     // the raw slot budget (`freeSlots`) — never the prefill-concurrency
     // budget. Conflating them made audit unreachable at the cap=1 default.
     const panesBudget = opts.effectiveFreeSlots ?? freeSlots;
+    // Leaf-audit admission pin (WL-0MVV1F0HK009JQAP C4): a relaxed tick
+    // admitted this dispatch for ONE pinned audit candidate, so every
+    // single-pane tier stays ineligible ("only the leaf audit, nothing else").
+    const pinnedAuditItemId = opts.pinnedAuditItemId;
     const panesEligible =
-      panesBudget === undefined || panesBudget >= DOWNTIME_PANE_MIN_FREE_SLOTS;
+      pinnedAuditItemId === undefined &&
+      (panesBudget === undefined || panesBudget >= DOWNTIME_PANE_MIN_FREE_SLOTS);
     // Conservative audit ceiling — the PARENT minimum. Met at/above it, so
     // every audit candidate is admissible without a scope lookup. Kept for the
     // tier-consultation decision below and for logging/behaviour parity; the
@@ -371,6 +390,7 @@ export async function dispatchDowntimeWork(
     // the LEAF minimum is available. The per-item `auditItemEligible` gate
     // then admits a trusted leaf and skips a parent/unknown exactly as today.
     const auditTierConsidered =
+      pinnedAuditItemId !== undefined ||
       auditEligible ||
       (freeSlots !== undefined && freeSlots >= DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS);
     // Raw free-slot count handed to the Herdr-head filter (normal + critical-
@@ -497,7 +517,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode, freeSlots, frozen, cpuSaturated, panesEligible, auditSlotBudget, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
+        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode, freeSlots, frozen, cpuSaturated, panesEligible, auditSlotBudget, pinnedAuditItemId, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return finalize(herdrOutcome);
 
@@ -568,7 +588,14 @@ export async function dispatchDowntimeWork(
         // continues so other work still dispatches and the flag write is
         // retried if it failed.
         if (budgetExhausted) return finalize({ dispatched: false, reason: 'attempt-budget-exhausted' });
-        return finalize({ dispatched: false, reason: 'no-candidate' });
+        // A relaxed leaf-audit tick reserves its single free slot for the
+        // pinned audit item: when nothing dispatched, that reservation — not
+        // an empty backlog — is the reason (WL-0MVV1F0HK009JQAP C4). Neutral
+        // reason, so no no-candidate cooldown and no strike.
+        return finalize({
+          dispatched: false,
+          reason: pinnedAuditItemId !== undefined ? LEAF_AUDIT_PIN_HOLD_REASON : 'no-candidate',
+        });
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
       // legacy chain (test-compat path; flags still drive the terminal reason).
@@ -651,7 +678,13 @@ export async function dispatchDowntimeWork(
             // No active audit: proceed with the candidate lookup unchanged.
             const audit = await deps.getNextAuditCandidate(opts.cwd);
             if (audit.ok) {
-              if (audit.candidate !== null && audit.candidate.needsProducerReview !== true) {
+              if (
+                audit.candidate !== null &&
+                audit.candidate.needsProducerReview !== true &&
+                // Pin (WL-0MVV1F0HK009JQAP C4): a relaxed tick admits THIS
+                // candidate only.
+                auditPinAdmits(pinnedAuditItemId, audit.candidate.id)
+              ) {
                 // Per-item leaf-aware minimum (parent WL-0MSORQ8Y4004YT63 C3):
                 // in the single-free-slot band only a classified LEAF is
                 // eligible. A parent, or an untrustworthy scope lookup, is
@@ -838,9 +871,15 @@ export async function dispatchDowntimeWork(
         tier2ErrorDetail = intakeComplete.error;
       }
     } else {
-      // 0 free slots (defensive, unreachable via the worker): the panes
-      // cannot run — treat as an empty backlog (no candidate dispatchable).
-      return { dispatched: false, reason: 'no-candidate' };
+      // No pane may be dispatched (0 free slots, or — the relaxed leaf-audit
+      // case — the tick reserved its single free slot for the pinned audit
+      // candidate). Treat as an empty backlog (no candidate dispatchable); a
+      // pin reports its own neutral reason so no no-candidate cooldown arms
+      // (WL-0MVV1F0HK009JQAP C4).
+      return {
+        dispatched: false,
+        reason: pinnedAuditItemId !== undefined ? LEAF_AUDIT_PIN_HOLD_REASON : 'no-candidate',
+      };
     }
 
     // Tier 3 (idea → /skill:intake) is ALWAYS attempted when tier 2 produced

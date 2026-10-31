@@ -18,6 +18,7 @@
 
 import {
   auditItemEligible,
+  auditPinAdmits,
   classifyItemForDispatch,
   evaluateCriticalFirstGuard,
   flagBudgetExhausted,
@@ -99,7 +100,7 @@ export function selectCriticalFirstCandidates(
 export async function dispatchFromHerdrList(
   deps: DowntimeDispatchDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; localPreference?: LocalPreference; localPreferenceMode?: LocalPreferenceMode; freeSlots?: number; frozen: boolean; cpuSaturated: boolean; panesEligible: boolean; auditSlotBudget: number | undefined; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
+  ctx: { cwd: string; model: string; localPreference?: LocalPreference; localPreferenceMode?: LocalPreferenceMode; freeSlots?: number; frozen: boolean; cpuSaturated: boolean; panesEligible: boolean; auditSlotBudget: number | undefined; pinnedAuditItemId?: string; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
   flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
@@ -150,7 +151,10 @@ export async function dispatchFromHerdrList(
     // Safety gate: per-tier free-slot minimums (parent WL-0MT32F90UAD2 AC3).
     // The audit minimum is per-CANDIDATE (parent WL-0MSORQ8Y4004YT63 C3): a
     // leaf audit dispatches in the single-free-slot band while a parent (or an
-    // untrustworthy scope lookup) keeps the unchanged 2-slot gate.
+    // untrustworthy scope lookup) keeps the unchanged 2-slot gate. A relaxed
+    // leaf-audit tick additionally pins the one slot to ITS candidate
+    // (WL-0MVV1F0HK009JQAP C4), so no other audit item may consume it.
+    if (kind === 'audit' && !auditPinAdmits(ctx.pinnedAuditItemId, candidate.id)) continue;
     if (kind === 'audit' && !(await auditItemEligible(deps, candidate, ctx.auditSlotBudget, ctx.cwd))) continue;
     if (kind !== 'audit' && !ctx.panesEligible) continue;
     // In-flight guard: never re-dispatch an item with a live working pane.
@@ -313,7 +317,10 @@ export async function dispatchFromHerdrList(
     // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3). The audit
     // minimum is per-CANDIDATE (parent WL-0MSORQ8Y4004YT63 C3): a leaf audit
     // dispatches in the single-free-slot band, a parent keeps the unchanged
-    // 2-slot gate — the same helper as the critical-first scan above.
+    // 2-slot gate — the same helper as the critical-first scan above. A relaxed
+    // leaf-audit tick also pins its one slot to that candidate
+    // (WL-0MVV1F0HK009JQAP C4).
+    if (k === 'audit' && !auditPinAdmits(ctx.pinnedAuditItemId, item.id)) continue;
     if (k === 'audit' && !(await auditItemEligible(deps, item, ctx.auditSlotBudget, ctx.cwd))) continue;
     if (k !== 'audit' && !ctx.panesEligible) continue;
     // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by

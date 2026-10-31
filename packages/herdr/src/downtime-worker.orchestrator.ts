@@ -175,6 +175,12 @@ export function buildOrchestratorContext(opts: DowntimeWorkerConfig): Orchestrat
     // tick observe ONE consistent state — an election win mid-tick applies
     // next tick). Legacy mode (no coordinationDir) is always the leader.
     leaderState: leaderManager ? leaderManager.isLeader() : true,
+    // Relaxed leaf-audit admission for the CURRENT tick
+    // (WL-0MVV1F0HK009JQAP C4): set by `pollAndEvaluate` only when the tick's
+    // per-slot idle band is a single continuously-free slot and the peeked
+    // audit candidate is a trusted LEAF. `null` = today's behaviour (every
+    // tick phase resets it, so a relaxed admission never outlives its tick).
+    leafAuditAdmission: null,
   };
 }
 

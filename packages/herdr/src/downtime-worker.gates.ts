@@ -56,11 +56,13 @@ import {
 import type { ClassifyGateToken } from './downtime-worker.offer-attribution.js';
 import type {
   CriticalFirstGuardDecision,
+  DowntimeActiveAuditResult,
   DowntimeClaimExpected,
   DowntimeDispatchKind,
   DowntimeHerdrItem,
   DowntimeHerdrListResult,
   DowntimeItemInfo,
+  DowntimeNextResult,
   DowntimeSkillKind,
   InFlightPanes,
 } from './downtime-worker.types.js';
@@ -308,6 +310,129 @@ export async function auditItemEligible(
     result = null; // fail-closed: an untrustworthy lookup is a parent
   }
   return classifyAuditScope(result) === 'leaf';
+}
+
+// ── Relaxed leaf-audit TICK admission (WL-0MVV1F0HK009JQAP C4) ────────
+//
+// The tick's idle-duration gate normally requires `downtimeRequiredFreeSlots`
+// (default 2 of 3) slots to be continuously free before ANY dispatch is
+// considered. Relaxing only the per-item audit minimum (C3) therefore changed
+// nothing in production: the tick never reached the dispatch filters in the
+// single-free-slot band. This slice relaxes the TICK requirement for one
+// positively classified LEAF audit candidate, and pins the relaxed slot to
+// that item so no other tier can consume it under the relaxed policy.
+
+/**
+ * A relaxed leaf-audit admission for ONE tick (WL-0MVV1F0HK009JQAP C4).
+ *
+ * Produced by {@link probeLeafAuditAdmission} when the per-slot idle tracker
+ * reports the leaf band (`DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS <=
+ * thresholdMetCount < downtimeRequiredFreeSlots`) and the peeked audit
+ * candidate is a trusted `leaf`. The tick then admits the dispatch for THIS
+ * item only: every non-audit tier is ineligible and the audit tier admits no
+ * other candidate.
+ */
+export interface LeafAuditAdmission {
+  /** The audit candidate the relaxed slot is pinned to. */
+  itemId: string;
+  /** Free unowned slots the admitting poll observed. */
+  freeSlots: number;
+  /** Free slots continuously idle for the full threshold (same-slot identity). */
+  thresholdMetCount: number;
+  /** The configured minimum the tick would normally require. */
+  requiredFreeSlots: number;
+}
+
+/**
+ * Outcome of the leaf-band audit peek. `non-leaf` carries the rejected
+ * candidate so the tick can emit the `audit-tier-budget-skipped` observation
+ * (the audit tier's 2-slot minimum is exactly why it was skipped);
+ * `no-candidate` and `unavailable` are silent — today's behaviour, no
+ * relaxation and no new token.
+ */
+export type LeafAuditAdmissionProbe =
+  | { kind: 'admitted'; admission: LeafAuditAdmission }
+  | { kind: 'non-leaf'; itemId: string; scope: AuditScope }
+  | { kind: 'no-candidate' }
+  | { kind: 'unavailable' };
+
+/**
+ * The dependency slice the leaf-band peek reads, named structurally like
+ * {@link DowntimeGateDeps} so this module never imports the barrel.
+ */
+export interface LeafAuditAdmissionDeps {
+  getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult>;
+  getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult>;
+  getAuditCandidateScope?(itemId: string, cwd: string): Promise<AuditCandidateScopeResult>;
+}
+
+/**
+ * Peek the audit candidate for a relaxed leaf-audit tick.
+ *
+ * Composition of the EXISTING dependency seams — no new `wl` call, no second
+ * selection rule: the active-audit single-flight check runs first (an audit
+ * already in flight means there is no relaxed slot to hand out), then
+ * `getNextAuditCandidate` (which already applies the dispatched-marker and
+ * freshness exclusions), then the leaf-vs-parent scope lookup classified by
+ * {@link classifyAuditScope}.
+ *
+ * **Fail-closed:** `{ ok: false }` on either lookup, a missing scope lookup, a
+ * `parent` candidate, a `needsProducerReview` candidate, or an absent
+ * candidate never relaxes the tick — every one of them restores today's
+ * behaviour exactly (no admission, no extra dispatch).
+ */
+export async function probeLeafAuditAdmission(
+  deps: LeafAuditAdmissionDeps,
+  cwd: string,
+  evidence: { freeSlots: number; thresholdMetCount: number; requiredFreeSlots: number },
+): Promise<LeafAuditAdmissionProbe> {
+  // Active-audit single-flight (WL-0MT3PHW4I002SNOV). An unanswerable check
+  // is not an empty one: fail closed and keep today's gate.
+  let active: DowntimeActiveAuditResult;
+  try {
+    active = await deps.getActiveAudit(cwd);
+  } catch {
+    return { kind: 'unavailable' };
+  }
+  if (!active.ok || active.active) return { kind: 'unavailable' };
+
+  let next: DowntimeNextResult;
+  try {
+    next = await deps.getNextAuditCandidate(cwd);
+  } catch {
+    return { kind: 'unavailable' };
+  }
+  if (!next.ok) return { kind: 'unavailable' };
+  if (next.candidate === null) return { kind: 'no-candidate' };
+  // A budget-exhausted candidate is already flagged for producer review and
+  // the dispatcher would skip it — never relax the tick for it.
+  if (next.candidate.needsProducerReview === true) return { kind: 'no-candidate' };
+
+  let result: AuditCandidateScopeResult | null | undefined;
+  try {
+    result =
+      typeof deps.getAuditCandidateScope === 'function'
+        ? await deps.getAuditCandidateScope(next.candidate.id, cwd)
+        : null;
+  } catch {
+    result = null; // fail-closed: an untrustworthy lookup is a parent
+  }
+  const scope = classifyAuditScope(result);
+  if (scope !== 'leaf') return { kind: 'non-leaf', itemId: next.candidate.id, scope };
+  return { kind: 'admitted', admission: { itemId: next.candidate.id, ...evidence } };
+}
+
+/**
+ * True when a dispatch attempt may consider an audit candidate under a relaxed
+ * leaf-audit admission pin (WL-0MVV1F0HK009JQAP C4).
+ *
+ * An absent pin (`undefined`) means no relaxation is in play, so every
+ * candidate is considered exactly as today; a present pin admits ONLY the
+ * pinned item, so the relaxed single slot can never be consumed by a second
+ * leaf audit selected after the peek.
+ */
+export function auditPinAdmits(pinnedItemId: string | undefined, candidateId: string): boolean {
+  return pinnedItemId === undefined || pinnedItemId === candidateId;
 }
 
 // ── Review-queue depth gate — shared (WL-0MT2UQWOR007CYY9 gate re-wired

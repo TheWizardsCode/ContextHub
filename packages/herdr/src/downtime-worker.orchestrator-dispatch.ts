@@ -34,18 +34,21 @@ import {
   decisionHeaderToken,
   type DecisionEntryFields,
 } from './downtime-worker.constants.js';
-import type { CapacityStarvationObservation } from './capacity-starvation.js';
 import { dispatchFromCoordination } from './downtime-worker.coordination-leader.js';
 import { computeMostImportantItem } from './downtime-worker.coordination.js';
 import { hasPeerOffer, readCoordinationFile } from './coordination.js';
 import { countFreeUnownedSlots, evaluatePrefillPacing } from './downtime-worker.idle.js';
 import { dispatchDowntimeWork } from './downtime-worker.dispatch.js';
+import {
+  pauseAfterPersistentErrors,
+  writeCapacityStarvationSignal,
+} from './downtime-worker.orchestrator-signals.js';
+import type { LeafAuditAdmission } from './downtime-worker.gates.js';
 import type {
   IdleTracker,
   IdleWindowLaunchFence,
   LlamaSlot,
   LlamaStatus,
-  LongRunningPaneObservation,
   PerSlotIdleTracker,
 } from './downtime-worker.types.js';
 import type { CapacityStarvationTracker } from './capacity-starvation.js';
@@ -117,6 +120,11 @@ export interface OrchestratorContext {
   lastCheckInAt: number | null;
   lastOfferEmpty: boolean;
   leaderState: boolean;
+  /**
+   * Relaxed leaf-audit admission for THIS tick
+   * (WL-0MVV1F0HK009JQAP C4); null = no relaxation (today's behaviour).
+   */
+  leafAuditAdmission: LeafAuditAdmission | null;
 }
 
 /** The per-tick result shape (identical to `DowntimeWorkerTickResult`). */
@@ -159,117 +167,10 @@ export interface DispatchAdmission {
 
 // ── Cooldown / three-strike state machine + decision log ───────────────
 
-// Three-strike pause (WL-0MSI7DQL10016QYX; shared by the CLI-error path
-// and the coordination probe-failure path, WL-0MTEZ4XZJ006Y9U7): N
-// consecutive failures pause the worker entirely and log the persistent
-// error so it is auditable. A single transient failure does NOT pause —
-// it retries on the next idle period. Fail-closed: error logging must
-// never crash the worker.
-// WL-0MTJPYM53003ORCV: log on EVERY strike (not just 3) with structured
-// fields for debuggability.
-export async function pauseAfterPersistentErrors(
-  ctx: OrchestratorContext,
-  message: string,
-  error?: string,
-  extra?: {
-    workItemId?: string;
-    command?: string;
-    stderrExcerpt?: string;
-    exitCode?: number | null;
-    timeoutMs?: number;
-    probeContext?: string;
-  },
-): Promise<void> {
-  ctx.errorStrikes += 1;
-  const attempt = ctx.errorStrikes;
-  // Enrich stderr: the explicit stderr excerpt wins; otherwise fall back
-  // to the plain error string (fetcher.ts builds it from
-  // `stderr || stdout || error.message`, so it IS the stderr in most
-  // wl-error cases). Truncate to 200 chars with [truncated] marker
-  // (WL-0MTJPYM53003ORCV).
-  const rawStderr = extra?.stderrExcerpt ?? error ?? '';
-  const stderrExcerpt =
-    rawStderr.length > 0
-      ? rawStderr.length > 200
-        ? rawStderr.slice(0, 200) + '[truncated]'
-        : rawStderr
-      : undefined;
-  try {
-    await ctx.opts.deps.recordError({
-      cwd: ctx.opts.config().cwd,
-      at: new Date().toISOString(),
-      message,
-      ...(error ? { error } : {}),
-      ...(stderrExcerpt ? { stderrExcerpt } : {}),
-      ...(extra?.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
-      ...(extra?.timeoutMs !== undefined ? { timeoutMs: extra.timeoutMs } : {}),
-      ...(extra?.workItemId ? { workItemId: extra.workItemId } : {}),
-      ...(extra?.command ? { command: extra.command } : {}),
-      attempt,
-      ...(extra?.probeContext ? { probeContext: extra.probeContext } : {}),
-    });
-  } catch {
-    // fail-closed: error logging must never crash the worker
-  }
-  if (ctx.errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
-    ctx.cooldownUntil = Date.now() + ctx.opts.config().noCandidateCooldownMs;
-    ctx.errorStrikes = 0;
-    ctx.tracker.record(false);
-    ctx.perSlotTracker.record([]);
-  }
-}
-
-// ── Capacity-starvation observation (WL-0MVKNC2N50025HXE AC3) ──
-// Write ONE observation entry for a capacity-refusal episode that has
-// outlasted the configured window. It reuses the refusal's evidence fields
-// (same schema), adds the episode length and — when the long-running scan
-// is wired — names the panes holding the model. Observation only: it does
-// not set the header blocking token, never gates dispatch, and a logging
-// failure is swallowed (fail-closed).
-export async function writeCapacityStarvationSignal(
-  ctx: OrchestratorContext,
-  cwd: string,
-  starvation: CapacityStarvationObservation,
-  fields: DecisionEntryFields,
-  now: number,
-): Promise<void> {
-  let longRunningPanes: LongRunningPaneObservation[] | undefined;
-  if (typeof ctx.opts.deps.scanLongRunningPanes === 'function') {
-    try {
-      const observed = await ctx.opts.deps.scanLongRunningPanes(cwd, {
-        thresholdMs: ctx.longRunningThresholdMs,
-        now,
-      });
-      if (Array.isArray(observed) && observed.length > 0) {
-        longRunningPanes = observed;
-      }
-    } catch {
-      // fail-safe: an unreadable scan must never suppress the signal
-    }
-  }
-  const entry: CoordinationLogEntry = {
-    kind: 'decision',
-    operation: 'no-dispatch',
-    instanceId: ctx.instanceId,
-    reason: 'capacity-starved',
-    ...fields,
-    starvedSince: new Date(starvation.starvedSince).toISOString(),
-    starvedMs: starvation.starvedMs,
-    consecutiveCapacityRefusals: starvation.consecutiveRefusals,
-    lastCapacityReason: starvation.lastReason,
-    ...(longRunningPanes !== undefined ? { longRunningPanes } : {}),
-    at: new Date(now).toISOString(),
-  };
-  try {
-    if (typeof ctx.opts.deps.recordDecision === 'function') {
-      await ctx.opts.deps.recordDecision(entry, cwd);
-    } else {
-      await appendCoordinationLogEntry(cwd, entry);
-    }
-  } catch {
-    // fail-closed: observation logging must never affect dispatch
-  }
-};
+// The three-strike pause and the capacity-starvation observation writer live
+// in `downtime-worker.orchestrator-signals.ts` (extracted by
+// WL-0MVV1F0HK009JQAP so this module stays inside the split guard's size
+// ceiling); both are imported above and composed unchanged below.
 
 // ── No-dispatch decision log (WL-0MU8808ZY0091JIA) ──
 // Record WHY a polled tick refused to dispatch so "idle slots but no
@@ -617,6 +518,12 @@ export async function performDispatch(
   // batch metadata to a blocked/ended decision.
   const armedBatch = ctx.activeAuditBatch;
   const continuationBudget = armedBatch !== null ? armedBatch.remaining : null;
+  // Relaxed leaf-audit admission pin (WL-0MVV1F0HK009JQAP C4): when the tick
+  // admitted this dispatch in the single-free-slot band, the slot is reserved
+  // for THIS audit item — every non-audit tier is ineligible and the audit
+  // tier admits no other candidate (see `pinnedAuditItemId` in the dispatch
+  // options). `undefined` = no relaxation (today's behaviour).
+  const pinnedAuditItemId = ctx.leafAuditAdmission?.itemId;
   // Coordination entries read ONCE for this dispatch (parent
   // WL-0MVP7QHUB003ZA2A AC2): the same snapshot feeds the dispatch attempt
   // AND the no-candidate arm's peer-offer check below, so the "is a peer's
@@ -699,6 +606,8 @@ export async function performDispatch(
             stallScanThresholdMs: cfg.stallScanThresholdMs,
             // Host-CPU gate threshold (WL-0MVK0UO3Q002TXW6 AC2/AC5).
             cpuGatePercent: cfg.cpuGatePercent,
+            // Leaf-audit admission pin (WL-0MVV1F0HK009JQAP C4).
+            ...(pinnedAuditItemId !== undefined ? { pinnedAuditItemId } : {}),
           });
     // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
     // no-dispatch outcomes (no-candidate / review-queue-hold / code-freeze
