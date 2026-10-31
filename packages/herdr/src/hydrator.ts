@@ -61,12 +61,14 @@
  * production wiring injects this through the worklist's
  * `applyActivePaneMarkers` seam (`index.ts`).
  *
- * Live claim holder (WL-0MVWDAZL10025P8J): a pane-less driven session still
- * holds its per-child `flock` claim, so the "busy" signal will become
- * `pane OR live claim holder` (sibling child). The local, side-effect-free
- * heldness probe lives in `./claim-lock.ts` (`probeClaimHolders`) — it is NOT
- * imported here yet; the cycle wiring (`decideDemotion`) is the sibling
- * child's scope.
+ * Live claim holder (WL-0MVWDB3IG004NRIU): a pane-less driven session still
+ * holds its per-child `flock` claim, so "busy" is `pane OR live claim holder`.
+ * The local, side-effect-free heldness probe lives in `./claim-lock.ts`
+ * (`probeClaimHolders`); the cycle asks it ONCE per tick over the pane-less
+ * candidates (batched, zero `wl`/`herdr` spawns) and suppresses the
+ * release-to-`open` branch while a claim is held (or ambiguous evidence
+ * forces fail-open — never a release on uncertainty). The pane signal stays
+ * primary and unchanged: a pane title match short-circuits and never probes.
  *
  * Opening/closing a work-item pane does NOT touch the worklog DB, so the
  * DB-change-gated refresh tick can never update this marker for it. The
@@ -101,6 +103,7 @@ import {
   fetchOutboundDepsForItems,
 } from './fetcher.js';
 import { parseMachinePaneListOutput } from './dispatcher-anchor.js';
+import { probeClaimHolders, type ClaimHolderVerdict } from './claim-lock.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -249,6 +252,23 @@ export interface HydratorDeps {
   listOutboundDepsBatch?: (
     itemIds: string[],
   ) => Promise<Map<string, HydratorDepTarget[] | undefined> | undefined>;
+  /**
+   * Optional batched claim-holder probe (WL-0MVWDB3IG004NRIU): for the given
+   * pane-less candidates, answer *is this item's `<worklog>/locks/child-<id>
+   * .lock` currently held by a live claim holder?* Called exactly ONCE per
+   * cycle over the pane-less candidates, bounded by the per-tick cap.
+   * Production wiring delegates to `probeClaimHolders` (`claim-lock.ts`) — a
+   * local, side-effect-free probe with zero `wl`/`herdr` spawns.
+   *
+   * Optional so existing test fakes keep compiling: an absent seam disables
+   * the held signal and preserves the pre-existing behaviour byte-for-byte.
+   * Fail-open: a step timeout, a thrown/unavailable probe, or a missing
+   * per-item verdict suppresses that cycle's (or item's) demotion — never a
+   * release on ambiguous evidence.
+   */
+  hasLiveClaimHolder?: (
+    itemIds: string[],
+  ) => Promise<Map<string, ClaimHolderVerdict>>;
   /** Apply a demotion via `wl update`; true when it was persisted. */
   applyDemotion: (itemId: string, status: string, stage: string) => Promise<boolean>;
   /** Optional diagnostic log sink. */
@@ -266,6 +286,7 @@ export type HydratorStepLabel =
   | 'in-progress-list'
   | 'pane-list'
   | 'dep-list'
+  | 'claim-probe'
   | 'demotion-apply';
 
 // ── Pure helpers ──────────────────────────────────────────────────────
@@ -496,14 +517,23 @@ export function compatibleStage(stage: string, status: string): string {
 
 /**
  * Pure demotion decision. Returns `null` when the item must be left alone
- * (not `in-progress`, or a matching ACTIVE pane exists — F1).
+ * (not `in-progress`, a matching ACTIVE pane exists — F1 — or a live claim
+ * holder keeps the item busy).
  *
  * The `hasActivePane` context key is retained for source compatibility; its
  * value now comes from the pane-title check `isActivePaneMatch`.
+ *
+ * Branch precedence (WL-0MVWDB3IG004NRIU, AC3 of the parent): `held` is
+ * evaluated AFTER the `in_review` and `blocked` branches, so a held claim
+ * only suppresses the final release-to-`open` branch and never overrides the
+ * audit-tier `in_review → completed` or the dependency `blocked` transition:
+ * `not in-progress → null` · `hasActivePane → null` · `stage in_review →
+ * completed` · `blocked → blocked` · `held → null` · `else → open/
+ * intake_complete`.
  */
 export function decideDemotion(
   item: HydratorItem,
-  ctx: { hasActivePane: boolean; blocked: boolean },
+  ctx: { hasActivePane: boolean; blocked: boolean; held: boolean },
 ): DemotionDecision | null {
   const status = (item.status ?? '').toLowerCase();
   if (status !== 'in-progress' && status !== 'in_progress') return null;
@@ -516,6 +546,7 @@ export function decideDemotion(
   if (ctx.blocked) {
     return { status: 'blocked', stage: compatibleStage(stage, 'blocked') };
   }
+  if (ctx.held) return null;
   // AC3 else-branch as written: release to `open` at `intake_complete`
   // (per WL-0MTF5WO2Q008B8US AC3; the stage is valid for `open` in
   // ALLOWED_STAGES_BY_STATUS / config.defaults.yaml).
@@ -719,6 +750,42 @@ export async function runHydrationOnce(
     // spawn seam (fail-open, exactly as before the batched seam existed).
   }
 
+  // WL-0MVWDB3IG004NRIU: ONE batched claim-holder probe per cycle, over the
+  // SAME pane-less candidate list as the dep read (a pane-matched item
+  // short-circuits and never probes; candidates beyond the per-tick cap are
+  // deferred to the next tick). Production wiring is a local, spawn-free
+  // `flock`/`/proc/locks` probe, so the cycle adds zero `wl`/`herdr` spawns.
+  // Fail-open, consistent with `pane-list`/`dep-list` handling: a step
+  // timeout or an unavailable/abnormal probe result suppresses demotion for
+  // the WHOLE cycle with a named reason — never a release on ambiguous
+  // evidence. An absent seam (existing test fakes) leaves the held signal
+  // off and the pre-existing behaviour byte-for-byte unchanged.
+  let claimByItem: Map<string, ClaimHolderVerdict> | null = null;
+  if (deps.hasLiveClaimHolder && depCandidateIds.length > 0) {
+    const claimStep = await runStep('claim-probe', stepTimeoutMs, now, log, () =>
+      deps.hasLiveClaimHolder!(depCandidateIds),
+    );
+    if (claimStep.status === 'timeout') {
+      return {
+        ok: false,
+        considered,
+        demoted: 0,
+        skipped: 0,
+        reason: 'claim-probe step timeout (no demotion on ambiguous evidence)',
+      };
+    }
+    if (claimStep.status === 'error' || !(claimStep.value instanceof Map)) {
+      return {
+        ok: false,
+        considered,
+        demoted: 0,
+        skipped: 0,
+        reason: 'claim-probe step unavailable (no demotion on ambiguous evidence)',
+      };
+    }
+    claimByItem = claimStep.value;
+  }
+
   let demoted = 0;
   let skipped = 0;
   let processed = 0;
@@ -768,9 +835,27 @@ export async function runHydrationOnce(
       }
     }
 
-    const decision = decideDemotion(item, { hasActivePane: hasActivePane, blocked });
+    // Held = a live claim holder owns this item's per-child lock (or the
+    // probe was ambiguous for it). Fail-open per item: a missing verdict in
+    // an otherwise-usable probe map is ambiguous evidence → treat as held
+    // (suppress), never released. `claimByItem === null` (no seam, or no
+    // pane-less candidates) → `held` stays false, preserving pre-seam
+    // behaviour.
+    let held = false;
+    if (claimByItem !== null) {
+      const verdict = claimByItem.get(item.id);
+      held = verdict === undefined || verdict.held;
+    }
+
+    const decision = decideDemotion(item, { hasActivePane: hasActivePane, blocked, held });
     if (decision === null) {
       skipped += 1;
+      if (held) {
+        const verdict = claimByItem?.get(item.id) as ClaimHolderVerdict | undefined;
+        const pid = typeof verdict?.pid === 'number' ? ` pid ${verdict.pid}` : '';
+        const sid = typeof verdict?.sessionId === 'string' ? ` session ${verdict.sessionId}` : '';
+        log(`[hydrator] kept ${item.id}: live claim holder${pid}${sid}`);
+      }
       continue;
     }
 
@@ -792,9 +877,18 @@ export async function runHydrationOnce(
     }
     if (applyStep.status === 'ok' && applyStep.value === true) {
       demoted += 1;
-      log(
-        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (no matching pane)`,
-      );
+      const verdict = claimByItem?.get(item.id);
+      if (verdict !== undefined && !verdict.held && verdict.reason === 'stale') {
+        // Deciding signal: the pane is absent AND the recorded claim holder
+        // is provably dead — the stale-lock release (WL-0MVWDB3IG004NRIU).
+        log(
+          `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (no pane, claim holder dead)`,
+        );
+      } else {
+        log(
+          `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (no matching pane)`,
+        );
+      }
     } else {
       skipped += 1;
       log(`[hydrator] demotion failed for ${item.id} (left unchanged)`);
@@ -1033,6 +1127,17 @@ export function createProductionHydratorDeps(
       }
       return result;
     },
+
+    // WL-0MVWDB3IG004NRIU: batched claim-holder probe — ONE call per cycle
+    // over the pane-less candidates. The worklog root is resolved once per
+    // cycle through `getWorklogDir()` (already imported here; the `.worklog`
+    // store root is exactly what `probeClaimHolders` expects, and it falls
+    // back to `$WORKLOG_DIR` / `<cwd>/.worklog` when the override is unset).
+    // The probe itself is local and side-effect-free (one `locks/` dir read + a
+    // `/proc/locks` snapshot or non-blocking `flock` per file) — zero new
+    // `wl`/`herdr` spawns per item.
+    hasLiveClaimHolder: async (itemIds: string[]) =>
+      probeClaimHolders(itemIds, { worklogDir }),
 
     applyDemotion: async (itemId: string, status: string, stage: string) => {
       const { stdout } = await getExecFileAsync()(
