@@ -21,6 +21,61 @@ const COMMAND_MARKER = 'worklog-selection-list.open-worklog-tab';
 const LEGACY_BINDING = 'herdr plugin action invoke worklog-selection-list.open-worklist';
 const LEGACY_PODCAST_BINDING = 'herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab';
 
+// ── Hermetic script subprocess environment (WL-0MVWL88MO002SQ2B) ──────────
+//
+// These tests spawn bash + scripts/install-herdr.sh, whose step 0 installs
+// packages/herdr's dependencies (`npm ci`). A real install is both slow under
+// load and destructive to the tree it runs in: npm deletes node_modules
+// before reinstalling. Running the suite from a linked worktree used to point
+// that install at the SHARED main checkout (WL-0MVWJ4IKT005SAHT, now skipped
+// for worktree builds) and, under concurrent host load, blew vitest's 30 s
+// default `testTimeout` — the flake this file's migration test reported
+// ("Test timed out in 30000ms" at load average 30-43; green on a fresh rerun).
+//
+// These tests verify keybinding migration, plugin linking and config reload —
+// never the dependency install — so a hermetic `npm`/`node` stub keeps them
+// fast, side-effect free and independent of the checkout they run in: no real
+// install, no `link-shared.mjs` rewrite of the executing checkout. The npm
+// stub records its invocations so a test can prove the install is intercepted.
+const SCRIPT_TEST_TIMEOUT_MS = 60_000;
+
+let scriptStubDirCache: string | undefined;
+
+function scriptStubDir(): string {
+  if (scriptStubDirCache) return scriptStubDirCache;
+  const dir = makeTempDir('worklog-herdr-stub-');
+  const logPath = path.join(dir, 'npm-invocations.log');
+  const stubs: Record<string, string> = {
+    npm: `#!/usr/bin/env bash\necho "npm $*" >> "${logPath}"\nexit 0\n`,
+    node: '#!/usr/bin/env bash\nexit 0\n',
+  };
+  for (const [name, body] of Object.entries(stubs)) {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, body);
+    fs.chmodSync(file, 0o755);
+  }
+  scriptStubDirCache = dir;
+  return dir;
+}
+
+/** Invocations recorded by the hermetic npm stub, oldest first. */
+function npmInvocations(): string[] {
+  const logPath = path.join(scriptStubDir(), 'npm-invocations.log');
+  if (!fs.existsSync(logPath)) return [];
+  return fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+}
+
+/**
+ * `it` with the explicit subprocess budget these tests need. Every test here
+ * spawns bash + scripts/install-herdr.sh (and several spawn real `git`), so
+ * each gets the 60 s window vitest.config.ts prescribes for subprocess tests
+ * (45-60 s): a safety net under concurrent host load, on top of the hermetic
+ * stubs above (WL-0MVWL88MO002SQ2B).
+ */
+function itScript(name: string, fn: () => void): void {
+  it(name, fn, SCRIPT_TEST_TIMEOUT_MS);
+}
+
 function runScript(env: Record<string, string>): {
   status: number;
   stdout: string;
@@ -34,8 +89,10 @@ function runScript(env: Record<string, string>): {
     env: {
       ...process.env,
       // Keep PATH minimal so `herdr` is deterministically absent (the
-      // plugin-link path is not stubbed — see plan Q2 answer b).
-      PATH: '/usr/bin:/bin',
+      // plugin-link path is not stubbed in these tests), and put the hermetic
+      // npm/node stubs first so the dependency-install step never touches a
+      // real install or the executing checkout (WL-0MVWL88MO002SQ2B).
+      PATH: `${scriptStubDir()}${path.delimiter}/usr/bin:/bin`,
       ...env,
     },
   });
@@ -86,7 +143,7 @@ function realGitBin(): string {
 }
 
 describe('install-herdr script', () => {
-  it('inserts the keybinding block exactly once when run twice (idempotent)', () => {
+  itScript('inserts the keybinding block exactly once when run twice (idempotent)', () => {
     const tempDir = makeTempDir('worklog-herdr-idempotent-');
     const configPath = path.join(tempDir, 'config.toml');
 
@@ -104,7 +161,7 @@ describe('install-herdr script', () => {
     expect(afterSecond).toBe(KEYBINDING_BLOCK);
   });
 
-  it('creates the parent directory and file when the config path does not exist', () => {
+  itScript('creates the parent directory and file when the config path does not exist', () => {
     const tempDir = makeTempDir('worklog-herdr-missing-');
     const configPath = path.join(tempDir, 'herdr', 'config.toml');
 
@@ -114,7 +171,7 @@ describe('install-herdr script', () => {
     expect(fs.readFileSync(configPath, 'utf8')).toBe(KEYBINDING_BLOCK);
   });
 
-  it('skips insertion when the config already contains the binding', () => {
+  itScript('skips insertion when the config already contains the binding', () => {
     const tempDir = makeTempDir('worklog-herdr-existing-');
     const configPath = path.join(tempDir, 'config.toml');
     const original = '# hand-edited config\n' + KEYBINDING_BLOCK;
@@ -127,7 +184,7 @@ describe('install-herdr script', () => {
     expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
   });
 
-  it('honours HERDR_CONFIG_PATH and leaves the default config untouched', () => {
+  itScript('honours HERDR_CONFIG_PATH and leaves the default config untouched', () => {
     const tempHome = makeTempDir('worklog-herdr-home-');
     const overridePath = path.join(tempHome, 'override.toml');
 
@@ -138,7 +195,7 @@ describe('install-herdr script', () => {
     expect(fs.existsSync(path.join(tempHome, '.config', 'herdr', 'config.toml'))).toBe(false);
   });
 
-  it('warns and exits 0 when herdr is not on PATH, still inserting the binding', () => {
+  itScript('warns and exits 0 when herdr is not on PATH, still inserting the binding', () => {
     const tempDir = makeTempDir('worklog-herdr-noherdr-');
     const configPath = path.join(tempDir, 'config.toml');
 
@@ -150,7 +207,7 @@ describe('install-herdr script', () => {
     expect(fs.readFileSync(configPath, 'utf8')).toBe(KEYBINDING_BLOCK);
   });
 
-  it('warns and exits 0 when the config directory cannot be written', () => {
+  itScript('warns and exits 0 when the config directory cannot be written', () => {
     const tempDir = makeTempDir('worklog-herdr-readonly-');
     fs.chmodSync(tempDir, 0o555);
     const configPath = path.join(tempDir, 'config.toml');
@@ -165,7 +222,7 @@ describe('install-herdr script', () => {
     }
   });
 
-  it('appends the block on a fresh line when the existing config lacks a trailing newline', () => {
+  itScript('appends the block on a fresh line when the existing config lacks a trailing newline', () => {
     const tempDir = makeTempDir('worklog-herdr-newline-');
     const configPath = path.join(tempDir, 'config.toml');
     fs.writeFileSync(configPath, 'existing = true'); // no trailing newline
@@ -177,7 +234,7 @@ describe('install-herdr script', () => {
     expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
   });
 
-  it('migrates a legacy open-worklist binding in-place to the new action', () => {
+  itScript('migrates a legacy open-worklist binding in-place to the new action', () => {
     const tempDir = makeTempDir('worklog-herdr-migrate-');
     const configPath = path.join(tempDir, 'config.toml');
     const legacyBlock = `[[keys.command]]\nkey = "prefix+l"\ncommand = "${LEGACY_BINDING}"\ndescription = "Open the Worklog work item selection pane in a new tab."\n`;
@@ -193,7 +250,7 @@ describe('install-herdr script', () => {
     expect(content).toContain('command = "herdr plugin action invoke ' + COMMAND_MARKER + '"');
   });
 
-  it('migrates a legacy open-podcast-editor-tab binding in-place to the new action', () => {
+  itScript('migrates a legacy open-podcast-editor-tab binding in-place to the new action', () => {
     const tempDir = makeTempDir('worklog-herdr-migrate-podcast-');
     const configPath = path.join(tempDir, 'config.toml');
     const legacyBlock = `[[keys.command]]\nkey = "prefix+l"\ncommand = "${LEGACY_PODCAST_BINDING}"\ndescription = "Open the Podcast Editing tab (Worklog work item selection pane)."\n`;
@@ -212,7 +269,7 @@ describe('install-herdr script', () => {
     expect(content).toContain('description = "Open the Worklog tab (Worklog work item selection pane)."');
   });
 
-  it('removes a stale legacy open-podcast-editor-tab binding when the new binding is already present', () => {
+  itScript('removes a stale legacy open-podcast-editor-tab binding when the new binding is already present', () => {
     // WL-0MSRG4828007ITI4: an earlier installer could add the new binding
     // while a legacy prefix+l binding was still present, because the
     // "already present" fast path exited before the legacy migration ran.
@@ -233,7 +290,7 @@ describe('install-herdr script', () => {
     expect(content).not.toContain('Podcast Editing');
   });
 
-  it('removes a stale legacy open-worklist binding when the new binding is already present', () => {
+  itScript('removes a stale legacy open-worklist binding when the new binding is already present', () => {
     const tempDir = makeTempDir('worklog-herdr-dedupe-worklist-');
     const configPath = path.join(tempDir, 'config.toml');
     const legacyBlock = `[[keys.command]]\nkey = "prefix+l"\ncommand = "${LEGACY_BINDING}"\ndescription = "Open the Worklog work item selection pane in a new tab."\n`;
@@ -247,7 +304,7 @@ describe('install-herdr script', () => {
     expect(countOccurrences(content, '[[keys.command]]')).toBe(1);
   });
 
-  it('preserves unrelated keybindings when purging a stale legacy binding', () => {
+  itScript('preserves unrelated keybindings when purging a stale legacy binding', () => {
     const tempDir = makeTempDir('worklog-herdr-dedupe-preserve-');
     const configPath = path.join(tempDir, 'config.toml');
     const otherBlock = `[[keys.command]]\nkey = "prefix+n"\ncommand = "herdr plugin action invoke herdr-notes.new-note"\ndescription = "New note."\n`;
@@ -265,7 +322,7 @@ describe('install-herdr script', () => {
     expect(countOccurrences(content, '[[keys.command]]')).toBe(2);
   });
 
-  it('links the plugin from the main checkout when run inside a linked worktree', () => {
+  itScript('links the plugin from the main checkout when run inside a linked worktree', () => {
     // Reproduce the /skill:implement build: the postbuild hook runs
     // scripts/install-herdr.sh from a linked git worktree. The script must
     // register the global herdr plugin from the MAIN checkout, never the
@@ -340,7 +397,7 @@ describe('install-herdr script', () => {
     expect(log).not.toContain(wtDir);
   });
 
-  it('skips the dependency install in a linked worktree, leaving the @worklog/shared link live', () => {
+  itScript('skips the dependency install in a linked worktree, leaving the @worklog/shared link live', () => {
     // WL-0MVWJ4IKT005SAHT AC1+AC3: the /skill:implement build runs
     // install-herdr.sh from a linked worktree. The script must NOT run
     // `npm ci` there — the worktree's node_modules is symlinked to the main
@@ -472,7 +529,7 @@ describe('install-herdr script', () => {
     }
   });
 
-  it('calls `herdr server reload-config` after inserting a new keybinding', () => {
+  itScript('calls `herdr server reload-config` after inserting a new keybinding', () => {
     // WL-0MSHND11O007FKOU: after inserting the keybinding, the running herdr
     // server must be told to reload its config so the new binding is active
     // without a manual restart.
@@ -495,7 +552,7 @@ describe('install-herdr script', () => {
       encoding: 'utf8',
       env: {
         ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}/usr/bin:/bin`,
+        PATH: `${fakeBinDir}${path.delimiter}${scriptStubDir()}${path.delimiter}/usr/bin:/bin`,
         HERDR_CONFIG_PATH: configPath,
       },
     });
@@ -512,7 +569,7 @@ describe('install-herdr script', () => {
     expect(result.stdout).toContain('reload');
   });
 
-  it('reloads config even when the keybinding already exists', () => {
+  itScript('reloads config even when the keybinding already exists', () => {
     // AC: re-running the installer makes the binding active. A previous
     // installer run may have written the binding without activating it (the
     // running server keeps startup keybindings in memory), so the already
@@ -540,7 +597,7 @@ describe('install-herdr script', () => {
       encoding: 'utf8',
       env: {
         ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}/usr/bin:/bin`,
+        PATH: `${fakeBinDir}${path.delimiter}${scriptStubDir()}${path.delimiter}/usr/bin:/bin`,
         HERDR_CONFIG_PATH: configPath,
       },
     });
@@ -553,7 +610,7 @@ describe('install-herdr script', () => {
     expect(log).toContain('server reload-config');
   });
 
-  it('exits 0 even when `herdr server reload-config` fails', () => {
+  itScript('exits 0 even when `herdr server reload-config` fails', () => {
     // Best-effort reload: if the herdr server is not running or reload
     // fails for any reason, the script must still succeed.
     const tempBase = makeTempDir('worklog-herdr-reload-fail-');
@@ -575,12 +632,75 @@ describe('install-herdr script', () => {
       encoding: 'utf8',
       env: {
         ...process.env,
-        PATH: `${fakeBinDir}${path.delimiter}/usr/bin:/bin`,
+        PATH: `${fakeBinDir}${path.delimiter}${scriptStubDir()}${path.delimiter}/usr/bin:/bin`,
         HERDR_CONFIG_PATH: configPath,
       },
     });
     // Script must exit 0 despite reload failure.
     expect(result.status).toBe(0);
+    expect(fs.existsSync(configPath)).toBe(true);
+  });
+
+  itScript('intercepts the dependency install with a stub from a main checkout (hermetic)', () => {
+    // WL-0MVWL88MO002SQ2B: a real `npm ci` in this suite is both slow under
+    // load (the flake's root cause) and destructive (npm deletes
+    // node_modules first). Running the installer from a MAIN checkout — as CI
+    // and a plain `npm test` do — still reaches the install step, so the test
+    // environment must intercept it. This test fails loudly if the stub wiring
+    // regresses and a real install would happen again.
+    const tempBase = makeTempDir('worklog-herdr-install-stub-');
+    const repoDir = path.join(tempBase, 'repo');
+    const herdrDir = path.join(repoDir, 'packages', 'herdr');
+    fs.mkdirSync(path.join(repoDir, 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(herdrDir, 'node_modules'), { recursive: true });
+
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    fs.copyFileSync(
+      path.join(repoRoot, 'scripts', 'install-herdr.sh'),
+      path.join(repoDir, 'scripts', 'install-herdr.sh'),
+    );
+    fs.writeFileSync(
+      path.join(herdrDir, 'package.json'),
+      JSON.stringify({ name: '@worklog/herdr-plugin', version: '0.1.0', private: true }),
+    );
+    // A lockfile means the installer chooses `npm ci`.
+    fs.writeFileSync(
+      path.join(herdrDir, 'package-lock.json'),
+      JSON.stringify({ lockfileVersion: 3 }),
+    );
+    fs.writeFileSync(path.join(herdrDir, 'herdr-plugin.toml'), 'id = "worklog-selection-list"\n');
+    // A real `npm ci` deletes node_modules; this marker must survive.
+    const markerPath = path.join(herdrDir, 'node_modules', 'installed.txt');
+    fs.writeFileSync(markerPath, 'installed\n');
+
+    const gitBin = realGitBin();
+    git(gitBin, ['init', '-q', repoDir], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'config', 'user.email', 'test@example.com'], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'config', 'user.name', 'Worklog Test'], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'add', '-A'], tempBase, tempBase);
+    git(gitBin, ['-C', repoDir, 'commit', '-q', '-m', 'init'], tempBase, tempBase);
+
+    const installsBefore = npmInvocations().length;
+    const configPath = path.join(tempBase, 'herdr', 'config.toml');
+    // Run from the fixture's own checkout: the script's main-checkout
+    // resolution keeps REPO_ROOT here, so this is the install path, not the
+    // linked-worktree skip path.
+    const result = spawnSync('bash', [path.join(repoDir, 'scripts', 'install-herdr.sh')], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${scriptStubDir()}${path.delimiter}/usr/bin:/bin`,
+        HERDR_CONFIG_PATH: configPath,
+      },
+    });
+    expect(result.status, `script failed: ${result.stderr}`).toBe(0);
+
+    // The stub — not a real npm — served the install.
+    const installs = npmInvocations().slice(installsBefore);
+    expect(installs.some((line) => line.includes('ci --prefix'))).toBe(true);
+    // …and nothing was actually installed or wiped.
+    expect(fs.readFileSync(markerPath, 'utf8')).toBe('installed\n');
     expect(fs.existsSync(configPath)).toBe(true);
   });
 

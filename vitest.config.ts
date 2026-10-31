@@ -5,6 +5,8 @@ export default defineConfig({
     // Increase default timeout to reduce intermittent test timeouts in CI.
     // Tests that spawn tsx subprocesses should set explicit per-test timeouts
     // (45-60s) since subprocess startup is slow under concurrent load.
+    // (e.g. tests/scripts/install-herdr.test.ts -> 60s via its itScript
+    // helper, plus hermetic npm/node stubs — WL-0MVWL88MO002SQ2B.)
     testTimeout: 30000,
     // Hook timeout must match the test budget. Several suites set up real git
     // remotes and bare repositories in `beforeEach` (sync-concurrent,

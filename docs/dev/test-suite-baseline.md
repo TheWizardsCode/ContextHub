@@ -1034,6 +1034,59 @@ npx tsx bench/inproc-harness-profile.ts --runs 3 --scenarios list-json,status \
 Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
 `--out <path>`, `--no-write`, `--json`, `--keep`, `--update-budget`.
 
+## install-herdr script tests: hermetic install + explicit timeout (WL-0MVWL88MO002SQ2B)
+
+### Failure mode
+
+The install-herdr tests spawn `scripts/install-herdr.sh`. Step 0 of that
+script installs `packages/herdr`'s dependencies (`npm ci`). When a test ran
+from a linked git worktree the script resolved `REPO_ROOT` to the **main
+checkout** (first `git worktree list --porcelain` entry —
+WL-0MSRG481O007QVEA) and that checkout's `packages/herdr/node_modules` is
+symlinked into the worktree by `implement.py`, so the install was shared with
+every concurrent agent build. Under heavy host load (load average 30–43, ~41
+concurrent `run_tests` waiters) that install alone exceeded vitest's 30 s
+default `testTimeout` (`Test timed out in 30000ms` in
+`tests/scripts/install-herdr.test.ts`); the same test passed on the next
+fresh full-suite run. Triage determination: **flaky**, load-induced — not a
+product regression.
+
+WL-0MVWJ4IKT005SAHT then removed the shared-tree damage on the worktree path
+(a linked-worktree build **skips** the install and reuses the main checkout's
+`node_modules`, repairing the `@worklog/shared` link instead). That fixes the
+worst case but not the test-level exposure: a main-checkout run (CI, a plain
+`npm test`) still performs a real install inside the test.
+
+### Remediation (stub + explicit timeout)
+
+- **Hermetic `npm`/`node` stubs.** The test file prepends a per-file stub
+directory (`worklog-herdr-stub-*`) to the PATH of every spawn it controls.
+Stub `npm` records its invocation and exits 0; stub `node` exits 0 (so
+`link-shared.mjs` never rewrites the executing checkout). No real install and
+no workspace-link rewrite happens during these tests, whichever checkout the
+suite runs in.
+- **Explicit per-test timeout.** Every test in the file runs through
+  `itScript(...)` with the 60 s budget (the 45–60 s window
+  `vitest.config.ts` prescribes for subprocess tests), as a safety net for the
+  real-`git` worktree fixtures and for host-load spikes.
+- **Regression guard.** `intercepts the dependency install with a stub from a
+  main checkout (hermetic)` runs the installer from a fixture main checkout
+  (the path that still reaches the install step) and asserts the stub served
+  `npm ci` and that `node_modules` was not wiped. Dropping the stub from the
+  test PATH fails that test instead of silently restoring a real install.
+
+The two upstream worktree fixtures (plugin-link target, worktree install skip)
+build their own PATHs on purpose — they assert the script's real behaviour with
+real `git` and fake `npm`/`herdr`, so the stub does not apply to them.
+
+### Reproduce
+
+```bash
+# the specific test that flaked (vitest worker, not pytest)
+npx vitest run tests/scripts/install-herdr.test.ts \
+  -t 'migrates a legacy open-worklist binding in-place to the new action'
+```
+
 ## Related
 
 - Parent epic: WL-0MV28X3BT0079JM3 — Deduplicate legacy `test/` vs `tests/`
@@ -1067,3 +1120,6 @@ Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
   [Re-scope decision: no harness reuse](#re-scope-decision-no-harness-reuse-wl-0mvvxg4b200968bf)
 - Harness per-call cost budget guard (ratchet): WL-0MVVXG3UW00250V5 — see
   [Budget guard: harness per-call cost is ratcheted](#budget-guard-harness-per-call-cost-is-ratcheted-wl-0mvwxg3uw00250v5)
+- install-herdr test hermeticity + explicit per-test timeout (load-induced
+  30 s timeout): WL-0MVWL88MO002SQ2B — see
+  [install-herdr script tests: hermetic install + explicit timeout](#install-herdr-script-tests-hermetic-install--explicit-timeout-wl-0mvwl88mo002sq2b)
