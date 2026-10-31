@@ -133,6 +133,17 @@ export const HYDRATOR_STEP_TIMEOUT_MS = 5_000;
 export const HYDRATOR_EXEC_TIMEOUT_MS = 10_000;
 
 /**
+ * Hard-kill bound for the best-effort release audit comment spawn (ms).
+ *
+ * The comment is a tolerated side effect of a demotion that has ALREADY been
+ * persisted (WL-0MVWDB7F2003SORI): a hung/slow `wl comment add` must fail as a
+ * logged error, never trip the `demotion-apply` step budget and abort the
+ * cycle. The bound is therefore below `HYDRATOR_STEP_TIMEOUT_MS`, so the exec
+ * child is killed and the rejection is caught inside `applyDemotion`.
+ */
+export const HYDRATOR_RELEASE_COMMENT_TIMEOUT_MS = 2_000;
+
+/**
  * Default cap on candidates processed per hydrate tick. Bounds the number
  * of sequential CLI spawns so a large queue cannot make one run unbounded;
  * the remainder is deferred to the next 30 s tick (WL-0MUY1CYV6008BQWX).
@@ -165,6 +176,8 @@ const TERMINAL_DEP_STAGES = new Set(['in_review', 'done']);
 
 /** File name of the hydrator diagnostic log inside `.worklog/logs/`. */
 export const HYDRATOR_LOG_FILE = 'hydrator.log';
+/** Author recorded on every hydrator release audit comment. */
+export const HYDRATOR_COMMENT_AUTHOR = 'herdr-hydrator';
 /** Rolling bound: keep at most this many lines in the hydrator log. */
 export const HYDRATOR_LOG_MAX_LINES = 200;
 
@@ -176,6 +189,27 @@ export interface HydratorItem {
   title?: string;
   status?: string;
   stage?: string;
+  /**
+   * Current assignee. A non-empty value is the scheduling hold
+   * (WL-0MV85WDOM007BKF8), so a release must clear it and name the previous
+   * holder in the audit comment (WL-0MVWDB7F2003SORI).
+   */
+  assignee?: string;
+}
+
+/**
+ * Extra context for a demotion write (WL-0MVWDB7F2003SORI).
+ *
+ * A release must clear the scheduling hold (`--assignee ""`), guard that
+ * clear with a CAS on the holder it observed (`--if-assignee <prev>`) so a
+ * concurrent assignee change is never clobbered, and record who held the item
+ * so the release is explicable from the item alone.
+ */
+export interface DemotionOptions {
+  /** The holder observed this cycle; empty/absent ⇒ no `--if-assignee` guard. */
+  previousAssignee?: string;
+  /** Human-readable deciding signal, used in the release audit comment. */
+  reason?: string;
 }
 
 /** The subset of a `herdr pane list` entry the hydrator needs. */
@@ -269,8 +303,22 @@ export interface HydratorDeps {
   hasLiveClaimHolder?: (
     itemIds: string[],
   ) => Promise<Map<string, ClaimHolderVerdict>>;
-  /** Apply a demotion via `wl update`; true when it was persisted. */
-  applyDemotion: (itemId: string, status: string, stage: string) => Promise<boolean>;
+  /**
+   * Apply a demotion via `wl update`; true when it was persisted.
+   *
+   * Production wiring also clears the scheduling hold (`--assignee ""`, CAS
+   * guarded by `--if-assignee <previous>`) and writes the release audit
+   * comment naming the deciding signal and the previous holder
+   * (WL-0MVWDB7F2003SORI). A failed comment is logged and never fails the
+   * demotion — the `[hydrator] released` log line stays the primary local
+   * trail.
+   */
+  applyDemotion: (
+    itemId: string,
+    status: string,
+    stage: string,
+    opts?: DemotionOptions,
+  ) => Promise<boolean>;
   /** Optional diagnostic log sink. */
   log?: (message: string) => void;
   /** Injectable monotonic clock (ms) for deterministic per-step timing. */
@@ -513,6 +561,31 @@ export function compatibleStage(stage: string, status: string): string {
   if (allowed.includes('plan_complete')) return 'plan_complete';
   if (allowed.includes('idea')) return 'idea';
   return allowed[0] ?? stage;
+}
+
+/**
+ * Build the body of a release audit comment (WL-0MVWDB7F2003SORI).
+ *
+ * Names the deciding signal and the previous holder so the release is
+ * explicable from the item alone, e.g.
+ * `released because no pane and claim holder dead; previous assignee: implement`.
+ * An item with no holder records `previous assignee: (none)` — never an
+ * ambiguous empty suffix.
+ *
+ * @param reason            The deciding signal (e.g. `released because no
+ *                          matching pane`).
+ * @param previousAssignee  The holder observed this cycle, if any.
+ */
+export function buildReleaseComment(
+  reason: string,
+  previousAssignee?: string,
+): string {
+  const holder =
+    typeof previousAssignee === 'string' && previousAssignee.length > 0
+      ? previousAssignee
+      : '(none)';
+  const signal = reason.length > 0 ? reason : 'released';
+  return `${signal}; previous assignee: ${holder}`;
 }
 
 /**
@@ -859,12 +932,27 @@ export async function runHydrationOnce(
       continue;
     }
 
+    // Deciding signal for this release, named identically in the audit
+    // comment and the local log line. The pane is absent by definition (a
+    // matching pane returns `null` above); the claim holder is the second,
+    // mechanically verifiable signal (WL-0MVWDB3IG004NRIU).
+    const verdict = claimByItem?.get(item.id);
+    const deadClaimHolder =
+      verdict !== undefined && !verdict.held && verdict.reason === 'stale';
+    const releaseReason = deadClaimHolder
+      ? 'released because no pane and claim holder dead'
+      : 'released because no matching pane';
+
     const applyStep = await runStep(
       'demotion-apply',
       stepTimeoutMs,
       now,
       log,
-      () => deps.applyDemotion(item.id, decision.status, decision.stage),
+      () =>
+        deps.applyDemotion(item.id, decision.status, decision.stage, {
+          previousAssignee: item.assignee,
+          reason: releaseReason,
+        }),
     );
     if (applyStep.status === 'timeout') {
       return {
@@ -877,18 +965,9 @@ export async function runHydrationOnce(
     }
     if (applyStep.status === 'ok' && applyStep.value === true) {
       demoted += 1;
-      const verdict = claimByItem?.get(item.id);
-      if (verdict !== undefined && !verdict.held && verdict.reason === 'stale') {
-        // Deciding signal: the pane is absent AND the recorded claim holder
-        // is provably dead — the stale-lock release (WL-0MVWDB3IG004NRIU).
-        log(
-          `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (no pane, claim holder dead)`,
-        );
-      } else {
-        log(
-          `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (no matching pane)`,
-        );
-      }
+      log(
+        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (${deadClaimHolder ? 'no pane, claim holder dead' : 'no matching pane'})`,
+      );
     } else {
       skipped += 1;
       log(`[hydrator] demotion failed for ${item.id} (left unchanged)`);
@@ -911,6 +990,7 @@ function normaliseItem(raw: unknown): HydratorItem | null {
     title: typeof o.title === 'string' ? o.title : undefined,
     status: typeof o.status === 'string' ? o.status : undefined,
     stage: typeof o.stage === 'string' ? o.stage : undefined,
+    assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
   };
 }
 
@@ -1139,14 +1219,70 @@ export function createProductionHydratorDeps(
     hasLiveClaimHolder: async (itemIds: string[]) =>
       probeClaimHolders(itemIds, { worklogDir }),
 
-    applyDemotion: async (itemId: string, status: string, stage: string) => {
+    // WL-0MVWDB7F2003SORI: a release must also clear the scheduling hold and
+    // record who held the item. The `--assignee ""` clear is CAS-guarded by
+    // `--if-assignee <previous>` whenever a holder was observed, mirroring
+    // `rollbackClaimWorkItem()` (fetcher.ts): a concurrent assignee change
+    // makes the demotion stale instead of clobbering the new holder. With no
+    // observed holder there is nothing to guard — `--assignee ""` alone is
+    // idempotent. The audit comment is best-effort: a comment failure is
+    // logged and never fails the demotion (the `[hydrator] released` log line
+    // remains the primary local trail).
+    applyDemotion: async (
+      itemId: string,
+      status: string,
+      stage: string,
+      opts: DemotionOptions = {},
+    ) => {
+      const args = [
+        'update',
+        itemId,
+        '--status',
+        status,
+        '--stage',
+        stage,
+        '--assignee',
+        '',
+      ];
+      const previousAssignee = opts.previousAssignee;
+      if (typeof previousAssignee === 'string' && previousAssignee.length > 0) {
+        args.push('--if-assignee', previousAssignee);
+      }
+      args.push('--json');
       const { stdout } = await getExecFileAsync()(
         'wl',
-        buildWlArgs(['update', itemId, '--status', status, '--stage', stage, '--json']),
+        buildWlArgs(args),
         hydratorExecOptions(),
       );
       const payload = extractJson(stdout) as { success?: boolean } | null;
-      return payload?.success === true;
+      if (payload?.success !== true) return false;
+
+      try {
+        await getExecFileAsync()(
+          'wl',
+          buildWlArgs([
+            'comment',
+            'add',
+            itemId,
+            '--comment',
+            buildReleaseComment(opts.reason ?? 'released', previousAssignee),
+            '--author',
+            HYDRATOR_COMMENT_AUTHOR,
+            '--json',
+          ]),
+          {
+            ...hydratorExecOptions(),
+            timeout: HYDRATOR_RELEASE_COMMENT_TIMEOUT_MS,
+          },
+        );
+      } catch (err) {
+        log(
+          `[hydrator] release comment failed for ${itemId} (demotion stands): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      return true;
     },
 
     log,
