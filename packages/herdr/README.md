@@ -638,8 +638,10 @@ pacing* below).
   entry, and it is NOT reported as capacity starvation. `0` disables the
   gate (default: `75`, clamped to 0 – 100; re-read live on every dispatch
   tick). See the *Host-CPU dispatch gate* bullet above
-- `downtimeLeafAuditImmediate` — **Opt-in, default `false`.** A leaf audit
-  candidate (an item with no children) normally waits until the same free
+- `downtimeLeafAuditImmediate` — **Opt-in, default `false`** (see
+  *Leaf-aware audit minimum* above for the leaf/parent slot difference and
+  the pinned tick admission). A leaf audit candidate (an item with no
+  children) normally waits until the same free
   slot has been continuously free for the full `downtimeIdleThresholdMs`
   before it is dispatched on that single slot. Setting this `true` lets a
   positively classified leaf audit dispatch on **one trusted free unowned
@@ -900,11 +902,51 @@ need **≥ 1 free slot**. An unmet minimum skips that tier to the next
 eligible one — an ineligible skip, never a three-strike error and never an
 empty-backlog cooldown (mirrors the code-freeze skip).
 
+**Leaf-aware audit minimum (parent WL-0MSORQ8Y4004YT63, leaf = 1 slot,
+parent = `DOWNTIME_AUDIT_MIN_FREE_SLOTS`).** The audit tier's slot
+requirement now depends on the candidate's **scope**: a **leaf** (an item
+with **no children**) is audited by a single Pi session, so one free slot
+suffices — `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS` (shipped default `1`); a
+**parent** (≥ 1 child, the audit's Phase 2 fan-out) still needs the full
+`DOWNTIME_AUDIT_MIN_FREE_SLOTS` (shipped default `2`). The scope comes from
+`wl show <id> --children --json` (`getAuditCandidateScope`) classified by
+`classifyAuditScope` — **fail-closed** (parent AC1): only an explicit,
+trusted `'leaf'` relaxes the gate; a `parent`, or any untrustworthy lookup
+(`{ok:false}` result, timeout, missing/malformed `children` payload,
+non-root candidate, or a missing scope dependency) keeps the parent
+minimum, so an unreadable children query can never loosen dispatch.
+The lookup runs **only** inside the leaf band (`isLeafAuditSlotBand`,
+`DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS <= freeSlots <
+DOWNTIME_AUDIT_MIN_FREE_SLOTS` — with the shipped constants exactly one
+free slot): at/above the parent minimum the gate is satisfied with **no**
+extra `wl` call (AC1), and below the leaf minimum no audit can run. The
+same per-item gate (`auditItemEligible`) is the single definition shared
+by every selection path — the Herdr-head filter, the critical-first scan
+and the legacy tier chain agree on the decision for a given
+candidate/free-slot pair (AC3). In the leaf band the tick then waits for
+that single slot to be continuously free for the full idle threshold and
+admits ONE pinned leaf audit (`leaf-audit-admission`), reserving the slot
+for that item alone (pin reason `leaf-audit-pin-hold`, a neutral skip —
+never `no-candidate`) — the band → scope lookup → pin admission sequence
+and its coordination-path twin are documented in
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#leaf-aware-audit-dispatch-parent-wl-0msorq8y4004yt63).
+
+**Per-slot identity dependency (now met).** The leaf allowance and the
+tick's "same N slots continuously free" guarantee both consume the per-slot
+detail `slots: [{slot_id, is_processing}]` served by the proxy — the
+proxy-side dependency LP-0MSORPUMX002LLIA is **resolved**: herdr trusts
+the per-slot payload per the fail-closed contract WL-0MUXVPXAZ005RESW, and
+same-slot stability is guaranteed by the existing per-slot idle tracker
+(WL-0MSG7P9N8009PCKG). See the *Opt-in race-accepting toggle* setting for
+the documented exception to the idle-threshold wait.
+
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --root-only
 --json` and selects the first completed/in_review **root** item (no parent —
 child/sub-task items are excluded server-side by `--root-only`, so only
-parent items are ever dispatched for audit; WL-0MSTLFW14000KPEC) **without**
+**root** items are ever dispatched for audit; WL-0MSTLFW14000KPEC — a root
+item with **no children** is a *leaf* and dispatches on the single-slot
+leaf minimum, see *Leaf-aware audit minimum* above) **without**
 a valid audit that was
 **modified within the last 7 days** (`updatedAt` recency window; a candidate
 with a missing `updatedAt` is still selected — recency cannot be verified —

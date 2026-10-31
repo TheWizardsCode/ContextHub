@@ -2114,6 +2114,128 @@ WL-0MVG4FF9200346NR the canonical gate is the `tests/` umbrella command, which
 covers every `tests/` file but still not `packages/` — see the coverage table
 in `docs/dev/test-suite-baseline.md`.)
 
+### Leaf-aware audit dispatch (parent WL-0MSORQ8Y4004YT63)
+
+**What changed.** The audit tier's slot requirement used to be a single
+number: ≥ `DOWNTIME_AUDIT_MIN_FREE_SLOTS` (= 2) free slots, because a parent
+audit's Phase 2 fan-out (parent pane + one child at
+`AUDIT_PHASE2_PARALLELISM=1`) needs two local slots. But most audit
+candidates are **leaf** items (no children) whose audit is a single Pi
+session needing exactly **one** slot. Leaf-aware dispatch makes the audit
+minimum per-**candidate**: `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS` (= 1) for a
+trusted leaf, the unchanged `DOWNTIME_AUDIT_MIN_FREE_SLOTS` (= 2) for a
+parent — so a pool with only one spare slot can still run leaf audits.
+
+**Admission sequence (band → scope lookup → pin).** A leaf audit can only
+dispatch through the leaf slot band:
+
+1. **Band detection** — `isLeafAuditSlotBand(freeSlots)`: the tick is in the
+   band when `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS <= freeSlots <
+   DOWNTIME_AUDIT_MIN_FREE_SLOTS` (with the shipped constants exactly one
+   free slot). At/above the parent minimum every audit candidate is
+   admissible **without** a scope lookup (AC1: zero extra `wl` calls in the
+   normal case); below the leaf minimum no audit can run.
+2. **Scope lookup** — only inside the band the worker classifies the
+   candidate via `getAuditCandidateScope` (`wl show <id> --children
+   --json`) → `classifyAuditScope`. **Fail-closed (AC1/AC2):** anything
+   other than an explicit, trusted `'leaf'` — `{ok:false}`, a missing
+   `scope`, an unexpected token, a thrown/absent lookup, a
+   `needsProducerReview` candidate, or a non-root candidate — is a
+   `'parent'`, restoring the full `DOWNTIME_AUDIT_MIN_FREE_SLOTS` gate. The
+   same per-item predicate `auditItemEligible` is the single definition the
+   Herdr-head filter, the critical-first scan and the legacy tier chain
+   share, so every path decides identically for the same
+   candidate/free-slot pair (AC3).
+3. **Pin** — a positively classified leaf in the band still has to wait
+   for the **same single slot** to be continuously free for the full idle
+   threshold (per-slot identity, WL-0MSG7P9N8009PCKG), then the tick
+   admits the band as a **pin** (`probeLeafAuditAdmission` →
+   `LeafAuditAdmission` → `ctx.leafAuditAdmission` →
+   `pinnedAuditItemId`). The pin reserves the relaxed slot for THAT item
+   alone (`auditPinAdmits`): every non-audit tier is ineligible
+   (implement/plan/intake, critical, scheduled prompts, stalled-resume),
+   and the audit tier admits no other candidate. A relaxed tick whose
+   pinned item cannot dispatch ends neutrally (`LEAF_AUDIT_PIN_HOLD_REASON`,
+   header token `leaf-audit-pin-hold`) — never `no-candidate`, so no
+   no-candidate cooldown and no strike.
+
+   Only the **threshold-tracker** branch relaxes on this path: the
+   proxy-idle-age branch (`local_idle_seconds`) deliberately keeps the
+   configured capacity. The opt-in `downtimeLeafAuditImmediate` toggle is
+   the documented exception (see the next subsection).
+
+**Coordination path (leader) — identical semantics, offered pin.** The
+leader dispatches from the shared coordination offer file, so its relaxed
+slot must be pinned to an item that is actually **offered**
+(WL-0MVV1F130009VZ1P). `probeCoordinationLeafAuditAdmission` scans the
+offers in file order with the leader's own dispatch-time re-validation
+seams (`fetchItem` → `classifyItemForDispatchDetail` → active-audit
+single-flight → `getAuditCandidateScope` → `classifyAuditScope`) and
+admits the first offer that is an eligible root audit candidate with a
+trusted `'leaf'` scope. No new ranking, no second eligibility definition.
+**Parity requirement:** for an identical payload/candidate set the direct
+and coordination paths must decide identically — same classifier, same
+single-flight, same scope lookup, same pin — and emit the same
+`leaf-audit-admission` evidence. Pinned by the *parity — the direct and
+coordination paths decide identically* group and *records the same
+`leaf-audit-admission` evidence as the direct path* in
+`coordination-dispatch.test.ts`.
+
+**Fail-closed rules (never relax past a refusal).** The band admission and
+both per-item gates return `false`/no-admission — restoring today's
+behaviour exactly — for every case below; each is also pinned in
+`downtime-worker.leaf-audit.test.ts`:
+
+| Case | Outcome |
+| --- | --- |
+| `freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS` | eligible, **no** scope lookup (AC1) |
+| `freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS` | ineligible, no lookup |
+| leaf band, trusted `'leaf'` scope | eligible via the band |
+| leaf band, `'parent'` scope | skipped (fail-closed; `audit-tier-budget-skipped` token) |
+| leaf band, `{ok:false}`/thrown/absent scope lookup | skipped (fail-closed — treated as parent) |
+| active audit in flight (single-flight) | no admission |
+| live contention / prefill-gate waiters / prefill pacing deferral | no admission |
+| `needsProducerReview === true` candidate | no admission (never relax a budget-exhausted item) |
+
+**Decision-log tokens.** The relaxed band emits **non-blocking**
+observations (never a blocking header token, never a strike):
+
+| Token | Meaning | Key fields |
+| --- | --- | --- |
+| `leaf-audit-admission` | The tick relaxed its required-free-slots gate for ONE pinned leaf audit. | `freeSlots`, `thresholdMetCount`, `requiredFreeSlots`, `leafAuditItemId`, `leafAuditScope: 'leaf'`, `leafAuditImmediate` |
+| `audit-tier-budget-skipped` | The audit tier was skipped for a slot-budget reason — in the leaf band because the only candidate is a `parent`/unclassifiable (the audit tier's 2-slot minimum is exactly why). | `skippedTier: 'audit'`, plus the same slot/threshold fields and `leafAuditItemId` / `leafAuditScope` |
+
+Both tokens are emitted on **both** the direct and the coordination path;
+the coordination path additionally attributes per-offer rejections with the
+`audit-slot-min` gate on the terminal decision entry (see *Empty-offer &
+skipped-tier attribution*).
+
+**Dependency status.** The per-slot identity dependency LP-0MSORPUMX002LLIA
+is **resolved** — the proxy serves `slots: [{slot_id, is_processing}]` and
+herdr trusts that payload per the fail-closed contract WL-0MUXVPXAZ005RESW;
+same-slot stability is guaranteed by the per-slot idle tracker
+(WL-0MSG7P9N8009PCKG) that the band evidence (`thresholdMetCount`) reads.
+
+**Tests.** `downtime-worker.leaf-audit.test.ts` pins the classifier and its
+fail-closed defaults, the leaf-band budget, `auditItemEligible` across the
+three selection paths (AC3 agreement group), the pin semantics, the tick
+admission with the single-tier pin (AC1/AC2), same-slot identity (AC5),
+the non-blocking observation tokens (AC4) and the full fail-closed matrix
+(AC3); `coordination-dispatch.test.ts` pins the leader-path probe and the
+direct/coordination parity (C5).
+
+**AC traceability (parent WL-0MSORQ8Y4004YT63).**
+
+| AC | Implementation | Pinned by |
+| --- | --- | --- |
+| AC1 children-query fetch, fail-closed | `getAuditCandidateScope` dep + `classifyAuditScope` (fail-closed `'parent'`) | `downtime-worker.leaf-audit.test.ts` (classifier + fail-closed defaults) |
+| AC2 leaf = ≥ 1 slot | `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1`, `isLeafAuditSlotBand`, `auditItemEligible` | leaf-audit tests (1-free leaf dispatch, parent/unknown skip) |
+| AC3 parent = all/2-slot gate unchanged | `DOWNTIME_AUDIT_MIN_FREE_SLOTS` unchanged; per-item gate stops doing lookups at/above it | selection-paths-agree tests |
+| AC4 same-slot stability | per-slot idle tracker (WL-0MSG7P9N8009PCKG) + band evidence | same-slot-identity worker tests |
+| AC5 opt-in race-accepting variant | `downtimeLeafAuditImmediate` (default OFF) | `settings.test.ts` + `downtime-worker.leaf-audit.test.ts` ON/OFF matrix |
+| AC6 tests | classification, fail-closed, per-slot tracker integration, toggle | the suites named above |
+| AC7 documentation | this subsection, `packages/herdr/README.md` (*Leaf-aware audit minimum*), code comments | this document |
+
 ### Leaf-audit admission: the opt-in race-accepting toggle (WL-0MVV1F1P1005PO5M)
 
 **Context.** A leaf audit candidate (an item with **no children**, classified
