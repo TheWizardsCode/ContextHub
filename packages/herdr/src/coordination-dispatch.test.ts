@@ -25,6 +25,7 @@ import {
   createDowntimeWorker,
   createDowntimePoller,
   classifyItemForDispatch,
+  dispatchDowntimeWork,
   dispatchFromCoordination,
   runCoordinationCheckIn,
   computeMostImportantItem,
@@ -38,8 +39,9 @@ import {
   type ScheduledPrompt,
 } from './downtime-worker.js';
 import { createLeaderElectionManager, LEASE_FILE } from './leader-election.js';
-import { writeDowntimeLog } from './downtime-worker.fixtures.js';
-import { readCoordinationLogEntries } from './downtime-log.js';
+import { probeCoordinationLeafAuditAdmission } from './downtime-worker.gates.js';
+import { threeSlotPoolStatus, writeDowntimeLog } from './downtime-worker.fixtures.js';
+import { readCoordinationLogEntries, type CoordinationLogEntry } from './downtime-log.js';
 import { defaultSettings } from './settings.js';
 import {
   writeCoordinationFile,
@@ -115,6 +117,10 @@ function makeCoordinationDeps(overrides: Partial<DowntimeWorkerDeps> = {}): Down
     recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
     readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
     fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-X', stage: 'idea' }) }),
+    // Active-audit single-flight (WL-0MT3PHW4I002SNOV) — also read by the
+    // leaf-band coordination probe (WL-0MVV1F130009VZ1P): no audit in flight
+    // by default so the relaxed leaf admission is reachable.
+    getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
     // Review-queue depth gate (WL-0MT2UQWOR007CYY9 / WL-0MTTSWC1X005P4VD):
     // shallow (empty) queue by default so the gate is INACTIVE and existing
     // tests dispatch implement offers unchanged.
@@ -1422,6 +1428,7 @@ function makeCoordWorker(opts: {
   depsOverrides?: Partial<DowntimeWorkerDeps>;
   pollPayloads?: Array<Record<string, unknown> | null>;
   thresholdMs?: number;
+  requiredFreeSlots?: number;
 }): { worker: DowntimeWorker; deps: DowntimeWorkerDeps } {
   const deps = makeCoordinationDeps(opts.depsOverrides);
   const fetcher = makeFetcher(opts.pollPayloads ?? [makeStatusPayload()]);
@@ -1433,7 +1440,7 @@ function makeCoordWorker(opts: {
     config: () => ({
       enabled: true,
       thresholdMs: opts.thresholdMs ?? 60_000,
-      requiredFreeSlots: 1,
+      requiredFreeSlots: opts.requiredFreeSlots ?? 1,
       model: 'plan',
       cwd: '/repo',
       noCandidateCooldownMs: 3_600_000,
@@ -3241,5 +3248,515 @@ describe('priority-aware locality preference at every dispatch path (WL-0MVNUIW7
         localPreferenceReason: 'default',
       }),
     );
+  });
+});
+
+// ── Leaf-aware audit gate on the coordination leader path (C5,
+// WL-0MVV1F130009VZ1P) ────────────────────────────────────────────────
+//
+// The leader's offer loop must apply the SAME per-item audit minimum (C3,
+// WL-0MVV1EZVB007M1LR) and the SAME relaxed-tick pin (C4,
+// WL-0MVV1F0HK009JQAP) as the direct path. These tests pin the two paths
+// together: for an identical payload/candidate set they must reach the same
+// decision (dispatch/skip + reason), attribute the same per-offer gate and
+// record the same observation token.
+
+describe('leaf-aware audit gate on the coordination leader path (WL-0MVV1F130009VZ1P)', () => {
+  /** A completed/in_review root that classifies as an audit candidate. */
+  const auditInfo = (id: string): DowntimeItemInfo =>
+    itemInfo({
+      id,
+      status: 'completed',
+      stage: 'in_review',
+      updatedAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+  /** The same audit candidate once it is a Herdr-list head item. */
+  const auditHead = (id: string): DowntimeHerdrItem =>
+    headItem({
+      id,
+      status: 'completed',
+      stage: 'in_review',
+      updatedAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+  const planInfo = (id: string): DowntimeItemInfo =>
+    itemInfo({ id, status: 'open', stage: 'intake_complete' });
+  const planHead = (id: string): DowntimeHerdrItem =>
+    headItem({ id, status: 'open', stage: 'intake_complete' });
+
+  // ── C3: the per-item leaf-aware minimum on the offer loop ──────────
+
+  describe('C3 — per-item leaf-aware audit minimum on the offer loop', () => {
+    it('dispatches a LEAF audit offer with only a single free slot', async () => {
+      const deps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-LEAF') }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+      });
+      const entries = [makeEntry('inst-a', 'WL-LEAF', '/roots/a')];
+
+      const outcome = await dispatchFromCoordination(deps, entries, {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        freeSlots: 1,
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('audit');
+      expect(outcome.candidate?.id).toBe('WL-LEAF');
+      expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain(
+        '/skill:audit WL-LEAF',
+      );
+    });
+
+    it('still skips a PARENT audit offer in the leaf band (fail-closed)', async () => {
+      const deps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-PARENT') }),
+        // The neutral default is `parent`; asserted explicitly for clarity.
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+      });
+      const entries = [makeEntry('inst-a', 'WL-PARENT', '/roots/a')];
+
+      const outcome = await dispatchFromCoordination(deps, entries, {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        freeSlots: 1,
+      });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+      expect(outcome.offerRejections).toEqual([
+        { workItemId: 'WL-PARENT', worklogRoot: '/roots/a', gate: 'audit-slot-min' },
+      ]);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Parity: identical payload/candidate set, identical decision ─────
+
+  describe('parity — the direct and coordination paths decide identically', () => {
+    /** The decision facets the two paths must agree on. */
+    const decision = (outcome: {
+      dispatched: boolean;
+      kind?: string;
+      reason?: string;
+      candidate?: { id: string };
+    }): { dispatched: boolean; kind?: string; reason?: string; itemId?: string } => ({
+      dispatched: outcome.dispatched,
+      ...(outcome.kind !== undefined ? { kind: outcome.kind } : {}),
+      ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+      ...(outcome.candidate !== undefined ? { itemId: outcome.candidate.id } : {}),
+    });
+
+    it('leaf audit with 1 free slot: both dispatch the same audit candidate', async () => {
+      const directDeps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditHead('WL-LEAF')] }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+      });
+      const coordDeps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-LEAF') }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+      });
+
+      const direct = await dispatchDowntimeWork(directDeps, {
+        model: 'plan',
+        cwd: '/repo',
+        freeSlots: 1,
+      });
+      const coordination = await dispatchFromCoordination(
+        coordDeps,
+        [makeEntry('inst-a', 'WL-LEAF', '/roots/a')],
+        { model: 'plan', cwd: '/repo', coordinationDir: testDir, freeSlots: 1 },
+      );
+
+      expect(decision(direct)).toEqual({ dispatched: true, kind: 'audit', itemId: 'WL-LEAF' });
+      // The parity assertion: identical payload/candidates → identical decision.
+      expect(decision(coordination)).toEqual(decision(direct));
+    });
+
+    it('parent audit with 1 free slot: both skip', async () => {
+      const directDeps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditHead('WL-PARENT')] }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+      });
+      const coordDeps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-PARENT') }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+      });
+
+      const direct = await dispatchDowntimeWork(directDeps, {
+        model: 'plan',
+        cwd: '/repo',
+        freeSlots: 1,
+      });
+      const coordination = await dispatchFromCoordination(
+        coordDeps,
+        [makeEntry('inst-a', 'WL-PARENT', '/roots/a')],
+        { model: 'plan', cwd: '/repo', coordinationDir: testDir, freeSlots: 1 },
+      );
+
+      expect(decision(direct)).toEqual({ dispatched: false, reason: 'no-candidate' });
+      // The parity assertion: identical payload/candidates → identical decision.
+      expect(decision(coordination)).toEqual(decision(direct));
+    });
+
+    it('relaxed pin: both dispatch only the pinned audit and never the plan candidate', async () => {
+      const directDeps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [planHead('WL-PLAN'), auditHead('WL-LEAF')],
+        }),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+      });
+      const coordDeps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockImplementation(async (id: string) => ({
+          ok: true,
+          info: id === 'WL-PLAN' ? planInfo('WL-PLAN') : auditInfo('WL-LEAF'),
+        })),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+      });
+
+      const direct = await dispatchDowntimeWork(directDeps, {
+        model: 'plan',
+        cwd: '/repo',
+        freeSlots: 1,
+        pinnedAuditItemId: 'WL-LEAF',
+      });
+      const coordination = await dispatchFromCoordination(
+        coordDeps,
+        [makeEntry('inst-plan', 'WL-PLAN', '/roots/a'), makeEntry('inst-a', 'WL-LEAF', '/roots/a')],
+        {
+          model: 'plan',
+          cwd: '/repo',
+          coordinationDir: testDir,
+          freeSlots: 1,
+          pinnedAuditItemId: 'WL-LEAF',
+        },
+      );
+
+      expect(decision(direct)).toEqual({ dispatched: true, kind: 'audit', itemId: 'WL-LEAF' });
+      // The parity assertion: identical payload/candidates → identical decision.
+      expect(decision(coordination)).toEqual(decision(direct));
+      // The relaxed slot never leaks to the single-pane tier on EITHER path.
+      expect(directDeps.getNextItem).not.toHaveBeenCalled();
+      expect((coordDeps.spawnAgentPane as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ── C4: the relaxed-tick pin is not leaked to single-pane tiers ─────
+
+  describe('C4 — a relaxed tick reports non-audit offers as slots-unavailable', () => {
+    it('attributes every non-pinned offer and holds the pinned slot', async () => {
+      const deps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockImplementation(async (id: string) => ({
+          ok: true,
+          info: id === 'WL-PLAN' ? planInfo('WL-PLAN') : auditInfo('WL-PARENT'),
+        })),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+      });
+      const entries = [
+        makeEntry('inst-plan', 'WL-PLAN', '/roots/a'),
+        makeEntry('inst-parent', 'WL-PARENT', '/roots/a'),
+      ];
+
+      const outcome = await dispatchFromCoordination(deps, entries, {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        freeSlots: 1,
+        pinnedAuditItemId: 'WL-LEAF',
+      });
+
+      // The relaxed budget belongs to the pinned audit item only: the plan
+      // offer is a slots-unavailable rejection, not a dispatchable candidate.
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('leaf-audit-pin-hold');
+      expect(outcome.offerRejections).toEqual([
+        { workItemId: 'WL-PLAN', worklogRoot: '/roots/a', gate: 'slots-unavailable' },
+        { workItemId: 'WL-PARENT', worklogRoot: '/roots/a', gate: 'audit-slot-min' },
+      ]);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      expect(deps.getNextItem).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Fail-closed contract of the offer peek ──────────────────────────
+
+  describe('probeCoordinationLeafAuditAdmission — fail-closed', () => {
+    const evidence = { freeSlots: 1, thresholdMetCount: 1, requiredFreeSlots: 2 };
+    const leafAudit = async () => ({ ok: true as const, info: auditInfo('WL-LEAF') });
+    const offer = { workItemId: 'WL-LEAF', worklogRoot: '/roots/a' };
+
+    it('treats an empty offer list as no candidate (no relaxation)', async () => {
+      const probe = await probeCoordinationLeafAuditAdmission(
+        { fetchItem: leafAudit, getActiveAudit: vi.fn() },
+        [],
+        evidence,
+      );
+      expect(probe).toEqual({ kind: 'no-candidate' });
+    });
+
+    it('fails closed when the item-fetch seam is unwired', async () => {
+      const probe = await probeCoordinationLeafAuditAdmission(
+        { getActiveAudit: vi.fn() },
+        [offer],
+        evidence,
+      );
+      expect(probe).toEqual({ kind: 'unavailable' });
+    });
+
+    it('fails closed when every offer fetch fails', async () => {
+      const probe = await probeCoordinationLeafAuditAdmission(
+        {
+          fetchItem: vi.fn().mockResolvedValue({ ok: false }),
+          getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+        },
+        [offer],
+        evidence,
+      );
+      expect(probe).toEqual({ kind: 'unavailable' });
+    });
+
+    it('never relaxes while an audit is already in flight', async () => {
+      const probe = await probeCoordinationLeafAuditAdmission(
+        {
+          fetchItem: leafAudit,
+          getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: true }),
+          getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+        },
+        [offer],
+        evidence,
+      );
+      expect(probe).toEqual({ kind: 'unavailable' });
+    });
+
+    it('reports a parent/unknown scope as non-leaf (budget-skip evidence)', async () => {
+      const probe = await probeCoordinationLeafAuditAdmission(
+        {
+          fetchItem: leafAudit,
+          getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+          getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: false }),
+        },
+        [offer],
+        evidence,
+      );
+      expect(probe).toEqual({ kind: 'non-leaf', itemId: 'WL-LEAF', scope: 'parent' });
+    });
+
+    it('admits a trusted leaf offer with the band evidence', async () => {
+      const probe = await probeCoordinationLeafAuditAdmission(
+        {
+          fetchItem: leafAudit,
+          getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+          getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+        },
+        [offer],
+        evidence,
+      );
+      expect(probe).toEqual({
+        kind: 'admitted',
+        admission: { itemId: 'WL-LEAF', ...evidence },
+      });
+    });
+  });
+
+  // ── AC4: the observation tokens on the coordination path ────────────
+
+  describe('AC4 — observation tokens are recorded by the coordination path', () => {
+    it('records leaf-audit-admission and dispatches the offered leaf audit', async () => {
+      // Seed the leader's own offer so its check-in re-offers the same item.
+      writeCoordinationFile(testDir, {
+        version: 1,
+        entries: [makeEntry('inst-a', 'WL-LEAF', '/repo')],
+      });
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const worker = makeCoordWorker({
+        coordinationDir: testDir,
+        instanceId: 'inst-a',
+        thresholdMs: 60_000,
+        requiredFreeSlots: 2,
+        pollPayloads: [threeSlotPoolStatus(1) as unknown as Record<string, unknown>],
+        depsOverrides: {
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditHead('WL-LEAF')] }),
+          fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-LEAF') }),
+          getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+          getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+          recordDecision,
+        },
+      });
+
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000_000);
+      try {
+        await worker.worker.tick(); // idle run starts
+        vi.setSystemTime(10_000_000 + 60_000);
+        const at = await worker.worker.tick(); // threshold met → relaxed admission
+
+        expect(at.dispatched).toBe(true);
+        expect((worker.deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain(
+          '/skill:audit WL-LEAF',
+        );
+
+        const admission = recordDecision.mock.calls
+          .map((call) => call[0] as CoordinationLogEntry)
+          .find((entry) => entry.reason === 'leaf-audit-admission');
+        expect(admission).toMatchObject({
+          reason: 'leaf-audit-admission',
+          freeSlots: 1,
+          thresholdMetCount: 1,
+          requiredFreeSlots: 2,
+          leafAuditItemId: 'WL-LEAF',
+          leafAuditScope: 'leaf',
+        });
+        expect(worker.worker.blockReason).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('records audit-tier-budget-skipped when the only offered audit is a parent', async () => {
+      writeCoordinationFile(testDir, {
+        version: 1,
+        entries: [makeEntry('inst-a', 'WL-PARENT', '/repo')],
+      });
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const worker = makeCoordWorker({
+        coordinationDir: testDir,
+        instanceId: 'inst-a',
+        thresholdMs: 60_000,
+        requiredFreeSlots: 2,
+        pollPayloads: [threeSlotPoolStatus(1) as unknown as Record<string, unknown>],
+        depsOverrides: {
+          getHerdrListHead: vi.fn().mockResolvedValue({
+            ok: true,
+            items: [auditHead('WL-PARENT')],
+          }),
+          fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-PARENT') }),
+          getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+          getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+          recordDecision,
+        },
+      });
+
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000_000);
+      try {
+        await worker.worker.tick();
+        vi.setSystemTime(10_000_000 + 60_000);
+        const at = await worker.worker.tick();
+
+        expect(at.dispatched).toBe(false);
+        expect(worker.deps.spawnAgentPane).not.toHaveBeenCalled();
+
+        const skipped = recordDecision.mock.calls
+          .map((call) => call[0] as CoordinationLogEntry)
+          .find((entry) => entry.reason === 'audit-tier-budget-skipped');
+        expect(skipped).toMatchObject({
+          reason: 'audit-tier-budget-skipped',
+          skippedTier: 'audit',
+          leafAuditItemId: 'WL-PARENT',
+          leafAuditScope: 'parent',
+        });
+        // A relaxed tick that found only a parent is NOT an admission.
+        expect(
+          recordDecision.mock.calls
+            .map((call) => call[0] as CoordinationLogEntry)
+            .some((entry) => entry.reason === 'leaf-audit-admission'),
+        ).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('records the same leaf-audit-admission evidence as the direct path', async () => {
+      // Direct path: the tick-level probe over the leader's own audit candidate.
+      const directDecision = vi.fn().mockResolvedValue(undefined);
+      const directDeps = makeCoordinationDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({
+          ok: true,
+          candidate: { id: 'WL-LEAF', title: 'Leaf', stage: 'audit' },
+        }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+        getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+        recordDecision: directDecision,
+      });
+      const directWorker = createDowntimeWorker({
+        poller: createDowntimePoller(
+          'http://localhost:8000',
+          makeFetcher([threeSlotPoolStatus(1) as unknown as Record<string, unknown>]) as never,
+          5000,
+        ),
+        deps: directDeps,
+        config: () => ({
+          enabled: true,
+          thresholdMs: 60_000,
+          requiredFreeSlots: 2,
+          model: 'plan',
+          cwd: '/repo',
+          noCandidateCooldownMs: 3_600_000,
+        }),
+      });
+
+      // Coordination path: the same payload offered through the leader file.
+      writeCoordinationFile(testDir, {
+        version: 1,
+        entries: [makeEntry('inst-a', 'WL-LEAF', '/repo')],
+      });
+      const coordDecision = vi.fn().mockResolvedValue(undefined);
+      const coordWorker = makeCoordWorker({
+        coordinationDir: testDir,
+        instanceId: 'inst-a',
+        thresholdMs: 60_000,
+        requiredFreeSlots: 2,
+        pollPayloads: [threeSlotPoolStatus(1) as unknown as Record<string, unknown>],
+        depsOverrides: {
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditHead('WL-LEAF')] }),
+          fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-LEAF') }),
+          getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+          getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+          recordDecision: coordDecision,
+        },
+      });
+
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000_000);
+      try {
+        await directWorker.tick();
+        await coordWorker.worker.tick();
+        vi.setSystemTime(10_000_000 + 60_000);
+        expect((await directWorker.tick()).dispatched).toBe(true);
+        expect((await coordWorker.worker.tick()).dispatched).toBe(true);
+
+        const pick = (calls: unknown[]): Record<string, unknown> | undefined => {
+          const entries = calls.map((call) => (call as [Record<string, unknown>])[0]);
+          const admission = entries.find((entry) => entry.reason === 'leaf-audit-admission');
+          if (admission === undefined) return undefined;
+          const {
+            reason,
+            freeSlots,
+            thresholdMetCount,
+            requiredFreeSlots,
+            leafAuditItemId,
+            leafAuditScope,
+          } = admission;
+          return {
+            reason,
+            freeSlots,
+            thresholdMetCount,
+            requiredFreeSlots,
+            leafAuditItemId,
+            leafAuditScope,
+          };
+        };
+
+        const direct = pick(directDecision.mock.calls);
+        const coordination = pick(coordDecision.mock.calls);
+        expect(direct).toBeDefined();
+        expect(coordination).toEqual(direct);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

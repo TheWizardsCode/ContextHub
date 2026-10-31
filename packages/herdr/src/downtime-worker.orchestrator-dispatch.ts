@@ -566,6 +566,11 @@ export async function performDispatch(
               stallScanEnabled: cfg.stallScanEnabled,
               stallScanThresholdMs: cfg.stallScanThresholdMs,
               cpuGatePercent: cfg.cpuGatePercent,
+              // Relaxed leaf-audit admission pin (C4/C5, WL-0MVV1F130009VZ1P):
+              // the SAME pin the direct path receives, so the leader's offer
+              // scan reserves the relaxed slot for that audit item and no
+              // single-pane tier can consume it.
+              ...(pinnedAuditItemId !== undefined ? { pinnedAuditItemId } : {}),
               leaseTtlMs: ctx.opts.leaseTtlSeconds
                 ? ctx.opts.leaseTtlSeconds * 1000
                 : DEFAULT_LEASE_TTL_SECONDS * 1000,

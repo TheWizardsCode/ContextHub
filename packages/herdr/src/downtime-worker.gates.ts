@@ -62,6 +62,7 @@ import type {
   DowntimeHerdrItem,
   DowntimeHerdrListResult,
   DowntimeItemInfo,
+  DowntimeItemResult,
   DowntimeNextResult,
   DowntimeSkillKind,
   InFlightPanes,
@@ -420,6 +421,113 @@ export async function probeLeafAuditAdmission(
   const scope = classifyAuditScope(result);
   if (scope !== 'leaf') return { kind: 'non-leaf', itemId: next.candidate.id, scope };
   return { kind: 'admitted', admission: { itemId: next.candidate.id, ...evidence } };
+}
+
+/**
+ * The dependency slice the COORDINATION leaf-band peek reads
+ * (WL-0MVV1F130009VZ1P). Structurally named, like {@link LeafAuditAdmissionDeps},
+ * so this module never imports the barrel.
+ */
+export interface CoordinationLeafAuditDeps {
+  /**
+   * Re-fetch one offered item in its own worklog root — the same seam the
+   * leader's dispatch-time re-validation uses. Optional: absent means the
+   * offers cannot be inspected, so the peek fails closed (`unavailable`).
+   */
+  fetchItem?(itemId: string, cwd: string): Promise<DowntimeItemResult>;
+  /**
+   * Active-audit single-flight read for an offer's root: an audit already in
+   * flight means there is no relaxed slot to hand out.
+   */
+  getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult>;
+  /** Leaf-vs-parent scope lookup (see {@link DowntimeGateDeps}). */
+  getAuditCandidateScope?(itemId: string, cwd: string): Promise<AuditCandidateScopeResult>;
+}
+
+/** The offer shape the coordination peek iterates (file order preserved). */
+export interface CoordinationOfferRef {
+  workItemId: string;
+  worklogRoot: string;
+}
+
+/**
+ * Peek the COORDINATION offer list for a relaxed leaf-audit admission
+ * (WL-0MVV1F130009VZ1P, C5 — the leader-path sibling of
+ * {@link probeLeafAuditAdmission}).
+ *
+ * The direct path peeks the single instance's own `getNextAuditCandidate`;
+ * the leader dispatches from the shared offer list, so its relaxed-tick slot
+ * must be pinned to an item that is actually OFFERED. The offers are therefore
+ * scanned in file order with the leader's own dispatch-time re-validation
+ * seams (`fetchItem` → `classifyItemForDispatchDetail`), and the first offer
+ * that is an eligible root audit candidate with a trusted `leaf` scope is
+ * admitted. No new ranking, no second eligibility definition: the same
+ * classifier and the same {@link classifyAuditScope} the dispatch loop uses.
+ *
+ * **Fail-closed** — every case restores today's behaviour (no relaxation):
+ * no usable offer → `no-candidate`; unwired `fetchItem`, a throwing/`{ok:false}`
+ * active-audit read, or every offer fetch failing → `unavailable`; a
+ * parent/unknown scope → `non-leaf` (so the tick still records the
+ * `audit-tier-budget-skipped` observation). Per-offer fetch failures are
+ * tolerated (fail-open per instance, exactly as the leader's offer loop).
+ */
+export async function probeCoordinationLeafAuditAdmission(
+  deps: CoordinationLeafAuditDeps,
+  offers: readonly CoordinationOfferRef[],
+  evidence: { freeSlots: number; thresholdMetCount: number; requiredFreeSlots: number },
+  now: number = Date.now(),
+): Promise<LeafAuditAdmissionProbe> {
+  const usable = offers.filter(
+    (offer) => offer.workItemId.length > 0 && offer.worklogRoot.length > 0,
+  );
+  if (usable.length === 0) return { kind: 'no-candidate' };
+  if (typeof deps.fetchItem !== 'function') return { kind: 'unavailable' };
+
+  let fetched = 0;
+  let nonLeaf: { itemId: string; scope: AuditScope } | null = null;
+  for (const offer of usable) {
+    let result: DowntimeItemResult;
+    try {
+      result = await deps.fetchItem(offer.workItemId, offer.worklogRoot);
+    } catch {
+      continue; // fail-open per instance, mirroring the leader's offer loop
+    }
+    if (!result.ok) continue;
+    fetched += 1;
+    // Same classifier the leader applies at dispatch time: only an eligible
+    // audit candidate can consume the relaxed slot.
+    if (classifyItemForDispatchDetail(result.info, now).kind !== 'audit') continue;
+    // Active-audit single-flight (WL-0MT3PHW4I002SNOV): an unanswerable or
+    // active read is a refusal — never relax past a running audit.
+    let active: DowntimeActiveAuditResult;
+    try {
+      active = await deps.getActiveAudit(offer.worklogRoot);
+    } catch {
+      return { kind: 'unavailable' };
+    }
+    if (!active.ok || active.active) return { kind: 'unavailable' };
+
+    let scope: AuditCandidateScopeResult | null | undefined;
+    try {
+      scope =
+        typeof deps.getAuditCandidateScope === 'function'
+          ? await deps.getAuditCandidateScope(result.info.id, offer.worklogRoot)
+          : null;
+    } catch {
+      scope = null; // fail-closed: an untrustworthy lookup is a parent
+    }
+    const classified = classifyAuditScope(scope);
+    if (classified === 'leaf') {
+      return {
+        kind: 'admitted',
+        admission: { itemId: result.info.id, ...evidence },
+      };
+    }
+    if (nonLeaf === null) nonLeaf = { itemId: result.info.id, scope: classified };
+  }
+
+  if (nonLeaf !== null) return { kind: 'non-leaf', itemId: nonLeaf.itemId, scope: nonLeaf.scope };
+  return fetched === 0 ? { kind: 'unavailable' } : { kind: 'no-candidate' };
 }
 
 /**

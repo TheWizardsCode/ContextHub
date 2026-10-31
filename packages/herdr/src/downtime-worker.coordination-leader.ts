@@ -39,8 +39,8 @@ import {
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
-  DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_PANE_MIN_FREE_SLOTS,
+  LEAF_AUDIT_PIN_HOLD_REASON,
 } from './downtime-worker.constants.js';
 import {
   dispatchClaimedTier,
@@ -54,6 +54,8 @@ import {
 } from './downtime-worker.dispatch-cpu-gate.js';
 import {
   REVIEW_QUEUE_HOLD_REASON,
+  auditItemEligible,
+  auditPinAdmits,
   classifyItemForDispatch,
   classifyItemForDispatchDetail,
   computeAuditEligibleDepth,
@@ -160,7 +162,15 @@ export async function dispatchFromCoordination(
      * default (75).
      */
     cpuGatePercent?: number;
-    /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number; /** Batch-local exclusion set: item ids already dispatched in the current audit batch (WL-0MVFE1DD8000D8T2 AC3/AC4). Never re-selected within one batch. */ auditBatchDispatchedIds?: readonly string[] },
+    /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number; /** Batch-local exclusion set: item ids already dispatched in the current audit batch (WL-0MVFE1DD8000D8T2 AC3/AC4). Never re-selected within one batch. */ auditBatchDispatchedIds?: readonly string[];
+    /**
+     * Relaxed leaf-audit admission pin (C4, WL-0MVV1F0HK009JQAP; wired to the
+     * leader by WL-0MVV1F130009VZ1P C5): the tick admitted this dispatch in the
+     * single-free-slot band for ONE classified leaf audit offer, so every
+     * non-audit offer is ineligible (`slots-unavailable`) and the audit tier
+     * admits no other candidate. `undefined` = no relaxation (unchanged).
+     */
+    pinnedAuditItemId?: string },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1–AC5):
@@ -232,7 +242,12 @@ async function dispatchFromOwnHead(
      * the own-backlog fallback and the audit-batch continuation are gated too.
      */
     cpuSaturated: boolean;
-    auditEligible: boolean;
+    /** Raw free-slot budget the per-item leaf-aware audit gate reads (C3). */
+    auditSlotBudget: number | undefined;
+    /** False when a relaxed leaf-audit pin reserves the single free slot. */
+    panesEligible: boolean;
+    /** Relaxed-tick pin (C4): only this audit item may consume the slot. */
+    pinnedAuditItemId: string | undefined;
     markerStaleWindowMs: number;
     maxAttempts: number;
     cooldownMs: number;
@@ -311,7 +326,19 @@ async function dispatchFromOwnHead(
       ctx.holds.cpu = true;
       continue;
     }
-    if (kind === 'audit' && !ctx.auditEligible) continue;
+    // Leaf-aware per-item audit minimum + relaxed-tick pin (C3/C4) — the same
+    // helpers as the offer loop above, so the own-backlog fallback and the
+    // audit-batch continuation can never dispatch a candidate the offer path
+    // would skip.
+    if (ctx.pinnedAuditItemId !== undefined && kind !== 'audit') continue;
+    if (kind !== 'audit' && !ctx.panesEligible) continue;
+    if (kind === 'audit' && !auditPinAdmits(ctx.pinnedAuditItemId, item.id)) continue;
+    if (
+      kind === 'audit' &&
+      !(await auditItemEligible(deps, item, ctx.auditSlotBudget, opts.cwd))
+    ) {
+      continue;
+    }
     if (item.priority === 'critical') {
       const guard = evaluateCriticalFirstGuard(
         item.id,
@@ -445,14 +472,22 @@ async function dispatchFromCoordinationGated(
   // The audit minimum is a SLOT-COUNT requirement (parent + Phase 2 child):
   // evaluate it against the raw slot budget, never the prefill-concurrency
   // budget (WL-0MVR8FI4Q0007CGR AC2). Single-pane tiers keep the prefill-
-  // paced budget as their >= 1 slot input.
-  const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+  // paced budget as their >= 1 slot input. The per-CANDIDATE decision is
+  // `auditItemEligible` in the offer/own-head filters below (leaf-aware,
+  // parent WL-0MSORQ8Y4004YT63 C3 — wired here by WL-0MVV1F130009VZ1P C5).
+  const auditSlotBudget = freeSlots;
+  const pinnedAuditItemId = opts.pinnedAuditItemId;
   const panesBudget = opts.effectiveFreeSlots ?? freeSlots;
+  // A relaxed leaf-audit tick (C4) reserves its single free slot for the
+  // PINNED audit item: every single-pane tier is ineligible, exactly as on
+  // the direct path, so the relaxed budget can never leak to another tier.
   const panesEligible =
-    panesBudget === undefined || panesBudget >= DOWNTIME_PANE_MIN_FREE_SLOTS;
-  if (!panesEligible) {
+    pinnedAuditItemId === undefined &&
+    (panesBudget === undefined || panesBudget >= DOWNTIME_PANE_MIN_FREE_SLOTS);
+  if (!panesEligible && pinnedAuditItemId === undefined) {
     // No slot can host a pane — nothing to dispatch (mirrors the legacy
-    // tier chain's 0-free-slots defensive no-candidate).
+    // tier chain's 0-free-slots defensive no-candidate). A relaxed pin
+    // continues to the audit-only offer scan instead.
     return withOfferRejections(
       { dispatched: false, reason: 'no-candidate' },
       rejectedOffers(entries, 'slots-unavailable'),
@@ -465,7 +500,7 @@ async function dispatchFromCoordinationGated(
   // successful resume short-circuits the cycle with the neutral
   // 'stalled-resume' reason; any failure (unwired deps, unreadable pane
   // list, resume failure) falls through to the unchanged path below.
-  {
+  if (panesEligible) {
     const resumed = await resumeStalledWorkIfAble(deps, opts.cwd, {
       enabled: opts.stallScanEnabled ?? true,
       frozen,
@@ -528,6 +563,9 @@ async function dispatchFromCoordinationGated(
   // per dispatch (AC7c).
   const maxAttempts = opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS;
   let budgetHold = false;
+  // A relaxed leaf-audit pin held at least one offer (C4/C5): the reserved
+  // slot, not an empty backlog, is why nothing dispatched.
+  let pinHeld = false;
   const flaggedForBudget = new Set<string>();
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
@@ -539,7 +577,7 @@ async function dispatchFromCoordinationGated(
   // never triggers the no-candidate cooldown (AC6). Absent or malformed
   // config resolves null (fail-closed, logged by the dep): no scheduled
   // dispatch and the tiers below are unaffected (AC2).
-  if (!frozen) {
+  if (!frozen && panesEligible) {
     const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
     if (duePrompt !== null) {
       return await dispatchScheduledPrompt(deps, duePrompt, {
@@ -680,11 +718,32 @@ async function dispatchFromCoordinationGated(
       rejectOffer(entry, worklogRoot, 'cpu-saturated');
       continue;
     }
+    // Relaxed leaf-audit tick (C4, WL-0MVV1F0HK009JQAP; leader-path wiring
+    // C5 WL-0MVV1F130009VZ1P): the tick admitted this dispatch for ONE pinned
+    // leaf audit, so no other tier may consume the relaxed slot — a non-audit
+    // offer is reported `slots-unavailable` (the token the direct path uses
+    // when its pane budget is unavailable).
+    if (pinnedAuditItemId !== undefined && kind !== 'audit') {
+      pinHeld = true;
+      rejectOffer(entry, worklogRoot, 'slots-unavailable');
+      continue;
+    }
     // Audit-tier slot minimum: an audit pane needs a second slot for its
     // Phase 2 child (WL-0MSORQ1RG005DGUS / WL-0MT32F90V008UAD2 AC3) — skip
     // the offer this cycle when too few slots are free, but KEEP it (it is
-    // still a valid offer; the next cycle may have the slot).
-    if (kind === 'audit' && !auditEligible) {
+    // still a valid offer; the next cycle may have the slot). The minimum is
+    // PER CANDIDATE (leaf-aware, parent WL-0MSORQ8Y4004YT63 AC2/AC3): in the
+    // single-free-slot band only a classified LEAF is eligible, so the leader
+    // reaches the same decision as the direct path for the same candidate.
+    if (kind === 'audit' && !auditPinAdmits(pinnedAuditItemId, result.info.id)) {
+      pinHeld = true;
+      rejectOffer(entry, worklogRoot, 'audit-slot-min');
+      continue;
+    }
+    if (
+      kind === 'audit' &&
+      !(await auditItemEligible(deps, result.info, auditSlotBudget, worklogRoot))
+    ) {
       // Budget precondition (AC3): the tick records the
       // `audit-tier-budget-skipped` observation for this same raw slot
       // budget; here we only attribute the rejected offer.
@@ -827,7 +886,9 @@ async function dispatchFromCoordinationGated(
         window: ownWindow,
         frozen,
         cpuSaturated,
-        auditEligible,
+        auditSlotBudget,
+        panesEligible,
+        pinnedAuditItemId,
         markerStaleWindowMs,
         maxAttempts,
         cooldownMs,
@@ -906,6 +967,12 @@ async function dispatchFromCoordinationGated(
             ? { dispatched: false, reason: 'attempt-budget-exhausted' }
             : inFlightHold || ownHeadHolds.inFlight
             ? { dispatched: false, reason: 'in-flight-pane' }
+            : pinHeld || pinnedAuditItemId !== undefined
+            // A relaxed leaf-audit tick reserved its single free slot for the
+            // pinned audit item: that reservation — not an empty backlog — is
+            // the reason (parity with the direct path, C4/C5). Neutral, so no
+            // no-candidate cooldown and no strike.
+            ? { dispatched: false, reason: LEAF_AUDIT_PIN_HOLD_REASON }
             : { dispatched: false, reason: 'no-candidate' };
   return withOfferRejections(terminal, offerRejections);
 }

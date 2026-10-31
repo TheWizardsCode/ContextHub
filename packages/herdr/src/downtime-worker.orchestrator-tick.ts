@@ -49,6 +49,7 @@ import {
   paneLifecycleWarn,
 } from './downtime-worker.pane.js';
 import {
+  probeCoordinationLeafAuditAdmission,
   probeLeafAuditAdmission,
   type LeafAuditAdmission,
 } from './downtime-worker.gates.js';
@@ -687,20 +688,22 @@ interface LeafAuditBandEvidence {
  * Every fail-closed case returns `null`, restoring today's behaviour exactly
  * (no admission, no relaxation): no candidate, an unanswerable
  * active-audit/candidate lookup, a `parent` or untrustworthy scope, too few
- * free slots, live contention, the prefill gate, and coordination mode (the
- * coordination leader path is a separate slice, C5 — the relaxed slot can only
- * be pinned where the dispatch call targets ONE candidate).
+ * free slots, live contention and the prefill gate.
+ *
+ * Coordination mode is peeked through the OFFER list instead
+ * (`probeCoordinationLeafAuditAdmission`, C5 WL-0MVV1F130009VZ1P): the leader
+ * dispatches from the shared offers, so the pin must name an item that is
+ * actually offered. The same decision-log tokens are emitted, and the pin is
+ * threaded into `dispatchFromCoordination`, which reserves the relaxed slot
+ * for that audit item exactly as the direct path does.
  */
 async function admitLeafAuditBand(
   ctx: OrchestratorContext,
   cfg: OrchestratorConfig,
   evidence: LeafAuditBandEvidence,
 ): Promise<LeafAuditAdmission | null> {
-  // Coordination mode: the leader dispatches from the shared offer list, so a
-  // single-candidate pin cannot be honoured here (C5 owns that path).
-  if (ctx.opts.coordinationDir !== undefined && typeof ctx.opts.deps.fetchItem === 'function') {
-    return null;
-  }
+  const coordinationMode =
+    ctx.opts.coordinationDir !== undefined && typeof ctx.opts.deps.fetchItem === 'function';
   // The band itself: only the relaxed leaf minimum is continuously free. At
   // or above the configured minimum the tick is already ready (no relaxation).
   if (evidence.thresholdMetCount < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
@@ -712,11 +715,30 @@ async function admitLeafAuditBand(
   if (evaluatePrefillPacing(evidence.status, evidence.perSlotSlots).deferReason !== undefined) {
     return null;
   }
-  const probe = await probeLeafAuditAdmission(ctx.opts.deps, cfg.cwd, {
-    freeSlots: evidence.freeSlots,
-    thresholdMetCount: evidence.thresholdMetCount,
-    requiredFreeSlots: cfg.requiredFreeSlots,
-  });
+  // Coordination mode peeks the SHARED OFFER list (never the leader's own
+  // worklog): only an offered item can be dispatched by the leader, so the
+  // relaxed slot is pinned to an offer the dispatch scan will actually see
+  // (C5 WL-0MVV1F130009VZ1P).
+  const probe = coordinationMode
+    ? await probeCoordinationLeafAuditAdmission(
+        ctx.opts.deps,
+        (readCoordinationFile(ctx.opts.coordinationDir as string)?.entries ?? []).map(
+          (entry) => ({
+            workItemId: entry.workItemId,
+            worklogRoot: entry.worklogRoot ?? entry.directory,
+          }),
+        ),
+        {
+          freeSlots: evidence.freeSlots,
+          thresholdMetCount: evidence.thresholdMetCount,
+          requiredFreeSlots: cfg.requiredFreeSlots,
+        },
+      )
+    : await probeLeafAuditAdmission(ctx.opts.deps, cfg.cwd, {
+        freeSlots: evidence.freeSlots,
+        thresholdMetCount: evidence.thresholdMetCount,
+        requiredFreeSlots: cfg.requiredFreeSlots,
+      });
   const fields = {
     freeSlots: evidence.freeSlots,
     totalSlots: evidence.status.total_slots,
