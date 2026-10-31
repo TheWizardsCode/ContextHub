@@ -340,6 +340,138 @@ describe('install-herdr script', () => {
     expect(log).not.toContain(wtDir);
   });
 
+  it('skips the dependency install in a linked worktree, leaving the @worklog/shared link live', () => {
+    // WL-0MVWJ4IKT005SAHT AC1+AC3: the /skill:implement build runs
+    // install-herdr.sh from a linked worktree. The script must NOT run
+    // `npm ci` there — the worktree's node_modules is symlinked to the main
+    // checkout's, so an install would delete the shared tree and replace
+    // the @worklog/shared workspace link with an empty real directory (the
+    // reported bug: 113 failing CLI tests whose only error was empty
+    // stdout). A worktree build reuses the main checkout's installed
+    // dependencies, and the link must still resolve to the live workspace
+    // package afterwards.
+    const tempBase = makeTempDir('worklog-herdr-wt-skip-');
+    try {
+      const repoDir = path.join(tempBase, 'repo');
+      const wtDir = path.join(tempBase, 'worktree');
+      const repoRoot = path.resolve(__dirname, '..', '..');
+
+      // Minimal repo mirroring this repository: installer, herdr package
+      // with the real link-shared.mjs, and a shared workspace package.
+      const herdrDir = path.join(repoDir, 'packages', 'herdr');
+      fs.mkdirSync(path.join(repoDir, 'scripts'), { recursive: true });
+      fs.mkdirSync(path.join(herdrDir, 'scripts'), { recursive: true });
+      fs.mkdirSync(path.join(repoDir, 'packages', 'shared', 'dist'), { recursive: true });
+      fs.copyFileSync(
+        path.join(repoRoot, 'scripts', 'install-herdr.sh'),
+        path.join(repoDir, 'scripts', 'install-herdr.sh'),
+      );
+      fs.copyFileSync(
+        path.join(repoRoot, 'packages', 'herdr', 'scripts', 'link-shared.mjs'),
+        path.join(herdrDir, 'scripts', 'link-shared.mjs'),
+      );
+      fs.writeFileSync(
+        path.join(herdrDir, 'package.json'),
+        JSON.stringify({ name: '@worklog/herdr-plugin', version: '0.1.0', private: true }),
+      );
+      // A lockfile means the installer would choose `npm ci` were it to run.
+      fs.writeFileSync(
+        path.join(herdrDir, 'package-lock.json'),
+        JSON.stringify({ lockfileVersion: 3 }),
+      );
+      fs.writeFileSync(path.join(herdrDir, 'herdr-plugin.toml'), 'id = "worklog-selection-list"\n');
+      fs.writeFileSync(
+        path.join(repoDir, 'packages', 'shared', 'package.json'),
+        JSON.stringify({ name: '@worklog/shared', version: '1.0.0' }),
+      );
+      fs.writeFileSync(
+        path.join(repoDir, 'packages', 'shared', 'dist', 'icons.js'),
+        'export const statusIcon = () => "live";\n',
+      );
+      // node_modules is gitignored in the real repo; keep the fixture hermetic.
+      fs.writeFileSync(path.join(repoDir, '.gitignore'), 'node_modules/\n');
+
+      const gitBin = realGitBin();
+      git(gitBin, ['init', '-q', repoDir], tempBase, tempBase);
+      git(gitBin, ['-C', repoDir, 'config', 'user.email', 'test@example.com'], tempBase, tempBase);
+      git(gitBin, ['-C', repoDir, 'config', 'user.name', 'Worklog Test'], tempBase, tempBase);
+      git(gitBin, ['-C', repoDir, 'add', '-A'], tempBase, tempBase);
+      git(gitBin, ['-C', repoDir, 'commit', '-q', '-m', 'init'], tempBase, tempBase);
+
+      // The MAIN checkout's @worklog/shared link is WIPED — an empty real
+      // directory, exactly the state a concurrent/unfixed `npm ci` leaves
+      // (the reported bug). The worktree build must NOT run the install and
+      // must leave the link resolving to the live workspace package again.
+      const linkPath = path.join(herdrDir, 'node_modules', '@worklog', 'shared');
+      fs.mkdirSync(linkPath, { recursive: true });
+      git(gitBin, ['-C', repoDir, 'worktree', 'add', '--detach', wtDir, 'HEAD'], tempBase, tempBase);
+
+      // The worktree's herdr node_modules is symlinked to the main
+      // checkout's, exactly as implement.py start creates it for every
+      // worktree build (SA-0MSGS763C006SM1B).
+      const wtHerdrDir = path.join(wtDir, 'packages', 'herdr');
+      fs.mkdirSync(wtHerdrDir, { recursive: true });
+      fs.symlinkSync(path.join(herdrDir, 'node_modules'), path.join(wtHerdrDir, 'node_modules'), 'dir');
+
+      // Fake npm that WOULD wipe the link (npm ci deletes node_modules
+      // first) and a fake herdr that records the manifest it links. If the
+      // script ran the install from the worktree, the npm log would be
+      // written and the link assertions below would fail.
+      const fakeBinDir = path.join(tempBase, 'bin');
+      fs.mkdirSync(fakeBinDir);
+      const npmLog = path.join(tempBase, 'npm.log');
+      const linkLog = path.join(tempBase, 'herdr-link.log');
+      fs.writeFileSync(
+        path.join(fakeBinDir, 'npm'),
+        `#!/usr/bin/env bash\necho "npm invoked" >> "${npmLog}"\nrm -rf "${linkPath}"\nmkdir -p "${linkPath}"\nexit 0\n`,
+      );
+      fs.chmodSync(path.join(fakeBinDir, 'npm'), 0o755);
+      fs.writeFileSync(
+        path.join(fakeBinDir, 'herdr'),
+        '#!/usr/bin/env bash\necho "$@" >> "' + linkLog + '"\nexit 0\n',
+      );
+      fs.chmodSync(path.join(fakeBinDir, 'herdr'), 0o755);
+
+      // Real git for the worktree resolution, fake npm/herdr for the rest,
+      // with the test-suite git mock (no `worktree list`) excluded.
+      const realGitDir = path.dirname(gitBin);
+      const mockBinDir = path.resolve(__dirname, '..', 'cli', 'mock-bin');
+      const cleanPath = (process.env.PATH ?? '')
+        .split(path.delimiter)
+        .filter((dir) => dir !== '' && path.resolve(dir) !== mockBinDir);
+      const scriptPath = `${fakeBinDir}${path.delimiter}${realGitDir}${path.delimiter}${cleanPath.join(path.delimiter)}`;
+
+      const configPath = path.join(tempBase, 'herdr', 'config.toml');
+      const result = spawnSync('bash', [path.join(wtDir, 'scripts', 'install-herdr.sh')], {
+        cwd: wtDir,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: scriptPath, HERDR_CONFIG_PATH: configPath },
+      });
+      expect(result.status, `script failed: ${result.stderr}`).toBe(0);
+
+      // AC1: npm must never have been invoked from the worktree build.
+      expect(fs.existsSync(npmLog)).toBe(false);
+
+      // AC3: the @worklog/shared link still resolves to the LIVE workspace
+      // package — in the main checkout and through the worktree's symlinked
+      // node_modules.
+      expect(fs.lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      expect(fs.realpathSync(linkPath)).toBe(path.join(repoDir, 'packages', 'shared'));
+      expect(fs.realpathSync(path.join(wtHerdrDir, 'node_modules', '@worklog', 'shared'))).toBe(
+        path.join(repoDir, 'packages', 'shared'),
+      );
+
+      // Scope note (WL-0MVWJ4IKT005SAHT): the plugin link must still target
+      // the MAIN checkout from a worktree build — never the worktree.
+      const log = fs.readFileSync(linkLog, 'utf8').trim();
+      const expectedManifest = path.join(repoDir, 'packages', 'herdr', 'herdr-plugin.toml');
+      expect(log).toContain(expectedManifest);
+      expect(log).not.toContain(wtDir);
+    } finally {
+      fs.rmSync(tempBase, { recursive: true, force: true });
+    }
+  });
+
   it('calls `herdr server reload-config` after inserting a new keybinding', () => {
     // WL-0MSHND11O007FKOU: after inserting the keybinding, the running herdr
     // server must be told to reload its config so the new binding is active

@@ -214,4 +214,89 @@ describe('install-herdr.sh links @worklog/shared (integration)', () => {
       removeTemp(root);
     }
   });
+
+  it('restores the @worklog/shared link when the install is interrupted after wiping node_modules', () => {
+    // WL-0MVWJ4IKT005SAHT AC2: npm deletes node_modules (wiping the
+    // @worklog/shared link) BEFORE it re-installs. If the installer is
+    // interrupted in that window (SIGTERM/SIGINT) it never reaches the
+    // separate link step, leaving the link wiped for every consumer of the
+    // shared node_modules tree. The restoration must therefore be part of
+    // the install step itself — an EXIT trap — so a wiped link can never
+    // survive, even when the install is killed part-way through.
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-install-herdr-ac2-'));
+    try {
+      // Minimal repo layout the installer expects.
+      fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+      fs.mkdirSync(path.join(root, 'packages', 'herdr', 'scripts'), { recursive: true });
+      fs.mkdirSync(path.join(root, 'packages', 'shared', 'dist'), { recursive: true });
+      fs.copyFileSync(
+        path.join(repoRoot, 'scripts', 'install-herdr.sh'),
+        path.join(root, 'scripts', 'install-herdr.sh'),
+      );
+      fs.copyFileSync(
+        path.join(repoRoot, 'packages', 'herdr', 'scripts', 'link-shared.mjs'),
+        path.join(root, 'packages', 'herdr', 'scripts', 'link-shared.mjs'),
+      );
+      fs.writeFileSync(
+        path.join(root, 'packages', 'herdr', 'package.json'),
+        JSON.stringify({ name: '@worklog/herdr-plugin', version: '0.1.0', private: true }),
+      );
+      fs.writeFileSync(path.join(root, 'packages', 'herdr', 'herdr-plugin.toml'), 'id = "worklog-selection-list"\n');
+      // A lockfile means the installer chooses `npm ci`.
+      fs.writeFileSync(
+        path.join(root, 'packages', 'herdr', 'package-lock.json'),
+        JSON.stringify({ lockfileVersion: 3 }),
+      );
+      fs.writeFileSync(
+        path.join(root, 'packages', 'shared', 'package.json'),
+        JSON.stringify({ name: '@worklog/shared', version: '1.0.0' }),
+      );
+      fs.writeFileSync(
+        path.join(root, 'packages', 'shared', 'dist', 'icons.js'),
+        'export const statusIcon = () => "live";\n',
+      );
+
+      const linkPath = resolveSharedLinkTarget(path.join(root, 'packages', 'herdr'));
+
+      // Fake npm that does what npm ci does first — delete node_modules,
+      // wiping the workspace link — and then gets INTERRUPTED: it signals
+      // the installer (its parent) with SIGTERM before exiting, exactly as
+      // Ctrl-C / a cancelled build would. A plain (non-interrupted) npm
+      // failure is already repaired by the subsequent link step; this
+      // covers the window that step cannot reach.
+      const fakeBin = path.join(root, 'bin');
+      fs.mkdirSync(fakeBin);
+      fs.writeFileSync(
+        path.join(fakeBin, 'npm'),
+        `#!/usr/bin/env bash\nrm -rf "${linkPath}"\nmkdir -p "${linkPath}"\nkill -TERM "$PPID" 2>/dev/null || true\nsleep 0.5\nexit 143\n`,
+      );
+      fs.chmodSync(path.join(fakeBin, 'npm'), 0o755);
+      // Fake herdr: the plugin link is irrelevant to this test.
+      fs.writeFileSync(path.join(fakeBin, 'herdr'), '#!/usr/bin/env bash\nexit 0\n');
+      fs.chmodSync(path.join(fakeBin, 'herdr'), 0o755);
+
+      // Keep the real git/node, but the fake npm/herdr win. Exclude the
+      // test-suite git mock, which lacks `worktree`.
+      const mockBinDir = path.resolve(repoRoot, 'tests', 'cli', 'mock-bin');
+      const cleanPath = (process.env.PATH ?? '')
+        .split(path.delimiter)
+        .filter((d) => d !== '' && path.resolve(d) !== mockBinDir);
+      const scriptPath = `${fakeBin}${path.delimiter}${cleanPath.join(path.delimiter)}`;
+
+      const configPath = path.join(root, 'herdr', 'config.toml');
+      const result = spawnSync('bash', [path.join(root, 'scripts', 'install-herdr.sh')], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: scriptPath, HERDR_CONFIG_PATH: configPath },
+      });
+      // The interrupted build fails (non-zero), but must not leave the link
+      // wiped behind it.
+      expect(result.status, `unexpected success: ${result.stdout}`).not.toBe(0);
+      expect(fs.lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      expect(fs.realpathSync(linkPath)).toBe(path.join(root, 'packages', 'shared'));
+    } finally {
+      removeTemp(root);
+    }
+  });
 });

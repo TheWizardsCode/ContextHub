@@ -7,7 +7,9 @@
 # Hook step 0 installs the plugin's npm dependencies (marked, the
 # @worklog/shared file dep) into packages/herdr first, so a fresh clone or
 # a node_modules cleanup does not leave the plugin crashing with
-# ERR_MODULE_NOT_FOUND on startup.
+# ERR_MODULE_NOT_FOUND on startup. The install runs for the MAIN checkout
+# only — a linked-worktree build reuses the main checkout's already-installed
+# dependencies through the node_modules symlink instead (WL-0MVWJ4IKT005SAHT).
 #
 # Safe to run on every build:
 #   - The plugin is always linked from the MAIN checkout, even when the
@@ -17,7 +19,9 @@
 #     `herdr plugin link` updates an existing link in place, so a stale
 #     worktree link is corrected automatically on the next build. The
 #     dependency install (step 0) also targets the MAIN checkout for the
-#     same reason (WL-0MSRLH52R003CK49). Step 0b then replaces npm's packaged
+#     same reason (WL-0MSRLH52R003CK49) and is skipped entirely for a
+#     linked-worktree build, whose node_modules is symlinked to the main
+#     checkout's (WL-0MVWJ4IKT005SAHT). Step 0 then replaces npm's packaged
 #     COPY of @worklog/shared with a symlink to the live workspace package
 #     (WL-0MVAY631M004RZ3Q), so a stale vendored copy can never crash the
 #     pane with an ESM "does not provide an export named ..." error.
@@ -35,19 +39,33 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# ── Main-checkout resolution (worktree-safe) ────────────────────────────
+# ── Checkout resolution (worktree-safe) ─────────────────────────────────
 # During /skill:implement the postbuild hook runs from a linked git
 # worktree, so REPO_ROOT would resolve to the worktree path. Linking the
 # global herdr plugin from a worktree leaves a dangling registry entry once
 # implement.py finish deletes the worktree — the prefix+l keybinding then
 # invokes a non-existent action and silently does nothing. Resolve the main
 # checkout (always listed first by `git worktree list --porcelain`) and
-# link from there instead. Falls back to REPO_ROOT when not inside a git
-# repo or git is unavailable.
-if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  MAIN_CHECKOUT="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print; exit}')"
+# target it instead. Falls back to REPO_ROOT when not inside a git repo or
+# git is unavailable.
+#
+# IS_LINKED_WORKTREE additionally records whether THIS invocation runs from
+# a linked worktree (the script's own checkout differs from the main
+# checkout). Step 0 (dependency install) then refuses to run: a worktree
+# build consumes the main checkout's node_modules through a symlink, so an
+# install from the worktree would delete that SHARED tree — wiping the
+# @worklog/shared workspace link out from under every live worktree
+# (WL-0MVWJ4IKT005SAHT). Every other step still targets the main checkout.
+IS_LINKED_WORKTREE="false"
+if command -v git >/dev/null 2>&1 \
+   && git -C "${SCRIPT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  MAIN_CHECKOUT="$(git -C "${SCRIPT_DIR}" worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print; exit}')"
   if [ -n "${MAIN_CHECKOUT}" ] && [ -d "${MAIN_CHECKOUT}" ]; then
     REPO_ROOT="${MAIN_CHECKOUT}"
+    SCRIPT_CHECKOUT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "${SCRIPT_CHECKOUT}" ] && [ "${SCRIPT_CHECKOUT}" != "${MAIN_CHECKOUT}" ]; then
+      IS_LINKED_WORKTREE="true"
+    fi
   fi
 fi
 
@@ -86,13 +104,59 @@ try_reload_config() {
   fi
 }
 
-# ── 0. Install herdr plugin dependencies ─────────────────────────────────
+# ── 0. Install herdr plugin dependencies + relink @worklog/shared ───────
 # Ensures marked and @worklog/shared are available so the plugin does not
 # crash on startup (ERR_MODULE_NOT_FOUND). Uses npm ci when a lockfile
 # exists (faster, deterministic), falling back to npm install.
+#
+# Two guards keep the install from ever damaging the SHARED workspace tree
+# (WL-0MVWJ4IKT005SAHT):
+#   1. A linked-worktree build skips the install entirely (AC1). Its
+#      node_modules is symlinked to the main checkout's, so an `npm ci` here
+#      would delete the main checkout's node_modules — and with it the
+#      @worklog/shared workspace link — out from under every live worktree.
+#      The worktree reuses the main checkout's installed dependencies and
+#      still repairs the link if a concurrent build left it wiped.
+#   2. When the install DOES run, npm deletes node_modules (wiping the
+#      @worklog/shared link) before it re-installs. The restoration is
+#      therefore part of THIS same step: an EXIT trap restores the link even
+#      if the install is interrupted, and the explicit call below restores it
+#      when npm fails or is absent (AC2). A wiped link can never survive a
+#      build.
 HERDR_DIR="${REPO_ROOT}/packages/herdr"
-if [ -d "${HERDR_DIR}" ] && [ -f "${HERDR_DIR}/package.json" ]; then
+
+# Replace npm's packaged COPY of @worklog/shared with a symlink to the live
+# workspace package (WL-0MVAY631M004RZ3Q): npm installs the `file:`
+# dependency as a copy that silently goes stale whenever packages/shared
+# changes — the plugin then imports a missing export and herdr closes the
+# pane on startup. Best-effort: a linking failure only warns (the
+# src/start.ts launcher still explains the stale state).
+restore_shared_link() {
+  if [ -d "${HERDR_DIR}" ] && [ -f "${HERDR_DIR}/scripts/link-shared.mjs" ]; then
+    if command -v node >/dev/null 2>&1; then
+      if node "${HERDR_DIR}/scripts/link-shared.mjs" "${HERDR_DIR}"; then
+        :
+      else
+        echo "Warning: 'node link-shared.mjs' failed in ${HERDR_DIR} — @worklog/shared may resolve to a stale copy." >&2
+      fi
+    else
+      echo "Warning: 'node' not found on PATH — cannot link @worklog/shared in ${HERDR_DIR}." >&2
+    fi
+  fi
+}
+
+if [ "${IS_LINKED_WORKTREE}" = "true" ]; then
+  echo "Skipping herdr dependency install in a linked worktree — reusing the main checkout's installed dependencies (${HERDR_DIR})."
+  # No install runs here, so this build cannot wipe the link — but a
+  # concurrent build from an older/stale checkout still can. Repair it
+  # (idempotent, fail-open) so a wiped link never survives ANY build (AC2),
+  # without running an install (AC1).
+  restore_shared_link
+elif [ -d "${HERDR_DIR}" ] && [ -f "${HERDR_DIR}/package.json" ]; then
   if command -v npm >/dev/null 2>&1; then
+    # npm deletes node_modules before it (re-)installs, so restore the
+    # @worklog/shared link even if the install is interrupted mid-run.
+    trap restore_shared_link EXIT
     if [ -f "${HERDR_DIR}/package-lock.json" ]; then
       if npm ci --prefix "${HERDR_DIR}" 2>/dev/null; then
         echo "Installed herdr plugin dependencies (npm ci: ${HERDR_DIR})"
@@ -108,27 +172,11 @@ if [ -d "${HERDR_DIR}" ] && [ -f "${HERDR_DIR}/package.json" ]; then
         echo "Warning: 'npm install' failed in ${HERDR_DIR} — plugin may crash on startup." >&2
       fi
     fi
+    restore_shared_link
+    trap - EXIT
   else
     echo "Warning: 'npm' not found on PATH — skipping herdr dependency install." >&2
-  fi
-fi
-
-# ── 0b. Link @worklog/shared to the live workspace package ──────────────
-# npm installs the `file:` dependency as a packaged COPY that silently goes
-# stale whenever packages/shared changes — the plugin then imports a missing
-# export and herdr closes the pane on startup (WL-0MVAY631M004RZ3Q).
-# Replace the copy with a symlink to packages/shared so the plugin always
-# reads current Shared code after a build. Best-effort: a linking failure
-# only warns (the src/start.ts launcher still explains the stale state).
-if [ -d "${HERDR_DIR}" ] && [ -f "${HERDR_DIR}/scripts/link-shared.mjs" ]; then
-  if command -v node >/dev/null 2>&1; then
-    if node "${HERDR_DIR}/scripts/link-shared.mjs" "${HERDR_DIR}"; then
-      :
-    else
-      echo "Warning: 'node link-shared.mjs' failed in ${HERDR_DIR} — @worklog/shared may resolve to a stale copy." >&2
-    fi
-  else
-    echo "Warning: 'node' not found on PATH — cannot link @worklog/shared in ${HERDR_DIR}." >&2
+    restore_shared_link
   fi
 fi
 
