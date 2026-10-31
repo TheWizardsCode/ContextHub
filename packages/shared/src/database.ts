@@ -47,6 +47,7 @@ import * as sortModule from './database/sort.js';
 // Work-item and hierarchy modules — thin-delegate targets (WL-0MVOBP4J6003ZKML).
 // Method implementations moved here; the class members below delegate.
 import * as workItemsModule from './database/work-items.js';
+import type { UpdateOptions } from './database/work-items.js';
 import * as hierarchyModule from './database/hierarchy.js';
 // Dependency-edge and comment modules — thin-delegate targets
 // (WL-0MVOBP6K0007574C). Method implementations moved here; the class members
@@ -1194,8 +1195,9 @@ export class WorklogDatabase {
     id: string,
     input: UpdateWorkItemInput,
     expected: { status?: string; stage?: string; assignee?: string } = {},
+    options: UpdateOptions = {},
   ): UpdateIfMatchesResult {
-    return workItemsModule.updateIfMatches(this.ctx, this.ctx.itemHooks, id, input, expected);
+    return workItemsModule.updateIfMatches(this.ctx, this.ctx.itemHooks, id, input, expected, options);
   }
 
   /**
@@ -1203,8 +1205,8 @@ export class WorklogDatabase {
    *
    * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
    */
-  update(id: string, input: UpdateWorkItemInput): WorkItem | null {
-    return workItemsModule.update(this.ctx, this.ctx.itemHooks, id, input);
+  update(id: string, input: UpdateWorkItemInput, options: UpdateOptions = {}): WorkItem | null {
+    return workItemsModule.update(this.ctx, this.ctx.itemHooks, id, input, options);
   }
 
   /**

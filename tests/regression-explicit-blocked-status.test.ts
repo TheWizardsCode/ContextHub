@@ -1,48 +1,53 @@
 /**
- * Regression test: an explicit `wl update <id> --status blocked` must persist
- * `blocked` (stored/reported agreement).
+ * Regression tests: an explicit `wl update <id> --status <s>` write must win
+ * over the derived (`blocked`/`open`) reconciliation.
  *
  * Parent: WL-0MVTUKSJZ003WK82 — `wl update --status blocked` silently reverts
- * to `open` and still reports success. This file is the deterministic
- * reproduction (AC1) that lands **before** the fix task.
+ * to `open` and still reports success.
  *
- * ## What goes wrong today
+ * ## The defect
  *
  * For an item with only an **inbound** dependency edge (other items depend on
- * it; it depends on nothing), `db.update` writes the requested `blocked`
- * status and then calls `hooks.reconcileDependentStatus(id)`
+ * it; it depends on nothing), `db.update` wrote the requested `blocked` status
+ * and then called `hooks.reconcileDependentStatus(id)`
  * (`packages/shared/src/database/work-items.ts`). That reconciliation rewrites
  * `blocked` -> `open` whenever the item has no **active outbound blockers**
- * (`packages/shared/src/database/dependencies.ts`). The update returns the
- * **pre-reconcile** snapshot, so `wl update --json` reports
- * `workItem.status: "blocked"` while the store holds `open` with a later
- * `updatedAt`. The distinguishing feature of the affected item — an inbound
- * edge only, no outbound edges — is exactly the condition that triggers the
- * silent unblock.
+ * (`packages/shared/src/database/dependencies.ts`). The update returned the
+ * **pre-reconcile** snapshot, so `wl update --json` reported
+ * `workItem.status: "blocked"` while the store held `open` with a later
+ * `updatedAt`.
  *
- * ## RED-pinned
+ * ## The fix (WL-0MVTVYXZD002NDMP)
  *
- * This spec asserts the FIXED behaviour (persisted status is `blocked` and the
- * JSON-reported status equals the persisted status), so its body fails against
- * the current tree. It is wrapped in `it.fails(...)` so the gated suite stays
- * green while the defect is open — the same RED-witness convention used by
- * `tests/cli/reviewed.test.ts` and the herdr RED witnesses. The fix task flips
- * `it.fails(` -> `it(` once the reconcile guard lands; the RED->GREEN
- * transition is the evidence the reproduction tracked a real defect.
+ * `db.update` / `db.updateIfMatches` accept an `UpdateOptions` with
+ * `reconcileSelf`; `wl update` passes `reconcileSelf: false` when the caller
+ * supplied an explicit `--status`/`--stage`, so the explicit write is never
+ * self-reconciled. Reconciliation of **dependent** items is unchanged, as are
+ * the `wl dep add` / `wl dep rm` paths. `db.update` now returns the
+ * **persisted post-reconcile** record, so the CLI reports the stored value.
  *
- * No production code is changed by this task (AC4).
+ * The first test below was landed RED-pinned (`it.fails`) by the reproduction
+ * task WL-0MVTVYNY4001EBRX; it is now plain `it(` — the RED->GREEN transition
+ * is the evidence the reproduction tracked a real defect.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
 import {
   cliPath,
   execAsync,
   writeConfig,
   writeInitSemaphore,
 } from './cli/cli-helpers.js';
-import { createTempDir, cleanupTempDir } from './test-utils.js';
+import {
+  createTempDir,
+  cleanupTempDir,
+  createTempDbPath,
+  createTempJsonlPath,
+} from './test-utils.js';
+import { WorklogDatabase } from '../packages/shared/src/database.js';
 
-describe('explicit --status blocked persists (WL-0MVTVYNY4001EBRX)', () => {
+describe('explicit --status writes win over derived reconcile (WL-0MVTVYXZD002NDMP)', () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -64,51 +69,173 @@ describe('explicit --status blocked persists (WL-0MVTVYNY4001EBRX)', () => {
     return JSON.parse(stdout).workItem.id as string;
   }
 
-  // RED-pinned with `it.fails(` — see the file header. The fix task flips it
-  // to `it(`.
-  it.fails(
-    'RED: persists an explicit --status blocked write on an item with only an inbound edge',
-    async () => {
-      // The affected item (open, stage `idea`) and a second item that depends
-      // on it. `dep add <itemId> <dependsOnId>` means "itemId depends on
-      // dependsOnId", so `dep add other item` gives `item` an INBOUND edge
-      // only — the exact condition that mis-fires the reconcile.
-      const item = await createItem('Item to block');
-      const other = await createItem('Dependent');
+  /** Read the persisted record through the store (not the update payload). */
+  async function persistedStatus(id: string): Promise<string> {
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json show ${id}`,
+      { cwd: tempDir },
+    );
+    return JSON.parse(stdout).workItem.status as string;
+  }
 
-      await execAsync(
-        `tsx ${cliPath} --json dep add ${other} ${item}`,
-        { cwd: tempDir },
-      );
+  it('persists an explicit --status blocked write on an item with only an inbound edge', async () => {
+    // The affected item (open) and a second item that depends on it.
+    // `dep add <itemId> <dependsOnId>` means "itemId depends on dependsOnId",
+    // so `dep add other item` gives `item` an INBOUND edge only — the exact
+    // condition that mis-fired the reconcile.
+    const item = await createItem('Item to block');
+    const other = await createItem('Dependent');
 
-      // The exact user-facing reproduction: an explicit status write.
-      const { stdout: updateOut } = await execAsync(
-        `tsx ${cliPath} --json update ${item} --status blocked`,
-        { cwd: tempDir },
-      );
-      const updateJson = JSON.parse(updateOut);
-      expect(updateJson.success).toBe(true);
+    await execAsync(
+      `tsx ${cliPath} --json dep add ${other} ${item}`,
+      { cwd: tempDir },
+    );
 
-      // The command reports success and `blocked` today (the "still reports
-      // success" half of the defect) — this documents that the report is
-      // misleading rather than broken.
-      expect(updateJson.workItem.status).toBe('blocked');
-      const reportedStatus: string = updateJson.workItem.status;
+    // The exact user-facing reproduction: an explicit status write.
+    const { stdout: updateOut } = await execAsync(
+      `tsx ${cliPath} --json update ${item} --status blocked`,
+      { cwd: tempDir },
+    );
+    const updateJson = JSON.parse(updateOut);
+    expect(updateJson.success).toBe(true);
+    expect(updateJson.workItem.status).toBe('blocked');
+    const reportedStatus: string = updateJson.workItem.status;
 
-      // Re-read the persisted record through the store.
-      const { stdout: showOut } = await execAsync(
-        `tsx ${cliPath} --json show ${item}`,
-        { cwd: tempDir },
-      );
-      const persistedStatus: string = JSON.parse(showOut).workItem.status;
+    // The explicit blocked write must persist — no post-write reconcile may
+    // rewrite it to `open`.
+    const storedStatus = await persistedStatus(item);
+    expect(storedStatus).toBe('blocked');
 
-      // AC1: the explicit blocked write must persist. Fails today — the store
-      // holds `open` after the post-write reconcile rewrote it.
-      expect(persistedStatus).toBe('blocked');
+    // The JSON payload must agree with the persisted record (AC4).
+    expect(reportedStatus).toBe(storedStatus);
+  });
 
-      // AC2: the JSON-reported status must agree with the persisted status.
-      // Fails today — reported `blocked` vs persisted `open`.
-      expect(reportedStatus).toBe(persistedStatus);
-    },
-  );
+  it('persists an explicit --status blocked write on an item with no dependency edges', async () => {
+    const item = await createItem('Standalone item');
+
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json update ${item} --status blocked`,
+      { cwd: tempDir },
+    );
+    expect(JSON.parse(stdout).workItem.status).toBe('blocked');
+
+    expect(await persistedStatus(item)).toBe('blocked');
+  });
+
+  it('persists an explicit --status blocked write on an item with an active outbound blocker', async () => {
+    // Dependency-derived semantics are unchanged: `dep add` blocks the item
+    // that depends on a non-terminal blocker.
+    const blocker = await createItem('Active blocker');
+    const item = await createItem('Blocked item');
+    await execAsync(
+      `tsx ${cliPath} --json dep add ${item} ${blocker}`,
+      { cwd: tempDir },
+    );
+    expect(await persistedStatus(item)).toBe('blocked');
+
+    // Re-asserting `blocked` explicitly must keep it blocked.
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json update ${item} --status blocked`,
+      { cwd: tempDir },
+    );
+    expect(JSON.parse(stdout).workItem.status).toBe('blocked');
+    expect(await persistedStatus(item)).toBe('blocked');
+  });
+
+  it('does not let the self-reconcile overwrite an explicit --status open', async () => {
+    // An explicit status write is authoritative even when the item still has
+    // an active outbound blocker; only dependency-derived paths (`dep add`,
+    // `dep rm`, blocker completion) derive `blocked`/`open`.
+    const blocker = await createItem('Active blocker');
+    const item = await createItem('Blocked item');
+    await execAsync(
+      `tsx ${cliPath} --json dep add ${item} ${blocker}`,
+      { cwd: tempDir },
+    );
+    expect(await persistedStatus(item)).toBe('blocked');
+
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json update ${item} --status open`,
+      { cwd: tempDir },
+    );
+    expect(JSON.parse(stdout).workItem.status).toBe('open');
+    expect(await persistedStatus(item)).toBe('open');
+  });
+
+  it('keeps dependency-derived reconciliation: dep rm unblocks when no active blockers remain', async () => {
+    const blocker = await createItem('Blocker');
+    const item = await createItem('Blocked item');
+    await execAsync(
+      `tsx ${cliPath} --json dep add ${item} ${blocker}`,
+      { cwd: tempDir },
+    );
+    expect(await persistedStatus(item)).toBe('blocked');
+
+    await execAsync(
+      `tsx ${cliPath} --json dep rm ${item} ${blocker}`,
+      { cwd: tempDir },
+    );
+    expect(await persistedStatus(item)).toBe('open');
+  });
+});
+
+describe('db.update reports the persisted post-reconcile record (WL-0MVTVYXZD002NDMP)', () => {
+  let tempDir: string;
+  let dbPath: string;
+  let jsonlPath: string;
+  let db: WorklogDatabase;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    dbPath = createTempDbPath(tempDir);
+    jsonlPath = createTempJsonlPath(tempDir);
+    if (fs.existsSync(jsonlPath)) {
+      fs.unlinkSync(jsonlPath);
+    }
+    db = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
+  });
+
+  afterEach(() => {
+    db.close();
+    cleanupTempDir(tempDir);
+  });
+
+  it('returns the persisted status when derived reconciliation overrides the write', () => {
+    const blocker = db.create({ title: 'Blocker', status: 'open' });
+    const item = db.create({ title: 'Item', status: 'blocked' });
+    db.addDependencyEdge(item.id, blocker.id);
+
+    // Derived reconciliation re-blocks an item that still has an active
+    // blocker — the return value must be that persisted record, not the
+    // in-memory pre-reconcile snapshot (AC4).
+    const updated = db.update(item.id, { status: 'in-progress' });
+    expect(updated).not.toBeNull();
+    expect(updated!.status).toBe('blocked');
+    expect(updated!.status).toBe(db.get(item.id)!.status);
+  });
+
+  it('persists and returns an explicit status when reconcileSelf is false', () => {
+    const blocker = db.create({ title: 'Blocker', status: 'open' });
+    const item = db.create({ title: 'Item', status: 'blocked' });
+    db.addDependencyEdge(item.id, blocker.id);
+
+    const updated = db.update(item.id, { status: 'in-progress' }, { reconcileSelf: false });
+    expect(updated).not.toBeNull();
+    expect(updated!.status).toBe('in-progress');
+    expect(db.get(item.id)!.status).toBe('in-progress');
+  });
+
+  it('keeps derived self-reconciliation as the default (no explicit-status signal)', () => {
+    const blocker = db.create({ title: 'Blocker', status: 'open' });
+    const item = db.create({ title: 'Item', status: 'blocked' });
+    db.addDependencyEdge(item.id, blocker.id);
+
+    db.reconcileDependentStatus(item.id);
+    expect(db.get(item.id)!.status).toBe('blocked');
+
+    // Without the reconcileSelf opt-out the item is re-derived from its
+    // edges, so `dep add`/`dep rm` semantics (which rely on it) are intact.
+    db.update(item.id, { status: 'open' });
+    expect(db.get(item.id)!.status).toBe('blocked');
+  });
 });

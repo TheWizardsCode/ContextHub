@@ -508,6 +508,14 @@ export default function register(ctx: PluginContext): void {
         // capture the full previous state for the terminal-transition check.
         const itemBeforeUpdate = db.get(normalizedId);
         const oldPriority = (itemBeforeUpdate?.priority) as WorkItemPriority | undefined;
+        // An explicitly supplied `--status`/`--stage` is authoritative: opt out
+        // of the derived (`blocked`/`open`) self-reconcile so the requested
+        // value is what persists (WL-0MVTVYXZD002NDMP). Reconciliation of
+        // DEPENDENT items, and the `wl dep add` / `wl dep rm` paths, are
+        // unchanged.
+        const updateOptions = {
+          reconcileSelf: !(statusCandidate !== undefined || stageCandidate !== undefined),
+        };
         // CAS claim path (RCA WL-0MSRBFFLN005W3VT design point 1): when
         // --if-status/--if-stage/--if-assignee are provided the update applies
         // ONLY if the item still matches — the check and the write run in one
@@ -529,7 +537,7 @@ export default function register(ctx: PluginContext): void {
             ...(ifAssigneeCandidate !== undefined
               ? { assignee: ifAssigneeCandidate }
               : {}),
-          });
+          }, updateOptions);
           if (!cas.ok) {
             if (cas.reason === 'not-found') {
               const message = `Work item not found: ${normalizedId}`;
@@ -553,7 +561,7 @@ export default function register(ctx: PluginContext): void {
           }
           item = cas.item ?? null;
         } else {
-          item = db.update(normalizedId, updates);
+          item = db.update(normalizedId, updates, updateOptions);
         }
         if (!item) {
           const message = `Work item not found: ${normalizedId}`;
@@ -561,9 +569,10 @@ export default function register(ctx: PluginContext): void {
           continue;
         }
 
-        if (updates.status || updates.stage) {
-          db.reconcileDependentStatus(normalizedId);
-        }
+        // NOTE: no second self-reconcile here. `db.update` already reconciles
+        // the item and its dependents; re-running it after an explicit
+        // `--status` write was the redundant write that reverted a requested
+        // `blocked` to `open` (WL-0MVTVYXZD002NDMP).
 
         // Auto-downgrade on a terminal transition (WL-0MSJM4EIV001A0V9): an
         // item that just became `completed` or entered `in_review` must not
