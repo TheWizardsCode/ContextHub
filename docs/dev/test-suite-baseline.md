@@ -887,6 +887,48 @@ because it writes into that store.
   `create` → DB open (production startup); `status` → DB open (production
   startup).
 
+### Reuse-safety contract and harness counters (WL-0MVVXG0EQ0068WQB)
+
+The attribution above is only half the story: any change that removes the
+harness-side 1.0–1.5 ms by **reusing** a `Command`, a plugin context, a parsed
+config or a DB handle across calls can leak commander option state or the global
+`--worklog-dir` override (`setWorklogDirOverride` / `_worklogDirOverride` in
+`src/worklog-paths.ts`) between tests and turn a pass into an order-dependent
+accident (the parent item's recorded fidelity risk). Two pieces pin that
+contract:
+
+- **Counters (always on, behaviour-neutral).** `tests/cli/cli-inproc.ts`
+  exports `getInprocHarnessStats()` / `resetInprocHarnessStats()` reporting
+  `calls`, `commandsConstructed`, `pluginContextsCreated` and
+  `databasesOpened`. They are plain integer increments (no timing calls, no
+  behaviour change) and are the machine-readable form of the per-call cost:
+  one construction, one plugin context and one DB open **per call** today.
+- **Contract tests.** `tests/cli/inproc-harness-reuse.test.ts` (in-process only,
+  no spawns) characterises that per-call cost and pins the reuse-safety
+  contract: interleaved `--worklog-dir` stores never leak into each other,
+  `--json` / `--verbose` / `-F/--format` / `-w/--watch` state never survives
+  into the next call, in-process reads observe every preceding mutation (no
+  stale cached DB), every patched process global is restored after each call,
+  and a mixed read/write sequence produces the same output per call and the
+  same final state when reversed.
+
+The "reuse actually happens" assertion is **RED-pinned** with `it.fails(...)`
+(the same convention used by the fast-path and lazy-registry work) because no
+reuse exists yet. Recorded pre-change evidence for three consecutive stateless
+`list --json` calls:
+
+```text
+{ calls: 3, commandsConstructed: 3, pluginContextsCreated: 3, databasesOpened: 3 }
+```
+
+The pinned expectation is one shared construction and one shared plugin context
+for the run of read calls (`expected 3 to be less than or equal to 1` is the
+red failure); `databasesOpened` stays at most one per call because DB open was
+classified here as production startup, not harness overhead. The child that
+reduces the harness cost (WL-0MVVXG4B200968BF) flips `it.fails(` to `it(` when
+reuse lands — or adjusts the expectation together with its recorded re-scope
+finding.
+
 ### Caveats
 
 - **Same-host medians only.** Absolute values are load sensitive; the tables
@@ -955,3 +997,6 @@ Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
 - In-process CLI harness cost baseline (attribution, decision gate):
   WL-0MVVXFXM6007QZ2L — see
   [In-process CLI harness cost](#in-process-cli-harness-cost-wl-0mvvxfxm6007qz2l)
+- In-process harness reuse-safety contract + counters (red-first tests):
+  WL-0MVVXG0EQ0068WQB — see
+  [Reuse-safety contract and harness counters](#reuse-safety-contract-and-harness-counters-wl-0mvvxg0eq0068wqb)

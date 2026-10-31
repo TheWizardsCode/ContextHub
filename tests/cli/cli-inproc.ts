@@ -170,6 +170,55 @@ export function drainInprocProfileRecords(): InprocProfileRecord[] {
   return drained;
 }
 
+// ── Always-on harness instrumentation counters (WL-0MVVXG0EQ0068WQB) ──────
+/**
+ * Per-process counters for the work the harness pays **per call**: one
+ * `Command` construction, one plugin context and one database open today.
+ *
+ * The counters are always on (they are plain integer increments, so they do
+ * not change behaviour or timing) because two consumers need them:
+ *
+ *  - `tests/cli/inproc-harness-reuse.test.ts` asserts the pre-change cost
+ *    characterisation and the red-first reuse contract;
+ *  - the per-call cost budget guard (a later child of WL-0MVHVZMCH0092JCY)
+ *    reads them to detect a regression back to per-call construction.
+ */
+export interface InprocHarnessStats {
+  /** `runInProcess()` calls started. */
+  calls: number;
+  /** `new Command()` constructions (one per call today). */
+  commandsConstructed: number;
+  /** `createPluginContext()` calls (one per call today). */
+  pluginContextsCreated: number;
+  /** Database handles opened through `ctx.utils.getDatabase()` (one per read call today). */
+  databasesOpened: number;
+}
+
+const inprocHarnessStats: InprocHarnessStats = {
+  calls: 0,
+  commandsConstructed: 0,
+  pluginContextsCreated: 0,
+  databasesOpened: 0,
+};
+
+/**
+ * Snapshot of the harness counters accumulated by this process so far.
+ *
+ * Returns a copy: callers can hold it as a "before" baseline and diff it
+ * against a later snapshot without the two aliasing the same object.
+ */
+export function getInprocHarnessStats(): InprocHarnessStats {
+  return { ...inprocHarnessStats };
+}
+
+/** Zero every counter (used by the reuse contract tests to get a clean baseline). */
+export function resetInprocHarnessStats(): void {
+  inprocHarnessStats.calls = 0;
+  inprocHarnessStats.commandsConstructed = 0;
+  inprocHarnessStats.pluginContextsCreated = 0;
+  inprocHarnessStats.databasesOpened = 0;
+}
+
 interface InprocProfiler {
   setArgs(args: string[]): void;
   add(phase: InprocProfilePhase, ms: number, nested?: boolean): void;
@@ -213,6 +262,7 @@ function splitShellArgs(cmd: string): string[] {
 }
 
 export async function runInProcess(commandLine: string, timeoutMs: number = 15000): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+  inprocHarnessStats.calls += 1;
   const profile = startInprocProfile(commandLine);
   /** Monotonic clock for the current phase (0 when profiling is off). */
   const markStart = (): number => (profile ? performance.now() : 0);
@@ -246,6 +296,10 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   const origConsoleWarn = console.warn;
   const origConsoleInfo = console.info;
   const origArgv = process.argv;
+  // `process.exitCode` is process-wide state like the patched functions above:
+  // a command that sets it must not leave the value behind for the next call
+  // (or for the test runner), so it is restored in the same `finally` block.
+  const origExitCode = process.exitCode;
   const argv = ['node', 'worklog', ...normalizedArgs];
   process.argv = argv;
   process.stdout.write = ((chunk: any, enc?: any, cb?: any) => {
@@ -288,6 +342,7 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   try {
     phaseStart = markStart();
     const program = new Command();
+    inprocHarnessStats.commandsConstructed += 1;
     // Configure global options to match src/cli.ts so --json/--verbose/etc are recognized
     program
       .name('worklog')
@@ -302,6 +357,7 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
 
     phaseStart = markStart();
     const ctx = createPluginContext(program);
+    inprocHarnessStats.pluginContextsCreated += 1;
     mark('plugin_context', phaseStart);
 
     phaseStart = markStart();
@@ -310,6 +366,7 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
     ctx.utils.getDatabase = (prefix?: string) => {
       const dbStart = profile ? performance.now() : 0;
       const db = origGetDatabase(prefix);
+      inprocHarnessStats.databasesOpened += 1;
       // Nested in the command action: DB open includes schema creation and
       // migrations and must not be double counted in the attribution sum.
       mark('db_open', dbStart, true);
@@ -538,6 +595,7 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
     console.warn = origConsoleWarn;
     console.info = origConsoleInfo;
     process.argv = origArgv;
+    process.exitCode = origExitCode;
     mark('harness_restore', phaseStart);
     // Publish the record for the profiler once the harness has restored the
     // process globals, so the recorded total covers the whole call.
