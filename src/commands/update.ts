@@ -224,8 +224,44 @@ export default function register(ctx: PluginContext): void {
       // Track whether any update modified one of the impactful fields
       // that should trigger an automatic re-sort when the update completes.
       let impactfulChange = false;
+
+      /**
+       * Defence in depth (WL-0MVTVZ9RU003D4WW): re-read the persisted record
+       * after a write and report a divergence from an explicit `--status`
+       * request. The store is the source of truth — never the update's return
+       * value — so a status that silently did not stick can never be reported
+       * as `success: true`.
+       *
+       * @returns a per-id failure result, or `null` when the request persisted.
+       */
+      const statusNotPersisted = (id: string, requested: WorkItemStatus) => {
+        const persisted = db.get(id);
+        const persistedStatus = (persisted?.status ?? null) as WorkItemStatus | null;
+        if (persistedStatus === requested) return null;
+        return {
+          id,
+          success: false,
+          error: 'status-not-persisted',
+          message:
+            `Status "${requested}" was not persisted for ${id}: the store holds ` +
+            `"${persistedStatus ?? '<missing>'}". The explicit --status write did not ` +
+            `stick — investigate the store before retrying.`,
+          requestedStatus: requested,
+          persistedStatus,
+        };
+      };
+
       for (const rawId of idsRaw) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
+        // The status this update explicitly requests, normalized the same way
+        // stored statuses are (`in_progress` -> `in-progress`). Drives the
+        // post-write persistence guard below; replaced by the validated
+        // canonical value whenever status validation runs, so a config that
+        // genuinely stores underscores is never reported as a divergence.
+        let requestedStatus: WorkItemStatus | undefined =
+          statusCandidate !== undefined
+            ? ((normalizeStatusValue(String(statusCandidate)) ?? String(statusCandidate)) as WorkItemStatus)
+            : undefined;
         const updates: UpdateWorkItemInput = {};
         // Reversion record: set when a "Ready to close: No" audit verdict on
         // an in_review (completed) item moves it back to open/plan_complete
@@ -418,6 +454,8 @@ export default function register(ctx: PluginContext): void {
           }
           if (statusCandidate !== undefined) updates.status = normalizedStatus as WorkItemStatus;
           if (stageCandidate !== undefined) updates.stage = normalizedStage;
+          // The validated canonical value is what the store must hold.
+          if (updates.status !== undefined) requestedStatus = updates.status;
 
           // Advisory file-paths check: when transitioning to an intake stage
           // (intake_complete or prd_complete), warn if the description lacks
@@ -488,6 +526,16 @@ export default function register(ctx: PluginContext): void {
             const message = `Work item not found: ${normalizedId}`;
             results.push({ id: normalizedId, success: false, error: message });
             continue;
+          }
+          // An explicit `--status` that never reached the store (no status
+          // field was buildable, so nothing was written) must not be reported
+          // as a success (WL-0MVTVZ9RU003D4WW).
+          if (requestedStatus !== undefined) {
+            const divergence = statusNotPersisted(normalizedId, requestedStatus);
+            if (divergence) {
+              results.push(divergence);
+              continue;
+            }
           }
           // Include audit data in JSON output when audit was written
           if (auditWritten && auditEntryForOutput) {
@@ -573,6 +621,18 @@ export default function register(ctx: PluginContext): void {
         // the item and its dependents; re-running it after an explicit
         // `--status` write was the redundant write that reverted a requested
         // `blocked` to `open` (WL-0MVTVYXZD002NDMP).
+
+        // Defence in depth (WL-0MVTVZ9RU003D4WW): the fix above stops the
+        // known reverting write, but any other late writer must still be
+        // caught. Re-read the persisted record — never trust the update's
+        // return value — and fail loudly on divergence.
+        if (requestedStatus !== undefined) {
+          const divergence = statusNotPersisted(normalizedId, requestedStatus);
+          if (divergence) {
+            results.push(divergence);
+            continue;
+          }
+        }
 
         // Auto-downgrade on a terminal transition (WL-0MSJM4EIV001A0V9): an
         // item that just became `completed` or entered `in_review` must not
