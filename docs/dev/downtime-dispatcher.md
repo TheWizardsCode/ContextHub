@@ -2222,7 +2222,21 @@ three selection paths (AC3 agreement group), the pin semantics, the tick
 admission with the single-tier pin (AC1/AC2), same-slot identity (AC5),
 the non-blocking observation tokens (AC4) and the full fail-closed matrix
 (AC3); `coordination-dispatch.test.ts` pins the leader-path probe and the
-direct/coordination parity (C5).
+direct/coordination parity (C5). The closing verification slice (C8,
+WL-0MVV1F2W5001883R) adds three end-to-end gates to the leaf-audit suite: the
+**pre-change baseline parity** group (AC2 — parent-audit and non-audit
+action+reason unchanged on the 2-of-3-free and all-free fixtures), the
+**parent AC6 traceability** group (AC5 — one targeted assertion per listed test
+obligation: classification, children-query failure → parent gate, per-slot
+tracker integration, race-accepting toggle) and the test that pins the
+**scripted decision-log scenario**
+(`packages/herdr/scripts/leaf-audit-decision-log-scenario.ts`, AC3). The
+scenario drives the real worker tick against fixed payloads and prints the
+decision-log excerpts reported on the parent work item:
+
+```bash
+npx tsx packages/herdr/scripts/leaf-audit-decision-log-scenario.ts
+```
 
 **AC traceability (parent WL-0MSORQ8Y4004YT63).**
 
@@ -2233,7 +2247,7 @@ direct/coordination parity (C5).
 | AC3 parent = all/2-slot gate unchanged | `DOWNTIME_AUDIT_MIN_FREE_SLOTS` unchanged; per-item gate stops doing lookups at/above it | selection-paths-agree tests |
 | AC4 same-slot stability | per-slot idle tracker (WL-0MSG7P9N8009PCKG) + band evidence | same-slot-identity worker tests |
 | AC5 opt-in race-accepting variant | `downtimeLeafAuditImmediate` (default OFF) | `settings.test.ts` + `downtime-worker.leaf-audit.test.ts` ON/OFF matrix |
-| AC6 tests | classification, fail-closed, per-slot tracker integration, toggle | the suites named above |
+| AC6 tests | classification, fail-closed, per-slot tracker integration, toggle | the suites named above + the closing C8 traceability group |
 | AC7 documentation | this subsection, `packages/herdr/README.md` (*Leaf-aware audit minimum*), code comments | this document |
 
 ### Leaf-audit admission: the opt-in race-accepting toggle (WL-0MVV1F1P1005PO5M)
