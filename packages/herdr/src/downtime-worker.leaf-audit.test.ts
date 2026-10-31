@@ -42,12 +42,23 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  ago,
   perSlotOneOfThreeFree,
   perSlotTwoOfThreeFree,
   makeDeps,
   threeSlotPoolStatus,
 } from './downtime-worker.fixtures.js';
-import { classifyAuditScope, type AuditCandidateScopeResult } from './downtime-worker.gates.js';
+import {
+  auditItemEligible,
+  classifyAuditScope,
+  isLeafAuditSlotBand,
+  type AuditCandidateScopeResult,
+} from './downtime-worker.gates.js';
+import {
+  dispatchDowntimeWork,
+  type DowntimeCandidate,
+  type DowntimeHerdrItem,
+} from './downtime-worker.js';
 import {
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
@@ -168,5 +179,304 @@ describe('DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS — the leaf audit slot budget', ()
     expect(DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS).toBeLessThan(DOWNTIME_AUDIT_MIN_FREE_SLOTS);
     // A leaf audit still needs a slot — 0 would mean "dispatch with none".
     expect(DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS).toBeGreaterThan(0);
+  });
+});
+
+// ── Per-item leaf-aware audit slot minimum (C3, WL-0MVV1EZVB007M1LR) ──
+//
+// The audit slot minimum became a PER-CANDIDATE decision (parent
+// WL-0MSORQ8Y4004YT63 AC2/AC3): at/above the parent minimum everything is
+// unchanged and NO scope lookup happens; in the single-free-slot band only a
+// trusted `leaf` may consume the slot, while a parent — or any untrustworthy
+// `{ ok: false }` lookup — is skipped exactly as before (fail-closed). The
+// same helper decides on the legacy tier chain and every Herdr-head scan, so
+// the same candidate/free-slot pair can never produce two decisions.
+
+describe('isLeafAuditSlotBand', () => {
+  it.each<[number, boolean]>([
+    [0, false],
+    [1, true],
+    [2, false],
+    [3, false],
+  ])('reports %i free slot(s) as in-band = %s', (freeSlots, expected) => {
+    expect(isLeafAuditSlotBand(freeSlots)).toBe(expected);
+  });
+
+  it('never places an unknown slot count in the leaf band', () => {
+    // Direct-API callers pass no count: fail-open, unchanged — and never a
+    // "band" that would demand a scope lookup.
+    expect(isLeafAuditSlotBand(undefined)).toBe(false);
+  });
+});
+
+describe('auditItemEligible — per-item audit slot minimum', () => {
+  const leafLookup = () => vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' });
+
+  it('is eligible at/above the PARENT minimum without any scope lookup (AC1)', async () => {
+    const getAuditCandidateScope = vi.fn();
+
+    await expect(
+      auditItemEligible({ getAuditCandidateScope }, { id: 'WL-AUD' }, DOWNTIME_AUDIT_MIN_FREE_SLOTS, '/repo'),
+    ).resolves.toBe(true);
+    await expect(
+      auditItemEligible({ getAuditCandidateScope }, { id: 'WL-AUD' }, 3, '/repo'),
+    ).resolves.toBe(true);
+
+    // Zero extra `wl` calls in the normal case — the parent minimum is the
+    // ceiling and short-circuits before classification.
+    expect(getAuditCandidateScope).not.toHaveBeenCalled();
+  });
+
+  it('is eligible for a direct-API caller (no slot count) without a lookup', async () => {
+    const getAuditCandidateScope = vi.fn();
+
+    await expect(
+      auditItemEligible({ getAuditCandidateScope }, { id: 'WL-AUD' }, undefined, '/repo'),
+    ).resolves.toBe(true);
+    expect(getAuditCandidateScope).not.toHaveBeenCalled();
+  });
+
+  it('admits a trusted LEAF in the single-free-slot band', async () => {
+    const getAuditCandidateScope = leafLookup();
+
+    await expect(
+      auditItemEligible({ getAuditCandidateScope }, { id: 'WL-LEAF' }, DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS, '/repo'),
+    ).resolves.toBe(true);
+    expect(getAuditCandidateScope).toHaveBeenCalledWith('WL-LEAF', '/repo');
+  });
+
+  it.each<[string, AuditCandidateScopeResult]>([
+    ['a parent', { ok: true, scope: 'parent' }],
+    ['an untrustworthy { ok: false } lookup', { ok: false }],
+    ['a lookup with no scope', { ok: true }],
+  ])('skips %s in the single-free-slot band (fail-closed)', async (_name, result) => {
+    const getAuditCandidateScope = vi.fn().mockResolvedValue(result);
+
+    await expect(
+      auditItemEligible({ getAuditCandidateScope }, { id: 'WL-AUD' }, 1, '/repo'),
+    ).resolves.toBe(false);
+  });
+
+  it('fails closed (parent gate) when the scope lookup throws', async () => {
+    const getAuditCandidateScope = vi.fn().mockRejectedValue(new Error('wl timeout'));
+
+    await expect(
+      auditItemEligible({ getAuditCandidateScope }, { id: 'WL-AUD' }, 1, '/repo'),
+    ).resolves.toBe(false);
+  });
+
+  it('fails closed (parent gate) when the deps object has no scope lookup at all', async () => {
+    await expect(auditItemEligible({}, { id: 'WL-AUD' }, 1, '/repo')).resolves.toBe(false);
+  });
+
+  it('is ineligible with no free slot and performs no lookup', async () => {
+    const getAuditCandidateScope = leafLookup();
+
+    await expect(
+      auditItemEligible({ getAuditCandidateScope }, { id: 'WL-AUD' }, 0, '/repo'),
+    ).resolves.toBe(false);
+    expect(getAuditCandidateScope).not.toHaveBeenCalled();
+  });
+});
+
+describe('dispatchDowntimeWork — per-item audit minimum on the legacy tier chain', () => {
+  const auditCandidate: DowntimeCandidate = { id: 'WL-AUD', title: 'Audit me', stage: 'audit' };
+  const planCandidate: DowntimeCandidate = {
+    id: 'WL-PLAN',
+    title: 'Prep task',
+    stage: 'intake_complete',
+    status: 'open',
+  };
+
+  it('dispatches a LEAF audit with exactly 1 free slot', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('WL-AUD');
+    expect(deps.getAuditCandidateScope).toHaveBeenCalledWith('WL-AUD', '/repo');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit WL-AUD'),
+      expect.anything(),
+    );
+  });
+
+  it('skips a PARENT audit with exactly 1 free slot and falls through to the plan tier', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    // Unchanged behaviour for a parent: ineligible, not a strike, no audit
+    // pane — the single-pane plan tier takes the slot.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit'),
+      expect.anything(),
+    );
+  });
+
+  it('skips an untrustworthy { ok: false } scope with exactly 1 free slot', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: false }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('performs NO scope lookup at the parent minimum (AC1)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: DOWNTIME_AUDIT_MIN_FREE_SLOTS,
+    });
+
+    expect(outcome.kind).toBe('audit');
+    expect(deps.getAuditCandidateScope).not.toHaveBeenCalled();
+  });
+});
+
+describe('dispatchDowntimeWork — per-item audit minimum on the Herdr head filter', () => {
+  /** A root completed/in_review item with no fresh audit (audit-eligible). */
+  const auditHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Audit ${id}`,
+    status: 'completed',
+    stage: 'in_review',
+    updatedAt: ago(60_000),
+    sortIndex: 10,
+  });
+  const planHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    sortIndex: 20,
+  });
+
+  it('dispatches a LEAF audit from the Herdr head with exactly 1 free slot', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditHead('WL-AUD')] }),
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('WL-AUD');
+    expect(deps.getAuditCandidateScope).toHaveBeenCalledWith('WL-AUD', '/repo');
+  });
+
+  it('skips a PARENT audit from the Herdr head with exactly 1 free slot', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi
+        .fn()
+        .mockResolvedValue({ ok: true, items: [auditHead('WL-AUD'), planHead('WL-PLAN')] }),
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
+
+    // Unchanged for a parent: the audit head is filtered and the plan head
+    // (single pane, ≥1 slot) dispatches.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('WL-PLAN');
+  });
+
+  it('performs NO scope lookup on the Herdr head at the parent minimum (AC1)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi
+        .fn()
+        .mockResolvedValue({ ok: true, items: [auditHead('WL-AUD'), planHead('WL-PLAN')] }),
+      getAuditCandidateScope: vi.fn(),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: DOWNTIME_AUDIT_MIN_FREE_SLOTS,
+    });
+
+    expect(outcome.kind).toBe('audit');
+    expect(deps.getAuditCandidateScope).not.toHaveBeenCalled();
+  });
+});
+
+describe('per-item audit minimum — the selection paths agree (AC3)', () => {
+  const auditCandidate: DowntimeCandidate = { id: 'WL-AUD', title: 'Audit me', stage: 'audit' };
+  const auditHead: DowntimeHerdrItem = {
+    id: 'WL-AUD',
+    title: 'Audit WL-AUD',
+    status: 'completed',
+    stage: 'in_review',
+    updatedAt: ago(60_000),
+    sortIndex: 10,
+  };
+  const planCandidate: DowntimeCandidate = {
+    id: 'WL-PLAN',
+    title: 'Prep task',
+    stage: 'intake_complete',
+    status: 'open',
+  };
+  const planHead: DowntimeHerdrItem = {
+    id: 'WL-PLAN',
+    title: 'Plan WL-PLAN',
+    status: 'open',
+    stage: 'intake_complete',
+    sortIndex: 20,
+  };
+
+  /** Dispatch the same candidate through the legacy tier chain (empty head). */
+  const viaLegacy = (scope: AuditCandidateScopeResult, freeSlots: number) =>
+    dispatchDowntimeWork(
+      makeDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue(scope),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+      }),
+      { model: 'plan', cwd: '/repo', freeSlots },
+    );
+
+  /** Dispatch the same candidate through the Herdr head filter. */
+  const viaHerdrHead = (scope: AuditCandidateScopeResult, freeSlots: number) =>
+    dispatchDowntimeWork(
+      makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditHead, planHead] }),
+        getAuditCandidateScope: vi.fn().mockResolvedValue(scope),
+      }),
+      { model: 'plan', cwd: '/repo', freeSlots },
+    );
+
+  it.each<[string, AuditCandidateScopeResult, string]>([
+    ['a leaf', { ok: true, scope: 'leaf' }, 'audit'],
+    ['a parent', { ok: true, scope: 'parent' }, 'plan'],
+    ['an untrustworthy lookup', { ok: false }, 'plan'],
+  ])('takes the same decision for %s on the legacy chain and the Herdr head', async (_name, scope, expectedKind) => {
+    const freeSlots = 1; // the leaf-audit band
+    const legacy = await viaLegacy(scope, freeSlots);
+    const herdr = await viaHerdrHead(scope, freeSlots);
+
+    expect(legacy.kind).toBe(expectedKind);
+    expect(herdr.kind).toBe(expectedKind);
   });
 });

@@ -38,6 +38,31 @@ vi.mock('node:child_process', async (importOriginal) => {
   }
 })
 
+// ── Hermetic git environment for the whole suite (WL-0MVVWRPRO006IQ61) ──
+// A caller can export a repository-override variable that git honours over the
+// working directory. `implement.py finish` in particular exports GIT_INDEX_FILE
+// (a temporary index) while it validates the would-be-commit tree: any fixture
+// that then runs `git add`/`git commit` stages into THAT index instead of its
+// own throwaway repository, corrupting the enclosing gate's evidence ("the
+// temporary index changed while the suite ran") and then failing itself with
+// "invalid object ... / Error building trees". Fixtures must be hermetic, so the
+// override variables are removed once, before any test file runs; cwd alone
+// then decides the repository, exactly as in a normal run. Tests that exercise
+// an override set it explicitly themselves and are unaffected.
+for (const name of [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CONFIG',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_NOSYSTEM',
+]) {
+  delete process.env[name]
+}
+
 // Prepend tests/cli/mock-bin to PATH so child_process.spawn/exec pick up the
 // test-local git mock. This runs once before the test suite (configured in
 // vitest.config.ts).

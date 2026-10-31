@@ -1811,11 +1811,12 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 
-  it('AC3 tier minimums flow from the poll: 1 free slot skips the audit tier, plan dispatches (worker end-to-end)', async () => {
-    // N=1 with a single free slot: the idle gate is satisfied (1 ≥ N), but
-    // the AUDIT tier needs ≥2 free slots (parent WL-0MT32F90V008UAD2 AC3) —
-    // the worker must pass the polled free count into the tier selection so
-    // the audit candidate is skipped and the plan pane dispatches instead.
+  it('AC3 per-item tier minimums flow from the poll: 1 free slot skips a PARENT audit, plan dispatches (worker end-to-end)', async () => {
+    // N=1 with a single free slot: the idle gate is satisfied (1 ≥ N). The
+    // audit tier's minimum is per-CANDIDATE (parent WL-0MSORQ8Y4004YT63 C3):
+    // at 1 free slot the candidate is consulted and scope-classified, and a
+    // parent (the fixture default) still needs ≥2 slots — so it is skipped
+    // and the plan pane dispatches instead.
     const oneFreePayload = {
       llama_server_running: true,
       model_switch_in_progress: false,
@@ -1848,9 +1849,10 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     vi.setSystemTime(start + cfg.thresholdMs);
     const at = await worker.tick();
 
-    // The worker saw freeSlots=1: the audit candidate was never consulted
-    // and the plan pane dispatched.
-    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    // The worker saw freeSlots=1: the parent audit candidate was consulted,
+    // classified parent, and skipped — the plan pane dispatched.
+    expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+    expect(deps.getAuditCandidateScope).toHaveBeenCalledWith('WL-AUD', expect.any(String));
     expect(at.dispatched).toBe(true);
     expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('/skill:plan WL-PLAN');
   });

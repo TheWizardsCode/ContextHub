@@ -501,10 +501,11 @@ describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () 
     expect(outcome.reason).toBe('code-freeze');
   });
 
-  it('is not consulted when the audit tier is ineligible (1 free slot < the 2-slot audit minimum)', async () => {
-    // Free-slot minimum preserved (parent WL-0MT32F90V008UAD2 AC3): below the
-    // audit tier's 2-slot minimum the whole audit block is skipped — the
-    // single-flight check is not even run; plan (≥1 slot) dispatches.
+  it('consults the audit tier with 1 free slot and keeps the active-audit skip (leaf-aware minimum)', async () => {
+    // Leaf-aware minimum (parent WL-0MSORQ8Y4004YT63 C3): with 1 free slot the
+    // audit tier IS consulted (a leaf may use the single slot), but a live
+    // audit keeps the unchanged single-flight skip — the candidate lookup is
+    // never reached and plan (>=1 slot) dispatches.
     const deps = makeDeps({
       getActiveAudit: vi.fn().mockResolvedValue(activeAudit),
       getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
@@ -516,7 +517,7 @@ describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () 
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
 
-    expect(deps.getActiveAudit).not.toHaveBeenCalled();
+    expect(deps.getActiveAudit).toHaveBeenCalledTimes(1);
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
@@ -665,7 +666,7 @@ describe('dispatch tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3)', ()
     status: 'open',
   };
 
-  it('audit tier is skipped below 2 free slots: with 1 free slot an audit candidate is NOT dispatched (AC3)', async () => {
+  it('audit tier does not dispatch a PARENT audit with 1 free slot (AC3)', async () => {
     const deps = makeDeps({
       getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
       getNextItem: vi.fn().mockResolvedValue({
@@ -676,9 +677,8 @@ describe('dispatch tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3)', ()
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
 
-    // 1 free slot: audit needs ≥2 → skipped WITHOUT consulting the lookup
-    // (ineligible, not a strike); plan needs ≥1 → dispatches.
-    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    // 1 free slot: the (default-parent) audit candidate is consulted and
+    // skipped — ineligible, not a strike; plan needs >=1 and dispatches.
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-PLAN');
@@ -696,9 +696,9 @@ describe('dispatch tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3)', ()
     expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
   });
 
-  it('with exactly 1 free slot the audit skip is ineligible — a genuinely empty plan tier is no-candidate, not a strike', async () => {
-    // Mirror of the code-freeze skip: an unmet tier minimum never produces
-    // a wl-error strike and never short-circuits the fallback tiers.
+  it('with exactly 1 free slot a skipped parent audit is ineligible — a genuinely empty plan tier is no-candidate, not a strike', async () => {
+    // Mirror of the code-freeze skip: an unmet per-item tier minimum never
+    // produces a wl-error strike and never short-circuits the fallback tiers.
     const deps = makeDeps({
       getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
@@ -706,7 +706,6 @@ describe('dispatch tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3)', ()
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 1 });
 
-    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('no-candidate'); // plan tier answered empty
   });
@@ -1617,9 +1616,9 @@ describe('audit tier vs prefill-concurrency budget (WL-0MVR8FI4Q0007CGR)', () =>
   });
 
   it('AC2: the audit minimum uses the RAW slot budget, never the prefill budget', async () => {
-    // Raw budget 1 (< 2) → audit ineligible; a prefill budget can never raise
-    // a slot-count requirement. The audit lookup is not consulted and the
-    // single-pane plan tier dispatches instead.
+    // Raw budget 1 (< 2) → the (default-parent) audit candidate is skipped by
+    // the per-item gate; a prefill budget can never raise a slot-count
+    // requirement. The single-pane plan tier dispatches instead.
     const deps = makeDeps({
       getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
@@ -1632,7 +1631,6 @@ describe('audit tier vs prefill-concurrency budget (WL-0MVR8FI4Q0007CGR)', () =>
       effectiveFreeSlots: 1,
     });
 
-    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
   });

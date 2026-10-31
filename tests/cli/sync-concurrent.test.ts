@@ -38,8 +38,36 @@ function realGitPath(): string {
     .join(path.delimiter);
 }
 
+/**
+ * Repository-override git variables that must never reach a fixture command.
+ * A leaked `GIT_INDEX_FILE` makes `git add`/`git commit` write into the caller's
+ * index instead of this fixture repo's own — which corrupts an enclosing test
+ * gate's temporary index and fails the run as unattributable (WL-0MVVWRPRO006IQ61).
+ * Mirrors `skill/shared/git_sandbox.py::REPOSITORY_OVERRIDE_ENV_VARS` plus the
+ * index override that only a gate sets.
+ */
+const REPOSITORY_OVERRIDE_ENV_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CONFIG',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_NOSYSTEM',
+] as const;
+
+/** A hermetic environment for fixture git commands: the real git on PATH and
+ * no inherited repository override, so *cwd* alone decides the repository. */
+function fixtureGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: realGitPath() };
+  for (const name of REPOSITORY_OVERRIDE_ENV_VARS) delete env[name];
+  return env;
+}
+
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf-8', env: { ...process.env, PATH: realGitPath() } });
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
 }
 
 let tempDir: string;
@@ -164,4 +192,41 @@ it('single wl sync works identically and reports success', async () => {
   expect(parsed.success).toBe(true);
   expect(parsed.skipped).toBeUndefined();
   expect(fs.existsSync(lockPath())).toBe(false);
+}, 60000);
+
+// ---------------------------------------------------------------------------
+// Fixture isolation: a leaked repository override never reaches fixture git
+// (WL-0MVVWRPRO006IQ61)
+// ---------------------------------------------------------------------------
+
+it('ignores a GIT_INDEX_FILE leaked by an enclosing test gate', () => {
+  // `implement.py finish` validates a would-be-commit tree with a temporary
+  // GIT_INDEX_FILE exported to the suite. Before the hermetic fixture
+  // environment, this fixture's `git add`/`git commit` wrote into THAT index
+  // (whose object references belong to the implementation worktree), the
+  // enclosing gate then refused the run as unattributable, and this suite
+  // failed with "invalid object ... / Error building trees".
+  const leakedIndex = path.join(createTempDir(), 'leaked-gate.index');
+  const previous = process.env.GIT_INDEX_FILE;
+  process.env.GIT_INDEX_FILE = leakedIndex;
+  try {
+    fs.writeFileSync(path.join(tempDir, 'isolated.txt'), 'isolated\n', 'utf8');
+    git(tempDir, 'add', 'isolated.txt');
+    git(tempDir, 'commit', '-m', 'commit under a leaked GIT_INDEX_FILE');
+
+    // The fixture repo's own index recorded the commit...
+    const tracked = git(tempDir, 'ls-files');
+    expect(tracked).toContain('isolated.txt');
+    // ...with nothing staged or modified left behind (the `.worklog/` fixture
+    // churn from beforeEach is untracked and irrelevant here).
+    const status = git(tempDir, 'status', '--porcelain', 'isolated.txt');
+    expect(status.trim()).toBe('');
+    const log = git(tempDir, 'log', '--oneline');
+    expect(log).toContain('commit under a leaked GIT_INDEX_FILE');
+    // ...and the enclosing gate's index was never touched.
+    expect(fs.existsSync(leakedIndex)).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.GIT_INDEX_FILE;
+    else process.env.GIT_INDEX_FILE = previous;
+  }
 }, 60000);

@@ -27,11 +27,13 @@ import {
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   DISPATCH_PIPELINE_SINGLE_FLIGHT,
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
+  DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_PANE_MIN_FREE_SLOTS,
 } from './downtime-worker.constants.js';
 import { clampDowntimeAuditBatchMax } from './downtime-worker.clamps.js';
 import {
   REVIEW_QUEUE_HOLD_REASON,
+  auditItemEligible,
   computeAuditEligibleDepth,
   fetchExtendedHerdrItems,
   finalizeAuditBatchOutcome,
@@ -359,7 +361,21 @@ export async function dispatchDowntimeWork(
     const panesBudget = opts.effectiveFreeSlots ?? freeSlots;
     const panesEligible =
       panesBudget === undefined || panesBudget >= DOWNTIME_PANE_MIN_FREE_SLOTS;
+    // Conservative audit ceiling — the PARENT minimum. Met at/above it, so
+    // every audit candidate is admissible without a scope lookup. Kept for the
+    // tier-consultation decision below and for logging/behaviour parity; the
+    // actual admit/skip decision is the per-item `auditItemEligible`.
     const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+    // Per-item leaf-aware audit minimum (parent WL-0MSORQ8Y4004YT63 AC2/AC3,
+    // C3 WL-0MVV1EZVB007M1LR): the audit tier is considered whenever at least
+    // the LEAF minimum is available. The per-item `auditItemEligible` gate
+    // then admits a trusted leaf and skips a parent/unknown exactly as today.
+    const auditTierConsidered =
+      auditEligible ||
+      (freeSlots !== undefined && freeSlots >= DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS);
+    // Raw free-slot count handed to the Herdr-head filter (normal + critical-
+    // first scans) so the SAME `auditItemEligible` decides there too.
+    const auditSlotBudget = freeSlots;
 
     // Sprint-view dispatch window (WL-0MUNS8X97007C9H9 AC1): the live per-root
     // `browseItemCount` clamped exactly as the TUI worklist does, so the Herdr
@@ -481,7 +497,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode, freeSlots, frozen, cpuSaturated, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
+        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode, freeSlots, frozen, cpuSaturated, panesEligible, auditSlotBudget, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return finalize(herdrOutcome);
 
@@ -579,13 +595,18 @@ export async function dispatchDowntimeWork(
       // never a silent fall-through, so a broken audit query cannot look
       // like "no audit candidates" and silently disable the audit tier.
       //
-      // Per-tier minimum (parent WL-0MT32F90V008UAD2 AC3): the audit tier
-      // requires ≥ 2 free slots (parent + Phase 2 child at
-      // `AUDIT_PHASE2_PARALLELISM=1`). When fewer are free the audit
-      // lookup is skipped entirely — ineligible, not a strike and not a
-      // wl-error (mirrors the code-freeze skip) — and dispatch falls
-      // through to the implement tier (which needs only ≥ 1).
-      if (auditEligible) {
+      // Per-item minimum (parent WL-0MT32F90V008UAD2 AC3; leaf-aware in
+      // parent WL-0MSORQ8Y4004YT63 AC2/AC3): an audit candidate needs >= 2
+      // free slots when it is a PARENT (parent + Phase 2 child at
+      // `AUDIT_PHASE2_PARALLELISM=1`) but only >= 1 when it is a trusted LEAF
+      // (a single Pi session). The tier is therefore consulted whenever the
+      // LEAF minimum is met and the per-item `auditItemEligible` gate below
+      // decides; a parent or an untrustworthy `{ ok: false }` lookup is
+      // skipped exactly as today — ineligible, not a strike and not a
+      // wl-error (mirrors the code-freeze skip) — and dispatch falls through
+      // to the implement tier (which needs only >= 1). At/above the parent
+      // minimum the per-item gate performs no scope lookup (AC1).
+      if (auditTierConsidered) {
         // Active-audit single-flight (WL-0MT3PHW4I002SNOV): before any
         // audit candidate is selected, check whether an audit-tier item is
         // currently in flight — a non-stale `kind=audit` dispatch marker
@@ -631,33 +652,48 @@ export async function dispatchDowntimeWork(
             const audit = await deps.getNextAuditCandidate(opts.cwd);
             if (audit.ok) {
               if (audit.candidate !== null && audit.candidate.needsProducerReview !== true) {
-                // Interim freshness re-check (WL-0MT8KSTOE00871E7): between
-                // candidate selection and dispatch, a valid audit may have
-                // been recorded (e.g. by a human or another process). Re-check
-                // freshness to avoid dispatching a redundant audit pane and
-                // writing a misleading dispatch comment. If a fresh audit now
-                // exists, skip the dispatch entirely — no comment, no marker,
-                // no spawn — and fall through to the next tier. Treat as
-                // "already audited", not "no-candidate"/cooldown and not a
-                // strike. Fail-open: a wl/CLI failure in the freshness check
-                // is treated as "not fresh" (dispatch proceeds) — never a
-                // silent skip.
-                try {
-                  const fresh = await deps.hasFreshAudit(audit.candidate.id, opts.cwd);
-                  if (fresh) {
-                    freshnessSkip = true;
-                    process.stderr.write(
-                      `[worklog-plugin] Downtime audit tier skip: fresh audit recorded during interim (item ${audit.candidate.id})\n`,
-                    );
-                    // Fall through to the next tier (implement/plan/intake).
-                  } else {
+                // Per-item leaf-aware minimum (parent WL-0MSORQ8Y4004YT63 C3):
+                // in the single-free-slot band only a classified LEAF is
+                // eligible. A parent, or an untrustworthy scope lookup, is
+                // skipped exactly as before — no strike, no cooldown, silent
+                // fall-through (the tick still records the non-blocking
+                // `audit-tier-budget-skipped` observation). At/above the
+                // parent minimum this returns true without a scope lookup.
+                const auditSlotEligible = await auditItemEligible(
+                  deps,
+                  audit.candidate,
+                  freeSlots,
+                  opts.cwd,
+                );
+                if (auditSlotEligible) {
+                  // Interim freshness re-check (WL-0MT8KSTOE00871E7): between
+                  // candidate selection and dispatch, a valid audit may have
+                  // been recorded (e.g. by a human or another process). Re-check
+                  // freshness to avoid dispatching a redundant audit pane and
+                  // writing a misleading dispatch comment. If a fresh audit now
+                  // exists, skip the dispatch entirely — no comment, no marker,
+                  // no spawn — and fall through to the next tier. Treat as
+                  // "already audited", not "no-candidate"/cooldown and not a
+                  // strike. Fail-open: a wl/CLI failure in the freshness check
+                  // is treated as "not fresh" (dispatch proceeds) — never a
+                  // silent skip.
+                  try {
+                    const fresh = await deps.hasFreshAudit(audit.candidate.id, opts.cwd);
+                    if (fresh) {
+                      freshnessSkip = true;
+                      process.stderr.write(
+                        `[worklog-plugin] Downtime audit tier skip: fresh audit recorded during interim (item ${audit.candidate.id})\n`,
+                      );
+                      // Fall through to the next tier (implement/plan/intake).
+                    } else {
+                      return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
+                    }
+                  } catch {
+                    // Fail-open: the freshness check could not complete (e.g.
+                    // wl/CLI error) — proceed with the dispatch (conservative
+                    // default). The item is treated as "not fresh" for this tick.
                     return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
                   }
-                } catch {
-                  // Fail-open: the freshness check could not complete (e.g.
-                  // wl/CLI error) — proceed with the dispatch (conservative
-                  // default). The item is treated as "not fresh" for this tick.
-                  return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
                 }
               }
             } else {

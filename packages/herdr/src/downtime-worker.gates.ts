@@ -7,10 +7,11 @@
  * (`classifyItemForDispatch`, which applies the soft-delete, assignee and
  * producer-review holds owned by `downtime-worker.selection.ts`), the
  * leaf-vs-parent audit-scope classifier (`classifyAuditScope`, the fail-closed
- * mapping every leaf-aware audit gate reads), the critical-first escalation
- * guard, the audit-batch depth/cap status, the review-queue depth gate, the
- * critical-only window-extension escape hatch and the per-item
- * dispatch-attempt budget.
+ * mapping every leaf-aware audit gate reads), the per-item leaf-aware audit
+ * slot minimum (`auditItemEligible`, parent WL-0MSORQ8Y4004YT63 C3), the
+ * critical-first escalation guard, the audit-batch depth/cap status, the
+ * review-queue depth gate, the critical-only window-extension escape hatch and
+ * the per-item dispatch-attempt budget.
  *
  * Moved verbatim out of `downtime-worker.ts` (parent WL-0MVF3F9A7000HKP7;
  * child WL-0MVLIHZZI004D7EK). No behaviour change: gate ordering, fail-closed
@@ -37,8 +38,10 @@
 import { isAuditFresh } from '@worklog/shared/icons';
 import {
   DEFAULT_BROWSE_ITEM_COUNT,
+  DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_AUDIT_RECENCY_WINDOW_MS,
   DOWNTIME_DISPATCH_EXTEND_MAX,
+  DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
 } from './downtime-worker.constants.js';
 import {
   countAttempts as _countAttempts,
@@ -99,6 +102,14 @@ export interface DowntimeGateDeps {
    * a missing dep is fail-open (the budget filter still skips the item).
    */
   markNeedsProducerReview?(itemId: string, cwd: string): Promise<boolean>;
+  /**
+   * Leaf-vs-parent scope lookup for an audit candidate (parent
+   * WL-0MSORQ8Y4004YT63 C1/C2, see `DowntimeWorkerDeps.
+   * getAuditCandidateScope`). Consulted ONLY in the leaf-audit slot band by
+   * {@link auditItemEligible}; optional so a deps object without it degrades
+   * fail-closed (treated as a parent).
+   */
+  getAuditCandidateScope?(itemId: string, cwd: string): Promise<AuditCandidateScopeResult>;
 }
 
 /**
@@ -237,6 +248,66 @@ export function classifyAuditScope(
 ): AuditScope {
   if (!result || result.ok !== true) return 'parent';
   return result.scope === 'leaf' ? 'leaf' : 'parent';
+}
+
+/**
+ * True when a free-slot count falls in the LEAF-AUDIT band — at or above the
+ * leaf minimum and below the parent minimum (with the shipped constants:
+ * exactly one free slot). Only this band requires a scope lookup; every other
+ * count is decided by the slot number alone (parent WL-0MSORQ8Y4004YT63 C3).
+ */
+export function isLeafAuditSlotBand(freeSlots: number | undefined): boolean {
+  if (freeSlots === undefined) return false;
+  return (
+    freeSlots >= DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS &&
+    freeSlots < DOWNTIME_AUDIT_MIN_FREE_SLOTS
+  );
+}
+
+/**
+ * Per-item audit slot eligibility (parent WL-0MSORQ8Y4004YT63 C3).
+ *
+ * Replaces the tick-level `freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS`
+ * boolean with a per-CANDIDATE decision, because the minimum now depends on
+ * the candidate's scope:
+ *
+ *  - `freeSlots === undefined` → eligible (direct-API fail-open, unchanged).
+ *  - `freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS` → eligible IMMEDIATELY and
+ *    with NO scope lookup: the parent audit's minimum is untouched and the
+ *    normal case adds zero extra `wl` calls (AC1).
+ *  - `freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS` → ineligible with no
+ *    lookup (no slot can host even a single-session audit).
+ *  - leaf band (`DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS <= freeSlots <
+ *    DOWNTIME_AUDIT_MIN_FREE_SLOTS`) → classify the candidate's scope and
+ *    dispatch ONLY a trusted `'leaf'`. A `'parent'`, an `{ok:false}` lookup, a
+ *    thrown/absent lookup or an unexpected token is skipped exactly as today
+ *    (fail-closed, AC2).
+ *
+ * The same helper is the single definition every audit selection path shares,
+ * so the decision for a given candidate/free-slot pair is identical on the
+ * legacy tier chain, the Herdr head filter and the critical-first scan
+ * (AC3).
+ */
+export async function auditItemEligible(
+  deps: Pick<DowntimeGateDeps, 'getAuditCandidateScope'>,
+  candidate: { id: string },
+  freeSlots: number | undefined,
+  cwd: string,
+): Promise<boolean> {
+  if (freeSlots === undefined) return true; // direct API caller — unchanged
+  if (freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS) return true; // parent ceiling, no lookup
+  if (freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return false; // no slot at all
+  // Leaf band: only a trusted leaf may consume the single free slot.
+  let result: AuditCandidateScopeResult | null | undefined;
+  try {
+    result =
+      typeof deps.getAuditCandidateScope === 'function'
+        ? await deps.getAuditCandidateScope(candidate.id, cwd)
+        : null;
+  } catch {
+    result = null; // fail-closed: an untrustworthy lookup is a parent
+  }
+  return classifyAuditScope(result) === 'leaf';
 }
 
 // ── Review-queue depth gate — shared (WL-0MT2UQWOR007CYY9 gate re-wired
