@@ -61,6 +61,13 @@
  * production wiring injects this through the worklist's
  * `applyActivePaneMarkers` seam (`index.ts`).
  *
+ * Live claim holder (WL-0MVWDAZL10025P8J): a pane-less driven session still
+ * holds its per-child `flock` claim, so the "busy" signal will become
+ * `pane OR live claim holder` (sibling child). The local, side-effect-free
+ * heldness probe lives in `./claim-lock.ts` (`probeClaimHolders`) — it is NOT
+ * imported here yet; the cycle wiring (`decideDemotion`) is the sibling
+ * child's scope.
+ *
  * Opening/closing a work-item pane does NOT touch the worklog DB, so the
  * DB-change-gated refresh tick can never update this marker for it. The
  * worklist therefore re-applies the marker on the hydrate cadence and on

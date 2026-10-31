@@ -71,6 +71,34 @@ is the simple, reliable rule the producer directed:
 - Single-flight + scheduler watchdog (`HYDRATOR_RUN_TIMEOUT_MS`): a hung
   run is abandoned and retried on the next tick, never wedging the task.
 
+## Claim-holder probe: how heldness is measured (WL-0MVWDAZL10025P8J)
+
+The second busy signal (a live per-child claim holder) is measured by the
+local, side-effect-free probe in `packages/herdr/src/claim-lock.ts`. The
+mechanism was spiked and measured on the dev host on 2026-10-31:
+
+| Candidate | Result | Measured cost (50 candidates) |
+|---|---|---|
+| `flock(1)` spawn, fd-redirect form `sh -c 'flock -n -E 75 9 9<"$1"' sh <path>` | rc 0 = free, rc 75 = held, rc 2 = cannot open | ~7.6 ms/candidate (~0.4 s per batch, one spawn each) |
+| One `/proc/locks` snapshot per batch + one `stat` per candidate (`dev:inode`) | Linux-only; zero spawns | ~0.2 ms/candidate (~10 ms per batch) |
+
+**Chosen: hybrid** — on Linux the probe takes one `/proc/locks` snapshot per
+batch and maps each candidate with a single `stat`; when `/proc/locks` is
+unavailable (non-Linux, or a mount namespace that hides it) it falls back to
+the portable fd-redirect `flock` spawn. Neither path creates, truncates or
+rewrites a lock file, and neither blocks: plain `flock -n <path>` is never
+used because util-linux 2.41.3 has no `--no-create` and would create a missing
+lock file. Both paths stay far inside the 5 s per-step budget
+(`HYDRATOR_STEP_TIMEOUT_MS`).
+
+Heldness is decided per candidate by, in order: a held `flock` ⇒ `flock-held`
+(held); a free `flock` with a live recorded `pid` ⇒ `pid-alive` (held, guarded
+by the `started_at` vs process-start pid-reuse check ⇒ `pid-reuse-suspected`
+when inconsistent); a free `flock` with a provably dead `pid` ⇒ `stale` (the
+only held-file release path); no lock file ⇒ `no-lock-file`; and any ambiguity
+(unreadable `locks/`, corrupt metadata, unexpected `fs`/`flock` error) ⇒
+`held` with a named reason.
+
 ## Selection-list in-progress marker (WL-0MV1BWETT005GSUJ)
 
 Demotion alone is not enough for the selection list: an item whose worklog
@@ -138,6 +166,12 @@ display overlay:
 - `packages/herdr/src/pane-title.ts` — `truncatePaneTitlePreservingSuffix`
   keeps the work-item ID visible in truncated pane titles, which is what makes
   the pane-title match reliable.
+- `packages/herdr/src/claim-lock.ts` — `probeClaimHolders`, the local
+  claim-holder heldness probe (mechanism, fail-open rules and measured cost
+  above).
+- `packages/herdr/src/claim-lock.test.ts` — probe contract tests (real
+  `flock` holder process, stale fixtures, fail-open error classes, pid-reuse
+  guard, bounded cost, no side effects).
 
 ## Test map (AC6)
 
@@ -154,6 +188,7 @@ display overlay:
 | green circle (pane → `agentState`) stamp/clear | `markItemsActiveByPane` cases + `worklist-active-pane-marker.test.ts` |
 | event-driven pane refresh (no `herdr agent list` exec) | `worklist-agent-state-event.test.ts` |
 | fail-open error paths | `runHydrationOnce` (missing list, missing panes, failed demotion) |
+| claim-holder heldness (probe) | `claim-lock.test.ts` — live `flock` holder, dead holder, missing file, fail-open classes, pid-reuse guard, bounded cost, no side effects |
 
 ## Related
 
