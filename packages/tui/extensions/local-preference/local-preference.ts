@@ -24,10 +24,17 @@
  * Herdr conveys the policy per spawn as the pane-launch environment variable
  * `HERDR_LOCAL_PREFERENCE` (`--local-preference` in send-to-pi.sh); this
  * module turns it into the request header on EVERY request and appends one
- * bounded JSONL route-log line per response to
+ * bounded JSONL route-log line per **admitted** response to
  * `<cwd>/.worklog/local-route.log`, carrying the pi session id and the
  * forwarded reservation ticket so a dispatcher decision can be correlated
  * with the turns it produced (C4-AC4).
+ *
+ * One line is written per successful provider response: an attempt refused
+ * with a retryable 429 never reaches `after_provider_response`, so it writes
+ * nothing. The hook is mode-agnostic — an interactive pane and a headless
+ * (`pi -p`) session record the same line, and the headless ctx carries `cwd`,
+ * `model` and `sessionManager` exactly as the interactive one does
+ * (WL-0MVTN5M3E007DU9Z).
  *
  * Fail-open is mandatory (C4-AC3):
  *   - an unset/empty/invalid knob injects no header and writes no log —

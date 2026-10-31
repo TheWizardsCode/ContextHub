@@ -1795,11 +1795,19 @@ The refused attempts have **no** route-log line — `after_provider_response`
 does not fire when the provider throws on a non-2xx — so the proxy log is the
 only record of the deferral itself; the route log records the admitted turn.
 
-> **Headless caveat.** Route logging runs from the extension's
-> `after_provider_response` context; a `pi -p` (headless) session on this build
-> records the preference header and the deferral retries but produced no
-> route-log line, so reproduce with an interactive pane when the route log is
-the artefact you need.
+> **Headless is not exempt.** The route log is written from the extension's
+> `after_provider_response` hook in whichever pi mode is running: a headless
+> `pi -p` turn whose provider response is admitted writes exactly the same line
+> as an interactive pane (verified 2026-10-31 with a mock provider in text
+> mode, in `--mode json` — the `spawnBackgroundPi` shape — and with a
+> `.worklog/worktrees/…` session cwd; WL-0MVTN5M3E007DU9Z). Two absences are
+> expected and must **not** be read as a headless limitation: a run whose
+> attempts were all refused writes no line (no admitted response, so the hook
+> never fires — see the paragraph above), and a run terminated during its
+> deferral wait writes none for the abandoned turn. When a dispatched
+> (headless) turn shows no line, check its session JSONL: a last message with
+> `stopReason: "error"` / `429` means the turn never completed, rather than
+> the route log having failed to record an admitted turn.
 
 **Tests.** `packages/tui/extensions/local-preference/local-preference.test.ts`
 (pure module and hooks: both values, the unset case, absent/malformed headers,
