@@ -683,6 +683,16 @@ export interface DowntimeWorkerConfig {
      */
     cpuGatePercent?: number;
     /**
+     * OPT-IN race-accepting leaf-audit admission
+     * (`downtimeLeafAuditImmediate`, WL-0MVV1F1P1005PO5M, parent
+     * WL-0MSORQ8Y4004YT63 AC5): read live on every tick. Optional — absent
+     * leaves the default C4 admission (the same free slot must stay free for
+     * the FULL idle threshold) byte-for-byte; `true` admits a positively
+     * classified leaf audit on ONE trusted free unowned slot immediately.
+     * Every fail-closed check is unchanged either way.
+     */
+    leafAuditImmediate?: boolean;
+    /**
      * Continuous capacity-refusal window before a `capacity-starved`
      * observation is written (WL-0MVKNC2N50025HXE AC3). Read live on every
      * tick. Optional — defaults to

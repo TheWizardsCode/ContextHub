@@ -1055,3 +1055,276 @@ describe('worker tick — every fail-closed case restores today\'s behaviour (AC
     expect(reasons).not.toContain('no-candidate');
   });
 });
+
+// ── Opt-in race-accepting leaf variant (WL-0MVV1F1P1005PO5M) ───────────
+//
+// Parent AC5's OPTIONAL variant: `downtimeLeafAuditImmediate` (default OFF)
+// lets a POSITIVELY classified leaf audit dispatch on ONE trusted free unowned
+// slot without waiting the full idle threshold. The toggle removes the WAIT
+// only — every fail-closed refusal (untrustworthy per-slot detail, saturated
+// pool, live contention, the prefill gate, an owned slot, an unclassifiable or
+// parent candidate, the active-audit single flight) is untouched, and the
+// relaxed slot stays pinned to the leaf audit so no other tier can take it.
+describe('downtimeLeafAuditImmediate — opt-in race-accepting leaf admission', () => {
+  const leafCandidate = { id: 'WL-LEAF', title: 'Leaf', stage: 'audit' as const };
+  const planCandidate = {
+    id: 'WL-PLAN',
+    title: 'Prep task',
+    stage: 'intake_complete',
+    status: 'open',
+  };
+  const leafDeps = (overrides: Partial<DowntimeWorkerDeps> = {}): Partial<DowntimeWorkerDeps> => ({
+    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: leafCandidate }),
+    getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'leaf' }),
+    getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    ...overrides,
+  });
+
+  /** A 3-slot per-slot-mode worker whose config is mutable between ticks. */
+  function makeWorker(opts: {
+    status?: unknown;
+    deps?: Partial<DowntimeWorkerDeps>;
+    recordDecision?: (entry: CoordinationLogEntry, cwd: string) => Promise<void>;
+    leafAuditImmediate?: boolean;
+  } = {}) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: 2,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+      leafAuditImmediate: opts.leafAuditImmediate ?? false,
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(jsonResponseFixture(opts.status ?? threeSlotPoolStatus(1)));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      ...(opts.recordDecision ? { recordDecision: opts.recordDecision } : {}),
+      ...opts.deps,
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps, cfg };
+  }
+
+  const promptOf = (deps: ReturnType<typeof makeDeps>, index = 0): string =>
+    (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[index][0] as string;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('OFF (default) keeps C4: the first poll of a fresh idle window never dispatches', async () => {
+    const { worker, deps } = makeWorker({ deps: leafDeps() });
+    vi.setSystemTime(1_000_000);
+
+    const first = await worker.tick();
+
+    expect(first.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // The duration guard refuses BEFORE the candidate peek: on the default
+    // path a fresh idle window costs no extra `wl` audit lookup.
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+  });
+
+  it('ON dispatches a classified leaf audit on the FIRST poll of a 1-of-3-free pool', async () => {
+    const { worker, deps } = makeWorker({ deps: leafDeps(), leafAuditImmediate: true });
+    vi.setSystemTime(1_000_000);
+
+    const first = await worker.tick();
+
+    expect(first.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(promptOf(deps)).toContain('/skill:audit WL-LEAF');
+    // The relaxed slot stayed pinned: no other tier was ever offered it.
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it('is read live per tick — switching OFF → ON applies without a restart', async () => {
+    const { worker, deps, cfg } = makeWorker({ deps: leafDeps() });
+    vi.setSystemTime(1_000_000);
+    expect((await worker.tick()).dispatched).toBe(false);
+
+    cfg.leafAuditImmediate = true;
+    vi.setSystemTime(1_000_050); // still far below the idle threshold
+
+    expect((await worker.tick()).dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the toggle state and slot evidence on leaf-audit-admission', async () => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const { worker } = makeWorker({ deps: leafDeps(), recordDecision, leafAuditImmediate: true });
+    vi.setSystemTime(1_000_000);
+
+    await worker.tick();
+
+    const admission = recordDecision.mock.calls
+      .map((call) => call[0] as CoordinationLogEntry)
+      .find((entry) => entry.reason === 'leaf-audit-admission');
+    expect(admission).toMatchObject({
+      reason: 'leaf-audit-admission',
+      leafAuditItemId: 'WL-LEAF',
+      leafAuditScope: 'leaf',
+      leafAuditImmediate: true,
+      freeSlots: 1,
+      thresholdMetCount: 0, // no wait: the slot was free on this very poll
+      requiredFreeSlots: 2,
+    });
+    // Still an observation, never a refusal.
+    expect(worker.blockReason).toBeNull();
+  });
+
+  it('records leafAuditImmediate: false on the C4 admission when the toggle is OFF', async () => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const { worker, cfg } = makeWorker({ deps: leafDeps(), recordDecision });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + cfg.thresholdMs);
+
+    await worker.tick();
+
+    const admission = recordDecision.mock.calls
+      .map((call) => call[0] as CoordinationLogEntry)
+      .find((entry) => entry.reason === 'leaf-audit-admission');
+    expect(admission).toMatchObject({
+      reason: 'leaf-audit-admission',
+      leafAuditImmediate: false,
+      thresholdMetCount: 1,
+      freeSlots: 1,
+    });
+  });
+
+  it('ON bypasses the proxy idle-age wait as well (all free, idle age below the threshold)', async () => {
+    const youngIdle = { ...threeSlotPoolStatus(3), local_idle_seconds: 5 };
+
+    const off = makeWorker({ status: youngIdle, deps: leafDeps() });
+    vi.setSystemTime(1_000_000);
+    expect((await off.worker.tick()).dispatched).toBe(false);
+    expect(off.deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    const on = makeWorker({ status: youngIdle, deps: leafDeps(), leafAuditImmediate: true });
+    vi.setSystemTime(1_000_000);
+    expect((await on.worker.tick()).dispatched).toBe(true);
+    expect(promptOf(on.deps)).toContain('/skill:audit WL-LEAF');
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['an empty slots array', { slots: [] }],
+    ['stale slot detail', { slots_stale: true }],
+    ['a saturated pool', { capacity_hint: 'saturated' }],
+  ])('ON still fails closed on %s', async (_name, overrides) => {
+    const { worker, deps } = makeWorker({
+      status: { ...threeSlotPoolStatus(1), ...overrides },
+      deps: leafDeps(),
+      leafAuditImmediate: true,
+    });
+    vi.setSystemTime(1_000_000);
+
+    const result = await worker.tick();
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(worker.blockReason).not.toBeNull();
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['live contention', { contention_queue_depth: 1 }],
+    [
+      'a saturated prefill gate',
+      { local_max_concurrent_prefills: 1, local_prefills_in_flight: 1 },
+    ],
+  ])('ON never relaxes past %s', async (_name, overrides) => {
+    const { worker, deps } = makeWorker({
+      status: { ...threeSlotPoolStatus(1), ...overrides },
+      deps: leafDeps(),
+      leafAuditImmediate: true,
+    });
+    vi.setSystemTime(1_000_000);
+
+    expect((await worker.tick()).dispatched).toBe(false);
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('ON still refuses an OWNED free slot (no unowned capacity)', async () => {
+    const ownedOnly = {
+      ...threeSlotPoolStatus(1),
+      slots: [
+        { slot_id: 'slot-1', is_processing: true },
+        { slot_id: 'slot-2', is_processing: true },
+        { slot_id: 'slot-3', is_processing: false, owner_session_id: 'session-live-pane' },
+      ],
+    };
+    const { worker, deps } = makeWorker({
+      status: ownedOnly,
+      deps: leafDeps(),
+      leafAuditImmediate: true,
+    });
+    vi.setSystemTime(1_000_000);
+
+    expect((await worker.tick()).dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('ON still refuses a parent candidate and never gives the slot to another tier', async () => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const { worker, deps } = makeWorker({
+      deps: leafDeps({
+        getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+      }),
+      recordDecision,
+      leafAuditImmediate: true,
+    });
+    vi.setSystemTime(1_000_000);
+
+    const result = await worker.tick();
+
+    expect(result.dispatched).toBe(false);
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    const skip = recordDecision.mock.calls
+      .map((call) => call[0] as CoordinationLogEntry)
+      .find((entry) => entry.reason === 'audit-tier-budget-skipped');
+    expect(skip).toMatchObject({
+      reason: 'audit-tier-budget-skipped',
+      skippedTier: 'audit',
+      leafAuditScope: 'parent',
+      leafAuditImmediate: true,
+    });
+  });
+
+  it('ON never dispatches a non-audit tier on the relaxed slot', async () => {
+    const { worker, deps } = makeWorker({
+      deps: leafDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      }),
+      leafAuditImmediate: true,
+    });
+    vi.setSystemTime(1_000_000);
+
+    expect((await worker.tick()).dispatched).toBe(false);
+    expect(deps.getNextItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('ON still honours the active-audit single flight', async () => {
+    const { worker, deps } = makeWorker({
+      deps: leafDeps({ getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: true }) }),
+      leafAuditImmediate: true,
+    });
+    vi.setSystemTime(1_000_000);
+
+    expect((await worker.tick()).dispatched).toBe(false);
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});

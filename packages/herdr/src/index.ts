@@ -1535,6 +1535,11 @@ export async function main(): Promise<void> {
         // like the other downtime settings, so a threshold change (or `0` to
         // disable) applies without a plugin restart.
         cpuGatePercent: s.downtimeCpuGatePercent,
+        // OPT-IN race-accepting leaf-audit variant (WL-0MVV1F1P1005PO5M):
+        // re-read each tick like the other downtime settings, so turning the
+        // escape hatch on/off applies without a plugin restart. Default OFF —
+        // the fail-closed C4 admission (full idle threshold) is unchanged.
+        leafAuditImmediate: s.downtimeLeafAuditImmediate,
         browseItemCount: s.browseItemCount,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable

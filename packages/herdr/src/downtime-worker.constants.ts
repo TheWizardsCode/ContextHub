@@ -96,6 +96,15 @@ export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
  */
 export const DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1;
 /**
+ * Default for the OPT-IN race-accepting leaf-audit variant
+ * (`downtimeLeafAuditImmediate`, WL-0MVV1F1P1005PO5M, parent
+ * WL-0MSORQ8Y4004YT63 AC5): **off**. The fail-closed policy is the shipped
+ * default — a leaf audit waits for the same free slot to stay free for the
+ * full idle threshold (C4) unless an operator explicitly accepts the race
+ * that an interactive request grabs the slot before the audit's first call.
+ */
+export const DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE = false;
+/**
  * Minimum free slots required for a single-pane dispatch (implement /
  * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3, F5
  * WL-0MTII48OV008P2QU single budget): each pane consumes exactly one local
@@ -304,6 +313,15 @@ export interface DecisionEntryFields extends CapacityEvidence {
   leafAuditScope?: string;
   thresholdMetCount?: number;
   requiredFreeSlots?: number;
+  /**
+   * The `downtimeLeafAuditImmediate` toggle state that produced this decision
+   * (WL-0MVV1F1P1005PO5M): `true` on the opt-in race-accepting variant (the
+   * idle-threshold wait was bypassed), `false` on the default C4 admission.
+   * Recorded on both the `leaf-audit-admission` observation and its
+   * `audit-tier-budget-skipped` parent-only counterpart, so a relaxed tick —
+   * or its absence — is attributable to the toggle from the log alone.
+   */
+  leafAuditImmediate?: boolean;
   /**
    * Per-offer dispatch-time rejections (WL-0MVR8FKMU009XTED AC2): present on a
    * coordination-mode refusal that rejected one or more offers, so each

@@ -531,11 +531,31 @@ export async function pollAndEvaluate(
       // processing resets only its own timer (WL-0MSG7P9N8009PCKG).
       const freeSlots = countFreeUnownedSlots(perSlotSlots);
       const thresholdMetCount = ctx.perSlotTracker.thresholdMetCount(cfg.thresholdMs);
+      // The per-tick poll evidence the relaxed leaf-audit admission reads
+      // (C4). Built once so the timer-threshold path and the opt-in
+      // idle-age path below admit on the SAME evidence.
+      const bandEvidence: LeafAuditBandEvidence = {
+        status,
+        perSlotSlots,
+        freeSlots,
+        thresholdMetCount,
+        contentionQueueDepth,
+        prefillGateWaiters,
+        capacity,
+      };
       if (idleAgeAuthority) {
         // The proxy's idle age satisfies the duration requirement, so the
         // CURRENT free/unowned-slot budget is the only remaining check —
         // `requiredFreeSlots` (capacity) is deliberately NOT relaxed.
         ready = idleAgeQualifies && freeSlots >= cfg.requiredFreeSlots;
+        if (!ready && cfg.leafAuditImmediate === true) {
+          // Opt-in race-accepting variant (WL-0MVV1F1P1005PO5M): the toggle
+          // bypasses the DURATION wait, so the leaf admission is consulted
+          // even when the proxy's authoritative idle age is short. Every
+          // fail-closed check inside the admission still applies.
+          ctx.leafAuditAdmission = await admitLeafAuditBand(ctx, cfg, bandEvidence);
+          if (ctx.leafAuditAdmission !== null) ready = true;
+        }
       } else {
         ready = thresholdMetCount >= cfg.requiredFreeSlots;
         if (!ready) {
@@ -543,17 +563,10 @@ export async function pollAndEvaluate(
           // leaf minimum continuously free, admit THIS tick for one positively
           // classified LEAF audit candidate and nothing else. The admission is
           // pinned, so the spare slot can never be consumed by another tier.
-          // Only the threshold-tracker branch relaxes: the idle-age-authority
-          // branch above deliberately keeps the configured capacity.
-          ctx.leafAuditAdmission = await admitLeafAuditBand(ctx, cfg, {
-            status,
-            perSlotSlots,
-            freeSlots,
-            thresholdMetCount,
-            contentionQueueDepth,
-            prefillGateWaiters,
-            capacity,
-          });
+          // Only the threshold-tracker branch relaxes on the C4 path: the
+          // idle-age-authority branch above deliberately keeps the configured
+          // capacity (the opt-in toggle is the documented exception).
+          ctx.leafAuditAdmission = await admitLeafAuditBand(ctx, cfg, bandEvidence);
           if (ctx.leafAuditAdmission !== null) ready = true;
         }
       }
@@ -696,6 +709,14 @@ interface LeafAuditBandEvidence {
  * actually offered. The same decision-log tokens are emitted, and the pin is
  * threaded into `dispatchFromCoordination`, which reserves the relaxed slot
  * for that audit item exactly as the direct path does.
+ *
+ * The OPT-IN race-accepting variant (`downtimeLeafAuditImmediate`, default
+ * OFF, WL-0MVV1F1P1005PO5M) changes ONE guard only: ON drops the
+ * "continuously free for the FULL threshold" duration requirement, so the
+ * admission is driven by the trusted free/unowned slot count alone. It never
+ * relaxes a refusal — an untrustworthy poll, contention, the prefill gate, an
+ * owned slot, an unclassifiable/parent candidate and the active-audit
+ * single-flight all still return `null`.
  */
 async function admitLeafAuditBand(
   ctx: OrchestratorContext,
@@ -704,11 +725,20 @@ async function admitLeafAuditBand(
 ): Promise<LeafAuditAdmission | null> {
   const coordinationMode =
     ctx.opts.coordinationDir !== undefined && typeof ctx.opts.deps.fetchItem === 'function';
-  // The band itself: only the relaxed leaf minimum is continuously free. At
-  // or above the configured minimum the tick is already ready (no relaxation).
-  if (evidence.thresholdMetCount < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
-  if (evidence.thresholdMetCount >= cfg.requiredFreeSlots) return null;
-  if (evidence.freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
+  const immediate = cfg.leafAuditImmediate === true;
+  if (immediate) {
+    // Race-accepting variant (WL-0MVV1F1P1005PO5M): the threshold WAIT is the
+    // only thing bypassed — the band condition reduces to "one trusted free
+    // unowned slot" (checked below), and the evidence's `thresholdMetCount`
+    // is recorded for diagnosis only.
+    if (evidence.freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
+  } else {
+    // The C4 band: only the relaxed leaf minimum is continuously free. At or
+    // above the configured minimum the tick is already ready (no relaxation).
+    if (evidence.thresholdMetCount < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
+    if (evidence.thresholdMetCount >= cfg.requiredFreeSlots) return null;
+    if (evidence.freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
+  }
   // Contention and the prefill serialisation gate are refusals: never relax
   // past them (the admission gates would refuse the dispatch anyway).
   if (evidence.contentionQueueDepth > 0 || evidence.prefillGateWaiters > 0) return null;
@@ -748,6 +778,10 @@ async function admitLeafAuditBand(
     ...evidence.capacity,
     thresholdMetCount: evidence.thresholdMetCount,
     requiredFreeSlots: cfg.requiredFreeSlots,
+    // AC4 (WL-0MVV1F1P1005PO5M): the toggle state that produced this
+    // admission is recorded on the token, so an operator can tell a C4 wait
+    // from the opt-in race-accepting bypass from the log alone.
+    leafAuditImmediate: immediate,
   };
   if (probe.kind === 'admitted') {
     // Non-blocking observation (AC4): the relaxed admission is visible in the

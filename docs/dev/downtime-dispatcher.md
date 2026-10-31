@@ -2114,6 +2114,55 @@ WL-0MVG4FF9200346NR the canonical gate is the `tests/` umbrella command, which
 covers every `tests/` file but still not `packages/` — see the coverage table
 in `docs/dev/test-suite-baseline.md`.)
 
+### Leaf-audit admission: the opt-in race-accepting toggle (WL-0MVV1F1P1005PO5M)
+
+**Context.** A leaf audit candidate (an item with **no children**, classified
+by `classifyAuditScope` from `wl show <id> --children --json`) is audited by a
+single Pi session, so one free slot suffices
+(`DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1`, C3). By default (C4,
+WL-0MVV1F0HK009JQAP) the tick still requires that
+slot to have been **continuously free for the full `downtimeIdleThresholdMs`**
+(same-slot identity from the per-slot idle tracker) before it admits the tick
+for that one pinned leaf audit.
+
+**Setting.** `downtimeLeafAuditImmediate` (plugin settings,
+`~/.config/herdr/worklog-plugin.json`) — boolean, default **`false`**
+(`DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE`); absent or malformed (a string, a
+number, `null`) resolves to `false`. Re-read live on **every** tick, so turning
+it on/off applies without a plugin restart.
+
+**Race trade-off (opt-in only).** With the toggle **ON** a positively
+classified leaf audit dispatches on **one trusted free unowned slot
+immediately** — it does not wait the idle threshold, and therefore races any
+interactive request for that slot: the request may take it, and the audit's
+first call then falls back to the remote model. The default stays OFF so the
+fail-closed policy (parent AC5) is unchanged; onboarding this variant is an
+explicit operator decision, never a default.
+
+**Nothing else is relaxed.** The toggle bypasses the threshold **wait** only.
+Every refusal still applies on both settings: unusable per-slot detail
+(`slots: []` / `slots_stale: true` → `slots-unavailable`),
+`capacity_hint: "saturated"` (→ `capacity-saturated`), live contention
+(`contention_queue_depth > 0` / `prefill_gate_waiters > 0`), the prefill
+serialisation gate (`evaluatePrefillPacing`), owned slots
+(`countFreeUnownedSlots` excludes them), the active-audit single flight and a
+`parent`/unclassifiable candidate. The relaxed slot stays **pinned** to that
+one leaf audit (`ctx.leafAuditAdmission`, the C4 single-tier pin), so no
+implement/plan/intake pane can consume it.
+
+**Observability.** The `leaf-audit-admission` decision-log token carries
+`leafAuditImmediate` next to `freeSlots` / `thresholdMetCount` /
+`requiredFreeSlots` / `leafAuditItemId` / `leafAuditScope`, so a relaxed tick
+is attributable to the toggle from the log alone; when the band holds only a
+parent candidate the `audit-tier-budget-skipped` observation carries the same
+field.
+
+**Tests.** `settings.test.ts` pins default/parse/round-trip and the
+absent/malformed → `false` fallback;
+`downtime-worker.leaf-audit.test.ts` pins OFF parity with C4, the immediate
+ON admission (including under proxy idle-age authority), the live per-tick
+read and the full fail-closed matrix under ON.
+
 ### Soft-delete exclusion (SA-0MUJBLZC60085DI9)
 
 Every dispatch path excludes soft-deleted items — those with a non-empty

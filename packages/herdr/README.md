@@ -638,6 +638,21 @@ pacing* below).
   entry, and it is NOT reported as capacity starvation. `0` disables the
   gate (default: `75`, clamped to 0 – 100; re-read live on every dispatch
   tick). See the *Host-CPU dispatch gate* bullet above
+- `downtimeLeafAuditImmediate` — **Opt-in, default `false`.** A leaf audit
+  candidate (an item with no children) normally waits until the same free
+  slot has been continuously free for the full `downtimeIdleThresholdMs`
+  before it is dispatched on that single slot. Setting this `true` lets a
+  positively classified leaf audit dispatch on **one trusted free unowned
+  slot immediately**, without that wait — it races any interactive request
+  for the slot and accepts that the request may take it, in which case the
+  audit's first call falls back to the remote model. Only the wait is
+  removed: unusable per-slot detail (`slots: []` / `slots_stale`), a
+  `saturated` pool, live contention, the prefill gate, owned slots, the
+  active-audit single flight and a parent (or unclassifiable) candidate all
+  still refuse, and the relaxed slot stays pinned to that one leaf audit.
+  Boolean; absent/malformed → `false`; re-read live on every tick, and the
+  decision log records `leafAuditImmediate` on the `leaf-audit-admission`
+  token
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's
