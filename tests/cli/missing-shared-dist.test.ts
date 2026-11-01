@@ -335,30 +335,40 @@ describe('wl missing shared build output diagnostic (CLI)', () => {
       // dangling node_modules/@worklog/shared link. The preflight must fire
       // (root discovery must not depend on the workspace manifest surviving)
       // and its remediation must cover both tracked and built output.
-      const dir = scratchDir('wiped-cli');
-      const cliEntry = stageBuiltCli(dir, {
-        withSharedDist: false,
-        withSharedSources: false,
-      });
+      //
+      // The staging lives OUTSIDE the repo (os.tmpdir) on purpose: a scratch
+      // dir under `.worklog/` sits INSIDE this checkout, whose own healthy
+      // node_modules/@worklog/shared would satisfy `import.meta.resolve` and
+      // legitimately pass the preflight — masking the wiped state. A real
+      // wipe has no healthy ancestor to fall back to.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-wiped-cli-'));
+      try {
+        const cliEntry = stageBuiltCli(dir, {
+          withSharedDist: false,
+          withSharedSources: false,
+        });
 
-      const result = spawnSync(process.execPath, [cliEntry, 'list', '--json'], {
-        encoding: 'utf-8',
-        timeout: 120_000,
-      });
+        const result = spawnSync(process.execPath, [cliEntry, 'list', '--json'], {
+          encoding: 'utf-8',
+          timeout: 120_000,
+        });
 
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain('cannot start');
-      expect(result.stderr).toContain('Missing artifact:');
-      expect(result.stderr).toContain(
-        SHARED_DIST_ARTIFACT_RELPATH.split('/').slice(-1)[0]
-      );
-      // Remediation covers the tracked-source restore and the rebuild.
-      expect(result.stderr).toContain('git -C');
-      expect(result.stderr).toContain('restore -- packages/shared');
-      expect(result.stderr).toContain('npm run build:shared');
-      expect(result.stderr).toContain('scripts/repair-shared-package.sh');
-      expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
-      expect(result.stderr).not.toContain('\n    at ');
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain('cannot start');
+        expect(result.stderr).toContain('Missing artifact:');
+        expect(result.stderr).toContain(
+          SHARED_DIST_ARTIFACT_RELPATH.split('/').slice(-1)[0]
+        );
+        // Remediation covers the tracked-source restore and the rebuild.
+        expect(result.stderr).toContain('git -C');
+        expect(result.stderr).toContain('restore -- packages/shared');
+        expect(result.stderr).toContain('npm run build:shared');
+        expect(result.stderr).toContain('scripts/repair-shared-package.sh');
+        expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+        expect(result.stderr).not.toContain('\n    at ');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
   );
 

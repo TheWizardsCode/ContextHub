@@ -123,8 +123,10 @@ function runScript(
   scriptPathAbs: string,
   cwd: string,
   env: Record<string, string>,
+  useJson = true,
 ): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync('bash', [scriptPathAbs, '--json'], {
+  const args = useJson ? [scriptPathAbs, '--json'] : [scriptPathAbs];
+  const result = spawnSync('bash', args, {
     cwd,
     encoding: 'utf8',
     env: { ...process.env, ...env },
@@ -151,19 +153,29 @@ describe('check-main-checkout script', () => {
     // A concurrent actor deletes a tracked file under packages/shared.
     fs.rmSync(path.join(f.repoDir, 'packages', 'shared', 'src', 'worklog-paths.ts'));
 
+    // Human mode (the operator path): the loud report must go to stderr —
+    // every deleted path named, plus the one-command recovery.
     const result = runScript(
       path.join(f.repoDir, 'scripts', 'check-main-checkout.sh'),
       f.repoDir,
       { HOME: f.home, PATH: scriptPath([], f.gitBin) },
+      false,
     );
     expect(result.status).toBe(1);
-    expect(result.stdout).toContain('"clean": false');
-    // Every deleted path is named, exactly once, machine-readable.
-    expect(result.stdout).toContain('packages/shared/src/worklog-paths.ts');
-    const parsed = JSON.parse(result.stdout.trim().split('\n').pop() ?? '{}');
-    expect(parsed.deletions).toContain('packages/shared/src/worklog-paths.ts');
-    // The report also names the one-step recovery path.
+    expect(result.stderr).toContain('tracked-file deletion');
+    expect(result.stderr).toContain('packages/shared/src/worklog-paths.ts');
     expect(result.stderr).toContain('repair-shared-package.sh');
+
+    // The machine path (--json) carries the same facts.
+    const json = runScript(
+      path.join(f.repoDir, 'scripts', 'check-main-checkout.sh'),
+      f.repoDir,
+      { HOME: f.home, PATH: scriptPath([], f.gitBin) },
+    );
+    expect(json.status).toBe(1);
+    expect(json.stdout).toContain('"clean": false');
+    const parsed = JSON.parse(json.stdout.trim().split('\n').pop() ?? '{}');
+    expect(parsed.deletions).toContain('packages/shared/src/worklog-paths.ts');
   });
 
   itScript('guards the MAIN checkout even when invoked from a linked worktree', () => {
