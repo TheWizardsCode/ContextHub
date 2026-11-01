@@ -626,16 +626,17 @@ export interface LocalReservationHttpFixture<Body = unknown> {
 }
 
 /**
- * Granted ticket (`2xx`): the gate ticket id and its TTL in seconds. Override
- * any field to model an alias rename or an invalid variant the tolerant
- * parser must reject.
+ * Granted ticket (`2xx`): the gate ticket id (`reservation_id` — the LIVE
+ * proxy contract, verified 2026-11-01) and its TTL in seconds. Override any
+ * field to model an alias rename or an invalid variant the tolerant parser
+ * must reject.
  */
 export function reserveGranted(
   overrides: Record<string, unknown> = {},
 ): LocalReservationHttpFixture<LocalReservationGrantedBody> {
   return {
     status: 200,
-    body: { ticket_id: 'tkt-granted-1', ttl_s: 30, ...overrides },
+    body: { reservation_id: 'tkt-granted-1', ttl_s: 30, ...overrides },
   };
 }
 
@@ -656,6 +657,21 @@ export function reserveRefused429(
 export const reserveEndpointAbsent: LocalReservationHttpFixture<null> = {
   status: 404,
   body: null,
+};
+
+/**
+ * The wire-contract break this item fixed (WL-0MVWEZF4Z004UNYT AC1/AC4): the
+ * proxy rejects a body whose token field is not `estimated_tokens` with
+ * `400 {"error":"estimated_tokens is required","admit":false}`. Modelled as
+ * a fixture so the AC1 wire-body test and the AC4 "distinguishable from an
+ * old proxy" test both assert the real exchange, not a hand-built object.
+ */
+export const reserveWireContractBroken: LocalReservationHttpFixture<{
+  error: string;
+  admit: false;
+}> = {
+  status: 400,
+  body: { error: 'estimated_tokens is required', admit: false },
 };
 
 /** The proxy failed on the reserve path → `500`, no body → fail open to null. */

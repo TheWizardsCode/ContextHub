@@ -4,8 +4,18 @@
  *
  * Single responsibility: the reserve handshake's wire contract — the tolerant
  * response parser, the dispatcher's request builder and the POST client. Every
- * entry point fails open (`null`), so an older proxy can never block or crash
- * a dispatch.
+ * entry point fails open (an unusable exchange resolves an `unavailable`
+ * outcome / `null`), so an older proxy can never block or crash a dispatch.
+ *
+ * Walk-through of the wire contract and its beneficiary bounds
+ * (WL-0MVWEZF4Z004UNYT): the request body uses the proxy's REQUIRED
+ * `estimated_tokens` field (AC1); a granted ticket has a 10 s TTL
+ * (`DEFAULT_RESERVATION_TTL_SECONDS`, mirroring the proxy's own bound) and is
+ * consumable ONLY by the pane's own first request — never by a
+ * `--no-extensions` child process (audit runner etc.), which must take its own
+ * reservation (AC9). An unusable exchange is a typed `unavailable` outcome
+ * naming the failing exchange (AC4), and a `remote-ok` dispatch must not
+ * reserve at all (AC8).
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  * Moved verbatim out of `downtime-worker.ts` by WL-0MVLII0NO007JJBA (extract
@@ -94,31 +104,62 @@ export function parseLocalReservationResponse(
 
   if (!Number.isFinite(httpStatus) || httpStatus < 200 || httpStatus > 299) return null;
 
-  const ticketId = firstNonEmptyString(body, ['ticket_id', 'ticket']);
+  // The granted ticket id: the PROXY'S live contract field is `reservation_id`
+  // (verified against the running proxy, 2026-10-31/2026-11-01 — a real grant
+  // returns `{"admit":true,"reservation_id":…,"ttl_s":10,…}`). The `ticket_id`
+  // / `ticket` accessors remain as aliases for the settling contract, so a
+  // rename on either side is a one-line change — and a gate test pins the
+  // live `reservation_id` shape so a silent degradation can never recur
+  // (WL-0MVWEZF4Z004UNYT AC1/AC5).
+  const ticketId = firstNonEmptyString(body, ['reservation_id', 'ticket_id', 'ticket']);
   const ttlSeconds = firstFiniteNumber(body, ['ttl_s', 'ttl_seconds']);
   if (ticketId === undefined || ttlSeconds === undefined || ttlSeconds <= 0) return null;
   return { status: 'granted', ticket: { ticketId, ttlSeconds } };
 }
 
 /**
- * Conservative expected-token estimate sent with a reserve request. The
+ * Conservative estimated-token estimate sent with a reserve request. The
  * dispatcher cannot know a pane's first-turn size in advance (the prompt is
  * built locally, the response is unconstrained), so ONE documented constant
  * is sent and a real measurement is a one-line change once the proxy
  * documents its interpretation.
+ *
+ * The NAME mirrors the proxy's REQUIRED wire name `estimated_tokens`
+ * (WL-0MVWEZF4Z004UNYT AC1): the pre-fix `expected_tokens` spelling made the
+ * proxy answer 400 and the handshake fail open silently.
  */
-export const DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS = 8_192;
+export const DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS = 8_192;
+
+/**
+ * @deprecated Renamed to `DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS` so the
+ * constant name mirrors the required wire field `estimated_tokens`
+ * (WL-0MVWEZF4Z004UNYT AC1). Kept as a frozen-barrel alias for the split
+ * guard's public surface; new code must use the new name.
+ */
+export const DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS = DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS;
+
+/**
+ * Client-side bound for a usable granted ticket (WL-0MVWEZF4Z004UNYT AC9):
+ * the proxy's own `DEFAULT_RESERVE_TTL_SECONDS = 10` (max 60) is the
+ * documented TTL, and a grant with LESS than this window is not treated as
+ * capacity by the dispatcher (it was already expired, or expires before the
+ * pane could ever consume it). Mirrors the proxy constant at
+ * `llm/proxy/proxy/admission_reserve.py:52-53`; the proxy remains the owner
+ * of the contract — this is a defensive consumer bound, never a proxy change.
+ */
+export const DEFAULT_RESERVATION_TTL_SECONDS = 10;
 
 /**
  * Build the reserve request for a downtime dispatch: background priority
  * (unattended work is polite) and an unknown cache state (a fresh pane's
- * first prefill is not known to be warm, so the proxy decides).
+ * first prefill is not known to be warm, so the proxy decides). The wire
+ * field is `estimated_tokens`, exactly as the proxy contract requires.
  */
 export function buildLocalReservationRequest(
   _candidate: Pick<DowntimeCandidate, 'priority'>,
 ): LocalReservationRequest {
   return {
-    expected_tokens: DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS,
+    estimated_tokens: DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS,
     priority: 'background',
     cache_state: 'unknown',
   };
@@ -128,11 +169,21 @@ export function buildLocalReservationRequest(
 /**
  * Create the reserve client for `POST {proxyUrl}/llama/local/reserve`.
  *
- * One call = one POST, bounded by `timeoutMs`; a `429` body is parsed as a
- * refusal (the response is `ok:false` yet carries the deferral advice), a
- * `2xx` body as a grant, and everything else (404/500/abort/network error/
- * garbage) resolves `null`. Never throws, so a broken/older proxy can never
- * block or crash a dispatch (parent AC2).
+ * One call = one POST, bounded by `timeoutMs`. Outcomes:
+ *   - `429` body → typed refusal (the response is `ok:false` yet carries the
+ *     deferral advice);
+ *   - `2xx` body → typed grant;
+ *   - EVERYTHING ELSE (400/404/5xx/abort/network error/garbage body) → a
+ *     typed `{ status: 'unavailable', reason }` outcome whose `reason` NAMES
+ *     the failing exchange (`http-<status>` / `timeout` / `bad-body`), so the
+ *     dispatch record can tell a broken wire contract from an old proxy and
+ *     from a refusal (WL-0MVWEZF4Z004UNYT AC4). Never throws: a
+ *     broken/older proxy can never block or crash a dispatch (parent AC2).
+ *
+ * Beneficiary-bound (AC9): a granted ticket is usable only by the pane's own
+ * FIRST request within the `DEFAULT_RESERVATION_TTL_SECONDS` window, never by
+ * a `--no-extensions` child process (audit runner etc.) — such children must
+ * take their own reservation.
  */
 export function createLocalReserver(
   proxyUrl: string,
@@ -151,17 +202,26 @@ export function createLocalReserver(
         signal: controller.signal,
       });
       // A 429 refusal is meaningful even though `ok` is false; any other
-      // non-2xx status carries no usable reservation → fail open.
-      if (!res.ok && res.status !== 429) return null;
+      // non-2xx status carries no usable reservation → an UNAVAILABLE
+      // outcome naming the status (AC4) — never a bare null, so a wire
+      // contract break (400) can never masquerade as an old proxy.
+      if (!res.ok && res.status !== 429) {
+        return { status: 'unavailable', reason: `http-${res.status}` };
+      }
       let raw: unknown;
       try {
         raw = await res.json();
       } catch {
-        return null; // non-JSON / unreadable body
+        return { status: 'unavailable', reason: 'bad-body' }; // non-JSON body
       }
-      return parseLocalReservationResponse(raw, res.status);
+      const parsed = parseLocalReservationResponse(raw, res.status);
+      if (parsed === null) {
+        // 2xx with an unparseable/expired body → unavailable (AC4).
+        return { status: 'unavailable', reason: 'bad-body' };
+      }
+      return parsed;
     } catch {
-      return null; // network error / timeout / abort → fail open
+      return { status: 'unavailable', reason: 'timeout' }; // network error / timeout / abort → fail open (AC3)
     } finally {
       clearTimeout(timer);
     }

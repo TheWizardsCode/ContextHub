@@ -214,6 +214,26 @@ export interface DowntimeDispatchEvent {
   /** ISO timestamp the ticket was granted at (parent AC4, slice C2). */
   reservationGrantedAt?: string;
   /**
+   * The reserve handshake was ATTEMPTED but produced no usable outcome
+   * (WL-0MVWEZF4Z004UNYT AC4): the reason NAMES the failing exchange
+   * (`http-400` for a wire-contract break, `http-404` for a pre-reserve
+   * proxy, `http-5xx`/`timeout`/`bad-body`/`ttl-below-bound` otherwise).
+   * Present ONLY when the dispatch proceeded FAIL-OPEN (no ticket) after an
+   * attempted reserve; absent when no client is wired (older install), when
+   * the reserve was skipped (see `reservationSkipped`), and on a refusal or
+   * a grant. This is what makes a broken contract distinguishable from an
+   * old proxy in the dispatch record.
+   */
+  reservationUnavailable?: string;
+  /**
+   * The reserve call was deliberately SKIPPED and the dispatch proceeded
+   * (WL-0MVWEZF4Z004UNYT AC8): only `remote-ok` dispatches (whose first
+   * request goes remote and could never consume a ticket) skip. Absent
+   * otherwise — a plain fail-open dispatch without a wired client carries
+   * no field.
+   */
+  reservationSkipped?: string;
+  /**
    * Resolved per-turn locality preference forwarded to the pane
    * (WL-0MVNUIW77000VYAX AC5). Absent on legacy entries and on callers that
    * did not opt into the priority rule.

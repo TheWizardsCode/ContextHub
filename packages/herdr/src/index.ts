@@ -67,6 +67,7 @@ import {
   dirHasRecentModifications,
   parsePaneProcessInfo,
 } from './pane-close-herdr.js';
+import { observeDispatchedPaneOutcome } from './downtime-worker.route-outcome.js';
 import { runScheduledPaneClose } from './pane-close-scheduler.js';
 import {
   createDowntimeWorker,
@@ -1153,6 +1154,11 @@ export function createDowntimeDeps(
       const herdrBin = resolveHerdrBin();
       const invokingPaneId =
         process.env.HERDR_PANE_ID ?? process.env.HERDR_PANE ?? undefined;
+      // AC10 (WL-0MVWEZF4Z004UNYT): after the pane's work window closes the
+      // dispatch record gains its OBSERVED local/remote split (from the
+      // bounded route log, correlated by ticket/session — never inferred
+      // from the ticket). Fail-open: a route-outcome failure never blocks a
+      // pane close.
       const deps = createHerdrReaperDeps({
         listPanesRaw: async () => {
           const { stdout } = await getExecFileAsync()(herdrBin, ['pane', 'list'], {
@@ -1173,6 +1179,14 @@ export function createDowntimeDeps(
             return false; // fail-closed: a failed close is recorded, never thrown
           }
         },
+        // AC10: observed-routing-outcome recorder for a closed pane.
+        recordDispatchedPaneOutcome: (pane) =>
+          observeDispatchedPaneOutcome(cwd, {
+            itemId: pane.itemId,
+            paneId: pane.id,
+            sessionId: pane.sessionId,
+            kind: pane.kind,
+          }),
         invokingPaneId,
         // Item lookup (parent AC2/AC6): fetch both the producer-review flag
         // and the work-item stage so the close-decision snapshot records the
