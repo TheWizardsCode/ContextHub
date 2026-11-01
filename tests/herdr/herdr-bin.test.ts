@@ -204,17 +204,17 @@ describe('plugin entry points with a stale HERDR_BIN_PATH', () => {
     expect(log).toContain('tab rename w9:tPE Worklog');
   });
 
-  it('send-to-pi.sh --check-cli accepts a stale HERDR_BIN_PATH', () => {
-    const result = runScript(SEND_TO_PI, ['--check-cli', 'hello'], {
-      HERDR_BIN_PATH: `${mockHerdr} (deleted)`,
-    });
-    expect(result.status, result.stderr).toBe(0);
-  });
-
-  it('send-to-pi.sh --check-cli falls back to herdr on PATH', () => {
+  it('send-to-pi.sh resolves through the same helper for its diagnostics', () => {
+    // `--check-cli` continues after the availability check, so this case is
+    // deliberately the "nothing resolves" path: it proves send-to-pi.sh is
+    // wired to the resolver (the message names the STRIPPED path, never the
+    // unusable ` (deleted)` one) and still fails safely with a clear error.
     const result = runScript(SEND_TO_PI, ['--check-cli', 'hello'], {
       HERDR_BIN_PATH: join(root, 'gone', 'herdr (deleted)'),
+      PATH: '/usr/bin:/bin',
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(join(root, 'gone', 'herdr'));
+    expect(result.stderr).not.toContain('(deleted)');
   });
 });

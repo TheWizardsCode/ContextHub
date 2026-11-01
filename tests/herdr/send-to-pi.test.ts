@@ -34,6 +34,10 @@ const SCRIPT = join(
   'send-to-pi.sh',
 );
 
+// `send-to-pi.sh` sources the shared herdr CLI resolver (WL-0MVXRZL9H001GQ7A),
+// so a copied script needs its sibling helper too.
+const HERDR_BIN_SH = join(dirname(SCRIPT), 'herdr-bin.sh');
+
 let tmpDir: string;
 let logFile: string;
 let fakeHerdr: string;
@@ -224,6 +228,7 @@ describe('send-to-pi.sh --model forwarding', () => {
     writeFileSync(join(codeDir, 'run-pi-agent.sh'), '#!/usr/bin/env bash\n');
     const codeScript = join(codeDir, 'send-to-pi.sh');
     writeFileSync(codeScript, readFileSync(SCRIPT, 'utf-8'));
+    writeFileSync(join(codeDir, 'herdr-bin.sh'), readFileSync(HERDR_BIN_SH, 'utf-8'));
 
     const { status, log } = runScript(
       ['--no-resize', '--cwd', '/tmp/project-root', '/skill:implement <id>'],
