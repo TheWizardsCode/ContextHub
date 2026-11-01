@@ -114,6 +114,33 @@ The same checks exist in `.githooks/pre-push`, `.githooks/post-checkout`,
 `src/commands/init.ts`, and in the canonical hook content in
 `src/doctor/hook-upgrade.ts`.
 
+## Main-checkout deletions: detection and recovery
+
+The isolation rules above protect a *run's own* tree, but a concurrent
+worktree-scoped run can still delete files from the **main checkout** — the
+`packages/shared` wipe of 2026-10-31 (WL-0MVWK20DK004TQZM) broke `wl`
+machine-wide for ~35 minutes while the overlapping finish run's guard never
+verified (`verifies: []` — it aborted at the test gate). Two scripts cover
+that gap, both resolving the **main** checkout even when invoked from a
+linked worktree (`git worktree list --porcelain` first entry):
+
+- **`scripts/check-main-checkout.sh`** — read-only integrity check: exit 1
+  naming every tracked-file deletion in the main checkout plus the live
+  worktree list as concurrent-actor evidence; `--work-item <id>` also records
+  the report through `wl comment add` so it survives an aborted finish run;
+  `--json` for machine use. Regression-tested in
+  `tests/scripts/check-main-checkout.test.ts` (clean pass, one deletion,
+  worktree-invoked, untracked ignored, wl-broken still fails).
+- **`scripts/repair-shared-package.sh`** — one-command recovery: restores the
+  **deleted** tracked files under `packages/shared/` from `HEAD` (per path,
+  never stash/reset/clean, never clobbering modified-but-present files), then
+  rebuilds via `npm run build:shared` and verifies
+  `packages/shared/dist/worklog-paths.js`. Idempotent; smoke-tested in
+  `tests/scripts/repair-shared-package.test.ts`.
+
+See `docs/dev/wl-shared-dist-diagnostic.md` for the `wl` diagnostic that fires
+on the same state.
+
 ## Repo-wide filesystem walks and concurrent worktree churn
 
 Implementation worktrees live *inside* the main checkout

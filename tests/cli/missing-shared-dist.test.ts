@@ -31,6 +31,7 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import {
   expectedSharedDistArtifactPath,
+  looksLikeWorklogRepo,
   missingSharedDistDiagnostic,
   sharedDistPreflight,
   SHARED_DIST_ARTIFACT_RELPATH,
@@ -93,7 +94,11 @@ function findSharedDist(): string | null {
 }
 
 /** Copy the built CLI + workspace layout into `<dir>/app`, optionally with dist. */
-function stageBuiltCli(dir: string, options: { withSharedDist: boolean }): string {
+function stageBuiltCli(
+  dir: string,
+  options: { withSharedDist: boolean; withSharedSources?: boolean }
+): string {
+  const withSharedSources = options.withSharedSources ?? true;
   const builtCli = findBuiltCli();
   if (!builtCli) throw new Error('no built CLI (run `npm run build` first)');
   const distSource = path.dirname(builtCli);
@@ -116,16 +121,26 @@ function stageBuiltCli(dir: string, options: { withSharedDist: boolean }): strin
   });
 
   const sharedPkg = path.join(appRoot, 'packages', 'shared');
-  fs.mkdirSync(sharedPkg, { recursive: true });
-  fs.copyFileSync(
-    path.join(sharedPackageDir, 'package.json'),
-    path.join(sharedPkg, 'package.json')
-  );
-  if (options.withSharedDist) {
-    const sharedDist = findSharedDist();
-    if (!sharedDist) throw new Error('no built shared package (run `npm run build:shared`)');
-    fs.cpSync(sharedDist, path.join(sharedPkg, 'dist'), { recursive: true });
+  if (withSharedSources) {
+    fs.mkdirSync(sharedPkg, { recursive: true });
+    fs.copyFileSync(
+      path.join(sharedPackageDir, 'package.json'),
+      path.join(sharedPkg, 'package.json')
+    );
+    if (options.withSharedDist) {
+      const sharedDist = findSharedDist();
+      if (!sharedDist) throw new Error('no built shared package (run `npm run build:shared`)');
+      fs.cpSync(sharedDist, path.join(sharedPkg, 'dist'), { recursive: true });
+    }
   }
+
+  // Copy the root package.json so the staged layout matches a real repo:
+  // root discovery falls back to its `@worklog/shared` dependency record when
+  // `packages/shared` itself is wiped (WL-0MVWK20DK004TQZM AC3).
+  fs.copyFileSync(
+    path.join(repoRoot, 'package.json'),
+    path.join(appRoot, 'package.json')
+  );
 
   // Workspace install shape: node_modules/@worklog/shared → packages/shared.
   fs.mkdirSync(path.join(appRoot, 'node_modules', '@worklog'), { recursive: true });
@@ -191,7 +206,8 @@ describe('shared build-output preflight resolver', () => {
   });
 
   it('stays silent when no repository root is discoverable (no guessing)', () => {
-    // Outside any checkout: walking up finds no packages/shared/package.json.
+    // Outside any checkout: walking up finds no packages/shared/package.json
+    // and no root manifest declaring the @worklog/shared workspace dep.
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-no-shared-root-'));
     try {
       const moduleFile = path.join(root, 'cli.mjs');
@@ -210,17 +226,70 @@ describe('shared build-output preflight resolver', () => {
     }
   });
 
+  it('resolves the artifact root from the root manifest when packages/shared is entirely wiped', () => {
+    // WL-0MVWK20DK004TQZM AC3 fixture: tracked sources AND dist are gone (the
+    // 2026-10-31 state) — no packages/shared/package.json, no packages/shared
+    // directory. Root discovery must fall back to the root package.json's
+    // `@worklog/shared` file: dependency so the diagnostic still fires.
+    const fixture = scratchDir('wiped-root');
+    fs.writeFileSync(
+      path.join(fixture, 'package.json'),
+      JSON.stringify({
+        name: 'worklog',
+        dependencies: { '@worklog/shared': 'file:./packages/shared' },
+      })
+    );
+    const moduleFile = path.join(fixture, 'dist', 'cli.js');
+    fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+    fs.writeFileSync(moduleFile, '');
+
+    expect(expectedSharedDistArtifactPath(fileUrl(moduleFile))).toBe(
+      path.join(fixture, ...SHARED_DIST_ARTIFACT_RELPATH.split('/'))
+    );
+    // ... and the preflight fires rather than staying silent (the AC3 bug).
+    const diagnostic = sharedDistPreflight({
+      moduleUrl: fileUrl(moduleFile),
+      resolve: () => {
+        throw new Error('ERR_MODULE_NOT_FOUND');
+      },
+    });
+    expect(diagnostic).not.toBeNull();
+    expect(diagnostic).toContain(
+      path.join(fixture, ...SHARED_DIST_ARTIFACT_RELPATH.split('/'))
+    );
+  });
+
+  it('recognises a repo root by a surviving packages/shared directory alone', () => {
+    // Partial deletion: the directory survives but its tracked manifest does
+    // not. The directory marker must still identify the root.
+    const fixture = scratchDir('shared-dir-marker');
+    fs.mkdirSync(path.join(fixture, 'packages', 'shared'), { recursive: true });
+    const moduleFile = path.join(fixture, 'dist', 'cli.js');
+    fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+    fs.writeFileSync(moduleFile, '');
+
+    expect(looksLikeWorklogRepo(fixture)).toBe(true);
+    expect(expectedSharedDistArtifactPath(fileUrl(moduleFile))).toBe(
+      path.join(fixture, ...SHARED_DIST_ARTIFACT_RELPATH.split('/'))
+    );
+  });
+
   it('diagnostic names the artifact, the path checked and the remediation', () => {
     const artifact = path.join('/tmp/repo', ...SHARED_DIST_ARTIFACT_RELPATH.split('/'));
     const diagnostic = missingSharedDistDiagnostic(artifact);
     expect(diagnostic).toContain('cannot start');
     expect(diagnostic).toContain(`Missing artifact: ${artifact}`);
     expect(diagnostic).toContain('packages/shared/dist');
+    // AC3 remediation: deleted tracked sources (git restore, never stash)…
+    expect(diagnostic).toContain('git -C /tmp/repo restore -- packages/shared');
+    // …the gitignored build output…
     expect(diagnostic).toContain('npm run build:shared');
     expect(diagnostic).toContain('/tmp/repo');
+    // …and the one-command recovery script.
+    expect(diagnostic).toContain('scripts/repair-shared-package.sh');
     // One actionable block, not a stack trace.
     expect(diagnostic).not.toContain('ERR_MODULE_NOT_FOUND');
-    expect(diagnostic.split('\n').length).toBeLessThanOrEqual(6);
+    expect(diagnostic.split('\n').length).toBeLessThanOrEqual(10);
   });
 });
 
@@ -255,6 +324,41 @@ describe('wl missing shared build output diagnostic (CLI)', () => {
       expect(result.stderr).toContain(
         SHARED_DIST_ARTIFACT_RELPATH.split('/').slice(-1)[0]
       );
+    }
+  );
+
+  it.skipIf(!builtCliAvailable)(
+    'fires when tracked sources AND dist are gone (the 2026-10-31 state)',
+    () => {
+      // WL-0MVWK20DK004TQZM AC3: the whole packages/shared directory removed
+      // (37 tracked deletions + missing build output), leaving only the
+      // dangling node_modules/@worklog/shared link. The preflight must fire
+      // (root discovery must not depend on the workspace manifest surviving)
+      // and its remediation must cover both tracked and built output.
+      const dir = scratchDir('wiped-cli');
+      const cliEntry = stageBuiltCli(dir, {
+        withSharedDist: false,
+        withSharedSources: false,
+      });
+
+      const result = spawnSync(process.execPath, [cliEntry, 'list', '--json'], {
+        encoding: 'utf-8',
+        timeout: 120_000,
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('cannot start');
+      expect(result.stderr).toContain('Missing artifact:');
+      expect(result.stderr).toContain(
+        SHARED_DIST_ARTIFACT_RELPATH.split('/').slice(-1)[0]
+      );
+      // Remediation covers the tracked-source restore and the rebuild.
+      expect(result.stderr).toContain('git -C');
+      expect(result.stderr).toContain('restore -- packages/shared');
+      expect(result.stderr).toContain('npm run build:shared');
+      expect(result.stderr).toContain('scripts/repair-shared-package.sh');
+      expect(result.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+      expect(result.stderr).not.toContain('\n    at ');
     }
   );
 
