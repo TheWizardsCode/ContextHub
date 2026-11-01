@@ -15,27 +15,19 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
+import { fixtureGitEnv, realGitPath } from './cli/git-helpers.js';
 import { rewriteAndForcePushDataFile, type GitTarget } from '../src/sync.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
-const mockBinDir = path.join(__dirname, 'cli', 'mock-bin');
-
-/** PATH without the test mock-bin so we run the real git binary. */
-function realGitPath(): string {
-  return (process.env.PATH || '')
-    .split(path.delimiter)
-    .filter(p => path.resolve(p) !== path.resolve(mockBinDir))
-    .join(path.delimiter);
-}
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf-8', env: { ...process.env, PATH: realGitPath() } });
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
 }
 
 /** Read a file from a git ref: `git show <ref>:<path>` */
 function gitShow(cwd: string, refPath: string): string {
   return execFileSync('git', ['show', `${refPath}`], {
-    cwd, encoding: 'utf-8', env: { ...process.env, PATH: realGitPath() },
+    cwd, encoding: 'utf-8', env: fixtureGitEnv(),
   });
 }
 

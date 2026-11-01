@@ -20,22 +20,12 @@ import * as path from 'path';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
 import { readStateCounter } from '../../src/read-cache.js';
 import { cliInvocation } from './cli-bundle.js';
+import { fixtureGitEnv, realGitPath } from './git-helpers.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
-const projectRoot = path.resolve(__dirname, '..', '..');
 const [cliCommand, cliEntry] = cliInvocation();
-const mockBinDir = path.join(__dirname, 'mock-bin');
-
-/** PATH without the test mock-bin so we run the real git binary. */
-function realGitPath(): string {
-  return (process.env.PATH || '')
-    .split(path.delimiter)
-    .filter((p) => path.resolve(p) !== path.resolve(mockBinDir))
-    .join(path.delimiter);
-}
-
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf-8', env: { ...process.env, PATH: realGitPath() } });
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
 }
 
 interface CliResult {

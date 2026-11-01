@@ -22,49 +22,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
 import { cliInvocation } from './cli-bundle.js';
+import { fixtureGitEnv } from './git-helpers.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
-const projectRoot = path.resolve(__dirname, '..', '..');
 /** The CLI under test: the pre-compiled bundle of `src/cli.ts`, so these
  * tests never depend on a possibly stale `dist/` build (WL-0MVII17N3003FJWT). */
 const [cliCommand, cliEntry] = cliInvocation();
-const mockBinDir = path.join(__dirname, 'mock-bin');
-
-/** PATH without the test mock-bin so we run the real git binary. */
-function realGitPath(): string {
-  return (process.env.PATH || '')
-    .split(path.delimiter)
-    .filter(p => path.resolve(p) !== path.resolve(mockBinDir))
-    .join(path.delimiter);
-}
-
-/**
- * Repository-override git variables that must never reach a fixture command.
- * A leaked `GIT_INDEX_FILE` makes `git add`/`git commit` write into the caller's
- * index instead of this fixture repo's own — which corrupts an enclosing test
- * gate's temporary index and fails the run as unattributable (WL-0MVVWRPRO006IQ61).
- * Mirrors `skill/shared/git_sandbox.py::REPOSITORY_OVERRIDE_ENV_VARS` plus the
- * index override that only a gate sets.
- */
-const REPOSITORY_OVERRIDE_ENV_VARS = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_INDEX_FILE',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_CONFIG',
-  'GIT_CONFIG_GLOBAL',
-  'GIT_CONFIG_SYSTEM',
-  'GIT_CONFIG_NOSYSTEM',
-] as const;
-
-/** A hermetic environment for fixture git commands: the real git on PATH and
- * no inherited repository override, so *cwd* alone decides the repository. */
-function fixtureGitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, PATH: realGitPath() };
-  for (const name of REPOSITORY_OVERRIDE_ENV_VARS) delete env[name];
-  return env;
-}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
@@ -127,7 +90,7 @@ function runSyncViaSpawn(): Promise<{ code: number | null; stdout: string; stder
       [cliEntry, '--json', 'sync', '--if-idle'],
       {
         cwd: tempDir,
-        env: { ...process.env, PATH: realGitPath() },
+        env: fixtureGitEnv(),
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );

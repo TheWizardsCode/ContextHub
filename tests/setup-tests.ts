@@ -49,6 +49,12 @@ vi.mock('node:child_process', async (importOriginal) => {
 // override variables are removed once, before any test file runs; cwd alone
 // then decides the repository, exactly as in a normal run. Tests that exercise
 // an override set it explicitly themselves and are unaffected.
+//
+// Defence-in-depth: this is the suite-wide layer only. Fixtures that hand an
+// environment to their own git commands must additionally route it through the
+// shared `fixtureGitEnv()` helper (tests/cli/git-helpers.ts), which scrubs the
+// same list per invocation — a test that sets an override *after* this setup
+// has run must still not leak it (WL-0MVWRR4GD001M9LA).
 for (const name of [
   'GIT_DIR',
   'GIT_WORK_TREE',

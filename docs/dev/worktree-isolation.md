@@ -77,6 +77,28 @@ the ones running inside the temp worktree — at the wrong repository.
 `sanitizeGitEnv()` in `src/sync/git-exec.ts` strips all three before every
 sync child process runs, and it is the single place that does so.
 
+**Test-fixture layer (defence-in-depth, WL-0MVWRR4GD001M9LA).** The finish
+gate (SA-0MVQHVGFR006W8LG) exports a temporary `GIT_INDEX_FILE` into the
+suite it runs: `implement.py finish` stages the would-be-commit tree into a
+throwaway index and requires that index to be byte-identical after the suite
+(`index_unchanged`) for the verdict to describe the tree it tested. A test
+fixture that spawns `git` with a spread of `process.env` inherits that
+override, so its `git add`/`git commit` write into the *gate's* index instead
+of the fixture's own repository — the gate then refuses the run as
+unattributable ("gate evidence invalid: the temporary index changed while the
+suite ran"). Two layers keep this from happening:
+
+1. *Suite-wide:* `tests/setup-tests.ts` deletes the repository-override
+   variables once, before any test file runs (WL-0MVVWRPRO006IQ61).
+2. *Per fixture:* every fixture git invocation goes through the shared
+   `fixtureGitEnv()` helper in `tests/cli/git-helpers.ts`, which scrubs the
+   same list (plus `GIT_INDEX_FILE`) on every call and keeps the real git
+   reachable by dropping the test mock-bin from `PATH`. A test that sets an
+   override *after* suite setup (a deliberate-leak regression) still cannot
+   hand it to a fixture command; the no-non-hermetic-fixtures invariant is
+   enforced by `tests/cli/fixture-git-env.test.ts`. Mirrors
+   `skill/shared/git_sandbox.py::fixture_git_env()`.
+
 ## Guards that depend on isolation
 
 Both hooks below no-op inside an isolated tree, because syncing from a tree
@@ -123,6 +145,7 @@ propagation).
 |---|---|
 | Temp-worktree branch handling, target validation, hook guards, `GIT_DIR` leak | `tests/sync-worktree.test.ts` |
 | Rewrite/force-push against a real polluted remote | `tests/rewrite-and-force-push.test.ts` |
+| Hermetic fixture git env (fixtureGitEnv) + no non-hermetic fixtures invariant | `tests/cli/fixture-git-env.test.ts` |
 | Sync-family layering, size ceiling and frozen barrel surface | `tests/sync/split-guard.test.ts` |
 | Race-tolerant repo-wide walker (concurrent worktree churn) | `tests/unit/repo-file-walk.test.ts` |
 | Icons repo-wide import guard (uses the walker) | `tests/unit/icons.test.ts` |
