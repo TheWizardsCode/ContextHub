@@ -15,6 +15,7 @@ import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, fetchBlockersForItem, getWorklogDir, getExecFileAsync, createInProcessRefreshScope, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState, type BlockerRef } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
 import { AgentTracker } from './agent-tracker.js';
@@ -3037,7 +3038,7 @@ export function createProductionShipGuardQuery(
       worklogOutput = null;
     }
     try {
-      const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+      const herdrBin = resolveHerdrBin();
       const { stdout } = await exec(herdrBin, ['pane', 'list'], {
         encoding: 'utf8',
         maxBuffer: SHIP_GUARD_MAX_BUFFER,

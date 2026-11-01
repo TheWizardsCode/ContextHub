@@ -151,11 +151,12 @@ describe('isPaneVisible', () => {
     await isPaneVisible();
     expect(mockFn.mock.calls[0][0]).toBe('herdr');
 
-    // Explicit HERDR_BIN_PATH wins.
-    process.env.HERDR_BIN_PATH = '/custom/bin/herdr';
+    // Explicit HERDR_BIN_PATH wins (a real executable so the resolver keeps
+    // it verbatim — WL-0MVXRZL9H001GQ7A).
+    process.env.HERDR_BIN_PATH = process.execPath;
     mockFn.mockClear();
     await isPaneVisible();
-    expect(mockFn.mock.calls[0][0]).toBe('/custom/bin/herdr');
+    expect(mockFn.mock.calls[0][0]).toBe(process.execPath);
   });
 });
 

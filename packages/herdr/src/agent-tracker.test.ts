@@ -287,7 +287,9 @@ describe('AgentTracker — refreshStates', () => {
   });
 
   it('uses HERDR_BIN_PATH when set', async () => {
-    process.env.HERDR_BIN_PATH = '/custom/herdr';
+    // A real executable: the resolver validates the configured path before
+    // using it (WL-0MVXRZL9H001GQ7A), so a fake path would fall back to PATH.
+    process.env.HERDR_BIN_PATH = process.execPath;
     const tracker = new AgentTracker({ stateFile: makeStateFile(), ttlMs: 60_000 });
     await tracker.recordAgentForWorkItem('WL-ABC', 'p1');
 
@@ -298,7 +300,7 @@ describe('AgentTracker — refreshStates', () => {
     setExecFileAsync(mockFn as any);
 
     await tracker.refreshStates();
-    expect(mockFn.mock.calls[0][0]).toBe('/custom/herdr');
+    expect(mockFn.mock.calls[0][0]).toBe(process.execPath);
   });
 
   it('reloads the state file on refresh so other panes/tabs entries are shared', async () => {

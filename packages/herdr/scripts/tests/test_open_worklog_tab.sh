@@ -122,6 +122,20 @@ run_script() {
   HERDR_BIN_PATH="$1" bash "$OPEN_WORKLOG_TAB" 2>&1
 }
 
+# PATH with every directory that provides an executable `herdr` removed, so a
+# "CLI missing" test cannot accidentally resolve the operator's real herdr
+# through the resolver's PATH fallback (WL-0MVXRZL9H001GQ7A).
+herdr_free_path() {
+  local out="" dir
+  local IFS=':'
+  for dir in $PATH; do
+    [ -n "$dir" ] || continue
+    [ -x "$dir/herdr" ] && continue
+    out="${out:+$out:}$dir"
+  done
+  printf '%s' "$out"
+}
+
 echo "=== Test: script exists and is executable ==="
 [ -f "$OPEN_WORKLOG_TAB" ] && pass "open-worklog-tab.sh exists" || fail "open-worklog-tab.sh missing"
 [ -x "$OPEN_WORKLOG_TAB" ] && pass "open-worklog-tab.sh executable" || fail "open-worklog-tab.sh not executable"
@@ -159,7 +173,9 @@ fi
 
 echo ""
 echo "=== Test: herdr CLI unavailable → clear error, non-zero exit ==="
-out="$(run_script "$SANDBOX/no-such-herdr")"
+# Hide herdr from PATH so the resolver's PATH fallback cannot find a real
+# installation on the test host.
+out="$(HERDR_BIN_PATH="$SANDBOX/no-such-herdr" PATH="$(herdr_free_path)" bash "$OPEN_WORKLOG_TAB" 2>&1)"
 RC=$?
 
 if [ "$RC" -ne 0 ]; then
@@ -172,6 +188,45 @@ if echo "$out" | grep -qi "herdr CLI not found"; then
   pass "clear 'herdr CLI not found' error printed"
 else
   fail "missing clear error message"
+  echo "  output: $out"
+fi
+
+echo ""
+echo "=== Test: stale ' (deleted)' HERDR_BIN_PATH resolves to the replaced binary ==="
+# Regression for WL-0MVXRZL9H001GQ7A: after an in-place `herdr update` the
+# server injects its old /proc/self/exe, which Linux renders with a
+# " (deleted)" suffix. The script must still run instead of failing.
+rm -f "$HERDR_LOG"
+out="$(HERDR_BIN_PATH="$MOCK_HERDR (deleted)" bash "$OPEN_WORKLOG_TAB" 2>&1)"
+RC=$?
+
+if [ "$RC" -eq 0 ] && echo "$out" | grep -q 'Opened worklog tab'; then
+  pass "stale ' (deleted)' binary path resolved to the replaced binary"
+else
+  fail "stale ' (deleted)' binary path should resolve (rc=$RC)"
+  echo "  output: $out"
+fi
+
+if grep -q 'tab rename w9:tPE Worklog' "$HERDR_LOG" 2>/dev/null; then
+  pass "stale path: tab renamed via the resolved CLI"
+else
+  fail "stale path: tab rename missing"
+  echo "  log: $(cat "$HERDR_LOG" 2>/dev/null)"
+fi
+
+echo ""
+echo "=== Test: stale HERDR_BIN_PATH falls back to herdr on PATH ==="
+mkdir -p "$SANDBOX/path-bin"
+cp "$MOCK_HERDR" "$SANDBOX/path-bin/herdr"
+chmod +x "$SANDBOX/path-bin/herdr"
+rm -f "$HERDR_LOG"
+out="$(HERDR_BIN_PATH="$SANDBOX/gone/herdr (deleted)" PATH="$SANDBOX/path-bin:$(herdr_free_path)" bash "$OPEN_WORKLOG_TAB" 2>&1)"
+RC=$?
+
+if [ "$RC" -eq 0 ] && echo "$out" | grep -q 'Opened worklog tab'; then
+  pass "stale HERDR_BIN_PATH fell back to herdr on PATH"
+else
+  fail "stale HERDR_BIN_PATH should fall back to herdr on PATH (rc=$RC)"
   echo "  output: $out"
 fi
 

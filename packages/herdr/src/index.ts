@@ -47,6 +47,7 @@ import {
   stripSkillName,
 } from './pane-title.js';
 import { applyActivePaneMarkers, createProductionHydratorDeps } from './hydrator.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -1093,7 +1094,7 @@ export function createDowntimeDeps(
       expected?: { itemId: string; kind: string },
     ): Promise<boolean> {
       try {
-        const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+        const herdrBin = resolveHerdrBin();
         if (expected) {
           const { stdout } = await getExecFileAsync()(
             herdrBin,
@@ -1149,7 +1150,7 @@ export function createDowntimeDeps(
       cwd: string,
       opts: { idleThresholdMinutes: number; ledgerPath?: string },
     ): Promise<void> {
-      const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+      const herdrBin = resolveHerdrBin();
       const invokingPaneId =
         process.env.HERDR_PANE_ID ?? process.env.HERDR_PANE ?? undefined;
       const deps = createHerdrReaperDeps({

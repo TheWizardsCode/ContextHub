@@ -136,6 +136,7 @@ import {
   fetchOutboundDepsForItems,
 } from './fetcher.js';
 import { parseMachinePaneListOutput } from './dispatcher-anchor.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 import { probeClaimHolders, type ClaimHolderVerdict } from './claim-lock.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -1124,7 +1125,7 @@ export function createHydratorFileLog(
 export function createProductionHydratorDeps(
   opts: { log?: HydratorDeps['log'] } = {},
 ): HydratorDeps {
-  const herdrBin = (): string => process.env.HERDR_BIN_PATH ?? 'herdr';
+  const herdrBin = (): string => resolveHerdrBin();
 
   // Resolve the project root from the worklog-dir override when set, else
   // fall back to the process cwd (both work in the plugin pane).

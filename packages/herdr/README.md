@@ -2880,6 +2880,23 @@ want to refresh the plugin dependency without a full build, run
 `npm install --prefix packages/herdr` (its `postinstall` re-links the
 symlink).
 
+### Plugin actions fail with `herdr CLI not found ('…/herdr (deleted)')`
+
+After an in-place `herdr update`, the still-running server keeps the **old**
+binary inode. Herdr derives `HERDR_BIN_PATH` from its own `/proc/self/exe`,
+so every pane and plugin action inherits the stale path with Linux's
+` (deleted)` marker appended — a path that can never be executed.
+
+Since WL-0MVXRZL9H001GQ7A the plugin's shell scripts and TypeScript modules
+resolve the CLI through one shared resolver (`shared/herdr-bin.sh` and
+`src/herdr-bin.ts`): the marker is stripped, the resulting path is validated,
+and `herdr` on `PATH` is used as the fallback. Actions therefore keep working
+for the rest of the stale server's lifetime.
+
+To clear the stale server itself (it will then inject a valid path again),
+restart herdr or use `herdr update --handoff` — this disturbs open panes/tabs,
+so it is not done automatically.
+
 ## License
 
 MIT — see [LICENSE](../../LICENSE) for details.

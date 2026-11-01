@@ -1493,8 +1493,10 @@ describe('production active-detection spawns (pane list)', () => {
     await deps.applyDemotion(WL, 'open', 'plan_complete');
 
     // Every recorded spawn must not include `tab` for the active-detection
-    // lookup (pane titles are the signal).
-    expect(calls).toHaveLength(4);
+    // lookup (pane titles are the signal). Five spawns: in-progress list,
+    // pane list, per-item dep list, demotion update and its release comment
+    // (WL-0MVWDB7F2003SORI added the comment spawn).
+    expect(calls).toHaveLength(5);
     // The seam uses `herdr pane list` (bin may be a full path when
     // HERDR_BIN_PATH is set).
     const paneCall = calls.find(
@@ -1670,9 +1672,10 @@ describe('hydrator CLI stdio isolation (AC1)', () => {
     await deps.listOutboundDeps(WL);
     await deps.applyDemotion(WL, 'open', 'plan_complete');
 
-    // All four hydrator spawn shapes were exercised (in-progress list, pane
-    // list, per-item dep list, demotion apply).
-    expect(calls).toHaveLength(4);
+    // All five hydrator spawn shapes were exercised (in-progress list, pane
+    // list, per-item dep list, demotion update and its release comment —
+    // WL-0MVWDB7F2003SORI added the comment spawn).
+    expect(calls).toHaveLength(5);
     expect(calls.some((call) => call.args.includes('pane'))).toBe(true);
     expect(calls.some((call) => call.args.includes('dep'))).toBe(true);
     expect(calls.some((call) => call.args.includes('update'))).toBe(true);
