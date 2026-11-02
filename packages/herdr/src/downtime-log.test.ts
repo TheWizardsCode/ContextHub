@@ -44,6 +44,11 @@ import {
   recentAuditDispatchedItemIds,
   isNonTerminalCooldownActive,
   countAttempts,
+  COORDINATION_LOG_MAX_ENTRIES,
+  COORDINATION_LOG_MAX_ROTATED_FILES,
+  resolveCoordinationLogPolicy,
+  readCoordinationLogAllEntries,
+  hourlyReasonTally,
 } from './downtime-log.js';
 import type { DowntimeLogEntry, RecentDispatchRow } from './downtime-log.js';
 
@@ -261,6 +266,194 @@ describe('downtime rolling log', () => {
 // empty file and momentarily lose the dispatched marker (RCA H3,
 // WL-0MUBEZ6PE002WLP4). The writer is now temp-file + rename (atomic within a
 // filesystem).
+
+// ── 24 h retention & rotation for the coordination log (WL-0MVKNC28B003UOLX) ──
+//
+// The dispatch log keeps its legacy 100-entry single-file trim (the
+// dispatched-marker readers depend on that contract). The COORDINATION log
+// (decision history) rotates size-based with N kept: the current file holds
+// up to COORDINATION_LOG_MAX_ENTRIES; when the next append would exceed it the
+// whole current file is rotated to `.1` (older siblings shift down, oldest
+// beyond COORDINATION_LOG_MAX_ROTATED_FILES is dropped) and a fresh current
+// file starts — so the entry that triggers the rotation is never lost (AC4).
+// The retained window is maxEntries × (1 + maxRotatedFiles) entries, which at
+// the observed ≥ 60 decision entries/hour covers ≥ 24 h (AC1) while bounding
+// disk use (AC2).
+
+describe('coordination-log 24 h retention & rotation (WL-0MVKNC28B003UOLX)', () => {
+  /** A tiny policy so rotation is exercised without writing 2,000 lines. */
+  const SMALL_POLICY = { maxEntries: 10, maxRotatedFiles: 2 };
+  const START = Date.parse('2026-10-22T20:00:00.000Z');
+  const atMinute = (i: number) => new Date(START + i * 60_000).toISOString();
+
+  it('AC1: retains the oldest 24 h window after writing > 1,500 decision entries', async () => {
+    const cwd = makeTempCwd();
+    const total = 1_600; // ≈ 26.7 h at the observed ≥ 60 entries/hour
+    for (let i = 0; i < total; i++) {
+      await appendCoordinationLogEntry(cwd, {
+        kind: 'decision',
+        operation: 'no-dispatch',
+        reason: i % 2 === 0 ? 'capacity-saturated' : 'slots-unavailable',
+        at: atMinute(i),
+      });
+    }
+    const all = await readCoordinationLogAllEntries(cwd);
+    // Nothing was dropped: the rotation budget (500 × 4 = 2,000) covers all
+    // 1,600 entries. The log is split across the current file and rotated
+    // siblings (three rotations happened: at writes 501, 1001 and 1501).
+    expect(all).toHaveLength(total);
+    // The oldest 24 h window (the last 1,440 entries at 60/min) is still
+    // present after the fact — exactly the post-mortem the 2026-10-22/23
+    // overnight investigation could not reconstruct.
+    const cutoff = START + (total - 1_440) * 60_000;
+    const oldest24h = all.filter((e) => Date.parse(e.at!) >= cutoff);
+    expect(oldest24h).toHaveLength(1_440);
+    expect(oldest24h[0].at).toBe(new Date(cutoff).toISOString());
+  });
+
+  it('AC2: rotates at the per-file cap and keeps at most maxEntries × (1 + maxRotatedFiles) entries', async () => {
+    const cwd = makeTempCwd();
+    for (let i = 1; i <= 80; i++) {
+      await appendCoordinationLogEntry(
+        cwd,
+        { kind: 'decision', operation: 'no-dispatch', reason: `r${i}`, at: atMinute(i) },
+        SMALL_POLICY,
+      );
+    }
+    const all = await readCoordinationLogAllEntries(cwd);
+    // The retention equals the whole budget: 10 × (1 + 2) = 30 — the newest
+    // 30 of 80 (rotated `.1`/`.2` + current); the oldest 50 were dropped.
+    expect(all).toHaveLength(10 * (1 + 2));
+    expect(all.map((e) => e.reason)).toEqual([
+      'r51', 'r52', 'r53', 'r54', 'r55', 'r56', 'r57', 'r58', 'r59', 'r60',
+      'r61', 'r62', 'r63', 'r64', 'r65', 'r66', 'r67', 'r68', 'r69', 'r70',
+      'r71', 'r72', 'r73', 'r74', 'r75', 'r76', 'r77', 'r78', 'r79', 'r80',
+    ]);
+    // The current file holds only the newest slice (≤ cap): the legacy
+    // single-file reader still sees a coherent newest file.
+    const newest = await readCoordinationLogEntries(cwd);
+    expect(newest.map((e) => e.reason)).toEqual([
+      'r71', 'r72', 'r73', 'r74', 'r75', 'r76', 'r77', 'r78', 'r79', 'r80',
+    ]);
+  });
+
+  it('AC2: clamps the rotation policy and documents the defaults', () => {
+    expect(resolveCoordinationLogPolicy()).toEqual({
+      maxEntries: COORDINATION_LOG_MAX_ENTRIES,
+      maxRotatedFiles: COORDINATION_LOG_MAX_ROTATED_FILES,
+    });
+    // Out-of-range values are clamped into the documented bounds.
+    expect(resolveCoordinationLogPolicy({ maxEntries: 1, maxRotatedFiles: 99 })).toEqual({
+      maxEntries: 10,
+      maxRotatedFiles: 20,
+    });
+    expect(resolveCoordinationLogPolicy({ maxEntries: 99_999 })).toEqual({
+      maxEntries: 10_000,
+      maxRotatedFiles: COORDINATION_LOG_MAX_ROTATED_FILES,
+    });
+    // 0 rotated siblings disables rotation (single-file trim at the cap).
+    expect(resolveCoordinationLogPolicy({ maxEntries: 12 })).toEqual({
+      maxEntries: 12,
+      maxRotatedFiles: COORDINATION_LOG_MAX_ROTATED_FILES,
+    });
+  });
+
+  it('AC2: 0 rotated siblings trims the single file at the configured cap', async () => {
+    const cwd = makeTempCwd();
+    for (let i = 1; i <= 14; i++) {
+      await appendCoordinationLogEntry(
+        cwd,
+        { kind: 'decision', operation: 'no-dispatch', reason: `r${i}`, at: atMinute(i) },
+        { maxEntries: 10, maxRotatedFiles: 0 },
+      );
+    }
+    const all = await readCoordinationLogAllEntries(cwd);
+    expect(all.map((e) => e.reason)).toEqual([
+      'r5', 'r6', 'r7', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14',
+    ]);
+    expect(await readCoordinationLogEntries(cwd)).toHaveLength(10);
+  });
+
+  it('AC3: tallies no-dispatch decision reasons per UTC hour over a time range', () => {
+    const entries: CoordinationLogEntry[] = [
+      { kind: 'decision', operation: 'no-dispatch', reason: 'capacity-saturated', at: '2026-10-23T21:15:00.000Z' },
+      { kind: 'decision', operation: 'no-dispatch', reason: 'capacity-saturated', at: '2026-10-23T21:45:00.000Z' },
+      { kind: 'decision', operation: 'no-dispatch', reason: 'slots-unavailable', at: '2026-10-23T22:03:00.000Z' },
+      { kind: 'coordination', operation: 'checkin', instanceId: 'i1', at: '2026-10-23T21:30:00.000Z' }, // excluded (not a decision)
+      { kind: 'decision', operation: 'no-dispatch', reason: 'code-freeze', at: '2026-10-24T00:01:00.000Z' },
+      { kind: 'decision', reason: 'capacity-saturated' }, // no timestamp → excluded
+      { kind: 'decision', operation: 'no-dispatch', at: '2026-10-24T00:02:00.000Z' }, // no reason → excluded
+    ];
+    expect(
+      hourlyReasonTally(entries, {
+        from: '2026-10-23T21:00:00.000Z',
+        to: '2026-10-23T23:00:00.000Z',
+      }),
+    ).toEqual([
+      { hour: '2026-10-23T21', reason: 'capacity-saturated', count: 2 },
+      { hour: '2026-10-23T22', reason: 'slots-unavailable', count: 1 },
+    ]);
+    // No range → every parseable decision, grouped per hour per reason, sorted.
+    expect(hourlyReasonTally(entries)).toEqual([
+      { hour: '2026-10-23T21', reason: 'capacity-saturated', count: 2 },
+      { hour: '2026-10-23T22', reason: 'slots-unavailable', count: 1 },
+      { hour: '2026-10-24T00', reason: 'code-freeze', count: 1 },
+    ]);
+    expect(hourlyReasonTally([])).toEqual([]);
+  });
+
+  it('AC4: no dispatch decision is lost across a rotation boundary, and the boundary entry stays readable', async () => {
+    const cwd = makeTempCwd();
+    const total = 13; // crosses TWO rotation boundaries (at write 6 and write 11)
+    for (let i = 1; i <= total; i++) {
+      await appendCoordinationLogEntry(
+        cwd,
+        { kind: 'decision', operation: 'no-dispatch', reason: `r${i}`, at: atMinute(i) },
+        SMALL_POLICY,
+      );
+    }
+    const all = await readCoordinationLogAllEntries(cwd);
+    // Every written decision is readable in order — nothing lost at a boundary.
+    expect(all).toHaveLength(total);
+    expect(all.map((e) => e.reason)).toEqual([
+      'r1', 'r2', 'r3', 'r4', 'r5',
+      'r6', 'r7', 'r8', 'r9', 'r10',
+      'r11', 'r12', 'r13',
+    ]);
+    // The legacy single-file reader still reads the NEWEST file unchanged
+    // (AC4 — existing parsers continue to work without modification).
+    const newest = await readCoordinationLogEntries(cwd);
+    expect(newest.map((e) => e.reason)).toEqual(['r11', 'r12', 'r13']);
+    // No temp files leaked across the rotations (every write stays atomic).
+    const temps = readdirSync(join(cwd, '.worklog')).filter((f) => f.endsWith('.tmp'));
+    expect(temps).toEqual([]);
+  });
+
+  it('AC4: a pre-existing oversized current file heals on the next append (migration-safe, nothing lost)', async () => {
+    const cwd = makeTempCwd();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    // Simulate a legacy current file already larger than the new per-file cap
+    // (the old 100-entry era could leave any size up to the old bound).
+    const legacy = Array.from({ length: 12 }, (_, i) =>
+      JSON.stringify({ kind: 'decision', operation: 'no-dispatch', reason: `legacy${i}`, at: '2026-10-22T00:00:00.000Z' }),
+    );
+    writeFileSync(join(cwd, '.worklog', COORDINATION_LOG_FILE), legacy.join('\n') + '\n', 'utf8');
+
+    await appendCoordinationLogEntry(
+      cwd,
+      { kind: 'decision', operation: 'no-dispatch', reason: 'new', at: '2026-10-23T00:00:00.000Z' },
+      SMALL_POLICY,
+    );
+
+    const all = await readCoordinationLogAllEntries(cwd);
+    expect(all).toHaveLength(13); // 12 legacy + 1 new — the rotation preserved every line
+    expect(all[all.length - 1]).toMatchObject({ reason: 'new' });
+    // The oversized content rotated into `.1`; the current file restarts small.
+    const newest = await readCoordinationLogEntries(cwd);
+    expect(newest).toHaveLength(1);
+    expect(newest[0]).toMatchObject({ reason: 'new' });
+  });
+});
 
 describe('atomic rolling-log writes (WL-0MUBVL1FI0071WN3 / F5)', () => {
   const tmpFilesIn = (cwd: string): string[] =>

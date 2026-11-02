@@ -21,7 +21,7 @@
  */
 
 import { getEntry, hasPeerOffer, readCoordinationFile } from './coordination.js';
-import { appendCoordinationLogEntry } from './downtime-log.js';
+import { appendCoordinationLogEntry, coordinationLogPolicyFromConfig } from './downtime-log.js';
 import { DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS } from './capacity-starvation.js';
 import { disableMarkerExists } from './downtime-disable-marker.js';
 import { cleanupStaleElection } from './leader-election.js';
@@ -168,12 +168,16 @@ export async function runLeaderElectionAndCheckIn(
       // Audit trail (WL-0MSXHAE290067VAL): log the leadership win —
       // initial election or takeover after a stale-lease detection.
       if (ctx.leaderState) {
-        void appendCoordinationLogEntry(cfg.cwd, {
-          kind: 'coordination',
-          operation: 'election',
-          instanceId: ctx.instanceId,
-          at: new Date(tickNow).toISOString(),
-        });
+        void appendCoordinationLogEntry(
+          cfg.cwd,
+          {
+            kind: 'coordination',
+            operation: 'election',
+            instanceId: ctx.instanceId,
+            at: new Date(tickNow).toISOString(),
+          },
+          coordinationLogPolicyFromConfig(cfg),
+        );
       }
     }
 
@@ -216,6 +220,7 @@ export async function runLeaderElectionAndCheckIn(
           markerStaleWindowMs: cfg.markerStaleWindowMs,
           nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
           maxAttempts: cfg.maxAttempts,
+          coordinationLogPolicy: coordinationLogPolicyFromConfig(cfg),
         }, tickNow);
         ctx.lastOfferEmpty = checkIn.offered === null;
         // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the

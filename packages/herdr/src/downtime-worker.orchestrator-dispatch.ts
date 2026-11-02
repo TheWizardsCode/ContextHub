@@ -25,7 +25,11 @@
 
 import { resolveSprintViewWindow } from './browse-window.js';
 import { DEFAULT_LEASE_TTL_SECONDS } from './leader-election.js';
-import { appendCoordinationLogEntry, type CoordinationLogEntry } from './downtime-log.js';
+import {
+  appendCoordinationLogEntry,
+  coordinationLogPolicyFromConfig,
+  type CoordinationLogEntry,
+} from './downtime-log.js';
 import {
   DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS,
   DOWNTIME_ERROR_STRIKE_LIMIT,
@@ -258,7 +262,11 @@ export async function recordDecision(
     if (typeof ctx.opts.deps.recordDecision === 'function') {
       await ctx.opts.deps.recordDecision(entry, cwd);
     } else {
-      await appendCoordinationLogEntry(cwd, entry);
+      await appendCoordinationLogEntry(
+        cwd,
+        entry,
+        coordinationLogPolicyFromConfig(ctx.opts.config()),
+      );
     }
   } catch {
     // fail-closed: decision logging must never crash the worker

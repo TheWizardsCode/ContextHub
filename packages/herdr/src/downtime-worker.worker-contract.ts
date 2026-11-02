@@ -700,6 +700,25 @@ export interface DowntimeWorkerConfig {
      */
     capacityStarvationAlertMs?: number;
     /**
+     * Coordination-log retention policy (WL-0MVKNC28B003UOLX AC2): per-file
+     * entry cap for `.worklog/downtime-coordination.log` before it rotates
+     * to a numbered sibling, and how many rotated siblings are kept.
+     * Size-based rotation with N kept: the retained window is BOUNDED by
+     * `coordinationLogMaxEntries × (1 + coordinationLogMaxRotatedFiles)`
+     * entries and never falls below
+     * `coordinationLogMaxEntries × coordinationLogMaxRotatedFiles + 1`.
+     * Defaults (500/file, 3 rotated: always 1,501–2,000 entries ≈ ≥ 25 h at
+     * the observed ≥ 60 decisions/hour) come from
+     * `COORDINATION_LOG_MAX_ENTRIES` / `COORDINATION_LOG_MAX_ROTATED_FILES`
+     * in `downtime-log.ts`, and values are clamped by
+     * `resolveCoordinationLogPolicy` (10–10,000 entries, 0–20 siblings;
+     * 0 siblings = no rotation, single-file trim). Read live on every tick.
+     * The dispatch log is NOT affected (its 100-entry bound keeps the
+     * dispatched-marker readers' contract).
+     */
+    coordinationLogMaxEntries?: number;
+    coordinationLogMaxRotatedFiles?: number;
+    /**
      * Progress window before a live-agent pane is reported as long-running on
      * a starvation signal (WL-0MVKNC2N50025HXE AC2). Read live on every tick.
      * Optional — defaults to `DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS` (3 h).

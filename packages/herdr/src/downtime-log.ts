@@ -11,7 +11,10 @@
  * decisions, but logs are not migrated — stale per-worklog coordination
  * files do not imply log migration. The file is bounded — only the most recent DOWNTIME_LOG_MAX_ENTRIES entries are
  * kept — so it rolls instead of growing unbounded over a long-lived plugin
- * pane. Callers must treat failures as fail-closed (never crash the worker).
+ * pane. The COORDINATION log (`.worklog/downtime-coordination.log`) instead
+ * rotates size-based with N kept (WL-0MVKNC28B003UOLX): it holds 24 h of
+ * decision history with bounded disk — see `COORDINATION_LOG_MAX_ENTRIES` /
+ * `COORDINATION_LOG_MAX_ROTATED_FILES`. Callers must treat failures as fail-closed (never crash the worker).
  *
  * The log doubles as the dispatched-marker source for the audit tier
  * (WL-0MSLIY8ZR004QUSY): `readDowntimeLogEntries` + `auditDispatchedItemIds`
@@ -21,7 +24,7 @@
  * audit.
  */
 
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -170,24 +173,128 @@ export interface CoordinationLogEntry {
 
 /**
  * Append one coordination operation to `.worklog/downtime-coordination.log`
- * (same bounded-rolling behavior as the dispatch log — most recent
- * DOWNTIME_LOG_MAX_ENTRIES). Fail-closed: never throws; a write failure
+ * (WL-0MVKNC28B003UOLX retention: size-based rotation with N kept — the
+ * current file holds up to `maxEntries`; when that would be exceeded the
+ * whole current file rotates to `.1` and a fresh current file starts, so the
+ * entry that triggers the rotation is never lost). `policy` is optional and
+ * defaults to `COORDINATION_LOG_MAX_ENTRIES` ×
+ * `COORDINATION_LOG_MAX_ROTATED_FILES` (documented default ≈ ≥ 24 h at the
+ * observed ≥ 60 decisions/hour). Fail-closed: never throws; a write failure
  * is swallowed (audit logging must never crash the worker).
  */
 export async function appendCoordinationLogEntry(
   cwd: string,
   entry: CoordinationLogEntry,
+  policy?: CoordinationLogPolicyInput,
 ): Promise<void> {
   try {
     // Reuse the bounded JSONL append machinery with a different filename.
-    await appendRollingJsonl(cwd, COORDINATION_LOG_FILE, JSON.stringify(entry));
+    await appendRollingJsonl(
+      cwd,
+      COORDINATION_LOG_FILE,
+      JSON.stringify(entry),
+      resolveCoordinationLogPolicy(policy),
+    );
   } catch {
     // fail-closed: coordination logging must never crash the worker
   }
 }
 
-/** Rolling bound: keep at most this many entries in the log file. */
+/** Rolling bound for the DISPATCH log only: keep at most this many entries. */
 export const DOWNTIME_LOG_MAX_ENTRIES = 100;
+
+/**
+ * Per-file entry cap for the COORDINATION log before it rotates to a
+ * numbered sibling (WL-0MVKNC28B003UOLX AC2). The dispatch log keeps its
+ * smaller single-file bound (`DOWNTIME_LOG_MAX_ENTRIES`); only the
+ * coordination/decision log carries the 24 h retention. Default: 500
+ * entries per file.
+ */
+export const COORDINATION_LOG_MAX_ENTRIES = 500;
+
+/**
+ * Number of rotated coordination-log siblings kept (WL-0MVKNC28B003UOLX
+ * AC2). Together with `COORDINATION_LOG_MAX_ENTRIES` the retained window is
+ * bounded by `maxEntries × (1 + maxRotatedFiles)` entries and never falls
+ * below `maxEntries × maxRotatedFiles + 1` — the documented default (500
+ * per file, 3 rotated) therefore always holds 1,501–2,000 entries, covering
+ * ≥ 25 h at the observed ≥ 60 decision entries/hour (a full overnight
+ * post-mortem window) while bounding disk use to ~2,000 JSONL lines.
+ */
+export const COORDINATION_LOG_MAX_ROTATED_FILES = 3;
+
+/** Floor for the per-file coordination-log cap (clamped, AC2). */
+export const COORDINATION_LOG_MIN_ENTRIES = 10;
+/** Ceiling for the per-file coordination-log cap (bounded disk, AC2). */
+export const COORDINATION_LOG_MAX_ENTRIES_CEILING = 10_000;
+/** Ceiling for rotated coordination-log siblings (bounded disk, AC2). */
+export const COORDINATION_LOG_MAX_ROTATED_FILES_CEILING = 20;
+
+/**
+ * Resolved coordination-log retention/rotation policy
+ * (WL-0MVKNC28B003UOLX AC2) — see {@link resolveCoordinationLogPolicy}.
+ */
+export interface CoordinationLogPolicy {
+  /** Per-file entry cap before rotation; clamped to [10, 10 000]. */
+  maxEntries: number;
+  /**
+   * Rotated siblings kept; `0` disables rotation (single-file trim at the
+   * cap). Clamped to [0, 20].
+   */
+  maxRotatedFiles: number;
+}
+
+/** Unresolved (partial) coordination-log policy; missing fields take the documented defaults. */
+export interface CoordinationLogPolicyInput {
+  maxEntries?: number;
+  maxRotatedFiles?: number;
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
+/**
+ * Resolve a (partial) coordination-log retention policy to its clamped,
+ * defaulted form (WL-0MVKNC28B003UOLX AC2). Missing fields fall back to
+ * `COORDINATION_LOG_MAX_ENTRIES` / `COORDINATION_LOG_MAX_ROTATED_FILES`;
+ * out-of-range values are clamped to `[COORDINATION_LOG_MIN_ENTRIES,
+ * COORDINATION_LOG_MAX_ENTRIES_CEILING]` / `[0,
+ * COORDINATION_LOG_MAX_ROTATED_FILES_CEILING]` so disk growth stays bounded.
+ * Pure and total: never throws.
+ */
+export function resolveCoordinationLogPolicy(
+  input?: CoordinationLogPolicyInput,
+): CoordinationLogPolicy {
+  return {
+    maxEntries: clampInt(
+      input?.maxEntries ?? COORDINATION_LOG_MAX_ENTRIES,
+      COORDINATION_LOG_MIN_ENTRIES,
+      COORDINATION_LOG_MAX_ENTRIES_CEILING,
+    ),
+    maxRotatedFiles: clampInt(
+      input?.maxRotatedFiles ?? COORDINATION_LOG_MAX_ROTATED_FILES,
+      0,
+      COORDINATION_LOG_MAX_ROTATED_FILES_CEILING,
+    ),
+  };
+}
+
+/**
+ * Resolve the coordination-log retention policy from the worker's live
+ * config slice (WL-0MVKNC28B003UOLX AC2): `coordinationLogMaxEntries` /
+ * `coordinationLogMaxRotatedFiles` from `DowntimeWorkerConfig.config()`,
+ * falling back to (and clamped like) {@link resolveCoordinationLogPolicy}.
+ */
+export function coordinationLogPolicyFromConfig(cfg: {
+  coordinationLogMaxEntries?: number;
+  coordinationLogMaxRotatedFiles?: number;
+}): CoordinationLogPolicy {
+  return resolveCoordinationLogPolicy({
+    maxEntries: cfg.coordinationLogMaxEntries,
+    maxRotatedFiles: cfg.coordinationLogMaxRotatedFiles,
+  });
+}
 
 /**
  * Hours per recent-dispatch time block (WL-0MUMM9NED009TLL3). The recent
@@ -362,6 +469,28 @@ export interface DowntimeLogEntry {
 }
 
 /**
+ * Tolerantly parse the JSONL lines of a raw log file content into objects:
+ * malformed lines are skipped, an empty/whitespace-only file yields `[]`,
+ * and non-object JSON values are ignored. Used by every rolling-log reader
+ * (fail-safe, never throws).
+ */
+function parseJsonlLines(raw: string): Record<string, unknown>[] {
+  const entries: Record<string, unknown>[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) {
+        entries.push(parsed as Record<string, unknown>);
+      }
+    } catch {
+      // malformed line → skip (fail-safe)
+    }
+  }
+  return entries;
+}
+
+/**
  * Read the bounded rolling dispatch log at `<cwd>/.worklog/downtime-dispatches.log`.
  *
  * FAIL-SAFE by contract (WL-0MSLIY8ZR004QUSY): a missing or unreadable log
@@ -379,19 +508,7 @@ export async function readDowntimeLogEntries(cwd: string): Promise<DowntimeLogEn
   } catch {
     return []; // missing or unreadable → empty (fail-safe)
   }
-  const entries: DowntimeLogEntry[] = [];
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') continue;
-    try {
-      const parsed = JSON.parse(line) as unknown;
-      if (typeof parsed === 'object' && parsed !== null) {
-        entries.push(parsed as DowntimeLogEntry);
-      }
-    } catch {
-      // malformed line → skip (fail-safe)
-    }
-  }
-  return entries;
+  return parseJsonlLines(raw) as DowntimeLogEntry[];
 }
 
 /**
@@ -410,19 +527,105 @@ export async function readCoordinationLogEntries(cwd: string): Promise<Coordinat
   } catch {
     return []; // missing or unreadable → empty (fail-safe)
   }
-  const entries: CoordinationLogEntry[] = [];
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') continue;
+  return parseJsonlLines(raw) as CoordinationLogEntry[];
+}
+
+/**
+ * Read the FULL coordination-log history — the current file plus every
+ * rotated sibling (WL-0MVKNC28B003UOLX AC1/AC3/AC4). Chronological order:
+ * the oldest rotated file first (`.<N>`), then `.1`, then the current
+ * (newest) file — so the returned array is the decision history in append
+ * order and an operator's per-hour summary (see {@link hourlyReasonTally})
+ * reads naturally. Same FAIL-SAFE contract as `readCoordinationLogEntries`:
+ * a missing/unreadable `.worklog` yields `[]`, malformed lines are skipped,
+ * foreign/temp files (e.g. `.downtime-coordination.log.<pid>.<rand>.tmp`)
+ * are never picked up, and the function never throws.
+ */
+export async function readCoordinationLogAllEntries(cwd: string): Promise<CoordinationLogEntry[]> {
+  const dir = join(cwd, '.worklog');
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return []; // missing/unreadable .worklog → empty (fail-safe)
+  }
+  // Rotated siblings are `<file>.N` with an integer N; `.1` is the NEWEST
+  // rotated file, so chronological order is highest N first, then the
+  // current file. A suffix that is not a pure integer (temp files, `.json`,
+  // anything foreign) is never treated as a rotated sibling.
+  const suffixNumbers = names
+    .filter((name) => name.startsWith(COORDINATION_LOG_FILE + '.'))
+    .map((name) => name.slice(COORDINATION_LOG_FILE.length + 1))
+    .filter((suffix) => /^\d+$/.test(suffix))
+    .map(Number);
+  suffixNumbers.sort((a, b) => b - a); // oldest rotated first (highest N)
+
+  const raws: string[] = [];
+  for (const n of suffixNumbers) {
     try {
-      const parsed = JSON.parse(line) as unknown;
-      if (typeof parsed === 'object' && parsed !== null) {
-        entries.push(parsed as CoordinationLogEntry);
-      }
+      raws.push(await readFile(join(dir, `${COORDINATION_LOG_FILE}.${n}`), 'utf8'));
     } catch {
-      // malformed line → skip (fail-safe)
+      // rotated away concurrently → skip (fail-safe)
     }
   }
-  return entries;
+  try {
+    raws.push(await readFile(join(dir, COORDINATION_LOG_FILE), 'utf8'));
+  } catch {
+    // no current file → the rotated siblings alone are the history
+  }
+  return parseJsonlLines(raws.join('\n')) as CoordinationLogEntry[];
+}
+
+/**
+ * One per-hour reason tally row (WL-0MVKNC28B003UOLX AC3): the number of
+ * no-dispatch decision entries in a UTC hour (`YYYY-MM-DDTHH`) carrying a
+ * given `reason`.
+ */
+export interface HourlyReasonCount {
+  /** UTC hour covered, as an `at` prefix, e.g. `2026-10-23T21`. */
+  hour: string;
+  /** The no-dispatch decision reason, e.g. `capacity-saturated`. */
+  reason: string;
+  /** Number of matching decision entries in that hour. */
+  count: number;
+}
+
+/**
+ * Operator-facing hourly reason tally for a time range (WL-0MVKNC28B003UOLX
+ * AC3): count `kind: 'decision'` entries (no-dispatch decisions and
+ * observations) by UTC hour and `reason`. `range.from` is inclusive,
+ * `range.to` exclusive; an absent range covers the whole input. Pure and
+ * total: entries without a parseable `at`, without a string `reason`, or of
+ * another kind are ignored; unparseable range bounds fall open; an empty
+ * input yields `[]`; never throws. Rows sort by hour, then reason.
+ */
+export function hourlyReasonTally(
+  entries: readonly CoordinationLogEntry[],
+  range?: { from?: string; to?: string },
+): HourlyReasonCount[] {
+  const counts = new Map<string, { hour: string; reason: string; count: number }>();
+  const fromT = range?.from !== undefined ? Date.parse(range.from) : Number.NaN;
+  const toT = range?.to !== undefined ? Date.parse(range.to) : Number.NaN;
+  for (const e of entries) {
+    if (e.kind !== 'decision') continue;
+    if (typeof e.reason !== 'string' || e.reason.length === 0) continue;
+    if (typeof e.at !== 'string') continue;
+    const t = Date.parse(e.at);
+    if (Number.isNaN(t)) continue;
+    if (!Number.isNaN(fromT) && t < fromT) continue;
+    if (!Number.isNaN(toT) && t >= toT) continue; // `to` exclusive
+    const hour = e.at.slice(0, 13); // 'YYYY-MM-DDTHH' of the ISO `at`
+    const key = `${hour}\u0000${e.reason}`;
+    const row = counts.get(key);
+    if (row === undefined) {
+      counts.set(key, { hour, reason: e.reason, count: 1 });
+    } else {
+      row.count += 1;
+    }
+  }
+  return [...counts.values()].sort(
+    (a, b) => (a.hour === b.hour ? a.reason.localeCompare(b.reason) : a.hour.localeCompare(b.hour)),
+  );
 }
 
 /**
@@ -1099,21 +1302,40 @@ export async function appendDowntimeLogEntry(cwd: string, entry: string): Promis
 }
 
 /**
- * Bounded JSONL append shared by the dispatch and coordination logs:
- * write `line` to `<cwd>/.worklog/<file>`, creating `.worklog` if needed
- * and trimming to the most recent DOWNTIME_LOG_MAX_ENTRIES lines. Throws
- * on I/O failure — callers must catch (fail-closed).
+ * Bounded JSONL append shared by the dispatch and coordination logs.
  *
- * ATOMIC (WL-0MUBVL1FI0071WN3 / F5): the new content is written to a
- * temporary sibling file and `rename`d over the target, so a concurrent
- * reader (e.g. the dispatched-marker readers) can never observe a truncated,
- * empty, or partially written log — it sees either the whole previous file or
- * the whole new one. `rename(2)` is atomic within a filesystem, so the temp
- * file is created in the SAME directory as the target. The temp file is
- * removed on failure before the error is rethrown (and the target is left
- * untouched).
+ * DISPATCH log (no `rotate` policy, `appendDowntimeLogEntry`/
+ * `appendPaneCloseLogEntry`): write `line` to `<cwd>/.worklog/<file>`, creating
+ * `.worklog` if needed and trimming to the most recent DOWNTIME_LOG_MAX_ENTRIES
+ * lines (unchanged behaviour — the dispatched-marker readers depend on it).
+ *
+ * COORDINATION log (a `rotate` policy, `appendCoordinationLogEntry`):
+ * size-based rotation with N kept (WL-0MVKNC28B003UOLX AC2). The current file
+ * holds up to `rotate.maxEntries`; when the next append would exceed it the
+ * whole current file rotates to `.1` (older siblings shift down; the oldest
+ * beyond `rotate.maxRotatedFiles` is dropped) and a fresh current file — with
+ * just the new line — starts, so the entry that triggers the rotation is
+ * never lost (AC4). A pre-existing oversized current file (e.g. from the old
+ * 100-entry era) is healed on the next append: it rotates wholesale before
+ * the new line lands, so nothing is discarded.
+ *
+ * ATOMIC (WL-0MUBVL1FI0071WN3 / F5): every file write — current AND rotated
+ * siblings — goes to a temporary sibling file and is `rename`d over the
+ * target, so a concurrent reader can never observe a truncated, empty, or
+ * partially written file. Rotation orders the writes so the CURRENT path
+ * always exists with a complete snapshot: the full old content is written to
+ * `.1` BEFORE the current file is replaced with the fresh single-line file.
+ * `rename(2)` is atomic within a filesystem, so the temp file is created in
+ * the SAME directory as the target. The temp file is removed on failure
+ * before the error is rethrown (and the target is left untouched). Throws on
+ * I/O failure — callers must catch (fail-closed).
  */
-async function appendRollingJsonl(cwd: string, file: string, line: string): Promise<void> {
+async function appendRollingJsonl(
+  cwd: string,
+  file: string,
+  line: string,
+  rotate?: CoordinationLogPolicy,
+): Promise<void> {
   const dir = join(cwd, '.worklog');
   const filePath = join(dir, file);
   await mkdir(dir, { recursive: true });
@@ -1126,18 +1348,79 @@ async function appendRollingJsonl(cwd: string, file: string, line: string): Prom
     lines = []; // first entry or unreadable file → start fresh
   }
 
-  lines.push(line);
-  if (lines.length > DOWNTIME_LOG_MAX_ENTRIES) {
-    lines = lines.slice(lines.length - DOWNTIME_LOG_MAX_ENTRIES);
+  if (rotate === undefined) {
+    // Dispatch log: legacy single-file rolling bound (unchanged).
+    lines.push(line);
+    if (lines.length > DOWNTIME_LOG_MAX_ENTRIES) {
+      lines = lines.slice(lines.length - DOWNTIME_LOG_MAX_ENTRIES);
+    }
+    await atomicWriteJsonl(dir, file, lines);
+    return;
   }
 
-  // Temp name carries pid + a random suffix so two concurrent writers never
-  // collide on the same temp path. Same directory → same filesystem → the
-  // rename is atomic.
-  const tmpPath = join(
-    dir,
-    `.${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`,
-  );
+  if (rotate.maxRotatedFiles === 0) {
+    // Rotation disabled: single-file trim at the configured per-file cap.
+    lines.push(line);
+    if (lines.length > rotate.maxEntries) {
+      lines = lines.slice(lines.length - rotate.maxEntries);
+    }
+    await atomicWriteJsonl(dir, file, lines);
+    return;
+  }
+
+  if (lines.length >= rotate.maxEntries) {
+    // Current file is full: rotate it aside BEFORE appending, so the entry
+    // that triggers the rotation is never lost (AC4).
+    await rotateCoordinationFile(dir, file, rotate, lines);
+    await atomicWriteJsonl(dir, file, [line]);
+  } else {
+    lines.push(line);
+    await atomicWriteJsonl(dir, file, lines);
+  }
+}
+
+/**
+ * Rotate the full current coordination-log content to `.1`, shifting the
+ * existing siblings down so `.1` is always the NEWEST rotated file and the
+ * oldest beyond `policy.maxRotatedFiles` is dropped. Every shift uses
+ * `rename(2)` (atomic, overwrites the destination); `.1` is written with an
+ * atomic tmp+rename so the current file is only ever replaced afterwards by
+ * the caller (no empty/partial current snapshot). Best-effort: a missing
+ * sibling at a level is simply skipped. Throws on I/O failure — callers must
+ * catch (fail-closed).
+ */
+async function rotateCoordinationFile(
+  dir: string,
+  file: string,
+  policy: CoordinationLogPolicy,
+  currentLines: string[],
+): Promise<void> {
+  // Shift `.k` → `.k+1` for the retained siblings, oldest first: the last
+  // shift overwrites (drops) the sibling beyond `maxRotatedFiles`.
+  for (let k = policy.maxRotatedFiles - 1; k >= 1; k--) {
+    try {
+      await rename(join(dir, `${file}.${k}`), join(dir, `${file}.${k + 1}`));
+    } catch {
+      // ENOENT: no sibling at this level yet (early rotations) — nothing to shift.
+    }
+  }
+  // The full old current content lands in `.1` (newest rotated file).
+  await atomicWriteJsonl(dir, `${file}.1`, currentLines);
+}
+
+/**
+ * Atomic JSONL file write (WL-0MUBVL1FI0071WN3 / F5): write `lines` to a
+ * temporary sibling file (`.<file>.<pid>.<random>.tmp` in the same directory,
+ * so the rename stays on one filesystem) and `rename` it over the target. A
+ * concurrent reader sees either the whole previous file or the whole new one.
+ * The temp name carries pid + a random suffix so two concurrent writers never
+ * collide on the same temp path. The temp file is removed on failure before
+ * the error is rethrown and the target is left untouched. Throws on I/O
+ * failure — callers must catch.
+ */
+async function atomicWriteJsonl(dir: string, file: string, lines: string[]): Promise<void> {
+  const filePath = join(dir, file);
+  const tmpPath = join(dir, `.${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`);
   try {
     await writeFile(tmpPath, lines.join('\n') + '\n', 'utf8');
     await rename(tmpPath, filePath);

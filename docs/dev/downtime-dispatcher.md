@@ -2467,7 +2467,7 @@ This is deliberately **neither blind fail-closed nor blind fail-open**: a
 duplicate is impossible while a pane is proven in-flight, and escalation is
 never permanently starved (a pane-query outage only defers it until the
 marker goes stale — bounded by `markerStaleWindowMs`, default 24 h, clamped
-1 h – 7 d; the same bound documented under "Rolling log trimming"). It is
+1 h – 7 d; the same bound documented under "Rolling log trimming, retention & rotation"). It is
 benign in practice because pane spawn itself needs herdr, so a persistent
 pane-query outage also prevents dispatch.
 
@@ -2886,7 +2886,7 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
 | `~/.herdr/downtime/active-audit` | Host-wide audit serialisation marker `{ instanceId, dispatchedAt }` (machine dir; written on audit dispatch, removed on audit-pane close, stale-released after 2 h — WL-0MUIVE0YG000UVIA) |
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
-| `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning (per worklog, retained) |
+| `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning + no-dispatch decisions (per worklog; rotating, 500 entries/file × 4 files ≈ ≥ 24 h — see [Retention & rotation](#rolling-log-trimming-retention--rotation)) |
 | `<worklog-root>/.worklog/downtime-dispatches.log` | Dispatched items (per worklog, retained; includes `anchor-unavailable` neutral no-dispatch) |
 | `<worklog-root>/.worklog/local-route.log` | Per-response local-preference route evidence written by the Worklog pi extension (bounded at 2000 lines; `at`/`sessionId`/`preference`/`route`/`fallbackReason`/`model`/`ticket`, WL-0MVLJTV03000KIQZ) |
 | `<worklog-root>/.worklog/pane-close-ledger.jsonl` | Pane-closure reaper ledger (one JSONL row per evaluated pane, per worklog, WL-0MUJL1NAH0042GOS) |
@@ -3144,29 +3144,79 @@ Legacy entries without the new fields parse and behave exactly as before, and
 dispatch count (they are not a second dispatch) while reporting
 `selectionPaths` / `selectionReasons` / `paneIds` for post-fix evidence.
 
-### Rolling log trimming
+### Rolling log trimming, retention & rotation
 
-The log file is bounded to the most recent 100 entries
-(`DOWNTIME_LOG_MAX_ENTRIES`). Entries are appended; when the file exceeds
-100 lines the first lines are truncated. All new schema fields are
-preserved during trimming.
+**Dispatch log (`downtime-dispatches.log`) — unchanged:** the log file is
+bounded to the most recent 100 entries (`DOWNTIME_LOG_MAX_ENTRIES`). Entries
+are appended; when the file exceeds 100 lines the first lines are truncated.
+The dispatched-marker readers (audit/implement/plan/intake scope guards) and
+the recent-dispatches view depend on this single-file contract and are
+untouched by the retention work.
 
-**Atomic replacement (WL-0MUBVL1FI0071WN3 / F5).** Both the dispatch log
-(`downtime-dispatches.log`) and the coordination log
-(`downtime-coordination.log`) are written **atomically**: `appendRollingJsonl`
-writes the full new content to a temporary sibling file
-(`.<file>.<pid>.<random>.tmp` in the same directory, so the rename stays on one
-filesystem) and `rename`s it over the target. A concurrent reader — in
+**Coordination log (`downtime-coordination.log`) — size-based rotation with
+N kept (WL-0MVKNC28B003UOLX):** the current file holds up to
+`COORDINATION_LOG_MAX_ENTRIES` (default **500**) entries; when the next
+append would exceed that the whole current file rotates to a numbered sibling
+(`downtime-coordination.log.1`, `.2`, … — `.1` is the newest rotated file)
+and a fresh current file starts, so the entry that triggers the rotation is
+never lost. At most `COORDINATION_LOG_MAX_ROTATED_FILES` (default **3**)
+siblings are kept; the oldest is dropped. The retained window is therefore
+**bounded** by `maxEntries × (1 + maxRotatedFiles)` entries and never falls
+below `maxEntries × maxRotatedFiles + 1` — with the shipped default
+(500/file × 3 rotated) the coordination log always holds between 1,501 and
+2,000 entries, i.e. **≥ 25 h and up to ~33 h** at the observed ≥ 60 decision
+entries/hour (a full overnight post-mortem window), with disk bounded to
+~2,000 JSONL lines. The policy is configurable via the worker config
+(`coordinationLogMaxEntries` / `coordinationLogMaxRotatedFiles` on
+`DowntimeWorkerConfig.config()`) and clamped by `resolveCoordinationLogPolicy`
+(10–10,000 entries; 0–20 siblings; 0 siblings = no rotation, single-file
+trim). `readCoordinationLogEntries` keeps reading the **newest** file
+(unchanged contract); `readCoordinationLogAllEntries` returns the full
+chronological history over the rotated siblings plus the current file.
+`hourlyReasonTally` (same module) counts no-dispatch decision reasons per UTC
+hour over a time range.
+
+**Atomic replacement (WL-0MUBVL1FI0071WN3 / F5).** Both logs (and every
+rotated sibling) are written **atomically**: `appendRollingJsonl` writes the
+full new content to a temporary sibling file
+(`.<file>.<pid>.<random>.tmp` in the same directory, so the rename stays on
+one filesystem) and `rename`s it over the target. A concurrent reader — in
 particular the dispatched-marker readers that scan the log by kind — therefore
 sees either the whole previous file or the whole new one, **never** a
 truncated, empty, or partially written log. Previously the writer did
 `readFile → push → trim → writeFile` directly on the target, so a reader could
 momentarily observe an empty file and lose a marker (a contributing factor in
-the duplicate-dispatch RCA, WL-0MUBEZ6PE002WLP4 / H3). The temp file is removed
-on failure before the error is rethrown and the target is left untouched;
-trimming to `DOWNTIME_LOG_MAX_ENTRIES` and the throw-on-I/O-failure
-(fail-closed) contract are unchanged, and the JSONL format stays
-human-readable.
+the duplicate-dispatch RCA, WL-0MUBEZ6PE002WLP4 / H3). The temp file is
+removed on failure before the error is rethrown and the target is left
+untouched; trimming/rotation and the throw-on-I/O-failure (fail-closed)
+contract are unchanged, and the JSONL format stays human-readable.
+
+**Operator summary recipe (WL-0MVKNC28B003UOLX AC3) — per-hour no-dispatch
+reason tally for a given night.** The decision log is the only forensic
+evidence of capacity-saturation starvation, so a post-mortem must be able to
+reconstruct "how many of which reason per hour". Concatenate the rotated
+siblings with the current file (they are in append order) and tally
+`kind: 'decision'` entries by UTC hour and `reason`:
+
+```bash
+# Per-hour no-dispatch reason tally across ALL retained history
+ls .worklog/downtime-coordination.log* 2>/dev/null \
+  | sort -V \
+  | while read -r f; do cat "$f"; done \
+  | jq -r 'select(.kind == "decision") | [(.at[0:13] + ":00Z"), .reason] | @tsv' \
+  | sort | uniq -c | sort -k2,2 -k1,1nr
+
+# Restrict to a night (e.g. 2026-10-22T21:00Z → 2026-10-23T05:30Z)
+ls .worklog/downtime-coordination.log* 2>/dev/null \
+  | sort -V \
+  | while read -r f; do cat "$f"; done \
+  | jq -r 'select(.kind == "decision" and .at >= "2026-10-22T21:00" and .at < "2026-10-23T05:30") \
+          | [(.at[0:13] + ":00Z"), .reason] | @tsv' \
+  | sort | uniq -c | sort -k2,2 -k1,1nr
+```
+
+The same tally is available programmatically via
+`readCoordinationLogAllEntries(cwd)` + `hourlyReasonTally(entries, { from, to })`.
 
 ### Backward compatibility
 
