@@ -38,15 +38,13 @@
  * of the projects root plus at most two `existsSync` probes per candidate —
  * no repository-wide walk.
  *
- * ## RED pin
+ * ## Implementation
  *
- * The discovery assertions are wrapped in `it.fails(...)` because
- * `src/cross-repo/project-registry.ts` does not exist yet, so the gated suite
- * stays green while the contract is failing (the repo's established
- * test-first pattern — see `tests/cli/reviewed.test.ts`). F2 creates the module
- * and flips `it.fails(` → `it(` for every block below. The fixture-harness
- * assertions are plain `it(...)` so a broken fixture cannot hide behind the
- * RED pin.
+ * F2 (WL-0MVWEELAW005SDLU) creates `src/cross-repo/project-registry.ts` and
+ * makes these assertions pass; the discovery blocks were RED-pinned with
+ * `it(...)` while the module did not exist and are now plain `it(...)`.
+ * The fixture-harness assertions were always plain `it(...)` so a broken
+ * fixture could not hide behind the RED pin.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -278,7 +276,7 @@ describe('cross-repo discovery (AC1 — RED until F2)', () => {
     fixture.cleanup();
   });
 
-  it.fails('discovers only genuine stores, sorted by prefix (F2)', async () => {
+  it('discovers only genuine stores, sorted by prefix (F2)', async () => {
     const discoverProjects = await loadDiscoverProjects();
     const layout = fixture.layout!;
 
@@ -306,7 +304,7 @@ describe('cross-repo discovery (AC1 — RED until F2)', () => {
     }
   });
 
-  it.fails('reports a duplicate prefix as ambiguous with both paths, never guessing (F2)', async () => {
+  it('reports a duplicate prefix as ambiguous with both paths, never guessing (F2)', async () => {
     const discoverProjects = await loadDiscoverProjects();
     const [first, second] = fixture.layout!.duplicates;
 
@@ -323,7 +321,7 @@ describe('cross-repo discovery (AC1 — RED until F2)', () => {
     );
   });
 
-  it.fails('is deterministic across calls and sorted by prefix (F2)', async () => {
+  it('is deterministic across calls and sorted by prefix (F2)', async () => {
     const discoverProjects = await loadDiscoverProjects();
 
     const first = discoverProjects({ projectsRoot: fixture.root });
@@ -334,7 +332,7 @@ describe('cross-repo discovery (AC1 — RED until F2)', () => {
     expect(prefixes).toEqual([...prefixes].sort());
   });
 
-  it.fails('honours a projectsRoot config override on the checkout (F2)', async () => {
+  it('honours a projectsRoot config override on the checkout (F2)', async () => {
     const discoverProjects = await loadDiscoverProjects();
     const checkout = createTempDir();
     try {
@@ -355,13 +353,12 @@ describe('cross-repo discovery (AC1 — RED until F2)', () => {
     }
   });
 
-  it.fails('defaults the projects root to the checkout parent (F2)', async () => {
+  it('defaults the projects root to the checkout parent (F2)', async () => {
     const discoverProjects = await loadDiscoverProjects();
-    // A consumer checkout that is itself one of the projects under the root.
-    const consumer = writeProjectConfig(path.join(fixture.root, 'consumer-project'), {
-      prefix: 'CONS',
-      projectName: 'Consumer',
-    });
+    // A consumer checkout that is itself a genuine project under the root.
+    // A config-only stub is never discovered (see the worktree-stub decoy),
+    // so the consumer is built as a real store through the fixture.
+    const consumer = fixture.addStore('CONS', { name: 'consumer-project' }).dir;
 
     const result = discoverProjects({ cwd: consumer });
 
@@ -371,7 +368,7 @@ describe('cross-repo discovery (AC1 — RED until F2)', () => {
     );
   });
 
-  it.fails('warns instead of throwing when the projects root is missing or unreadable (F2)', async () => {
+  it('warns instead of throwing when the projects root is missing or unreadable (F2)', async () => {
     const discoverProjects = await loadDiscoverProjects();
 
     const missingRoot = path.join(fixture.root, 'does-not-exist');
@@ -388,7 +385,7 @@ describe('cross-repo discovery (AC1 — RED until F2)', () => {
     expect((unreadable.warnings ?? []).length).toBeGreaterThan(0);
   });
 
-  it.fails('scans with one readdir and at most two existsSync probes per candidate (F2)', async () => {
+  it('scans with one readdir and at most two existsSync probes per candidate (F2)', async () => {
     const discoverProjects = await loadDiscoverProjects();
     const root = real(fixture.root);
     const candidates = fixture.entries().length;

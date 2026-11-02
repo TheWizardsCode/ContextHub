@@ -1223,6 +1223,51 @@ Notes on defaults and behavior:
 - `--since <ISO timestamp>` — Optional; when provided `import` only considers issues updated since that timestamp.
 - `--create-new` (import only) — Optional flag; when set the importer will create new work items for unmarked GitHub issues. Default behavior: enabled unless `githubImportCreateNew` is explicitly set to `false` in configuration.
 
+### `project` (subcommands)
+
+Inspect the sibling projects `wl` discovered for cross-repo dependencies.
+
+Subcommands:
+
+- `list` — Print the `prefix → path` map of discovered projects, sorted by
+  prefix. Options: `--projects-root <path>` (override the configured projects
+  root for this run).
+
+The scan is the single implementation used by the whole framework
+(`src/cross-repo/project-registry.ts`): it reads the immediate subdirectories
+of the projects root once and keeps only **git repositories** that hold a
+**genuine** worklog store (`.worklog/initialized` or `.worklog/worklog.db`).
+Hidden folders, non-git folders and worktree-shaped stubs (only the tracked
+`.worklog/config.yaml`) are excluded. The projects root is the `projectsRoot`
+key in `.worklog/config.yaml`, defaulting to the parent of the current
+checkout — see [`CONFIG.md`](CONFIG.md#cross-repo-project-discovery-projectsroot).
+
+A prefix declared by more than one project is reported as **ambiguous** — both
+paths are shown and no owner is guessed. A missing or unreadable projects root
+prints a warning and an empty list (never an error).
+
+`--json` output shape:
+
+```json
+{
+  "success": true,
+  "projectsRoot": "/home/me/projects",
+  "projects": [
+    { "prefix": "ALPHA", "path": "/home/me/projects/alpha", "ambiguous": false },
+    { "prefix": "DUP", "path": null, "ambiguous": true }
+  ],
+  "warnings": []
+}
+```
+
+Examples:
+
+```sh
+wl project list
+wl --json project list
+wl project list --projects-root /srv/checkouts
+```
+
 ### `export` [options]
 
 Export work items and comments to a JSONL file.

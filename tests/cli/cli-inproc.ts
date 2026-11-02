@@ -42,6 +42,7 @@ import recentCommand from '../../src/commands/recent.js';
 import pluginsCommand from '../../src/commands/plugins.js';
 import migrateCommand from '../../src/commands/migrate.js';
 import depCommand from '../../src/commands/dep.js';
+import projectCommand from '../../src/commands/project.js';
 import reSortCommand from '../../src/commands/re-sort.js';
 import doctorCommand from '../../src/commands/doctor.js';
 import unlockCommand from '../../src/commands/unlock.js';
@@ -72,6 +73,7 @@ const builtInCommands = [
   pluginsCommand,
   migrateCommand,
   depCommand,
+  projectCommand,
   reSortCommand,
   doctorCommand,
   unlockCommand,

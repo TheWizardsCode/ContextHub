@@ -373,6 +373,25 @@ export interface WorklogConfig {
    * ```
    */
   cta?: string;
+  /**
+   * Directory scanned by cross-repo project discovery (WL-0MVWEELAW005SDLU).
+   * Immediate subdirectories that are git repositories holding a genuine
+   * `.worklog/` store become discoverable sibling projects.
+   *
+   * Default: the parent directory of the current checkout.
+   *
+   * Example:
+   * ```yaml
+   * projectsRoot: /home/me/projects
+   * ```
+   */
+  projectsRoot?: string;
+  /**
+   * Recorded prefix → project mappings for cross-repo dependencies.
+   * `wl project add` will write entries here (`path` and `gitUrl`); discovery
+   * itself derives the map from each sibling store's own `config.yaml`.
+   */
+  projects?: Record<string, { path?: string; gitUrl?: string }>;
 }
 
 /**

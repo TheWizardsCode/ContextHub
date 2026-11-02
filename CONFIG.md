@@ -163,6 +163,51 @@ The system loads configuration in this order:
 
 If no configuration exists at all, the system defaults to using `WI` as the prefix.
 
+## Cross-repo project discovery (`projectsRoot`)
+
+`projectsRoot` tells `wl` which directory holds the sibling project checkouts it
+may consult for **cross-repo dependencies** (a work item in this project blocked
+by a work item in another project's store). Discovery is implemented once, in
+`src/cross-repo/project-registry.ts`, and is exposed by `wl project list`.
+
+```yaml
+# .worklog/config.yaml
+projectsRoot: /home/me/projects
+
+# Reserved for `wl project add` (F8): recorded prefix → project mappings.
+projects:
+  SA:
+    path: /home/me/projects/SorraAgents
+    gitUrl: git@github.com:example/SorraAgents.git
+```
+
+- **Default:** the parent directory of the current checkout (its git root when
+  run from a subdirectory). Set `projectsRoot` only when projects live
+  elsewhere.
+- **Discovery rule:** one scan of the immediate subdirectories of
+  `projectsRoot`. A candidate is a project when it is **not hidden**, is a
+  **git repository** and holds a **genuine** worklog store
+  (`.worklog/initialized` or `.worklog/worklog.db`). Worktree-shaped stubs that
+  only carry the tracked `.worklog/config.yaml`, non-git folders and hidden
+  folders are excluded. The prefix comes from each project's own
+  `.worklog/config.yaml`.
+- **Ambiguity:** when two projects declare the same prefix the scan reports
+  that prefix as `ambiguous` with both paths instead of picking an owner.
+- **Fail-open:** a missing or unreadable `projectsRoot` produces an empty list
+  plus a warning — never an error.
+- **Memoised:** the scan result is cached per process for the resolved root.
+
+Inspect the discovered map with:
+
+```sh
+wl project list
+wl --json project list
+```
+
+The `projects` map is reserved for explicitly recorded mappings written by
+`wl project add` (see [`CLI.md`](CLI.md#project-subcommands)); discovery itself
+derives the map from the sibling stores.
+
 ## Project CTA (Call-to-Action)
 
 The optional `cta` field declares a project-specific call-to-action — a
