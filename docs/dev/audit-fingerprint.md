@@ -49,6 +49,52 @@ spawned `git` per touched path.
 Python counterpart: `audit_runner._compute_content_fingerprint` with
 `_AUDIT_CONTENT_FINGERPRINT_SCHEMA = 2` (SorraAgents `skill/audit`).
 
+## Manual (synthetic) audit writes
+
+Every CLI audit write records a fingerprint, including manual approvals
+(WL-0MVK01BBD005V7KK). `wl audit-set` and `wl update --audit-text` resolve the
+fingerprint in this order, and the first available value wins:
+
+| Order | `wl audit-set` | `wl update --audit-text` |
+|---|---|---|
+| 1 | `--fingerprint <value>` | `--audit-fingerprint <value>` |
+| 2 | `Audit content fingerprint:` line in `--raw-output`/`--audit-file` | `Audit content fingerprint:` line in the audit text |
+| 3 | `Audit content fingerprint:` line in `--summary` | — |
+| 4 | **auto-computed** `computeContentFingerprint({ title, description })` | **auto-computed** `computeContentFingerprint({ title, description })` |
+
+The fallback exists because manual approvals — the herdr `a-y` chord
+(`wl audit-set --ready-to-close yes --summary 'Approved by manual review'`)
+and every other write without a fingerprint input — previously stored
+`fingerprint = null`. `isAuditFresh` then had no stored fingerprint, degraded
+to the 60 s time gate, and any non-content `updatedAt` churn (a worklog-sync
+re-timestamp, for example) marked an unchanged approval stale, re-queuing an
+already-approved item for audit or dropping it from a release gate.
+
+Properties of the fallback:
+
+- **Pure fallback.** Explicit flags and embedded fingerprint lines always take
+  precedence; the auto-compute never overrides an explicitly supplied value.
+- **Both verdicts.** The fallback applies to `--ready-to-close yes` and
+  `--ready-to-close no` alike — a rejected audit is time-bound the same way.
+- **Parity by construction.** It calls the same `computeContentFingerprint`
+  `list-enrichment` uses to compute `currentFingerprint` at read time, so a
+  CLI-stored digest matches the read-time digest whenever the content is
+  unchanged. Zero git invocations on the write path.
+- **Not a backfill.** Audits already stored without a fingerprint are left
+  untouched: the content they were performed against cannot be proven
+  retroactively, so backfilling could mark changed content as fresh. Affected
+  legacy items are re-audited (or re-instated) via the existing routes.
+- **Content edits still invalidate.** `saveAuditResult` sets
+  `updatedAt = auditedAt` atomically, so a fresh manual approval is immediately
+  fresh; a later title/description edit changes the computed fingerprint and
+  the audit becomes stale. An audit written in the same invocation as a
+  title/description edit is stored against the pre-edit content and is
+  therefore immediately stale (fail-safe → re-audit, never falsely fresh).
+
+The automated audit-skill path is unchanged: `persist_audit.py` supplies the
+fingerprint explicitly (flag or embedded report line), so resolution stops at
+step 1 or 2.
+
 ## Parity check and host tooling skew
 
 `tests/unit/audit-fingerprint-parity.test.ts` computes the digest both ways for

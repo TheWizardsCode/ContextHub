@@ -12,6 +12,7 @@ import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
+import { computeContentFingerprint } from '../audit-fingerprint.js';
 import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rules.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 import { downgradeCriticalIfTerminal, isTerminalState } from '../terminal-priority.js';
@@ -353,11 +354,18 @@ export default function register(ctx: PluginContext): void {
           // Extract fingerprint: explicit flag takes priority, then embedded
           // in the new audit text (from the audit skill's report line). A new
           // audit without a fingerprint must NOT inherit the previous one —
-          // that would mark changed content as fresh.
+          // that would mark changed content as fresh. The final fallback
+          // (WL-0MVK01BBD005V7KK) records the item's current schema-2 content
+          // fingerprint so a manual/synthetic write participates in the
+          // content-fingerprint freshness gate instead of degrading to the
+          // 60 s time gate. It reads the pre-update item on purpose: when this
+          // same invocation also edits title/description, the audit is stored
+          // against the content it was performed on and is therefore
+          // immediately stale (fail-safe → re-audit), never falsely fresh.
           const fingerprint =
             options.auditFingerprint ??
             extractAuditFingerprint(auditEntry.text) ??
-            null;
+            computeContentFingerprint({ title: current.title, description: current.description });
           try {
             db.saveAuditResult({
               workItemId: normalizedId,
