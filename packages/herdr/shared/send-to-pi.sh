@@ -100,8 +100,11 @@ reservation_ticket=""
 local_preference=""
 anchor_arg=""
 resize=true
-herdr_bin="${HERDR_BIN_PATH:-herdr}"
-grid_bin="${HERDR_GRID_BIN:-$(cd "$(dirname "$0")" && pwd)/grid.py}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=./herdr-bin.sh
+. "$script_dir/herdr-bin.sh"
+herdr_bin="$(resolve_herdr_bin)"
+grid_bin="${HERDR_GRID_BIN:-$script_dir/grid.py}"
 
 # ── Parse arguments ─────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do

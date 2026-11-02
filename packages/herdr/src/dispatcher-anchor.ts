@@ -43,6 +43,7 @@ import {
   ensureMachineCoordinationDir,
 } from './machine-coordination.js';
 import { tryAcquireCoordLock } from './coordination.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 
 const execFile = promisify(_execFile);
 
@@ -193,7 +194,7 @@ export interface ProjectWorkspaceTarget {
 /** Build real deps exec'd against the herdr CLI (used in production). */
 export function createDispatcherAnchorDeps(
   cwd: string,
-  herdrBin: string = process.env.HERDR_BIN_PATH ?? 'herdr',
+  herdrBin: string = resolveHerdrBin(),
 ): DispatcherAnchorDeps {
   return {
     async createWorkspace(label: string) {
@@ -494,7 +495,7 @@ async function execFileStdout(
 /** List machine-wide panes via `herdr pane list` (null on CLI/parse failure). */
 export async function listMachinePanes(
   cwd: string,
-  herdrBin: string = process.env.HERDR_BIN_PATH ?? 'herdr',
+  herdrBin: string = resolveHerdrBin(),
 ): Promise<MachinePaneInfo[] | null> {
   let out: string;
   try {
@@ -521,7 +522,7 @@ export async function listMachinePanes(
 export async function getPaneProcessInfo(
   cwd: string,
   paneId: string,
-  herdrBin: string = process.env.HERDR_BIN_PATH ?? 'herdr',
+  herdrBin: string = resolveHerdrBin(),
 ): Promise<PaneProcessInfo | null> {
   let out: string;
   try {
@@ -562,7 +563,7 @@ export function readProcEnvironFile(shellPid: string): string | null {
 export async function listTabsInWorkspace(
   cwd: string,
   workspaceId: string,
-  herdrBin: string = process.env.HERDR_BIN_PATH ?? 'herdr',
+  herdrBin: string = resolveHerdrBin(),
 ): Promise<DispatcherTabInfo[] | null> {
   try {
     const out = await execFileStdout(
@@ -583,7 +584,7 @@ export async function listTabsInWorkspace(
 export async function listPanesInWorkspace(
   cwd: string,
   workspaceId: string,
-  herdrBin: string = process.env.HERDR_BIN_PATH ?? 'herdr',
+  herdrBin: string = resolveHerdrBin(),
 ): Promise<DispatcherPaneInfo[] | null> {
   try {
     const out = await execFileStdout(
@@ -609,7 +610,7 @@ export async function createTabInWorkspace(
   cwd: string,
   workspaceId: string,
   label: string,
-  herdrBin: string = process.env.HERDR_BIN_PATH ?? 'herdr',
+  herdrBin: string = resolveHerdrBin(),
 ): Promise<ItemTabAnchor | null> {
   let out: string;
   try {

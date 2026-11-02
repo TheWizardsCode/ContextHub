@@ -16,7 +16,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (reused if it already exists) — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
-- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against the panes of the current workspace (the pane title contains the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
+- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items and decides *busy* from two independent signals: a pane in the current workspace whose title contains the work-item ID (**primary**, producer rule WL-0MV1BWETT005GSUJ) and a **live per-child claim holder** (`<worklog>/locks/child-<id>.lock` currently `flock`ed — the second signal that keeps a pane-less driven session busy, WL-0MVWDAZL10025P8J). Only when both are negative is the claim released — `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage — and every release clears the scheduling hold (`assignee`) and records the previous holder in a `herdr-hydrator` audit comment. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
 - **Per-request priority (`X-Priority`)** — The proxy's retired fast/cheap operating mode is replaced by a per-request priority. Herdr maps each dispatched work item's priority onto a request priority and conveys it as the pane-launch environment variable `HERDR_REQUEST_PRIORITY`, which the Worklog pi extension turns into the `X-Priority` provider header. See [Request priority](#request-priority-per-request-x-priority).
 - **Local capacity reservation** — Before launching a downtime pane the worker claims capacity atomically via `POST /llama/local/reserve`: a granted ticket travels into the pane as `PI_LOCAL_RESERVATION_TICKET` (its first request carries `X-Local-Reservation`), a `429` refusal defers with the proxy's `retry_after_s` and the decision log records the evidence, and an absent/failing endpoint fails open to the pre-reservation polling behaviour. An idle window admits at most one launch: a second launch needs a fresh status tick that shows the launched prefill registered plus its own granted ticket. See [Local capacity reservation](#downtime-worker-local-llm-idle-dispatch).
 - **Work-item pane indicator** — The selection list shows a green circle icon (🟢) in the icon prefix of every item with an open work-item pane in the current workspace: a pane whose title carries the work-item ID (the dispatch pane-title convention preserves the ID as a trailing suffix). The icon appears exactly when such a pane is open and never otherwise (producer's rule, WL-0MV1BWETT005GSUJ) — it is pane existence, not a live agent status. The worklist also records which pi agent pane is attached to each dispatched item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes (used for the hover tooltip). The icon occupies a fixed-width slot so the item-ID column never shifts. See [Green-circle icon (work-item pane open)](#green-circle-icon-work-item-pane-open).
@@ -24,7 +24,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Worklog tab** — The `open-worklog-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Worklog`** so it is instantly recognisable in the tab row among other open tabs. See [Worklog tab](#worklog-tab).
 - **Quit** — Press `q` to exit
-- **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, tags, audit info, its **active dependency blockers**, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
+- **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, **assignee**, tags, audit info, its **active dependency blockers**, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values). Actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
@@ -230,7 +230,7 @@ The shared event-driven agent-status tracker (`AgentTracker`, `.worklog/agent-pa
 | Field | Source |
 |-------|--------|
 | ID | `workItem.id` |
-| Title | `workItem.title` |
+| Title | `workItem.title`, prefixed `[<assignee>] ` when the item has an assignee (WL-0MVTPEB3A0091RDH) |
 | Command | recorded command dispatched to the pane (e.g. `/skill:implement WL-123`; omitted when none was recorded) |
 | Priority | `workItem.priority` |
 | Type | `workItem.issueType` |
@@ -296,10 +296,20 @@ The hydrator detects those claims and releases them:
 - **Cadence** — every 30 s (scheduler task `hydrate`, single-flight +
   watchdog `HYDRATOR_RUN_TIMEOUT_MS`); the check also runs **immediately**
   when the worklog tab regains focus (same runner as the tick).
-- **Signal** — fetch `wl list --status in-progress`, fetch
-  `herdr pane list --workspace <id>`, and match each item against a pane in
-  the **current workspace** whose **title contains** the work-item ID. No
-  matching pane → the claim is stale.
+- **Signal — two independent busy signals, pane first** — fetch `wl list
+  --status in-progress`, fetch `herdr pane list --workspace <id>`, and match
+  each item against a pane in the **current workspace** whose **title
+  contains** the work-item ID (primary signal, producer rule
+  WL-0MV1BWETT005GSUJ). Items with **no** pane match are then checked for a
+  **live claim holder**: their per-child lock `<worklog>/locks/child-<id>.lock`
+  is currently `flock`ed (or its recorded pid is alive and not recycled). A
+  driven `pi -p` session is headless and can never own a pane, so this second,
+  mechanically verifiable signal is what keeps its claim alive
+  (WL-0MVWDAZL10025P8J / WL-0MVWDB3IG004NRIU). Only when **both** signals are
+  negative is the claim stale. The probe is local `fs`/`flock` only — one
+  batched lock-directory read per cycle, no per-item `wl`/`herdr` spawn — and
+  its heldness comes from the kernel `flock`, never from file existence or
+  `started_at` age (lock files persist after release).
 - **Pane-title ID survival (F0)** — matching is keyed on the work-item ID, so
   the ID must survive wherever it appears. Every pane spawned for an item
   gets a title ending in ` - WL-<id>` (manual, shell, and downtime builders in
@@ -311,10 +321,29 @@ The hydrator detects those claims and releases them:
   active outbound dependency blocker → `blocked`; otherwise → `open` at the
   claimed stage (folded-in no-activity/claim-age timeout, WL-0MTTSWE0G008M1VA;
   a no-pane claim is released regardless of activity age). Stage is repaired
-  to a status-compatible value when needed.
+  to a status-compatible value when needed. The live-claim-holder check is
+  evaluated **after** the `in_review` and `blocked` branches, so a held claim
+  only suppresses the `open` release and never overrides those two.
+- **Release trail** (WL-0MVWDB7F2003SORI) — a release also clears the
+  scheduling hold (`--assignee ""`, CAS-guarded with `--if-assignee
+  <observed holder>`) and writes a `herdr-hydrator` audit comment naming the
+  deciding signal and the previous holder (e.g. `released because no pane and
+  claim holder dead; previous assignee: implement`). A released item is
+  therefore immediately dispatchable again and the release is explicable from
+  the item alone.
 - **Safety** — the cycle is fail-open: an unavailable/unparseable
   `wl`/`herdr` call aborts WITHOUT demoting; an item with a matching pane is
-  never touched; a hidden tab spawns zero processes.
+  never touched; a hidden tab spawns zero processes. The claim-holder probe
+  joins that rule: an unreadable lock directory, a corrupt lock file, an
+  unexpected `fs`/`flock` error, a probe step timeout or a missing verdict
+  each **suppress** demotion with a named reason. The asymmetry is
+  deliberate — ambiguity never releases, proven death does. The recorded-pid
+  fallback is guarded against pid reuse (trusted only when `started_at` is not
+  earlier than the process start time).
+- **Non-goals** — no wall-clock TTL, no heartbeat, no new protocol, no change
+  to dispatch / the selection marker / the drive orchestrator /
+  `implement.py`; orphaned-lock cleanup and hydrator log rotation are separate
+  items.
 - **Selection-list marker** (WL-0MV1BWETT005GSUJ) — the same pane-title lookup
   drives the selection list's in-progress marker: an item with a matching pane
   is rendered `in-progress` (marker + Group N) even when its worklog status is
@@ -638,6 +667,23 @@ pacing* below).
   entry, and it is NOT reported as capacity starvation. `0` disables the
   gate (default: `75`, clamped to 0 – 100; re-read live on every dispatch
   tick). See the *Host-CPU dispatch gate* bullet above
+- `downtimeLeafAuditImmediate` — **Opt-in, default `false`** (see
+  *Leaf-aware audit minimum* above for the leaf/parent slot difference and
+  the pinned tick admission). A leaf audit candidate (an item with no
+  children) normally waits until the same free
+  slot has been continuously free for the full `downtimeIdleThresholdMs`
+  before it is dispatched on that single slot. Setting this `true` lets a
+  positively classified leaf audit dispatch on **one trusted free unowned
+  slot immediately**, without that wait — it races any interactive request
+  for the slot and accepts that the request may take it, in which case the
+  audit's first call falls back to the remote model. Only the wait is
+  removed: unusable per-slot detail (`slots: []` / `slots_stale`), a
+  `saturated` pool, live contention, the prefill gate, owned slots, the
+  active-audit single flight and a parent (or unclassifiable) candidate all
+  still refuse, and the relaxed slot stays pinned to that one leaf audit.
+  Boolean; absent/malformed → `false`; re-read live on every tick, and the
+  decision log records `leafAuditImmediate` on the `leaf-audit-admission`
+  token
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's
@@ -885,11 +931,51 @@ need **≥ 1 free slot**. An unmet minimum skips that tier to the next
 eligible one — an ineligible skip, never a three-strike error and never an
 empty-backlog cooldown (mirrors the code-freeze skip).
 
+**Leaf-aware audit minimum (parent WL-0MSORQ8Y4004YT63, leaf = 1 slot,
+parent = `DOWNTIME_AUDIT_MIN_FREE_SLOTS`).** The audit tier's slot
+requirement now depends on the candidate's **scope**: a **leaf** (an item
+with **no children**) is audited by a single Pi session, so one free slot
+suffices — `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS` (shipped default `1`); a
+**parent** (≥ 1 child, the audit's Phase 2 fan-out) still needs the full
+`DOWNTIME_AUDIT_MIN_FREE_SLOTS` (shipped default `2`). The scope comes from
+`wl show <id> --children --json` (`getAuditCandidateScope`) classified by
+`classifyAuditScope` — **fail-closed** (parent AC1): only an explicit,
+trusted `'leaf'` relaxes the gate; a `parent`, or any untrustworthy lookup
+(`{ok:false}` result, timeout, missing/malformed `children` payload,
+non-root candidate, or a missing scope dependency) keeps the parent
+minimum, so an unreadable children query can never loosen dispatch.
+The lookup runs **only** inside the leaf band (`isLeafAuditSlotBand`,
+`DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS <= freeSlots <
+DOWNTIME_AUDIT_MIN_FREE_SLOTS` — with the shipped constants exactly one
+free slot): at/above the parent minimum the gate is satisfied with **no**
+extra `wl` call (AC1), and below the leaf minimum no audit can run. The
+same per-item gate (`auditItemEligible`) is the single definition shared
+by every selection path — the Herdr-head filter, the critical-first scan
+and the legacy tier chain agree on the decision for a given
+candidate/free-slot pair (AC3). In the leaf band the tick then waits for
+that single slot to be continuously free for the full idle threshold and
+admits ONE pinned leaf audit (`leaf-audit-admission`), reserving the slot
+for that item alone (pin reason `leaf-audit-pin-hold`, a neutral skip —
+never `no-candidate`) — the band → scope lookup → pin admission sequence
+and its coordination-path twin are documented in
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#leaf-aware-audit-dispatch-parent-wl-0msorq8y4004yt63).
+
+**Per-slot identity dependency (now met).** The leaf allowance and the
+tick's "same N slots continuously free" guarantee both consume the per-slot
+detail `slots: [{slot_id, is_processing}]` served by the proxy — the
+proxy-side dependency LP-0MSORPUMX002LLIA is **resolved**: herdr trusts
+the per-slot payload per the fail-closed contract WL-0MUXVPXAZ005RESW, and
+same-slot stability is guaranteed by the existing per-slot idle tracker
+(WL-0MSG7P9N8009PCKG). See the *Opt-in race-accepting toggle* setting for
+the documented exception to the idle-threshold wait.
+
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --root-only
 --json` and selects the first completed/in_review **root** item (no parent —
 child/sub-task items are excluded server-side by `--root-only`, so only
-parent items are ever dispatched for audit; WL-0MSTLFW14000KPEC) **without**
+**root** items are ever dispatched for audit; WL-0MSTLFW14000KPEC — a root
+item with **no children** is a *leaf* and dispatches on the single-slot
+leaf minimum, see *Leaf-aware audit minimum* above) **without**
 a valid audit that was
 **modified within the last 7 days** (`updatedAt` recency window; a candidate
 with a missing `updatedAt` is still selected — recency cannot be verified —
@@ -2063,6 +2149,11 @@ it never clears, demotes or mutates an `assignee`, and the dispatched-item set
 is byte-identical with and without it (AC4). The classification shares
 `classifyWindowHold` with the coordination log's `all-window-items-held` token
 (WL-0MVR8FKMU009XTED), so the TUI and the log cannot diverge.
+- **Per-item assignee display (WL-0MVTPEB3A0091RDH)** — beside the
+  aggregate banner, each held item is identifiable on its own: an `Assignee`
+  metadata row plus a `[<assignee>] ` prefix on its title in the selection
+  list, the metadata panel, the detail-view header and the hover tooltip. See
+  [Metadata panel](#metadata-panel).
 
 ### Review-queue-depth footer banner
 
@@ -2172,9 +2263,9 @@ first rows), so a long list never scrolls off the top.
   it) — instead of item metadata; heading selections have no item, so the
   detail view is never opened from them.
 - Selecting an **item row** renders the item's fields:
-  metadata (status, stage, priority, type, risk, effort, children/parent
-  counts, tags, GitHub issue number, created/updated timestamps, and audit
-  state).
+  metadata (status, stage, priority, type, risk, effort, assignee,
+  children/parent counts, tags, GitHub issue number, created/updated
+  timestamps, and audit state).
 - Metadata values are rendered as **icon + text label** using the same icon
   helpers as the list rows, so the two sections can never diverge: e.g.
   `🔄 in_progress`, `⭐ high`, `📥 intake_complete`. The Stage row mirrors
@@ -2186,6 +2277,19 @@ first rows), so a long list never scrolls off the top.
   `❌ needs review`, …). When icons are disabled (`showIcons: false`) every
   metadata value falls back to **plain text** — no emoji and no bracketed
   fallbacks (unlike the list rows, which use `[OPEN]`-style labels).
+- **`Assignee` row and `[assignee]` title prefix (WL-0MVTPEB3A0091RDH)** —
+  an item with a non-empty `assignee` (the claim / scheduling hold: a producer
+  sentinel such as `Map`, or an active agent's name) shows an
+  `Assignee  <value>` row immediately after `Effort`, and every surface that
+  renders its title prefixes it with `[<assignee>] ` — the selection-list row,
+  this panel's `Title` row, the detail-view header and the hover tooltip. The
+  same `Assignee` row appears in the detail view's metadata table (both views
+  share `buildMetaRows`). The prefix inherits the title's priority colour, and
+  a whitespace-only assignee counts as unassigned. Items with no assignee
+  render exactly as before: no `[] ` prefix, no extra row. The extra row is
+  counted by `metadataPanelContentHeight`, so the `m`/`M` scroll clamp still
+  reaches it. Display-only — claims, holds, dispatch, sorting and filtering
+  are unchanged.
 - When the item's description has a `Key Files:` section containing one or
   more `.md` paths, the panel also shows a **`Related Docs`** row listing
   every markdown path (joined with `, `; long values are truncated to the
@@ -2540,7 +2644,7 @@ packages/herdr/
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
   - Local entries are validated with the same rules as bundled entries: an invalid entry is **logged and skipped**, and a missing/malformed local file (bad JSON, non-array) falls back to bundled-only with an error logged — a broken local file never crashes the plugin.
   - When no worklog root is resolved (uninitialized project) or no local file exists, the registry is exactly the bundled defaults and all dispatch behaviour is unchanged.
-- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows` (`worklist.meta.ts`), so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
+- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows` (`worklist.meta.ts`), so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Assignee` (WL-0MVTPEB3A0091RDH):** `buildMetaRows` emits an `Assignee` row (raw stored value) immediately after `Effort` whenever the assignee is a non-empty, non-whitespace string, and every title-bearing surface routes through the shared `formatTitleWithAssignee` helper (`worklist.format.ts`) for the `[<assignee>] ` prefix — the list row (`formatItemLine`, inside the priority-coloured title segment), the panel `Title` row, the detail header (`formatDetailContent`) and `formatTooltipLines`. **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
 - **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze
@@ -2775,6 +2879,23 @@ npm run build
 want to refresh the plugin dependency without a full build, run
 `npm install --prefix packages/herdr` (its `postinstall` re-links the
 symlink).
+
+### Plugin actions fail with `herdr CLI not found ('…/herdr (deleted)')`
+
+After an in-place `herdr update`, the still-running server keeps the **old**
+binary inode. Herdr derives `HERDR_BIN_PATH` from its own `/proc/self/exe`,
+so every pane and plugin action inherits the stale path with Linux's
+` (deleted)` marker appended — a path that can never be executed.
+
+Since WL-0MVXRZL9H001GQ7A the plugin's shell scripts and TypeScript modules
+resolve the CLI through one shared resolver (`shared/herdr-bin.sh` and
+`src/herdr-bin.ts`): the marker is stripped, the resulting path is validated,
+and `herdr` on `PATH` is used as the fallback. Actions therefore keep working
+for the rest of the stale server's lifetime.
+
+To clear the stale server itself (it will then inject a valid path again),
+restart herdr or use `herdr update --handoff` — this disturbs open panes/tabs,
+so it is not done automatically.
 
 ## License
 

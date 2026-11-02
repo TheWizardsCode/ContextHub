@@ -33,6 +33,7 @@ import {
   type RunningPanesResult,
 } from './downtime-worker.js';
 import { readDowntimeLogEntries } from './downtime-log.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 import {
   buildStalledResumeStartArgs,
   classifyHerdrAgentFailure,
@@ -57,7 +58,7 @@ export async function defaultRunningDowntimePanesResolver(
   _cwd: string,
 ): Promise<RunningPanesResult> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     const { stdout } = await getExecFileAsync()(
       herdrBin,
       ['pane', 'list'],
@@ -108,7 +109,7 @@ export async function defaultStalledResumePromptAgent(
   text: string,
 ): Promise<StalledResumeCliResult> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     await getExecFileAsync()(herdrBin, ['agent', 'prompt', paneId, text], {
       encoding: 'utf8',
       timeout: DOWNTIME_WL_TIMEOUT_MS,
@@ -133,7 +134,7 @@ export async function defaultStalledResumeStartAgent(
   opts: StalledResumeStartOptions,
 ): Promise<StalledResumeCliResult> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     await getExecFileAsync()(herdrBin, buildStalledResumeStartArgs(paneId, opts), {
       encoding: 'utf8',
       timeout: DOWNTIME_WL_TIMEOUT_MS,
@@ -153,7 +154,7 @@ export async function defaultStalledResumeStartAgent(
  */
 export async function defaultStalledPanesLister(): Promise<HerdrPaneRecord[] | null> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     const { stdout } = await getExecFileAsync()(herdrBin, ['pane', 'list'], {
       encoding: 'utf8',
       timeout: DOWNTIME_WL_TIMEOUT_MS,

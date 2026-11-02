@@ -98,6 +98,20 @@ run_open() {
     "$OPEN_PI_AGENT" "$@" 2>&1
 }
 
+# PATH with every directory that provides an executable `herdr` removed, so a
+# "CLI missing" test cannot accidentally resolve the operator's real herdr
+# through the resolver's PATH fallback (WL-0MVXRZL9H001GQ7A).
+herdr_free_path() {
+  local out="" dir
+  local IFS=':'
+  for dir in $PATH; do
+    [ -n "$dir" ] || continue
+    [ -x "$dir/herdr" ] && continue
+    out="${out:+$out:}$dir"
+  done
+  printf '%s' "$out"
+}
+
 # ── Tests ─────────────────────────────────────────────────────────────
 
 echo "=== Test: Scripts exist and are executable ==="
@@ -470,9 +484,11 @@ fi
 
 echo ""
 echo "=== Test: --check-cli fails fast when herdr CLI is missing ==="
-# Use a non-existent binary path so --check-cli aborts before launching.
+# Use a non-existent binary path (and a herdr-free PATH so the resolver's
+# fallback cannot find a real installation) so --check-cli aborts before
+# launching.
 rm -f "$HERDR_LOG" "$GRID_LOG"
-out="$(HERDR_BIN_PATH="$SANDBOX/no-such-herdr" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" --check-cli "hello" 2>&1)"
+out="$(HERDR_BIN_PATH="$SANDBOX/no-such-herdr" PATH="$(herdr_free_path)" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" --check-cli "hello" 2>&1)"
 rc=$?
 if [ "$rc" -ne 0 ] && echo "$out" | grep -qi "not found\|missing\|unavailable"; then
   pass "send-to-pi --check-cli exits non-zero with a clear error when herdr is missing"
@@ -484,11 +500,52 @@ fi
 # Without --check-cli the script still fails (herdr missing), but reaches
 # the split path instead of the CLI availability check.
 rm -f "$HERDR_LOG" "$GRID_LOG"
-out="$(HERDR_BIN_PATH="$SANDBOX/no-such-herdr" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" "hello" 2>&1)" || true
+out="$(HERDR_BIN_PATH="$SANDBOX/no-such-herdr" PATH="$(herdr_free_path)" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" "hello" 2>&1)" || true
 if [ -n "$out" ]; then
   pass "send-to-pi without --check-cli still reports an error when herdr is missing"
 else
   fail "send-to-pi without --check-cli should report an error when herdr is missing"
+fi
+
+echo ""
+echo "=== Test: stale ' (deleted)' HERDR_BIN_PATH still launches ==="
+# Regression for WL-0MVXRZL9H001GQ7A: after an in-place `herdr update` the
+# server injects its old /proc/self/exe (".../herdr (deleted)"). The script
+# must resolve the replaced binary instead of failing.
+rm -f "$HERDR_LOG" "$GRID_LOG"
+out="$(HERDR_BIN_PATH="$MOCK_HERDR (deleted)" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" --check-cli "hello" 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "send-to-pi --check-cli accepts a stale ' (deleted)' binary path"
+else
+  fail "send-to-pi --check-cli should accept a stale ' (deleted)' binary path (rc=$rc)"
+  echo "  output: $out"
+fi
+
+rm -f "$HERDR_LOG" "$GRID_LOG"
+out="$(HERDR_BIN_PATH="$MOCK_HERDR (deleted)" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" --no-resize "hello" 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'pane run' "$HERDR_LOG" 2>/dev/null; then
+  pass "send-to-pi launches through the resolved CLI with a stale path"
+else
+  fail "send-to-pi should launch through the resolved CLI with a stale path (rc=$rc)"
+  echo "  output: $out"
+  echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
+fi
+
+echo ""
+echo "=== Test: stale HERDR_BIN_PATH falls back to herdr on PATH ==="
+mkdir -p "$SANDBOX/path-bin"
+cp "$MOCK_HERDR" "$SANDBOX/path-bin/herdr"
+chmod +x "$SANDBOX/path-bin/herdr"
+rm -f "$HERDR_LOG" "$GRID_LOG"
+out="$(HERDR_BIN_PATH="$SANDBOX/gone/herdr (deleted)" PATH="$SANDBOX/path-bin:$(herdr_free_path)" HERDR_GRID_BIN="$MOCK_GRID" "$SEND_TO_PI" --check-cli "hello" 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "send-to-pi falls back to herdr on PATH when the stale path is gone"
+else
+  fail "send-to-pi should fall back to herdr on PATH (rc=$rc)"
+  echo "  output: $out"
 fi
 
 echo ""

@@ -30,6 +30,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { getExecFileAsync } from './fetcher.js';
 import type { WorkItem } from './fetcher.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -225,7 +226,7 @@ export class AgentTracker {
     // Re-read the shared file so other worklist panes/tabs are reflected.
     this.loadFromDisk();
 
-    const bin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const bin = resolveHerdrBin();
     try {
       const execFileAsync = getExecFileAsync();
       const result = await execFileAsync(bin, ['agent', 'list'], { maxBuffer: 1024 * 1024 });

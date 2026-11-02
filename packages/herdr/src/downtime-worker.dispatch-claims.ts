@@ -22,7 +22,10 @@ import {
   type LocalPreferenceMode,
   type LocalPreferenceReason,
 } from './local-preference.js';
-import { buildLocalReservationRequest } from './downtime-worker.local-reservation.js';
+import {
+  DEFAULT_RESERVATION_TTL_SECONDS,
+  buildLocalReservationRequest,
+} from './downtime-worker.local-reservation.js';
 import { buildDowntimePrompt } from './downtime-worker.prompts.js';
 import { TIER_EXPECTED } from './downtime-worker.gates.js';
 import {
@@ -280,53 +283,85 @@ export async function dispatchClaimedTier(
   // tick with a won claim, so there is no second request and no new timer).
   //
   //   - granted → the ticket id is forwarded to the pane, so the session's
-  //     first request carries `X-Local-Reservation` (AC1);
+  //     first request carries `X-Local-Reservation` (AC1); a grant whose TTL
+  //     is below the documented bound is NOT treated as capacity (AC9,
+  //     WL-0MVWEZF4Z004UNYT) — it fails open and is recorded `unavailable`;
   //   - refused (`429`) → DEFER with the proxy's `retry_after_s`, roll the
   //     claim back (the item must become selectable again) and never write a
   //     marker or run the spawn path (AC2);
-  //   - `null` / throwing client → fail OPEN: proceed exactly as today, with
-  //     no ticket (an older proxy is fully supported, AC3).
+  //   - `remote-ok` dispatch (AC8, WL-0MVWEZF4Z004UNYT) → the reserve call is
+  //     SKIPPED and the decision recorded: a remote-ok pane's first request
+  //     goes remote, so a granted ticket could never be consumed — reserving
+  //     would only reserve capacity the dispatch never uses;
+  //   - `unavailable` / throwing client → fail OPEN: proceed exactly as
+  //     today, with no ticket, but record WHICH exchange failed (AC4) so a
+  //     broken contract can never look like an old proxy (AC3 preserved).
   //
   // A granted ticket is single-use: when it cannot be forwarded (a later
   // marker/spawn failure) it is recorded as released/expired and the next
   // idle period asks for a fresh one — it is never reused or leaked.
   let reservation: DowntimeReservationEvidence | undefined;
   let reservationTicketId: string | undefined;
+  let reservationUnavailableReason: string | undefined;
+  let reservationSkippedReason: string | undefined;
   if (typeof deps.reserveLocalCapacity === 'function') {
-    let reserveResult: LocalReservationResult | null = null;
-    try {
-      reserveResult = await deps.reserveLocalCapacity(buildLocalReservationRequest(candidate));
-    } catch {
-      reserveResult = null; // fail-open: a throwing client never blocks dispatch
-    }
-    if (reserveResult?.status === 'refused') {
-      // The proxy's OPEN-vocabulary reason becomes the decision reason (its
-      // own distinct header token via decisionHeaderToken) and the deferral
-      // advice is carried in the evidence fields (AC2/AC4).
-      const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
-      return {
-        dispatched: false,
-        reason: reserveResult.refusal.reason,
-        // A failed rollback leaves the item claimed (no worse than the
-        // pre-fix state) — it is still not a spawn.
-        ...(rollbackOk ? {} : { error: 'claim rollback failed after reserve refusal' }),
-        reservation: {
-          admit: false,
-          retryAfterS: reserveResult.refusal.retryAfterSeconds,
-          projectedWaitS: reserveResult.refusal.retryAfterSeconds,
-        },
-      };
-    }
-    if (reserveResult?.status === 'granted') {
-      reservationTicketId = reserveResult.ticket.ticketId;
-      reservation = {
-        admit: true,
-        reservationTicket: {
-          id: reserveResult.ticket.ticketId,
-          grantedAt: new Date().toISOString(),
-        },
-        projectedWaitS: 0,
-      };
+    if (localPreference === 'remote-ok') {
+      // AC8: a remote-ok pane cannot consume local capacity (its first
+      // request goes remote) — reserve NOTHING and record the decision so
+      // the dispatch record explains the missing ticket. `undefined`
+      // preference (legacy callers) still reserves (AC3 backcompat).
+      reservationSkippedReason = 'remote-ok';
+    } else {
+      let reserveResult: LocalReservationResult | null = null;
+      try {
+        reserveResult = await deps.reserveLocalCapacity(buildLocalReservationRequest(candidate));
+      } catch {
+        reserveResult = null; // fail-open: a throwing client never blocks dispatch
+      }
+      if (reserveResult?.status === 'refused') {
+        // The proxy's OPEN-vocabulary reason becomes the decision reason (its
+        // own distinct header token via decisionHeaderToken) and the deferral
+        // advice is carried in the evidence fields (AC2/AC4).
+        const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
+        return {
+          dispatched: false,
+          reason: reserveResult.refusal.reason,
+          // A failed rollback leaves the item claimed (no worse than the
+          // pre-fix state) — it is still not a spawn.
+          ...(rollbackOk ? {} : { error: 'claim rollback failed after reserve refusal' }),
+          reservation: {
+            admit: false,
+            retryAfterS: reserveResult.refusal.retryAfterSeconds,
+            projectedWaitS: reserveResult.refusal.retryAfterSeconds,
+          },
+        };
+      }
+      if (reserveResult?.status === 'granted') {
+        if (reserveResult.ticket.ttlSeconds < DEFAULT_RESERVATION_TTL_SECONDS) {
+          // AC9: a ticket with less than the documented usable window is
+          // already-expired-by-construction — never treated as capacity.
+          // Fail open (no ticket forwarded) and name the exchange.
+          reservationUnavailableReason = 'ttl-below-bound';
+        } else {
+          reservationTicketId = reserveResult.ticket.ticketId;
+          reservation = {
+            admit: true,
+            reservationTicket: {
+              id: reserveResult.ticket.ticketId,
+              grantedAt: new Date().toISOString(),
+            },
+            projectedWaitS: 0,
+          };
+        }
+      } else if (reserveResult?.status === 'unavailable') {
+        // AC4: the proxy answered unusably (wire-contract 400, absent
+        // endpoint, server error, timeout, bad body) — fail open but NAME
+        // the failing exchange so the record can never again read "plain
+        // fail-open" while the contract is broken.
+        reservationUnavailableReason = reserveResult.reason;
+      }
+      // `null` (rare: client without a usable outcome) → plain fail-open,
+      // no marker field (AC3: older wiring, today's byte-identical launch).
     }
   }
 
@@ -369,6 +404,18 @@ export async function dispatchClaimedTier(
               ? { reservationGrantedAt: reservation.reservationTicket.grantedAt }
               : {}),
           }
+        : {}),
+      // AC4 (WL-0MVWEZF4Z004UNYT): a reserve that was ATTEMPTED but produced
+      // no usable outcome is recorded with the failing exchange's name — a
+      // broken contract (400) can never look like an old proxy again.
+      // Absent when no client is wired or the reserve succeeded/refused.
+      ...(reservationUnavailableReason !== undefined
+        ? { reservationUnavailable: reservationUnavailableReason }
+        : {}),
+      // AC8 (WL-0MVWEZF4Z004UNYT): a `remote-ok` dispatch SKIPS the reserve
+      // (it could never consume a ticket) and records the decision.
+      ...(reservationSkippedReason !== undefined
+        ? { reservationSkipped: reservationSkippedReason }
         : {}),
     });
   } catch {

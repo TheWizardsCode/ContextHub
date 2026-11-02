@@ -87,6 +87,60 @@ describe('reaper — marker idle pane closes once', () => {
   });
 });
 
+describe('reaper — observed routing outcome recorded at window close (WL-0MVWEZF4Z004UNYT AC10)', () => {
+  it('calls recordDispatchedPaneOutcome once for each successfully closed pane', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [
+      pane({ kind: 'plan', lastAssistantText: 'Done\n\n</end_session>', agentProcessAlive: false, idleMs: 120_000 }),
+      pane({ id: 'pane-002', itemId: 'WL-002', kind: 'intake', lastAssistantText: 'Done\n\n</end_session>', agentProcessAlive: false, idleMs: 120_000 }),
+    ];
+    const deps = makeDeps(panes);
+    const recordOutcome = vi.fn().mockResolvedValue(undefined);
+    deps.recordDispatchedPaneOutcome = recordOutcome;
+
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+
+    expect(recordOutcome).toHaveBeenCalledTimes(2);
+    expect(recordOutcome).toHaveBeenNthCalledWith(1, expect.objectContaining({ id: 'pane-001', itemId: 'WL-TEST001' }));
+    expect(recordOutcome).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: 'pane-002' }));
+  });
+
+  it('does not record the outcome for a dry-run or a failed close', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({ kind: 'plan', lastAssistantText: 'Done\n\n</end_session>', agentProcessAlive: false, idleMs: 120_000 })];
+    const dryRunDeps = makeDeps(panes);
+    const dryRecord = vi.fn().mockResolvedValue(undefined);
+    dryRunDeps.recordDispatchedPaneOutcome = dryRecord;
+    await runReaper(dryRunDeps, { idleThresholdMs: THRESHOLD_MS, dryRun: true });
+    expect(dryRecord).not.toHaveBeenCalled();
+
+    const failDeps = makeDeps([]);
+    failDeps.listPanes = vi.fn().mockResolvedValue(panes);
+    failDeps.closePane = vi.fn().mockRejectedValue(new Error('close refused'));
+    const failRecord = vi.fn().mockResolvedValue(undefined);
+    failDeps.recordDispatchedPaneOutcome = failRecord;
+    await runReaper(failDeps, { idleThresholdMs: THRESHOLD_MS });
+    expect(failRecord).not.toHaveBeenCalled();
+  });
+
+  it('a throwing outcome recorder never breaks the close loop (fail-open)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [
+      pane({ kind: 'plan', lastAssistantText: 'Done\n\n</end_session>', agentProcessAlive: false, idleMs: 120_000 }),
+      pane({ id: 'pane-002', itemId: 'WL-002', kind: 'intake', lastAssistantText: 'Done\n\n</end_session>', agentProcessAlive: false, idleMs: 120_000 }),
+    ];
+    const deps = makeDeps(panes);
+    const recordOutcome = vi.fn().mockRejectedValue(new Error('boom'));
+    deps.recordDispatchedPaneOutcome = recordOutcome;
+
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+
+    // Both panes still closed; the outcome failure was swallowed.
+    expect(deps.closePane).toHaveBeenCalledTimes(2);
+    expect(results.every((r) => r.success)).toBe(true);
+  });
+});
+
 describe('reaper — dead agent does not close (WL-0MUMEJHT9004EQPI)', () => {
   it('keeps a session whose agent process is gone (operator may need output)', async () => {
     const { runReaper } = await import('./pane-close-reaper');

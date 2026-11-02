@@ -31,6 +31,7 @@ import {
   type ItemTabAnchor,
 } from './dispatcher-anchor.js';
 import { getExecFileAsync } from './fetcher.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 import {
   DOWNTIME_WL_TIMEOUT_MS,
   parseHerdrPaneListOutput,
@@ -101,7 +102,7 @@ export async function resolveInteractiveItemAnchor(
   try {
     if (workspaceId === '' || itemId === '') return null;
     const anchorDeps =
-      deps ?? createDispatcherAnchorDeps(cwd, process.env.HERDR_BIN_PATH ?? 'herdr');
+      deps ?? createDispatcherAnchorDeps(cwd, resolveHerdrBin());
     return await resolveItemTabAnchor(cwd, anchorDeps, workspaceId, itemId, onCreate);
   } catch {
     return null;
@@ -202,7 +203,7 @@ export async function defaultInteractiveLiveTrackedPanesResolver(
   _cwd: string,
 ): Promise<InteractiveLiveTrackedPanesResult> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     const { stdout } = await getExecFileAsync()(
       herdrBin,
       ['pane', 'list'],
@@ -243,7 +244,7 @@ export async function defaultInteractiveClosePane(
   _cwd: string,
 ): Promise<boolean> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     await getExecFileAsync()(herdrBin, ['pane', 'close', paneId], {
       encoding: 'utf8',
       timeout: DOWNTIME_WL_TIMEOUT_MS,

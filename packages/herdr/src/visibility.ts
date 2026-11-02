@@ -20,6 +20,7 @@
  */
 
 import { getExecFileAsync } from './fetcher.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -46,7 +47,7 @@ export async function isPaneVisible(): Promise<boolean> {
   const tabId = process.env.HERDR_TAB_ID;
   if (!tabId) return true;
 
-  const bin = process.env.HERDR_BIN_PATH ?? 'herdr';
+  const bin = resolveHerdrBin();
   try {
     const execFileAsync = getExecFileAsync();
     const result = await execFileAsync(bin, ['tab', 'get', tabId], {

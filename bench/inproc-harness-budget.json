@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "workItem": "WL-0MVHVZMCH0092JCY",
+  "$comment": "In-process CLI harness per-call cost budget (parent WL-0MVHVZMCH0092JCY; guard test tests/cli/inproc-harness-budget.test.ts). Ratchet: a fresh re-measurement must stay within baseline * (1 + headroomPct/100) * clampedLoadFactor; regenerate deliberately with `npm run benchmark:inproc-harness -- --update-budget` after a real per-call change (re-scope follow-up: WL-0MVWLBZG4003A803).",
+  "capturedAt": "2026-10-31T11:38:11.169Z",
+  "host": {
+    "hostname": "rgardler-AI-Laptop",
+    "node": "v22.22.1",
+    "loadAverage": [
+      4.14,
+      6.56,
+      7.99
+    ]
+  },
+  "runs": 5,
+  "headroomPct": 250,
+  "maxHostLoadFactor": 8,
+  "method": "median of N warm runs of the in-process harness against a fresh temp store per run (bench script `npm run benchmark:inproc-harness -- --runs N`, not a vitest test); same-host medians, absolute values are load sensitive",
+  "scenarios": {
+    "help": {
+      "label": "wl --help (no data access)",
+      "medianMs": 2.33,
+      "harnessSideMs": 1.7,
+      "productionStartupMs": 0,
+      "reconciled": true
+    },
+    "list-json": {
+      "label": "wl list --json",
+      "medianMs": 4.74,
+      "harnessSideMs": 1.54,
+      "productionStartupMs": 2.56,
+      "reconciled": true
+    },
+    "create": {
+      "label": "wl create -t <fixture item> --json",
+      "medianMs": 5.06,
+      "harnessSideMs": 0.82,
+      "productionStartupMs": 2.64,
+      "reconciled": true
+    },
+    "status": {
+      "label": "wl status --json",
+      "medianMs": 4.02,
+      "harnessSideMs": 1.02,
+      "productionStartupMs": 2.28,
+      "reconciled": true
+    }
+  }
+}

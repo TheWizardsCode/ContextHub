@@ -49,6 +49,52 @@ spawned `git` per touched path.
 Python counterpart: `audit_runner._compute_content_fingerprint` with
 `_AUDIT_CONTENT_FINGERPRINT_SCHEMA = 2` (SorraAgents `skill/audit`).
 
+## Manual (synthetic) audit writes
+
+Every CLI audit write records a fingerprint, including manual approvals
+(WL-0MVK01BBD005V7KK). `wl audit-set` and `wl update --audit-text` resolve the
+fingerprint in this order, and the first available value wins:
+
+| Order | `wl audit-set` | `wl update --audit-text` |
+|---|---|---|
+| 1 | `--fingerprint <value>` | `--audit-fingerprint <value>` |
+| 2 | `Audit content fingerprint:` line in `--raw-output`/`--audit-file` | `Audit content fingerprint:` line in the audit text |
+| 3 | `Audit content fingerprint:` line in `--summary` | — |
+| 4 | **auto-computed** `computeContentFingerprint({ title, description })` | **auto-computed** `computeContentFingerprint({ title, description })` |
+
+The fallback exists because manual approvals — the herdr `a-y` chord
+(`wl audit-set --ready-to-close yes --summary 'Approved by manual review'`)
+and every other write without a fingerprint input — previously stored
+`fingerprint = null`. `isAuditFresh` then had no stored fingerprint, degraded
+to the 60 s time gate, and any non-content `updatedAt` churn (a worklog-sync
+re-timestamp, for example) marked an unchanged approval stale, re-queuing an
+already-approved item for audit or dropping it from a release gate.
+
+Properties of the fallback:
+
+- **Pure fallback.** Explicit flags and embedded fingerprint lines always take
+  precedence; the auto-compute never overrides an explicitly supplied value.
+- **Both verdicts.** The fallback applies to `--ready-to-close yes` and
+  `--ready-to-close no` alike — a rejected audit is time-bound the same way.
+- **Parity by construction.** It calls the same `computeContentFingerprint`
+  `list-enrichment` uses to compute `currentFingerprint` at read time, so a
+  CLI-stored digest matches the read-time digest whenever the content is
+  unchanged. Zero git invocations on the write path.
+- **Not a backfill.** Audits already stored without a fingerprint are left
+  untouched: the content they were performed against cannot be proven
+  retroactively, so backfilling could mark changed content as fresh. Affected
+  legacy items are re-audited (or re-instated) via the existing routes.
+- **Content edits still invalidate.** `saveAuditResult` sets
+  `updatedAt = auditedAt` atomically, so a fresh manual approval is immediately
+  fresh; a later title/description edit changes the computed fingerprint and
+  the audit becomes stale. An audit written in the same invocation as a
+  title/description edit is stored against the pre-edit content and is
+  therefore immediately stale (fail-safe → re-audit, never falsely fresh).
+
+The automated audit-skill path is unchanged: `persist_audit.py` supplies the
+fingerprint explicitly (flag or embedded report line), so resolution stops at
+step 1 or 2.
+
 ## Parity check and host tooling skew
 
 `tests/unit/audit-fingerprint-parity.test.ts` computes the digest both ways for
@@ -58,25 +104,48 @@ typically `~/projects/SorraAgents/skill/audit`), so its contract can move ahead
 of (or behind) this repository between installs.
 
 The test therefore probes the **installed** helper's contract
-(`inspect.signature` + `_AUDIT_CONTENT_FINGERPRINT_SCHEMA`):
+(`inspect.signature` + `_AUDIT_CONTENT_FINGERPRINT_SCHEMA`) through the shared
+probe in `src/audit-fingerprint-installed.ts`:
 
 | Installed helper | Result |
 |---|---|
 | schema 2, accepts `work_item=` | digests compared; a mismatch **fails** |
-| schema ≠ 2 | **skip** with an actionable message naming the installed path, its schema and the expected one |
-| cannot accept `work_item=` | **skip** naming the installed signature |
-| skill or `python3` missing | **skip** naming what is missing |
+| schema ≠ 2 (ahead **or** behind) | **fail** with an actionable message naming the installed path, its schema, the expected schema and the remediation |
+| schema undeclared (`_AUDIT_CONTENT_FINGERPRINT_SCHEMA` lookup returned nothing, i.e. a pre-v2 install) | **fail** — an undeclared schema cannot be proven compatible (fail-safe) |
+| cannot accept `work_item=` | **fail** naming the installed signature |
+| skill or `python3` missing (or the helper is unimportable) | **skip** naming what is missing |
 
-A skew is reported, never silently passed, and never masquerades as a code
-regression. Remediation on a skewed host:
+The fail-on-skew policy is enforced by a **live-host gate** in the same file
+(`liveHostSkewFailure`): when the probe returns `fail` the suite goes **red on
+the machine running it**, quoting the probe's actionable message. A skew is
+therefore never silent — probing the install and then quietly skipping the
+digest comparison is exactly how a schema-1 host shipped a false-stale audit
+badge (`LP-0MVKSXR4P001V0CM`). `skip` stays green so CI images without the
+agent framework are unaffected.
+
+Fail-on-skew is the contract: any schema skew **fails** the parity test loudly,
+with the installed and expected schema plus the remediation, and never
+masquerades as a code regression. `wl doctor` reports the same skew as the
+warning-level `audit-fingerprint.schema-skew` check, built on the same probe, so
+operators who never run the suite still see it. Only genuine environment
+unavailability (no scripts directory, no `python3`, or an unimportable helper)
+is not a failure, keeping CI images without the agent framework green.
+
+Remediation on a skewed host:
 
 ```sh
 # Re-install the agent framework skills from the canonical source
 cd ~/projects/SorraAgents && git pull
 scripts/install_pi.sh          # from this repo, or the framework's installer
-# ...or point the test at a specific install for one run:
+# ...or point the test and wl doctor at a schema-2 install:
 AUDIT_SKILL_SCRIPTS=/path/to/skill/audit/scripts npm --silent test -- tests/unit/audit-fingerprint-parity.test.ts
 ```
+
+A host whose installed skill is **ahead** of this repository (e.g. schema 3)
+fails by design: the message names both schemas, and the remedy is to port this
+repository forward to that schema (bump `AUDIT_CONTENT_FINGERPRINT_SCHEMA` and
+`computeContentFingerprint`, and update the parity fixtures) — not to suppress
+the test.
 
 To re-run just the parity check and the fingerprint unit tests:
 

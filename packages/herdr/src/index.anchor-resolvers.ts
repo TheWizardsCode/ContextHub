@@ -28,6 +28,7 @@ import {
   type ItemTabAnchor,
   type ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 
 /**
  * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
@@ -41,7 +42,7 @@ export async function defaultDispatcherAnchorResolver(
   cwd: string,
 ): Promise<DispatcherAnchor | null> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     return await resolveDispatcherAnchor(cwd, createDispatcherAnchorDeps(cwd, herdrBin));
   } catch {
     return null;
@@ -60,7 +61,7 @@ export async function defaultProjectWorkspaceResolver(
   cwd: string,
 ): Promise<ProjectWorkspaceTarget | null> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     return await resolveProjectWorkspaceForRoot(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),
@@ -87,7 +88,7 @@ export async function defaultDispatcherTabAnchorResolver(
   prefix: string,
 ): Promise<DispatcherPrefixTabAnchor | null> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     return await resolveDispatcherTabAnchor(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),
@@ -112,7 +113,7 @@ export async function defaultItemTabAnchorResolver(
   itemId: string,
 ): Promise<ItemTabAnchor | null> {
   try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const herdrBin = resolveHerdrBin();
     return await resolveItemTabAnchor(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),

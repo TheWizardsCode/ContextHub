@@ -165,6 +165,23 @@ export function get(ctx: WorklogDatabaseContext, id: string): WorkItem | null {
 }
 
 /**
+ * Options that shape the side effects of `update` / `updateIfMatches` after
+ * the row has been written.
+ */
+export interface UpdateOptions {
+  /**
+   * Reconcile the item's OWN `blocked`/`open` status from its dependency
+   * edges after the write (default `true` — the historical behaviour).
+   *
+   * Set to `false` when the caller supplied an explicit `--status`/`--stage`:
+   * an explicit write must win over the derived reconciliation
+   * (WL-0MVTVYXZD002NDMP). Reconciliation of **dependent** items is
+   * unaffected — it is always applied.
+   */
+  reconcileSelf?: boolean;
+}
+
+/**
  * Conditional update (compare-and-swap, RCA WL-0MSRBFFLN005W3VT design
  * point 1): apply `input` ONLY if the item's current status/stage/assignee
  * match the expected guard. Runs the check and the write inside a single
@@ -189,6 +206,7 @@ export function updateIfMatches(
   id: string,
   input: UpdateWorkItemInput,
   expected: { status?: string; stage?: string; assignee?: string } = {},
+  options: UpdateOptions = {},
 ): UpdateIfMatchesResult {
   return ctx.store.transactionImmediate<UpdateIfMatchesResult>(() => {
     const current = ctx.store.getWorkItem(id);
@@ -208,7 +226,7 @@ export function updateIfMatches(
     if (expected.assignee !== undefined && (current.assignee ?? '') !== expected.assignee) {
       return { ok: false, reason: 'stale' };
     }
-    const updated = update(ctx, hooks, id, input);
+    const updated = update(ctx, hooks, id, input, options);
     return updated ? { ok: true, item: updated } : { ok: false, reason: 'not-found' };
   });
 }
@@ -221,6 +239,7 @@ export function update(
   hooks: ItemHooks,
   id: string,
   input: UpdateWorkItemInput,
+  options: UpdateOptions = {},
 ): WorkItem | null {
   const item = ctx.store.getWorkItem(id);
   if (!item) {
@@ -310,14 +329,21 @@ export function update(
   ctx.writeHooks.triggerAutoSync();
 
   if (previousStatus !== updated.status || previousStage !== updated.stage) {
-    // Reconcile the item itself (e.g., re-block when reopened while
-    // active blockers still exist, or unblock when all blockers completed
-    // if the item was previously manually blocked without blockers).
-    hooks.reconcileDependentStatus(id);
+    // Reconcile the item itself (e.g., re-block when reopened while active
+    // blockers still exist, or unblock when all blockers completed if the
+    // item was previously manually blocked without blockers). An explicit
+    // status/stage write opts out: the caller's request must win over the
+    // derived blocked/open state (WL-0MVTVYXZD002NDMP).
+    if (options.reconcileSelf !== false) {
+      hooks.reconcileDependentStatus(id);
+    }
     // Reconcile all items that depend on this item
     if (hooks.listDependencyEdgesTo(id).length > 0) {
       hooks.reconcileDependentsForTarget(id);
     }
+    // Report the persisted post-reconcile record — never the pre-reconcile
+    // snapshot, which could disagree with the store (WL-0MVTVYXZD002NDMP AC4).
+    return ctx.store.getWorkItem(id) ?? updated;
   }
   return updated;
 }

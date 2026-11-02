@@ -1,3 +1,19 @@
+/**
+ * src/sync/merge-utils.ts — merge primitives shared by the sync merge modules.
+ *
+ * Concern: the low-level questions every field-level merge asks repeatedly —
+ * is this value a default/absent value (`isDefaultValue`), what is the stable
+ * identity of a value or an item (`stableValueKey`, `stableItemKey`), and how
+ * are tag lists combined (`mergeTags`). Keeping them here lets
+ * `./merge-predicates.js`, `./field-merge.js` and `./merge-collateral.js`
+ * share one implementation.
+ *
+ * This module predates the WL-0MVGKGMU400631VZ `src/sync.ts` decomposition and
+ * holds no git, I/O or lifecycle concern of its own; `MergeOptions` comes from
+ * `./types.js` (re-pointed by WL-0MVP9PCOU004L8HN to keep the merge layer off
+ * the `./sync.js` barrel).
+ */
+
 import { WorkItem } from '../types.js';
 import type { MergeOptions } from './types.js';
 

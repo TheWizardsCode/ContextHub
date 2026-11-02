@@ -19,7 +19,7 @@ import type { BlockerRef, WorkItem } from './fetcher.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 import { ANSI } from './worklist.constants.js';
-import { truncateLine } from './worklist.format.js';
+import { truncateLine, formatTitleWithAssignee } from './worklist.format.js';
 import { buildMetaRows, formatBlockerValue, pairMetaRows } from './worklist.meta.js';
 
 /**
@@ -99,10 +99,12 @@ export function formatDetailContent(
   const contentWidth = maxCols - 2;
   const separator = '─'.repeat(Math.min(contentWidth, 72));
 
-  // Header
+  // Header — the title carries the shared `[assignee] ` prefix
+  // (WL-0MVTPEB3A0091RDH AC2), so a producer hold or agent claim is visible
+  // without opening the metadata table.
   lines.push('');
   lines.push(` ${item.id}`);
-  lines.push(` ${ANSI.bold}${item.title}${ANSI.reset}`);
+  lines.push(` ${ANSI.bold}${formatTitleWithAssignee(item.title, item.assignee)}${ANSI.reset}`);
   lines.push(separator);
 
   // Related Docs ToC — pinned at the top of the detail view

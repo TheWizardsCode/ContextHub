@@ -29,6 +29,7 @@ import { runCoordinationCheckIn } from './downtime-worker.coordination-checkin.j
 import {
   countFreeUnownedSlots,
   evaluateIdle,
+  evaluatePrefillPacing,
   perSlotGlobalIdleChecks,
   pollShowsLocalActivity,
   usablePerSlotSlots,
@@ -36,6 +37,7 @@ import {
 import {
   DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
+  DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS,
   PANE_LIFECYCLE_MONITOR_ENABLED,
   capacityEvidence,
@@ -46,6 +48,11 @@ import {
   paneLifecycleErrMsg,
   paneLifecycleWarn,
 } from './downtime-worker.pane.js';
+import {
+  probeCoordinationLeafAuditAdmission,
+  probeLeafAuditAdmission,
+  type LeafAuditAdmission,
+} from './downtime-worker.gates.js';
 import { paneCloseReaperDue } from './pane-close-scheduler.js';
 import {
   admitDispatch,
@@ -57,6 +64,7 @@ import {
   type PollEvaluation,
 } from './downtime-worker.orchestrator-dispatch.js';
 import type { OrchestratorTickResult } from './downtime-worker.orchestrator-dispatch.js';
+import type { LlamaSlot, LlamaStatus } from './downtime-worker.types.js';
 
 // ── Tick phases ────────────────────────────────────────────────────────
 
@@ -518,16 +526,49 @@ export async function pollAndEvaluate(
     if (globalIdle) {
       ctx.perSlotTracker.record(perSlotSlots);
       idle = true;
+      // Same-slot identity (parent AC4): the count is of slots that have been
+      // continuously free for the FULL threshold — a slot that starts
+      // processing resets only its own timer (WL-0MSG7P9N8009PCKG).
+      const freeSlots = countFreeUnownedSlots(perSlotSlots);
+      const thresholdMetCount = ctx.perSlotTracker.thresholdMetCount(cfg.thresholdMs);
+      // The per-tick poll evidence the relaxed leaf-audit admission reads
+      // (C4). Built once so the timer-threshold path and the opt-in
+      // idle-age path below admit on the SAME evidence.
+      const bandEvidence: LeafAuditBandEvidence = {
+        status,
+        perSlotSlots,
+        freeSlots,
+        thresholdMetCount,
+        contentionQueueDepth,
+        prefillGateWaiters,
+        capacity,
+      };
       if (idleAgeAuthority) {
         // The proxy's idle age satisfies the duration requirement, so the
         // CURRENT free/unowned-slot budget is the only remaining check —
         // `requiredFreeSlots` (capacity) is deliberately NOT relaxed.
-        ready =
-          idleAgeQualifies &&
-          countFreeUnownedSlots(perSlotSlots) >= cfg.requiredFreeSlots;
+        ready = idleAgeQualifies && freeSlots >= cfg.requiredFreeSlots;
+        if (!ready && cfg.leafAuditImmediate === true) {
+          // Opt-in race-accepting variant (WL-0MVV1F1P1005PO5M): the toggle
+          // bypasses the DURATION wait, so the leaf admission is consulted
+          // even when the proxy's authoritative idle age is short. Every
+          // fail-closed check inside the admission still applies.
+          ctx.leafAuditAdmission = await admitLeafAuditBand(ctx, cfg, bandEvidence);
+          if (ctx.leafAuditAdmission !== null) ready = true;
+        }
       } else {
-        ready =
-          ctx.perSlotTracker.thresholdMetCount(cfg.thresholdMs) >= cfg.requiredFreeSlots;
+        ready = thresholdMetCount >= cfg.requiredFreeSlots;
+        if (!ready) {
+          // Relaxed leaf-audit band (WL-0MVV1F0HK009JQAP C4): with only the
+          // leaf minimum continuously free, admit THIS tick for one positively
+          // classified LEAF audit candidate and nothing else. The admission is
+          // pinned, so the spare slot can never be consumed by another tier.
+          // Only the threshold-tracker branch relaxes on the C4 path: the
+          // idle-age-authority branch above deliberately keeps the configured
+          // capacity (the opt-in toggle is the documented exception).
+          ctx.leafAuditAdmission = await admitLeafAuditBand(ctx, cfg, bandEvidence);
+          if (ctx.leafAuditAdmission !== null) ready = true;
+        }
       }
     } else {
       ctx.perSlotTracker.record([]); // global busy → reset every slot timer
@@ -627,6 +668,152 @@ export async function pollAndEvaluate(
   };
 }
 
+// ── Relaxed leaf-audit tick admission (WL-0MVV1F0HK009JQAP C4) ─────────
+
+/**
+ * The poll evidence the leaf-band admission reads.
+ */
+interface LeafAuditBandEvidence {
+  status: LlamaStatus;
+  perSlotSlots: LlamaSlot[];
+  /** Free unowned slots on this poll. */
+  freeSlots: number;
+  /** Slots continuously free for the FULL threshold (same-slot identity). */
+  thresholdMetCount: number;
+  contentionQueueDepth: number;
+  prefillGateWaiters: number;
+  capacity: ReturnType<typeof capacityEvidence>;
+}
+
+/**
+ * Relaxed leaf-audit admission for the single-free-slot band
+ * (WL-0MVV1F0HK009JQAP C4).
+ *
+ * Today's tick requires `downtimeRequiredFreeSlots` (default 2 of 3)
+ * continuously-free slots before ANY dispatch is considered; that gate is what
+ * kept the per-item leaf-aware audit minimum (C3) unreachable in production.
+ * When the band is `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS <= thresholdMetCount <
+ * cfg.requiredFreeSlots` this peeks the audit candidate and admits the tick
+ * ONLY for a positively classified LEAF, pinning the relaxed slot to that
+ * item (`ctx.leafAuditAdmission`) so no implement/plan/intake or critical pane
+ * can consume it.
+ *
+ * Every fail-closed case returns `null`, restoring today's behaviour exactly
+ * (no admission, no relaxation): no candidate, an unanswerable
+ * active-audit/candidate lookup, a `parent` or untrustworthy scope, too few
+ * free slots, live contention and the prefill gate.
+ *
+ * Coordination mode is peeked through the OFFER list instead
+ * (`probeCoordinationLeafAuditAdmission`, C5 WL-0MVV1F130009VZ1P): the leader
+ * dispatches from the shared offers, so the pin must name an item that is
+ * actually offered. The same decision-log tokens are emitted, and the pin is
+ * threaded into `dispatchFromCoordination`, which reserves the relaxed slot
+ * for that audit item exactly as the direct path does.
+ *
+ * The OPT-IN race-accepting variant (`downtimeLeafAuditImmediate`, default
+ * OFF, WL-0MVV1F1P1005PO5M) changes ONE guard only: ON drops the
+ * "continuously free for the FULL threshold" duration requirement, so the
+ * admission is driven by the trusted free/unowned slot count alone. It never
+ * relaxes a refusal — an untrustworthy poll, contention, the prefill gate, an
+ * owned slot, an unclassifiable/parent candidate and the active-audit
+ * single-flight all still return `null`.
+ */
+async function admitLeafAuditBand(
+  ctx: OrchestratorContext,
+  cfg: OrchestratorConfig,
+  evidence: LeafAuditBandEvidence,
+): Promise<LeafAuditAdmission | null> {
+  const coordinationMode =
+    ctx.opts.coordinationDir !== undefined && typeof ctx.opts.deps.fetchItem === 'function';
+  const immediate = cfg.leafAuditImmediate === true;
+  if (immediate) {
+    // Race-accepting variant (WL-0MVV1F1P1005PO5M): the threshold WAIT is the
+    // only thing bypassed — the band condition reduces to "one trusted free
+    // unowned slot" (checked below), and the evidence's `thresholdMetCount`
+    // is recorded for diagnosis only.
+    if (evidence.freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
+  } else {
+    // The C4 band: only the relaxed leaf minimum is continuously free. At or
+    // above the configured minimum the tick is already ready (no relaxation).
+    if (evidence.thresholdMetCount < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
+    if (evidence.thresholdMetCount >= cfg.requiredFreeSlots) return null;
+    if (evidence.freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS) return null;
+  }
+  // Contention and the prefill serialisation gate are refusals: never relax
+  // past them (the admission gates would refuse the dispatch anyway).
+  if (evidence.contentionQueueDepth > 0 || evidence.prefillGateWaiters > 0) return null;
+  if (evaluatePrefillPacing(evidence.status, evidence.perSlotSlots).deferReason !== undefined) {
+    return null;
+  }
+  // Coordination mode peeks the SHARED OFFER list (never the leader's own
+  // worklog): only an offered item can be dispatched by the leader, so the
+  // relaxed slot is pinned to an offer the dispatch scan will actually see
+  // (C5 WL-0MVV1F130009VZ1P).
+  const probe = coordinationMode
+    ? await probeCoordinationLeafAuditAdmission(
+        ctx.opts.deps,
+        (readCoordinationFile(ctx.opts.coordinationDir as string)?.entries ?? []).map(
+          (entry) => ({
+            workItemId: entry.workItemId,
+            worklogRoot: entry.worklogRoot ?? entry.directory,
+          }),
+        ),
+        {
+          freeSlots: evidence.freeSlots,
+          thresholdMetCount: evidence.thresholdMetCount,
+          requiredFreeSlots: cfg.requiredFreeSlots,
+        },
+      )
+    : await probeLeafAuditAdmission(ctx.opts.deps, cfg.cwd, {
+        freeSlots: evidence.freeSlots,
+        thresholdMetCount: evidence.thresholdMetCount,
+        requiredFreeSlots: cfg.requiredFreeSlots,
+      });
+  const fields = {
+    freeSlots: evidence.freeSlots,
+    totalSlots: evidence.status.total_slots,
+    ownerPresent: evidence.status.local_lease_active === true,
+    runningPanes: null,
+    contentionDepth: evidence.contentionQueueDepth,
+    ...evidence.capacity,
+    thresholdMetCount: evidence.thresholdMetCount,
+    requiredFreeSlots: cfg.requiredFreeSlots,
+    // AC4 (WL-0MVV1F1P1005PO5M): the toggle state that produced this
+    // admission is recorded on the token, so an operator can tell a C4 wait
+    // from the opt-in race-accepting bypass from the log alone.
+    leafAuditImmediate: immediate,
+  };
+  if (probe.kind === 'admitted') {
+    // Non-blocking observation (AC4): the relaxed admission is visible in the
+    // decision log with its slot/threshold evidence and the pinned item.
+    void recordDecision(
+      ctx,
+      cfg.cwd,
+      'leaf-audit-admission',
+      { ...fields, leafAuditItemId: probe.admission.itemId, leafAuditScope: 'leaf' },
+      { blocking: false },
+    );
+    return probe.admission;
+  }
+  if (probe.kind === 'non-leaf') {
+    // The audit tier's 2-slot minimum is exactly why this tick skipped it: keep
+    // emitting the existing budget-skip token, annotated with the candidate.
+    void recordDecision(
+      ctx,
+      cfg.cwd,
+      'audit-tier-budget-skipped',
+      {
+        ...fields,
+        skippedTier: 'audit',
+        leafAuditItemId: probe.itemId,
+        leafAuditScope: probe.scope,
+      },
+      { blocking: false },
+    );
+  }
+  return null;
+}
+
 /**
  * Drive one tick of the downtime worker (the object returned by
  * `createDowntimeWorker` delegates here). Phase order is significant and
@@ -648,6 +835,9 @@ export async function runOrchestratorTick(
   // Fresh per-tick decision state: clear the header blocking reason; a
   // gate below re-sets it when this tick is refused (WL-0MU8808ZY0091JIA).
   ctx.blockReason = null;
+  // Fresh per-tick leaf-audit admission (WL-0MVV1F0HK009JQAP C4): a relaxed
+  // admission never outlives the tick that computed it.
+  ctx.leafAuditAdmission = null;
   const enabledGate = applyEnabledGates(ctx, cfg);
   if (enabledGate !== null) return enabledGate;
   const leader = await runLeaderElectionAndCheckIn(ctx, cfg);
@@ -668,7 +858,11 @@ export async function runOrchestratorTick(
   // AC3 (WL-0MVR8FKMU009XTED): the tick-level check covers BOTH the direct
   // and the coordination path (the leader evaluates the same raw slot budget
   // the tick admitted), so a leader-skipped audit tier is never silent.
-  if (admitted.freeSlots < DOWNTIME_AUDIT_MIN_FREE_SLOTS) {
+  // A RELAXED leaf-audit tick is excluded (WL-0MVV1F0HK009JQAP C4): its single
+  // free slot is a deliberate pin, already observed as `leaf-audit-admission`
+  // (or as `audit-tier-budget-skipped` in the band when only a parent was
+  // available), so emitting a budget-skip here would contradict the dispatch.
+  if (ctx.leafAuditAdmission === null && admitted.freeSlots < DOWNTIME_AUDIT_MIN_FREE_SLOTS) {
     void recordDecision(
       ctx,
       cfg.cwd,

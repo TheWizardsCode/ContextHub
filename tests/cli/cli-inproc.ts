@@ -82,6 +82,173 @@ const builtInCommands = [
   completionCommand,
 ];
 
+// ── Opt-in phase instrumentation (WL-0MVVXFXM6007QZ2L) ────────────────────
+/**
+ * Phases the in-process harness can attribute wall-clock time to.
+ *
+ * Instrumentation is **off by default** and enabled per call by
+ * `WL_INPROC_PROFILE=1`; when the switch is absent the harness takes exactly
+ * the same code path (and performs no timing calls), so tests are unaffected.
+ *
+ * The phases fall into three groups:
+ *
+ *  - **sequential setup** (`argv`, `worklog_dir_override`, `harness_patch`,
+ *    `command_construction`, `plugin_context`, `register_commands`),
+ *  - the **command action** window (`command_action`), with `config_load` and
+ *    `db_open` nested inside it,
+ *  - **teardown** (`throttler_drain`, `db_close`, `harness_restore`).
+ *
+ * Every phase except `config_load` and `db_open` is a top-level, non
+ * overlapping segment, so their sum is directly comparable with the total
+ * measured call time; the difference is the residual that
+ * `bench/inproc-harness-profile.ts` reports as unattributed harness overhead.
+ */
+export type InprocProfilePhase =
+  | 'argv'
+  | 'harness_patch'
+  | 'worklog_dir_override'
+  | 'command_construction'
+  | 'plugin_context'
+  | 'register_commands'
+  | 'command_action'
+  | 'config_load'
+  | 'db_open'
+  | 'throttler_drain'
+  | 'db_close'
+  | 'harness_restore';
+
+/** One recorded phase measurement, in milliseconds. */
+export interface InprocPhaseMark {
+  phase: InprocProfilePhase;
+  ms: number;
+  /**
+   * True when the mark is nested inside an enclosing phase — `config_load`
+   * and `db_open` happen inside the `command_action` window and are therefore
+   * excluded from the top-level attribution sum (they are already counted in
+   * `command_action`).
+   */
+  nested?: boolean;
+}
+
+/** One profiled `runInProcess()` call. */
+export interface InprocProfileRecord {
+  /** The command line passed to `runInProcess()`. */
+  commandLine: string;
+  /** Normalised argv (after the `--fields` merge, before splitting). */
+  args: string[];
+  /** Wall time of the whole `runInProcess()` call. */
+  totalMs: number;
+  /** Phase marks in the order they completed. */
+  marks: InprocPhaseMark[];
+}
+
+const inprocProfileRecords: InprocProfileRecord[] = [];
+
+/** True when phase instrumentation is switched on (`WL_INPROC_PROFILE=1`). */
+export function isInprocProfilingEnabled(): boolean {
+  return process.env.WL_INPROC_PROFILE === '1';
+}
+
+/** Records captured so far, as copies (newest last). */
+export function getInprocProfileRecords(): InprocProfileRecord[] {
+  return inprocProfileRecords.map((record) => ({
+    ...record,
+    args: [...record.args],
+    marks: record.marks.map((mark) => ({ ...mark })),
+  }));
+}
+
+/** Remove every captured record. */
+export function clearInprocProfileRecords(): void {
+  inprocProfileRecords.length = 0;
+}
+
+/** Take the captured records and clear the collector. */
+export function drainInprocProfileRecords(): InprocProfileRecord[] {
+  const drained = getInprocProfileRecords();
+  clearInprocProfileRecords();
+  return drained;
+}
+
+// ── Always-on harness instrumentation counters (WL-0MVVXG0EQ0068WQB) ──────
+/**
+ * Per-process counters for the work the harness pays **per call**: one
+ * `Command` construction, one plugin context and one database open today.
+ *
+ * The counters are always on (they are plain integer increments, so they do
+ * not change behaviour or timing) because two consumers need them:
+ *
+ *  - `tests/cli/inproc-harness-reuse.test.ts` asserts the pre-change cost
+ *    characterisation and the red-first reuse contract;
+ *  - the per-call cost budget guard (a later child of WL-0MVHVZMCH0092JCY)
+ *    reads them to detect a regression back to per-call construction.
+ */
+export interface InprocHarnessStats {
+  /** `runInProcess()` calls started. */
+  calls: number;
+  /** `new Command()` constructions (one per call today). */
+  commandsConstructed: number;
+  /** `createPluginContext()` calls (one per call today). */
+  pluginContextsCreated: number;
+  /** Database handles opened through `ctx.utils.getDatabase()` (one per read call today). */
+  databasesOpened: number;
+}
+
+const inprocHarnessStats: InprocHarnessStats = {
+  calls: 0,
+  commandsConstructed: 0,
+  pluginContextsCreated: 0,
+  databasesOpened: 0,
+};
+
+/**
+ * Snapshot of the harness counters accumulated by this process so far.
+ *
+ * Returns a copy: callers can hold it as a "before" baseline and diff it
+ * against a later snapshot without the two aliasing the same object.
+ */
+export function getInprocHarnessStats(): InprocHarnessStats {
+  return { ...inprocHarnessStats };
+}
+
+/** Zero every counter (used by the reuse contract tests to get a clean baseline). */
+export function resetInprocHarnessStats(): void {
+  inprocHarnessStats.calls = 0;
+  inprocHarnessStats.commandsConstructed = 0;
+  inprocHarnessStats.pluginContextsCreated = 0;
+  inprocHarnessStats.databasesOpened = 0;
+}
+
+interface InprocProfiler {
+  setArgs(args: string[]): void;
+  add(phase: InprocProfilePhase, ms: number, nested?: boolean): void;
+  /** Record the total call time and publish the record. */
+  finish(): void;
+}
+
+/**
+ * Start a profiler for one call, or return `null` when instrumentation is off.
+ * `null` makes every `markStart()`/`mark()` call site a cheap no-op and keeps
+ * the default path free of timing calls.
+ */
+function startInprocProfile(commandLine: string): InprocProfiler | null {
+  if (!isInprocProfilingEnabled()) return null;
+  const startedAt = performance.now();
+  const record: InprocProfileRecord = { commandLine, args: [], totalMs: 0, marks: [] };
+  return {
+    setArgs(args: string[]): void {
+      record.args = [...args];
+    },
+    add(phase: InprocProfilePhase, ms: number, nested = false): void {
+      record.marks.push(nested ? { phase, ms, nested: true } : { phase, ms });
+    },
+    finish(): void {
+      record.totalMs = performance.now() - startedAt;
+      inprocProfileRecords.push(record);
+    },
+  };
+}
+
 function splitShellArgs(cmd: string): string[] {
   const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
   const res: string[] = [];
@@ -95,6 +262,17 @@ function splitShellArgs(cmd: string): string[] {
 }
 
 export async function runInProcess(commandLine: string, timeoutMs: number = 15000): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+  inprocHarnessStats.calls += 1;
+  const profile = startInprocProfile(commandLine);
+  /** Monotonic clock for the current phase (0 when profiling is off). */
+  const markStart = (): number => (profile ? performance.now() : 0);
+  /** Close the phase opened at `since` (no-op when profiling is off). */
+  const mark = (phase: InprocProfilePhase, since: number, nested = false): void => {
+    if (!profile) return;
+    profile.add(phase, performance.now() - since, nested);
+  };
+  let phaseStart = markStart();
+
   // Extract args after the CLI path
   const tokens = splitShellArgs(commandLine);
   // find index of the script path (ends with src/cli.ts)
@@ -103,7 +281,10 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   // Mirror src/cli.ts: merge space-separated --fields continuations before
   // Commander parses them (WL-0MSLW8GHQ0092PJK).
   const normalizedArgs = normalizeFieldsArgv(args);
+  mark('argv', phaseStart);
+  profile?.setArgs(normalizedArgs);
 
+  phaseStart = markStart();
   // Capture stdout/stderr
   const out: string[] = [];
   const err: string[] = [];
@@ -115,6 +296,10 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   const origConsoleWarn = console.warn;
   const origConsoleInfo = console.info;
   const origArgv = process.argv;
+  // `process.exitCode` is process-wide state like the patched functions above:
+  // a command that sets it must not leave the value behind for the next call
+  // (or for the test runner), so it is restored in the same `finally` block.
+  const origExitCode = process.exitCode;
   const argv = ['node', 'worklog', ...normalizedArgs];
   process.argv = argv;
   process.stdout.write = ((chunk: any, enc?: any, cb?: any) => {
@@ -140,6 +325,7 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   console.error = ((...args: any[]) => { err.push(`${args.map(a => String(a)).join(' ')}\n`); }) as any;
   console.warn = ((...args: any[]) => { err.push(`${args.map(a => String(a)).join(' ')}\n`); }) as any;
   console.info = ((...args: any[]) => { out.push(`${args.map(a => String(a)).join(' ')}\n`); }) as any;
+  mark('harness_patch', phaseStart);
 
   // Track database instances created during this run so we can close them
   // before returning. On Windows, SQLite file locks prevent temp-dir cleanup
@@ -149,10 +335,14 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   // Mirror src/cli.ts: apply --worklog-dir from argv BEFORE creating the
   // plugin context so ctx.dataPath (and -f/--file defaults) reflect the
   // override (WL-0MSAH26DD001XXST).
+  phaseStart = markStart();
   applyWorklogDirOverrideFromArgv(normalizedArgs);
+  mark('worklog_dir_override', phaseStart);
 
   try {
+    phaseStart = markStart();
     const program = new Command();
+    inprocHarnessStats.commandsConstructed += 1;
     // Configure global options to match src/cli.ts so --json/--verbose/etc are recognized
     program
       .name('worklog')
@@ -163,15 +353,40 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
       .option('-F, --format <format>', 'Human display format (choices: concise|normal|full|raw)')
       .option('-w, --watch [seconds]', 'Rerun the command every N seconds (default: 5)')
       .option('--worklog-dir <path>', 'Explicit path to .worklog directory (bypasses automatic directory resolution)');
+    mark('command_construction', phaseStart);
 
+    phaseStart = markStart();
     const ctx = createPluginContext(program);
+    inprocHarnessStats.pluginContextsCreated += 1;
+    mark('plugin_context', phaseStart);
+
+    phaseStart = markStart();
     // Wrap getDatabase to track instances for cleanup
     const origGetDatabase = ctx.utils.getDatabase;
     ctx.utils.getDatabase = (prefix?: string) => {
+      const dbStart = profile ? performance.now() : 0;
       const db = origGetDatabase(prefix);
+      inprocHarnessStats.databasesOpened += 1;
+      // Nested in the command action: DB open includes schema creation and
+      // migrations and must not be double counted in the attribution sum.
+      mark('db_open', dbStart, true);
       openDatabases.push(db);
       return db;
     };
+    if (profile) {
+      // Attribute config loads performed by the command action separately from
+      // the rest of the action. Installed only when profiling so the default
+      // path keeps the bare `ctx.utils.getConfig` reference.
+      const origGetConfig = ctx.utils.getConfig;
+      ctx.utils.getConfig = (() => {
+        const configStart = performance.now();
+        try {
+          return origGetConfig();
+        } finally {
+          mark('config_load', configStart, true);
+        }
+      }) as typeof ctx.utils.getConfig;
+    }
     // Register built-in commands
     for (const r of builtInCommands) r(ctx);
 
@@ -203,8 +418,10 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
     } catch (e) {
       // commander may throw for unsupported hook API versions; ignore instrumentation
     }
+    mark('register_commands', phaseStart);
 
     // Run command
+      const actionStart = markStart();
       try {
         // Provide a full argv (node + script) and parse from 'node' so commander
         // treats the following entries as process argv (matching subprocess behaviour).
@@ -304,8 +521,13 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
         return { stdout: out.join(''), stderr: err.join(''), exitCode: code };
       }
       throw e;
+    } finally {
+      // Closes the command-action window on every exit path, including the
+      // `--help`/`process.exit()` (`__INPROC_EXIT__`) and parse-timeout ones.
+      mark('command_action', actionStart);
     }
   } finally {
+    phaseStart = markStart();
     // Before closing DBs, wait briefly for the shared throttler to drain.
     // Background GitHub-sync tasks may still be running and can reference
     // the database; closing DBs while throttler tasks are active causes
@@ -354,19 +576,29 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
       // swallow any harness-side errors when probing throttler
     }
 
+    mark('throttler_drain', phaseStart);
+
+    phaseStart = markStart();
     // Close all database connections opened during this run to release
     // Windows file locks before tests attempt temp-dir cleanup.
     for (const db of openDatabases) {
       try { db.close(); } catch (_) { /* ignore */ }
     }
-    	process.stdout.write = origStdoutWrite;
-    	process.stderr.write = origStderrWrite;
-    	process.exit = origExit;
-    	console.log = origConsoleLog;
-    	console.error = origConsoleError;
-    	console.warn = origConsoleWarn;
-    	console.info = origConsoleInfo;
-    	process.argv = origArgv;
-    	// No instrumentation present; nothing else to restore for exitCode.
+    mark('db_close', phaseStart);
+
+    phaseStart = markStart();
+    process.stdout.write = origStdoutWrite;
+    process.stderr.write = origStderrWrite;
+    process.exit = origExit;
+    console.log = origConsoleLog;
+    console.error = origConsoleError;
+    console.warn = origConsoleWarn;
+    console.info = origConsoleInfo;
+    process.argv = origArgv;
+    process.exitCode = origExitCode;
+    mark('harness_restore', phaseStart);
+    // Publish the record for the profiler once the harness has restored the
+    // process globals, so the recorded total covers the whole call.
+    profile?.finish();
   }
 }

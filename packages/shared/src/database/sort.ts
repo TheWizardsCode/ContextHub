@@ -91,9 +91,22 @@ export function sortItemsByScore(ctx: WorklogDatabaseContext, items: WorkItem[],
   const auditMap = buildAuditMapForItems(ctx, items);
   const maxPriorityValue = 4; // critical
 
+  // Effective-priority cache for the hard critical tier
+  // (WL-0MVYCVSPN007CMAJ): effective priority (own + dependents + subtree
+  // inheritance) decides the tier, so a root hosting a critical child is
+  // re-sorted into the critical band above every non-critical root even
+  // though the child itself is hidden (strict root-only selection).
+  // Precomputed once so each comparator step is O(1).
+  const effectiveCache = new Map<string, { value: number; reason: string; inheritedFrom?: string }>();
+  for (const it of items) {
+    computeEffectivePriority(ctx, ctx.hooks, it, effectiveCache, cache, items);
+  }
+  const effectiveValueOf = (it: WorkItem): number =>
+    effectiveCache.get(it.id)?.value ?? getPriorityValue(it.priority);
+
   return items.slice().sort((a, b) => {
-    const aIsCritical = getPriorityValue(a.priority) === maxPriorityValue;
-    const bIsCritical = getPriorityValue(b.priority) === maxPriorityValue;
+    const aIsCritical = effectiveValueOf(a) === maxPriorityValue;
+    const bIsCritical = effectiveValueOf(b) === maxPriorityValue;
     const aAuditFresh = !aIsCritical && isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
     const bAuditFresh = !bIsCritical && isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
     // Hard tier boundary: critical items stay above any audited non-critical.
@@ -105,8 +118,8 @@ export function sortItemsByScore(ctx: WorklogDatabaseContext, items: WorkItem[],
     if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) {
       return aAuditFresh ? -1 : 1;
     }
-    const scoreA = computeScore(ctx, a, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap);
-    const scoreB = computeScore(ctx, b, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap);
+    const scoreA = computeScore(ctx, a, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap, items);
+    const scoreB = computeScore(ctx, b, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap, items);
     if (scoreB !== scoreA) return scoreB - scoreA;
     const createdA = new Date(a.createdAt).getTime();
     const createdB = new Date(b.createdAt).getTime();
@@ -130,7 +143,8 @@ export function computeScore(
   recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
   ancestorsOfInProgress?: Set<string>,
   edgeCache?: EdgeCache,
-  auditMap?: Map<string, AuditResult>
+  auditMap?: Map<string, AuditResult>,
+  items?: WorkItem[]
 ): number {
   // Weights are intentionally fixed and not configurable per request
   //
@@ -151,12 +165,26 @@ export function computeScore(
 
   let score = 0;
 
+  // Effective priority (own + dependents + subtree inheritance) governs the
+  // audit-not-ready boost suppression (WL-0MVYCVSPN007CMAJ): an
+  // effective-critical item — even one whose *declared* priority is
+  // non-critical, like a root hosting a critical child — must never receive
+  // the audit-not-ready boost, or it would outrank genuinely critical items
+  // (3500 > the critical gap). The base priority component below stays
+  // declared so the blocks-high-priority boost keeps its bounded,
+  // non-tier-crossing semantics. `items` (when provided) enables the same
+  // in-progress-subtree skip the dependents path uses, keeping this ranking
+  // consistent with candidate selection.
+  const effective = computeEffectivePriority(ctx, ctx.hooks, item, undefined, edgeCache, items);
+  const effectiveCritical = effective.value >= getPriorityValue('critical');
+
   // Audit-not-ready tier: second only to critical. Fresh `readyToClose ===
   // false` audits boost any non-critical item so it outranks any unaudited
   // non-critical regardless of base priority (tiered as numeric boost >
   // max priority delta, with the comparator above as the hard authority).
-  // Critical items never receive this boost (hard boundary).
-  if (item.priority !== 'critical' && auditMap) {
+  // Critical items never receive this boost (hard boundary) — including
+  // items that are only *effectively* critical via inheritance.
+  if (!effectiveCritical && auditMap) {
     const audit = auditMap.get(item.id);
     if (isAuditNotReadyFresh(audit, item.updatedAt)) {
       score += 3500; // > priority range (max 3*1000=3000 delta) but < critical gap

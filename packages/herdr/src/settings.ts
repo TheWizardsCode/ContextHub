@@ -38,6 +38,7 @@ import {
   clampDowntimeStallThresholdMs,
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
   DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -203,6 +204,27 @@ export interface PluginSettings {
    */
   downtimeLongRunningThresholdMs: number;
   /**
+   * OPT-IN race-accepting leaf-audit admission (WL-0MVV1F1P1005PO5M, parent
+   * WL-0MSORQ8Y4004YT63 AC5; default `false`).
+   *
+   * OFF (default, fail-closed policy): a **leaf** audit waits for the same
+   * free slot to have been continuously free for the full
+   * `downtimeIdleThresholdMs` before the relaxed single-slot admission
+   * applies (C4, WL-0MVV1F0HK009JQAP).
+   *
+   * ON: a positively classified leaf audit dispatches on ONE trusted free
+   * unowned slot **without waiting the full idle threshold** — it races an
+   * interactive request for that slot, accepting that the request may take it
+   * and the audit's first call then falls back to the remote model. Every
+   * fail-closed check still applies (untrustworthy per-slot detail, a
+   * saturated pool, live contention, the prefill gate, owned slots, the
+   * active-audit single flight and an unclassifiable/parent candidate), and
+   * the relaxed slot stays pinned to that one leaf audit. Re-read live on
+   * every tick; absent/malformed → `false`. See
+   * docs/dev/downtime-dispatcher.md.
+   */
+  downtimeLeafAuditImmediate: boolean;
+  /**
    * Enable periodic auto-close of settled/abandoned agent panes
    * (WL-0MUJL1NAH0042GOS). Default `true`; disable to turn off the reaper
    * without editing code.
@@ -258,6 +280,7 @@ export const defaultSettings: PluginSettings = {
   downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   downtimeCapacityStarvationAlertMs: DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
   downtimeLongRunningThresholdMs: DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
+  downtimeLeafAuditImmediate: DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
   downtimeCpuGatePercent: DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
   paneCloseEnabled: DEFAULT_PANE_CLOSE_ENABLED,
   paneCloseIdleThresholdMinutes: DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
@@ -383,6 +406,14 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeCpuGatePercent: typeof parsed.downtimeCpuGatePercent === 'number'
         ? clampDowntimeCpuGatePercent(parsed.downtimeCpuGatePercent)
         : defaultSettings.downtimeCpuGatePercent,
+      // Opt-in race-accepting leaf-audit variant (WL-0MVV1F1P1005PO5M): a
+      // boolean knob read live per tick. Anything that is not literally
+      // `true`/`false` (absent, string, number, null) resolves to the
+      // fail-closed default `false` — the clamp path for a boolean.
+      downtimeLeafAuditImmediate:
+        typeof parsed.downtimeLeafAuditImmediate === 'boolean'
+          ? parsed.downtimeLeafAuditImmediate
+          : defaultSettings.downtimeLeafAuditImmediate,
       paneCloseEnabled: typeof parsed.paneCloseEnabled === 'boolean'
         ? parsed.paneCloseEnabled : defaultSettings.paneCloseEnabled,
       paneCloseIdleThresholdMinutes: typeof parsed.paneCloseIdleThresholdMinutes === 'number'

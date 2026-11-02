@@ -19,6 +19,7 @@ import {
   MAX_BROWSE_ITEM_COUNT,
 } from './settings.js';
 import {
+  DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
   DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   MIN_DOWNTIME_STALL_THRESHOLD_MS,
@@ -597,5 +598,55 @@ describe('downtimeLocalPreferenceExplicit — derived explicitness (WL-0MVNUIW77
     const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
     expect('downtimeLocalPreference' in raw).toBe(false);
     expect(loadSettings(path).downtimeLocalPreference).toBe('remote-ok');
+  });
+});
+
+// ── downtimeLeafAuditImmediate — opt-in race-accepting leaf audit
+//    (WL-0MVV1F1P1005PO5M, parent WL-0MSORQ8Y4004YT63 AC5) ─────────────
+
+describe('downtimeLeafAuditImmediate (WL-0MVV1F1P1005PO5M)', () => {
+  it('defaults OFF — the fail-closed policy is preserved', () => {
+    expect(DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE).toBe(false);
+    expect(defaultSettings.downtimeLeafAuditImmediate).toBe(false);
+  });
+
+  it('loads an existing settings file without the key as OFF', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ autoRefresh: false }), 'utf-8');
+    expect(loadSettings(path).downtimeLeafAuditImmediate).toBe(false);
+  });
+
+  it('round-trips an explicit ON through save/load', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeLeafAuditImmediate: true });
+    expect(loadSettings(path).downtimeLeafAuditImmediate).toBe(true);
+
+    saveSettings(path, { ...defaultSettings, downtimeLeafAuditImmediate: false });
+    expect(loadSettings(path).downtimeLeafAuditImmediate).toBe(false);
+  });
+
+  it.each<[string, unknown]>([
+    ['a string "true"', 'true'],
+    ['a number', 1],
+    ['null', null],
+    ['an object', { on: true }],
+  ])('falls back to OFF when the persisted value is %s', (_name, value) => {
+    const path = tempSettingsPath();
+    writeFileSync(
+      path,
+      JSON.stringify({ ...defaultSettings, downtimeLeafAuditImmediate: value }),
+      'utf-8',
+    );
+    expect(loadSettings(path).downtimeLeafAuditImmediate).toBe(false);
+  });
+
+  it('does not fall back to ON for a legacy negative word', () => {
+    const path = tempSettingsPath();
+    writeFileSync(
+      path,
+      JSON.stringify({ ...defaultSettings, downtimeLeafAuditImmediate: 'yes' }),
+      'utf-8',
+    );
+    expect(loadSettings(path).downtimeLeafAuditImmediate).toBe(false);
   });
 });

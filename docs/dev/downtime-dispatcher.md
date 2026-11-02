@@ -1795,11 +1795,19 @@ The refused attempts have **no** route-log line — `after_provider_response`
 does not fire when the provider throws on a non-2xx — so the proxy log is the
 only record of the deferral itself; the route log records the admitted turn.
 
-> **Headless caveat.** Route logging runs from the extension's
-> `after_provider_response` context; a `pi -p` (headless) session on this build
-> records the preference header and the deferral retries but produced no
-> route-log line, so reproduce with an interactive pane when the route log is
-the artefact you need.
+> **Headless is not exempt.** The route log is written from the extension's
+> `after_provider_response` hook in whichever pi mode is running: a headless
+> `pi -p` turn whose provider response is admitted writes exactly the same line
+> as an interactive pane (verified 2026-10-31 with a mock provider in text
+> mode, in `--mode json` — the `spawnBackgroundPi` shape — and with a
+> `.worklog/worktrees/…` session cwd; WL-0MVTN5M3E007DU9Z). Two absences are
+> expected and must **not** be read as a headless limitation: a run whose
+> attempts were all refused writes no line (no admitted response, so the hook
+> never fires — see the paragraph above), and a run terminated during its
+> deferral wait writes none for the abandoned turn. When a dispatched
+> (headless) turn shows no line, check its session JSONL: a last message with
+> `stopReason: "error"` / `429` means the turn never completed, rather than
+> the route log having failed to record an admitted turn.
 
 **Tests.** `packages/tui/extensions/local-preference/local-preference.test.ts`
 (pure module and hooks: both values, the unset case, absent/malformed headers,
@@ -2105,6 +2113,191 @@ explicitly for herdr-touching items — tracked as WL-0MVGJ4WSS005BMSI. (Since
 WL-0MVG4FF9200346NR the canonical gate is the `tests/` umbrella command, which
 covers every `tests/` file but still not `packages/` — see the coverage table
 in `docs/dev/test-suite-baseline.md`.)
+
+### Leaf-aware audit dispatch (parent WL-0MSORQ8Y4004YT63)
+
+**What changed.** The audit tier's slot requirement used to be a single
+number: ≥ `DOWNTIME_AUDIT_MIN_FREE_SLOTS` (= 2) free slots, because a parent
+audit's Phase 2 fan-out (parent pane + one child at
+`AUDIT_PHASE2_PARALLELISM=1`) needs two local slots. But most audit
+candidates are **leaf** items (no children) whose audit is a single Pi
+session needing exactly **one** slot. Leaf-aware dispatch makes the audit
+minimum per-**candidate**: `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS` (= 1) for a
+trusted leaf, the unchanged `DOWNTIME_AUDIT_MIN_FREE_SLOTS` (= 2) for a
+parent — so a pool with only one spare slot can still run leaf audits.
+
+**Admission sequence (band → scope lookup → pin).** A leaf audit can only
+dispatch through the leaf slot band:
+
+1. **Band detection** — `isLeafAuditSlotBand(freeSlots)`: the tick is in the
+   band when `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS <= freeSlots <
+   DOWNTIME_AUDIT_MIN_FREE_SLOTS` (with the shipped constants exactly one
+   free slot). At/above the parent minimum every audit candidate is
+   admissible **without** a scope lookup (AC1: zero extra `wl` calls in the
+   normal case); below the leaf minimum no audit can run.
+2. **Scope lookup** — only inside the band the worker classifies the
+   candidate via `getAuditCandidateScope` (`wl show <id> --children
+   --json`) → `classifyAuditScope`. **Fail-closed (AC1/AC2):** anything
+   other than an explicit, trusted `'leaf'` — `{ok:false}`, a missing
+   `scope`, an unexpected token, a thrown/absent lookup, a
+   `needsProducerReview` candidate, or a non-root candidate — is a
+   `'parent'`, restoring the full `DOWNTIME_AUDIT_MIN_FREE_SLOTS` gate. The
+   same per-item predicate `auditItemEligible` is the single definition the
+   Herdr-head filter, the critical-first scan and the legacy tier chain
+   share, so every path decides identically for the same
+   candidate/free-slot pair (AC3).
+3. **Pin** — a positively classified leaf in the band still has to wait
+   for the **same single slot** to be continuously free for the full idle
+   threshold (per-slot identity, WL-0MSG7P9N8009PCKG), then the tick
+   admits the band as a **pin** (`probeLeafAuditAdmission` →
+   `LeafAuditAdmission` → `ctx.leafAuditAdmission` →
+   `pinnedAuditItemId`). The pin reserves the relaxed slot for THAT item
+   alone (`auditPinAdmits`): every non-audit tier is ineligible
+   (implement/plan/intake, critical, scheduled prompts, stalled-resume),
+   and the audit tier admits no other candidate. A relaxed tick whose
+   pinned item cannot dispatch ends neutrally (`LEAF_AUDIT_PIN_HOLD_REASON`,
+   header token `leaf-audit-pin-hold`) — never `no-candidate`, so no
+   no-candidate cooldown and no strike.
+
+   Only the **threshold-tracker** branch relaxes on this path: the
+   proxy-idle-age branch (`local_idle_seconds`) deliberately keeps the
+   configured capacity. The opt-in `downtimeLeafAuditImmediate` toggle is
+   the documented exception (see the next subsection).
+
+**Coordination path (leader) — identical semantics, offered pin.** The
+leader dispatches from the shared coordination offer file, so its relaxed
+slot must be pinned to an item that is actually **offered**
+(WL-0MVV1F130009VZ1P). `probeCoordinationLeafAuditAdmission` scans the
+offers in file order with the leader's own dispatch-time re-validation
+seams (`fetchItem` → `classifyItemForDispatchDetail` → active-audit
+single-flight → `getAuditCandidateScope` → `classifyAuditScope`) and
+admits the first offer that is an eligible root audit candidate with a
+trusted `'leaf'` scope. No new ranking, no second eligibility definition.
+**Parity requirement:** for an identical payload/candidate set the direct
+and coordination paths must decide identically — same classifier, same
+single-flight, same scope lookup, same pin — and emit the same
+`leaf-audit-admission` evidence. Pinned by the *parity — the direct and
+coordination paths decide identically* group and *records the same
+`leaf-audit-admission` evidence as the direct path* in
+`coordination-dispatch.test.ts`.
+
+**Fail-closed rules (never relax past a refusal).** The band admission and
+both per-item gates return `false`/no-admission — restoring today's
+behaviour exactly — for every case below; each is also pinned in
+`downtime-worker.leaf-audit.test.ts`:
+
+| Case | Outcome |
+| --- | --- |
+| `freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS` | eligible, **no** scope lookup (AC1) |
+| `freeSlots < DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS` | ineligible, no lookup |
+| leaf band, trusted `'leaf'` scope | eligible via the band |
+| leaf band, `'parent'` scope | skipped (fail-closed; `audit-tier-budget-skipped` token) |
+| leaf band, `{ok:false}`/thrown/absent scope lookup | skipped (fail-closed — treated as parent) |
+| active audit in flight (single-flight) | no admission |
+| live contention / prefill-gate waiters / prefill pacing deferral | no admission |
+| `needsProducerReview === true` candidate | no admission (never relax a budget-exhausted item) |
+
+**Decision-log tokens.** The relaxed band emits **non-blocking**
+observations (never a blocking header token, never a strike):
+
+| Token | Meaning | Key fields |
+| --- | --- | --- |
+| `leaf-audit-admission` | The tick relaxed its required-free-slots gate for ONE pinned leaf audit. | `freeSlots`, `thresholdMetCount`, `requiredFreeSlots`, `leafAuditItemId`, `leafAuditScope: 'leaf'`, `leafAuditImmediate` |
+| `audit-tier-budget-skipped` | The audit tier was skipped for a slot-budget reason — in the leaf band because the only candidate is a `parent`/unclassifiable (the audit tier's 2-slot minimum is exactly why). | `skippedTier: 'audit'`, plus the same slot/threshold fields and `leafAuditItemId` / `leafAuditScope` |
+
+Both tokens are emitted on **both** the direct and the coordination path;
+the coordination path additionally attributes per-offer rejections with the
+`audit-slot-min` gate on the terminal decision entry (see *Empty-offer &
+skipped-tier attribution*).
+
+**Dependency status.** The per-slot identity dependency LP-0MSORPUMX002LLIA
+is **resolved** — the proxy serves `slots: [{slot_id, is_processing}]` and
+herdr trusts that payload per the fail-closed contract WL-0MUXVPXAZ005RESW;
+same-slot stability is guaranteed by the per-slot idle tracker
+(WL-0MSG7P9N8009PCKG) that the band evidence (`thresholdMetCount`) reads.
+
+**Tests.** `downtime-worker.leaf-audit.test.ts` pins the classifier and its
+fail-closed defaults, the leaf-band budget, `auditItemEligible` across the
+three selection paths (AC3 agreement group), the pin semantics, the tick
+admission with the single-tier pin (AC1/AC2), same-slot identity (AC5),
+the non-blocking observation tokens (AC4) and the full fail-closed matrix
+(AC3); `coordination-dispatch.test.ts` pins the leader-path probe and the
+direct/coordination parity (C5). The closing verification slice (C8,
+WL-0MVV1F2W5001883R) adds three end-to-end gates to the leaf-audit suite: the
+**pre-change baseline parity** group (AC2 — parent-audit and non-audit
+action+reason unchanged on the 2-of-3-free and all-free fixtures), the
+**parent AC6 traceability** group (AC5 — one targeted assertion per listed test
+obligation: classification, children-query failure → parent gate, per-slot
+tracker integration, race-accepting toggle) and the test that pins the
+**scripted decision-log scenario**
+(`packages/herdr/scripts/leaf-audit-decision-log-scenario.ts`, AC3). The
+scenario drives the real worker tick against fixed payloads and prints the
+decision-log excerpts reported on the parent work item:
+
+```bash
+npx tsx packages/herdr/scripts/leaf-audit-decision-log-scenario.ts
+```
+
+**AC traceability (parent WL-0MSORQ8Y4004YT63).**
+
+| AC | Implementation | Pinned by |
+| --- | --- | --- |
+| AC1 children-query fetch, fail-closed | `getAuditCandidateScope` dep + `classifyAuditScope` (fail-closed `'parent'`) | `downtime-worker.leaf-audit.test.ts` (classifier + fail-closed defaults) |
+| AC2 leaf = ≥ 1 slot | `DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1`, `isLeafAuditSlotBand`, `auditItemEligible` | leaf-audit tests (1-free leaf dispatch, parent/unknown skip) |
+| AC3 parent = all/2-slot gate unchanged | `DOWNTIME_AUDIT_MIN_FREE_SLOTS` unchanged; per-item gate stops doing lookups at/above it | selection-paths-agree tests |
+| AC4 same-slot stability | per-slot idle tracker (WL-0MSG7P9N8009PCKG) + band evidence | same-slot-identity worker tests |
+| AC5 opt-in race-accepting variant | `downtimeLeafAuditImmediate` (default OFF) | `settings.test.ts` + `downtime-worker.leaf-audit.test.ts` ON/OFF matrix |
+| AC6 tests | classification, fail-closed, per-slot tracker integration, toggle | the suites named above + the closing C8 traceability group |
+| AC7 documentation | this subsection, `packages/herdr/README.md` (*Leaf-aware audit minimum*), code comments | this document |
+
+### Leaf-audit admission: the opt-in race-accepting toggle (WL-0MVV1F1P1005PO5M)
+
+**Context.** A leaf audit candidate (an item with **no children**, classified
+by `classifyAuditScope` from `wl show <id> --children --json`) is audited by a
+single Pi session, so one free slot suffices
+(`DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1`, C3). By default (C4,
+WL-0MVV1F0HK009JQAP) the tick still requires that
+slot to have been **continuously free for the full `downtimeIdleThresholdMs`**
+(same-slot identity from the per-slot idle tracker) before it admits the tick
+for that one pinned leaf audit.
+
+**Setting.** `downtimeLeafAuditImmediate` (plugin settings,
+`~/.config/herdr/worklog-plugin.json`) — boolean, default **`false`**
+(`DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE`); absent or malformed (a string, a
+number, `null`) resolves to `false`. Re-read live on **every** tick, so turning
+it on/off applies without a plugin restart.
+
+**Race trade-off (opt-in only).** With the toggle **ON** a positively
+classified leaf audit dispatches on **one trusted free unowned slot
+immediately** — it does not wait the idle threshold, and therefore races any
+interactive request for that slot: the request may take it, and the audit's
+first call then falls back to the remote model. The default stays OFF so the
+fail-closed policy (parent AC5) is unchanged; onboarding this variant is an
+explicit operator decision, never a default.
+
+**Nothing else is relaxed.** The toggle bypasses the threshold **wait** only.
+Every refusal still applies on both settings: unusable per-slot detail
+(`slots: []` / `slots_stale: true` → `slots-unavailable`),
+`capacity_hint: "saturated"` (→ `capacity-saturated`), live contention
+(`contention_queue_depth > 0` / `prefill_gate_waiters > 0`), the prefill
+serialisation gate (`evaluatePrefillPacing`), owned slots
+(`countFreeUnownedSlots` excludes them), the active-audit single flight and a
+`parent`/unclassifiable candidate. The relaxed slot stays **pinned** to that
+one leaf audit (`ctx.leafAuditAdmission`, the C4 single-tier pin), so no
+implement/plan/intake pane can consume it.
+
+**Observability.** The `leaf-audit-admission` decision-log token carries
+`leafAuditImmediate` next to `freeSlots` / `thresholdMetCount` /
+`requiredFreeSlots` / `leafAuditItemId` / `leafAuditScope`, so a relaxed tick
+is attributable to the toggle from the log alone; when the band holds only a
+parent candidate the `audit-tier-budget-skipped` observation carries the same
+field.
+
+**Tests.** `settings.test.ts` pins default/parse/round-trip and the
+absent/malformed → `false` fallback;
+`downtime-worker.leaf-audit.test.ts` pins OFF parity with C4, the immediate
+ON admission (including under proxy idle-age authority), the live per-tick
+read and the full fail-closed matrix under ON.
 
 ### Soft-delete exclusion (SA-0MUJBLZC60085DI9)
 

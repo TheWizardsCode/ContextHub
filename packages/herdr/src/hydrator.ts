@@ -13,7 +13,16 @@
  *  - a pane TITLE containing the item ID  → untouched (genuinely being worked)
  *  - stage `in_review`                    → `status=completed`, stage `in_review`
  *  - an active outbound dependency blocker→ `status=blocked` (stage made compatible)
+ *  - a live claim holder (lock held)      → untouched (pane-less driven session)
  *  - otherwise                            → `status=open`, stage `intake_complete`
+ *
+ * The two busy signals are independent and both are checked: the pane rule is
+ * PRIMARY and evaluated first (a pane match short-circuits and never probes),
+ * and the claim holder is the second, mechanically verifiable signal
+ * (`WL-0MVWDAZL10025P8J` / `WL-0MVWDB3IG004NRIU`). `held` is evaluated AFTER
+ * `in_review` and `blocked`, so a live claim only suppresses the release to
+ * `open` and never overrides the audit-tier completion or the dependency
+ * `blocked` transition.
  *
  * Active detection (WL-0MV1BWETT005GSUJ): a single simple rule — if there
  * is a pane in the current workspace whose title contains the work-item ID
@@ -61,6 +70,39 @@
  * production wiring injects this through the worklist's
  * `applyActivePaneMarkers` seam (`index.ts`).
  *
+ * Live claim holder (WL-0MVWDB3IG004NRIU): a pane-less driven session still
+ * holds its per-child `flock` claim, so "busy" is `pane OR live claim holder`.
+ * The local, side-effect-free heldness probe lives in `./claim-lock.ts`
+ * (`probeClaimHolders`); the cycle asks it ONCE per tick over the pane-less
+ * candidates (batched, zero `wl`/`herdr` spawns) and suppresses the
+ * release-to-`open` branch while a claim is held (or ambiguous evidence
+ * forces fail-open — never a release on uncertainty). The pane signal stays
+ * primary and unchanged: a pane title match short-circuits and never probes.
+ *
+ * Fail-open rules for the probe (deliberate asymmetry: ambiguity ⇒ no
+ * demotion, proven death ⇒ release): an unreadable/unenumerable `locks/`
+ * directory, a corrupt lock file, an unexpected `fs`/`flock` error, an
+ * undecidable probe, a `claim-probe` step timeout or a missing per-item
+ * verdict each suppress demotion with a named reason. Heldness is the kernel
+ * `flock`, never file existence or `started_at` age (lock files persist after
+ * release). The recorded-`pid` fallback carries the PID-REUSE GUARD: it is
+ * trusted only when the lock's `started_at` is not earlier than the recorded
+ * process start time, otherwise the verdict is `held`
+ * (`pid-reuse-suspected`) so a recycled pid can never read as a live claim.
+ *
+ * Release trail (WL-0MVWDB7F2003SORI): every applied demotion also clears the
+ * scheduling hold (`--assignee ""`, CAS-guarded with `--if-assignee
+ * <observed holder>` so a concurrent assignee change is never clobbered) and
+ * writes a `herdr-hydrator` audit comment naming the deciding signal and the
+ * previous holder (`released because no pane and claim holder dead; previous
+ * assignee: implement`). A comment failure is tolerated — the demotion stands
+ * and the cycle continues.
+ *
+ * Non-goals (deliberate): no wall-clock TTL, no heartbeat, no new protocol, no
+ * change to dispatch, the worklist selection marker, the drive orchestrator or
+ * `implement.py`; orphaned-lock cleanup and hydrator log rotation are separate
+ * work items.
+ *
  * Opening/closing a work-item pane does NOT touch the worklog DB, so the
  * DB-change-gated refresh tick can never update this marker for it. The
  * worklist therefore re-applies the marker on the hydrate cadence and on
@@ -94,6 +136,8 @@ import {
   fetchOutboundDepsForItems,
 } from './fetcher.js';
 import { parseMachinePaneListOutput } from './dispatcher-anchor.js';
+import { resolveHerdrBin } from './herdr-bin.js';
+import { probeClaimHolders, type ClaimHolderVerdict } from './claim-lock.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -121,6 +165,17 @@ export const HYDRATOR_STEP_TIMEOUT_MS = 5_000;
  * than lingering until the 20 s watchdog (WL-0MUY1CXSV008F8TZ).
  */
 export const HYDRATOR_EXEC_TIMEOUT_MS = 10_000;
+
+/**
+ * Hard-kill bound for the best-effort release audit comment spawn (ms).
+ *
+ * The comment is a tolerated side effect of a demotion that has ALREADY been
+ * persisted (WL-0MVWDB7F2003SORI): a hung/slow `wl comment add` must fail as a
+ * logged error, never trip the `demotion-apply` step budget and abort the
+ * cycle. The bound is therefore below `HYDRATOR_STEP_TIMEOUT_MS`, so the exec
+ * child is killed and the rejection is caught inside `applyDemotion`.
+ */
+export const HYDRATOR_RELEASE_COMMENT_TIMEOUT_MS = 2_000;
 
 /**
  * Default cap on candidates processed per hydrate tick. Bounds the number
@@ -155,6 +210,8 @@ const TERMINAL_DEP_STAGES = new Set(['in_review', 'done']);
 
 /** File name of the hydrator diagnostic log inside `.worklog/logs/`. */
 export const HYDRATOR_LOG_FILE = 'hydrator.log';
+/** Author recorded on every hydrator release audit comment. */
+export const HYDRATOR_COMMENT_AUTHOR = 'herdr-hydrator';
 /** Rolling bound: keep at most this many lines in the hydrator log. */
 export const HYDRATOR_LOG_MAX_LINES = 200;
 
@@ -166,6 +223,27 @@ export interface HydratorItem {
   title?: string;
   status?: string;
   stage?: string;
+  /**
+   * Current assignee. A non-empty value is the scheduling hold
+   * (WL-0MV85WDOM007BKF8), so a release must clear it and name the previous
+   * holder in the audit comment (WL-0MVWDB7F2003SORI).
+   */
+  assignee?: string;
+}
+
+/**
+ * Extra context for a demotion write (WL-0MVWDB7F2003SORI).
+ *
+ * A release must clear the scheduling hold (`--assignee ""`), guard that
+ * clear with a CAS on the holder it observed (`--if-assignee <prev>`) so a
+ * concurrent assignee change is never clobbered, and record who held the item
+ * so the release is explicable from the item alone.
+ */
+export interface DemotionOptions {
+  /** The holder observed this cycle; empty/absent ⇒ no `--if-assignee` guard. */
+  previousAssignee?: string;
+  /** Human-readable deciding signal, used in the release audit comment. */
+  reason?: string;
 }
 
 /** The subset of a `herdr pane list` entry the hydrator needs. */
@@ -242,8 +320,39 @@ export interface HydratorDeps {
   listOutboundDepsBatch?: (
     itemIds: string[],
   ) => Promise<Map<string, HydratorDepTarget[] | undefined> | undefined>;
-  /** Apply a demotion via `wl update`; true when it was persisted. */
-  applyDemotion: (itemId: string, status: string, stage: string) => Promise<boolean>;
+  /**
+   * Optional batched claim-holder probe (WL-0MVWDB3IG004NRIU): for the given
+   * pane-less candidates, answer *is this item's `<worklog>/locks/child-<id>
+   * .lock` currently held by a live claim holder?* Called exactly ONCE per
+   * cycle over the pane-less candidates, bounded by the per-tick cap.
+   * Production wiring delegates to `probeClaimHolders` (`claim-lock.ts`) — a
+   * local, side-effect-free probe with zero `wl`/`herdr` spawns.
+   *
+   * Optional so existing test fakes keep compiling: an absent seam disables
+   * the held signal and preserves the pre-existing behaviour byte-for-byte.
+   * Fail-open: a step timeout, a thrown/unavailable probe, or a missing
+   * per-item verdict suppresses that cycle's (or item's) demotion — never a
+   * release on ambiguous evidence.
+   */
+  hasLiveClaimHolder?: (
+    itemIds: string[],
+  ) => Promise<Map<string, ClaimHolderVerdict>>;
+  /**
+   * Apply a demotion via `wl update`; true when it was persisted.
+   *
+   * Production wiring also clears the scheduling hold (`--assignee ""`, CAS
+   * guarded by `--if-assignee <previous>`) and writes the release audit
+   * comment naming the deciding signal and the previous holder
+   * (WL-0MVWDB7F2003SORI). A failed comment is logged and never fails the
+   * demotion — the `[hydrator] released` log line stays the primary local
+   * trail.
+   */
+  applyDemotion: (
+    itemId: string,
+    status: string,
+    stage: string,
+    opts?: DemotionOptions,
+  ) => Promise<boolean>;
   /** Optional diagnostic log sink. */
   log?: (message: string) => void;
   /** Injectable monotonic clock (ms) for deterministic per-step timing. */
@@ -259,6 +368,7 @@ export type HydratorStepLabel =
   | 'in-progress-list'
   | 'pane-list'
   | 'dep-list'
+  | 'claim-probe'
   | 'demotion-apply';
 
 // ── Pure helpers ──────────────────────────────────────────────────────
@@ -488,15 +598,49 @@ export function compatibleStage(stage: string, status: string): string {
 }
 
 /**
+ * Build the body of a release audit comment (WL-0MVWDB7F2003SORI).
+ *
+ * Names the deciding signal and the previous holder so the release is
+ * explicable from the item alone, e.g.
+ * `released because no pane and claim holder dead; previous assignee: implement`.
+ * An item with no holder records `previous assignee: (none)` — never an
+ * ambiguous empty suffix.
+ *
+ * @param reason            The deciding signal (e.g. `released because no
+ *                          matching pane`).
+ * @param previousAssignee  The holder observed this cycle, if any.
+ */
+export function buildReleaseComment(
+  reason: string,
+  previousAssignee?: string,
+): string {
+  const holder =
+    typeof previousAssignee === 'string' && previousAssignee.length > 0
+      ? previousAssignee
+      : '(none)';
+  const signal = reason.length > 0 ? reason : 'released';
+  return `${signal}; previous assignee: ${holder}`;
+}
+
+/**
  * Pure demotion decision. Returns `null` when the item must be left alone
- * (not `in-progress`, or a matching ACTIVE pane exists — F1).
+ * (not `in-progress`, a matching ACTIVE pane exists — F1 — or a live claim
+ * holder keeps the item busy).
  *
  * The `hasActivePane` context key is retained for source compatibility; its
  * value now comes from the pane-title check `isActivePaneMatch`.
+ *
+ * Branch precedence (WL-0MVWDB3IG004NRIU, AC3 of the parent): `held` is
+ * evaluated AFTER the `in_review` and `blocked` branches, so a held claim
+ * only suppresses the final release-to-`open` branch and never overrides the
+ * audit-tier `in_review → completed` or the dependency `blocked` transition:
+ * `not in-progress → null` · `hasActivePane → null` · `stage in_review →
+ * completed` · `blocked → blocked` · `held → null` · `else → open/
+ * intake_complete`.
  */
 export function decideDemotion(
   item: HydratorItem,
-  ctx: { hasActivePane: boolean; blocked: boolean },
+  ctx: { hasActivePane: boolean; blocked: boolean; held: boolean },
 ): DemotionDecision | null {
   const status = (item.status ?? '').toLowerCase();
   if (status !== 'in-progress' && status !== 'in_progress') return null;
@@ -509,6 +653,7 @@ export function decideDemotion(
   if (ctx.blocked) {
     return { status: 'blocked', stage: compatibleStage(stage, 'blocked') };
   }
+  if (ctx.held) return null;
   // AC3 else-branch as written: release to `open` at `intake_complete`
   // (per WL-0MTF5WO2Q008B8US AC3; the stage is valid for `open` in
   // ALLOWED_STAGES_BY_STATUS / config.defaults.yaml).
@@ -712,6 +857,42 @@ export async function runHydrationOnce(
     // spawn seam (fail-open, exactly as before the batched seam existed).
   }
 
+  // WL-0MVWDB3IG004NRIU: ONE batched claim-holder probe per cycle, over the
+  // SAME pane-less candidate list as the dep read (a pane-matched item
+  // short-circuits and never probes; candidates beyond the per-tick cap are
+  // deferred to the next tick). Production wiring is a local, spawn-free
+  // `flock`/`/proc/locks` probe, so the cycle adds zero `wl`/`herdr` spawns.
+  // Fail-open, consistent with `pane-list`/`dep-list` handling: a step
+  // timeout or an unavailable/abnormal probe result suppresses demotion for
+  // the WHOLE cycle with a named reason — never a release on ambiguous
+  // evidence. An absent seam (existing test fakes) leaves the held signal
+  // off and the pre-existing behaviour byte-for-byte unchanged.
+  let claimByItem: Map<string, ClaimHolderVerdict> | null = null;
+  if (deps.hasLiveClaimHolder && depCandidateIds.length > 0) {
+    const claimStep = await runStep('claim-probe', stepTimeoutMs, now, log, () =>
+      deps.hasLiveClaimHolder!(depCandidateIds),
+    );
+    if (claimStep.status === 'timeout') {
+      return {
+        ok: false,
+        considered,
+        demoted: 0,
+        skipped: 0,
+        reason: 'claim-probe step timeout (no demotion on ambiguous evidence)',
+      };
+    }
+    if (claimStep.status === 'error' || !(claimStep.value instanceof Map)) {
+      return {
+        ok: false,
+        considered,
+        demoted: 0,
+        skipped: 0,
+        reason: 'claim-probe step unavailable (no demotion on ambiguous evidence)',
+      };
+    }
+    claimByItem = claimStep.value;
+  }
+
   let demoted = 0;
   let skipped = 0;
   let processed = 0;
@@ -761,18 +942,51 @@ export async function runHydrationOnce(
       }
     }
 
-    const decision = decideDemotion(item, { hasActivePane: hasActivePane, blocked });
+    // Held = a live claim holder owns this item's per-child lock (or the
+    // probe was ambiguous for it). Fail-open per item: a missing verdict in
+    // an otherwise-usable probe map is ambiguous evidence → treat as held
+    // (suppress), never released. `claimByItem === null` (no seam, or no
+    // pane-less candidates) → `held` stays false, preserving pre-seam
+    // behaviour.
+    let held = false;
+    if (claimByItem !== null) {
+      const verdict = claimByItem.get(item.id);
+      held = verdict === undefined || verdict.held;
+    }
+
+    const decision = decideDemotion(item, { hasActivePane: hasActivePane, blocked, held });
     if (decision === null) {
       skipped += 1;
+      if (held) {
+        const verdict = claimByItem?.get(item.id) as ClaimHolderVerdict | undefined;
+        const pid = typeof verdict?.pid === 'number' ? ` pid ${verdict.pid}` : '';
+        const sid = typeof verdict?.sessionId === 'string' ? ` session ${verdict.sessionId}` : '';
+        log(`[hydrator] kept ${item.id}: live claim holder${pid}${sid}`);
+      }
       continue;
     }
+
+    // Deciding signal for this release, named identically in the audit
+    // comment and the local log line. The pane is absent by definition (a
+    // matching pane returns `null` above); the claim holder is the second,
+    // mechanically verifiable signal (WL-0MVWDB3IG004NRIU).
+    const verdict = claimByItem?.get(item.id);
+    const deadClaimHolder =
+      verdict !== undefined && !verdict.held && verdict.reason === 'stale';
+    const releaseReason = deadClaimHolder
+      ? 'released because no pane and claim holder dead'
+      : 'released because no matching pane';
 
     const applyStep = await runStep(
       'demotion-apply',
       stepTimeoutMs,
       now,
       log,
-      () => deps.applyDemotion(item.id, decision.status, decision.stage),
+      () =>
+        deps.applyDemotion(item.id, decision.status, decision.stage, {
+          previousAssignee: item.assignee,
+          reason: releaseReason,
+        }),
     );
     if (applyStep.status === 'timeout') {
       return {
@@ -786,7 +1000,7 @@ export async function runHydrationOnce(
     if (applyStep.status === 'ok' && applyStep.value === true) {
       demoted += 1;
       log(
-        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (no matching pane)`,
+        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (${deadClaimHolder ? 'no pane, claim holder dead' : 'no matching pane'})`,
       );
     } else {
       skipped += 1;
@@ -810,6 +1024,7 @@ function normaliseItem(raw: unknown): HydratorItem | null {
     title: typeof o.title === 'string' ? o.title : undefined,
     status: typeof o.status === 'string' ? o.status : undefined,
     stage: typeof o.stage === 'string' ? o.stage : undefined,
+    assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
   };
 }
 
@@ -910,7 +1125,7 @@ export function createHydratorFileLog(
 export function createProductionHydratorDeps(
   opts: { log?: HydratorDeps['log'] } = {},
 ): HydratorDeps {
-  const herdrBin = (): string => process.env.HERDR_BIN_PATH ?? 'herdr';
+  const herdrBin = (): string => resolveHerdrBin();
 
   // Resolve the project root from the worklog-dir override when set, else
   // fall back to the process cwd (both work in the plugin pane).
@@ -1027,14 +1242,81 @@ export function createProductionHydratorDeps(
       return result;
     },
 
-    applyDemotion: async (itemId: string, status: string, stage: string) => {
+    // WL-0MVWDB3IG004NRIU: batched claim-holder probe — ONE call per cycle
+    // over the pane-less candidates. The worklog root is resolved once per
+    // cycle through `getWorklogDir()` (already imported here; the `.worklog`
+    // store root is exactly what `probeClaimHolders` expects, and it falls
+    // back to `$WORKLOG_DIR` / `<cwd>/.worklog` when the override is unset).
+    // The probe itself is local and side-effect-free (one `locks/` dir read + a
+    // `/proc/locks` snapshot or non-blocking `flock` per file) — zero new
+    // `wl`/`herdr` spawns per item.
+    hasLiveClaimHolder: async (itemIds: string[]) =>
+      probeClaimHolders(itemIds, { worklogDir }),
+
+    // WL-0MVWDB7F2003SORI: a release must also clear the scheduling hold and
+    // record who held the item. The `--assignee ""` clear is CAS-guarded by
+    // `--if-assignee <previous>` whenever a holder was observed, mirroring
+    // `rollbackClaimWorkItem()` (fetcher.ts): a concurrent assignee change
+    // makes the demotion stale instead of clobbering the new holder. With no
+    // observed holder there is nothing to guard — `--assignee ""` alone is
+    // idempotent. The audit comment is best-effort: a comment failure is
+    // logged and never fails the demotion (the `[hydrator] released` log line
+    // remains the primary local trail).
+    applyDemotion: async (
+      itemId: string,
+      status: string,
+      stage: string,
+      opts: DemotionOptions = {},
+    ) => {
+      const args = [
+        'update',
+        itemId,
+        '--status',
+        status,
+        '--stage',
+        stage,
+        '--assignee',
+        '',
+      ];
+      const previousAssignee = opts.previousAssignee;
+      if (typeof previousAssignee === 'string' && previousAssignee.length > 0) {
+        args.push('--if-assignee', previousAssignee);
+      }
+      args.push('--json');
       const { stdout } = await getExecFileAsync()(
         'wl',
-        buildWlArgs(['update', itemId, '--status', status, '--stage', stage, '--json']),
+        buildWlArgs(args),
         hydratorExecOptions(),
       );
       const payload = extractJson(stdout) as { success?: boolean } | null;
-      return payload?.success === true;
+      if (payload?.success !== true) return false;
+
+      try {
+        await getExecFileAsync()(
+          'wl',
+          buildWlArgs([
+            'comment',
+            'add',
+            itemId,
+            '--comment',
+            buildReleaseComment(opts.reason ?? 'released', previousAssignee),
+            '--author',
+            HYDRATOR_COMMENT_AUTHOR,
+            '--json',
+          ]),
+          {
+            ...hydratorExecOptions(),
+            timeout: HYDRATOR_RELEASE_COMMENT_TIMEOUT_MS,
+          },
+        );
+      } catch (err) {
+        log(
+          `[hydrator] release comment failed for ${itemId} (demotion stands): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      return true;
     },
 
     log,

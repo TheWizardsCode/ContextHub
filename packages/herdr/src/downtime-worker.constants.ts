@@ -83,6 +83,28 @@ export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2;
  */
 export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
 /**
+ * Minimum free slots required for a LEAF audit dispatch (parent
+ * WL-0MSORQ8Y4004YT63 AC2, WL-0MVV1EZ8G006PSBE): a candidate with **no
+ * children** is audited by a single Pi session, so a single free slot
+ * suffices — the `AUDIT_PHASE2_PARALLELISM=1` child fan-out that
+ * `DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2` reserves capacity for cannot happen.
+ * Applied ONLY when the candidate's scope is a trusted `'leaf'`; a
+ * `'parent'` or an untrustworthy scope lookup keeps the
+ * `DOWNTIME_AUDIT_MIN_FREE_SLOTS` gate (fail-closed via
+ * `classifyAuditScope`). Never larger than the parent audit minimum: a leaf
+ * audit must not demand more slots than a parent audit.
+ */
+export const DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1;
+/**
+ * Default for the OPT-IN race-accepting leaf-audit variant
+ * (`downtimeLeafAuditImmediate`, WL-0MVV1F1P1005PO5M, parent
+ * WL-0MSORQ8Y4004YT63 AC5): **off**. The fail-closed policy is the shipped
+ * default — a leaf audit waits for the same free slot to stay free for the
+ * full idle threshold (C4) unless an operator explicitly accepts the race
+ * that an interactive request grabs the slot before the audit's first call.
+ */
+export const DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE = false;
+/**
  * Minimum free slots required for a single-pane dispatch (implement /
  * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3, F5
  * WL-0MTII48OV008P2QU single budget): each pane consumes exactly one local
@@ -150,6 +172,17 @@ export function decisionHeaderToken(reason: string): string {
       return reason;
   }
 }
+/**
+ * Neutral outcome reason for a relaxed leaf-audit tick whose pinned candidate
+ * could not be dispatched (WL-0MVV1F0HK009JQAP C4): the slot was reserved for
+ * the pinned audit item and nothing else may consume it, so the tick ends
+ * WITHOUT a candidate rather than with a competing tier.
+ *
+ * Deliberately distinct from `no-candidate`: the backlog is not empty and the
+ * relaxed slot is a reservation, so this must never enter the no-candidate
+ * cooldown (or count as a strike) — polling resumes on the next idle band.
+ */
+export const LEAF_AUDIT_PIN_HOLD_REASON = 'leaf-audit-pin-hold';
 /**
  * Schema-v2 capacity evidence attached to a no-dispatch decision entry
  * (LP-0MVGDUVGE0024YAI): the pool summary, payload version and the observed
@@ -267,6 +300,28 @@ export interface DecisionEntryFields extends CapacityEvidence {
   capacityBudget?: number;
   effectiveFreeSlots?: number;
   skippedTier?: string;
+  /**
+   * Leaf-audit tick-admission evidence (WL-0MVV1F0HK009JQAP C4). On the
+   * non-blocking `leaf-audit-admission` observation: the pinned audit item and
+   * its classified scope, the per-slot `thresholdMetCount` that admitted it and
+   * the configured `downtimeRequiredFreeSlots` the tick relaxed. The same four
+   * fields annotate the `audit-tier-budget-skipped` observation emitted when the
+   * relaxed band held only a parent candidate. Together they make a relaxed
+   * tick — and its fail-closed counterpart — diagnosable from the log alone.
+   */
+  leafAuditItemId?: string;
+  leafAuditScope?: string;
+  thresholdMetCount?: number;
+  requiredFreeSlots?: number;
+  /**
+   * The `downtimeLeafAuditImmediate` toggle state that produced this decision
+   * (WL-0MVV1F1P1005PO5M): `true` on the opt-in race-accepting variant (the
+   * idle-threshold wait was bypassed), `false` on the default C4 admission.
+   * Recorded on both the `leaf-audit-admission` observation and its
+   * `audit-tier-budget-skipped` parent-only counterpart, so a relaxed tick —
+   * or its absence — is attributable to the toggle from the log alone.
+   */
+  leafAuditImmediate?: boolean;
   /**
    * Per-offer dispatch-time rejections (WL-0MVR8FKMU009XTED AC2): present on a
    * coordination-mode refusal that rejected one or more offers, so each

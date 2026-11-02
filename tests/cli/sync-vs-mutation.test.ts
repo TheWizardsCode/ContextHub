@@ -28,9 +28,9 @@ import * as path from 'path';
 import * as os from 'os';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
 import { cliInvocation } from './cli-bundle.js';
+import { fixtureGitEnv } from './git-helpers.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
-const projectRoot = path.resolve(__dirname, '..', '..');
 // The pre-compiled CLI bundle (cli-bundle.ts) runs the same `src/cli.ts`
 // command graph as `dist/cli.js`, but ~30% cheaper per spawn and always in
 // step with `src/` — a stale build would otherwise silently test old code.
@@ -42,19 +42,8 @@ function cliSpawn(
   return spawnSync(command, [entry, ...args], options);
 }
 
-const mockBinDir = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
-
-/** PATH without the test mock-bin so subprocesses run the real git binary. */
-function realGitEnv(): Record<string, string> {
-  const pathVal = (process.env.PATH || '')
-    .split(path.delimiter)
-    .filter(p => path.resolve(p) !== path.resolve(mockBinDir))
-    .join(path.delimiter);
-  return { ...process.env as Record<string, string>, PATH: pathVal };
-}
-
 function git(cwd: string, ...args: string[]): string {
-  const res = spawnSync('git', args, { cwd, encoding: 'utf-8', env: realGitEnv() });
+  const res = spawnSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
   if (res.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${res.stderr || res.stdout}`);
   }
@@ -69,7 +58,7 @@ function runCli(
   const res = cliSpawn([...args], {
     cwd,
     encoding: 'utf-8',
-    env: env ?? realGitEnv(),
+    env: env ?? fixtureGitEnv(),
     timeout: 60000,
   });
   return { stdout: res.stdout || '', stderr: res.stderr || '', status: res.status ?? -1 };
@@ -165,7 +154,7 @@ function setupProject(): Setup {
   const release = path.join(shimDir, 'fetch-release');
   const realGit = execFileSync('which', ['git'], {
     encoding: 'utf-8',
-    env: realGitEnv(),
+    env: fixtureGitEnv(),
   }).trim();
   const shim = [
     '#!/bin/sh',
@@ -204,8 +193,8 @@ fi
 /** Environment for a spawned sync: the git shim is first on PATH. */
 function shimEnv(s: Setup): Record<string, string> {
   return {
-    ...realGitEnv(),
-    PATH: `${s.shimDir}${path.delimiter}${realGitEnv().PATH}`,
+    ...fixtureGitEnv(),
+    PATH: `${s.shimDir}${path.delimiter}${fixtureGitEnv().PATH}`,
     GIT_SHIM_MARKER: s.marker,
     GIT_SHIM_RELEASE: s.release,
     GIT_SHIM_REAL: s.realGit,
@@ -257,14 +246,14 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const upd = spawnCli(
         s.local,
         ['--json', 'update', id, '-s', 'completed', '--stage', 'in_review'],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const updRes = await upd.done;
       expect(updRes.status, updRes.stderr).toBe(0);
       const cmt = spawnCli(
         s.local,
         ['--json', 'comment', 'add', id, '-a', 'test', '-c', 'completed concurrently'],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const cmtRes = await cmt.done;
       expect(cmtRes.status, cmtRes.stderr).toBe(0);
@@ -314,7 +303,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const close = spawnCli(
         s.local,
         ['--json', 'close', id, '--force', '--reason', 'closed concurrently'],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const closeRes = await close.done;
       expect(closeRes.status, closeRes.stderr).toBe(0);
@@ -365,7 +354,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const del = spawnCli(
         s.local,
         ['--json', 'delete', id, '--no-sync'],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const delRes = await del.done;
       expect(delRes.status, delRes.stderr).toBe(0);
@@ -402,7 +391,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const dep = spawnCli(
         s.local,
         ['--json', 'dep', 'add', idA, idB],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const depRes = await dep.done;
       expect(depRes.status, depRes.stderr).toBe(0);
@@ -446,7 +435,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const dep = spawnCli(
         s.local,
         ['--json', 'dep', 'rm', idA, idB],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const depRes = await dep.done;
       expect(depRes.status, depRes.stderr).toBe(0);
@@ -487,7 +476,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const doctor = spawnCli(
         s.local,
         ['--json', 'doctor', 'file-paths', '--add-placeholder'],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const doctorRes = await doctor.done;
       expect(doctorRes.status, doctorRes.stderr).toBe(0);
@@ -521,8 +510,8 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     // The import reads the issue list via the fake `gh` shim, which returns an
     // issue marked for $WL_TEST_ID; the import updates that item's title.
     const importEnv = {
-      ...realGitEnv(),
-      PATH: `${s.shimDir}${path.delimiter}${realGitEnv().PATH}`,
+      ...fixtureGitEnv(),
+      PATH: `${s.shimDir}${path.delimiter}${fixtureGitEnv().PATH}`,
       WL_TEST_ID: id,
     };
     const mutation = (async () => {
@@ -561,7 +550,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     await waitForFile(s.marker, 20000);
 
     const mutation = (async () => {
-      const rv = spawnCli(s.local, ['--json', 'update', id, '--assignee', 'producer'], realGitEnv());
+      const rv = spawnCli(s.local, ['--json', 'update', id, '--assignee', 'producer'], fixtureGitEnv());
       const rvRes = await rv.done;
       expect(rvRes.status, rvRes.stderr).toBe(0);
     })();
@@ -595,7 +584,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const waive = spawnCli(
         s.local,
         ['--json', 'audit-waive', id, '--reason', 'test waiver', '--author', 'tester'],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const waiveRes = await waive.done;
       expect(waiveRes.status, waiveRes.stderr).toBe(0);
@@ -633,7 +622,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     await waitForFile(s.marker, 20000);
 
     const mutation = (async () => {
-      const rs = spawnCli(s.local, ['--json', 're-sort'], realGitEnv());
+      const rs = spawnCli(s.local, ['--json', 're-sort'], fixtureGitEnv());
       const rsRes = await rs.done;
       expect(rsRes.status, rsRes.stderr).toBe(0);
     })();
@@ -671,7 +660,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const up = spawnCli(
         s.local,
         ['--json', 'comment', 'update', commentId, '-c', 'updated concurrently'],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const upRes = await up.done;
       expect(upRes.status, upRes.stderr).toBe(0);
@@ -711,7 +700,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       const del = spawnCli(
         s.local,
         ['--json', 'comment', 'delete', commentId],
-        realGitEnv(),
+        fixtureGitEnv(),
       );
       const delRes = await del.done;
       expect(delRes.status, delRes.stderr).toBe(0);
@@ -742,7 +731,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
 
     let createdId = '';
     const mutation = (async () => {
-      const cr = spawnCli(s.local, ['--json', 'create', '-t', 'Concurrent create target'], realGitEnv());
+      const cr = spawnCli(s.local, ['--json', 'create', '-t', 'Concurrent create target'], fixtureGitEnv());
       const crRes = await cr.done;
       expect(crRes.status, crRes.stderr).toBe(0);
       const parsed = JSON.parse(crRes.stdout);
@@ -784,7 +773,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     // the sync holds it. They must all block, then persist after release.
     const mutate = (args: string[]): Promise<void> =>
       new Promise<void>((resolve, reject) => {
-        const spawned = spawnCli(s.local, args, realGitEnv());
+        const spawned = spawnCli(s.local, args, fixtureGitEnv());
         spawned.done
           .then(r => {
             try {

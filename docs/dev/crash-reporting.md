@@ -134,7 +134,34 @@ Result: ✅ **kdump is configured and the crash kernel is loaded.** The next ker
 2. run `makedumpfile -c -d 31` (compressed, in-use pages only),
 3. save `vmcore` + `dmesg` to `KDUMP_COREDIR` (`/var/crash`).
 
-No `/etc/kdump.conf` is expected on Ubuntu — configuration lives in `/etc/default/kdump-tools`. No further action required.
+No `/etc/kdump.conf` is expected on Ubuntu — configuration lives in `/etc/default/kdump-tools`.
+
+> **Correction (2026-11-01, WL-0MVY898D4007BZ28): the old "no further action required" conclusion
+> was wrong, and the same misconfiguration is what made every earlier freeze leave no evidence.**
+> `crashkernel` was reserved at 512 MB against a `kdump-config show` requirement of 1103 MB
+> (the kdump initrd is 244 MB on disk / 310 MB recorded — the crash kernel could never boot far
+> enough to write a vmcore). `current state: ready to kdump` was true and useless: it only verifies
+> the reservation is *present*, never that a dump can be *written*.
+>
+> Fixed 2026-11-01 19:50 by a deliberate SysRq panic that reproduced the failure and forced the
+> fix. The reservation was raised to **1280M** in `/etc/default/grub.d/kdump-tools.cfg`:
+>
+> ```
+> crashkernel=2G-4G:320M,4G-32G:1280M,32G-64G:1280M,64G-128G:2048M,128G-:4096M
+> ```
+>
+> Post-reboot verification (all pass):
+>
+> ```
+> $ cat /sys/kernel/kexec_crash_size      # 1342177280 (= 1280 MiB)
+> $ cat /sys/kernel/kexec_crash_loaded    # 1
+> $ sudo kdump-config show | grep 'crashkernel addr'   # 0x8b000000 — populated
+> ```
+>
+> **Proof, not trust:** a synthetic panic (`echo c > /proc/sysrq-trigger`) produced the host's first
+> vmcore (`/var/crash/202611011959`, 309 MB + dmesg), and a genuine driver panic on the same day
+> produced `/var/crash/202611012042` and `/var/crash/202611012106` — see the
+> [Silent freezes / panic blink](#8-silent-freezes--panic-blink) section below.
 
 ### 3.2 Why not disabled
 
@@ -306,6 +333,69 @@ scripts/crash-reporting-check.sh --json | jq .whoopsie
 rm /var/crash/_usr_bin_node.1000.crash   # or: sudo apport-cli --crash-file /var/crash/... --save /tmp/...
 du -sh /var/crash
 ```
+
+---
+
+## 8. Silent freezes / panic blink (2026-11-01, WL-0MVY898D4007BZ28 AC-D)
+
+**A "total freeze with blinking caps-lock LED" is a kernel panic, not a hardware/firmware freeze.**
+The caps-lock blink is the **Linux panic LED loop** (~1 blink / 0.5 s), reproduced by a deliberate
+SysRq crash on this host. Blaming the firmware/EC put every investigation on the wrong path; the
+host's own filter chain made panic evidence invisible (each of the four capture layers failed
+independently):
+
+| Why nothing was captured | Evidence |
+|---|---|
+| crashkernel reservation too small | needed 1103M, reserved 512M → crash kernel never booted; fixed to 1280M (AC-A) |
+| pstore cannot work on this firmware | `efi_pstore` loads but `/sys/firmware/efi/efivars` has no dump/OOPS store — dead end |
+| journald cannot flush at panic | journal always stops mid-sentence; panic text goes to console only |
+| `quiet splash` hides the console | panic banner and stack were never visible on screen |
+
+### 8.1 Corrected observability table (`silent` ≠ `panic`)
+
+| Previous-boot end | Signature that actually ended it | Classification |
+|---|---|---|
+| No last line, freezing until manual power-cycle | panic that `crash_kexec()` entered but the undersized region hung before the 5 s reboot | `silent` (no dump) |
+| `mt7921e: driver own failed` / `Timeout for driver own` loop | the MediaTek Wi-Fi driver panic (`mt76_dma_add_buf` page fault, `panic_on_oops=1`) | `mt7921e-timeout` |
+| `NVRM … RmCheckForGcxSupport…` storm (>10³ lines) | NVIDIA driver storm | `NVRM-storm` |
+| `Kdump: loaded` panic header + `/var/crash/<ts>/` | captured panic — the trace is readable | `panic-dump-available` |
+| `Reached target shutdown.target`, `Powering off.` | deliberate reboot/power-off | `clean-shutdown` |
+
+### 8.2 Each layer, verified on this host
+
+- **kdump (only viable path):** reservation fixed; a synthetic panic and two real driver panics
+  produced vmcores (`/var/crash/202611011959`, `…12042`, `…12106`). Extraction needs no root and
+  no dbgsym kernel: `makedumpfile -R raw < dump.<ts>` then `makedumpfile --dump-dmesg raw --`.
+  `makedumpfile` warns the kernel version is unsupported, so the extracted dmesg is the reliable
+  artefact (a `crash(8)` session may need dbgsym symbols + a newer makedumpfile).
+- **pstore:** confirmed dead end on this firmware — do not spend time on it again.
+- **journald:** cannot flush at panic; panic text is console-only. `kernel.panic_print=0xff`
+  (`/etc/sysctl.d/99-panic-print.conf`) widens the on-screen trace, and `quiet splash` has been
+  dropped from the kernel command line so the console actually shows it.
+- **lockups → panics:** `kernel.hardlockup_panic=1` (`/etc/sysctl.d/99-lockup-panic.conf`)
+  converts hard lockups into captureable panics; `kernel.panic=5` (`99-panic-autoreboot.conf`)
+  makes a panic self-reboot. `softlockup_panic`/`hung_task_panic` left at 0 (they fire on any
+  scheduling stall and would turn recoverable hangs into reboot loops; the observed crash class is
+  a hard fault, already covered).
+
+### 8.3 Evidence tooling
+
+- `scripts/hostwatch.sh` (+ `install-hostwatch.sh`) — a timer-driven (≤10 s) telemetry sample
+  (`HOSTWATCH` journald lines: k10temp/acpitz/MT7921e temps, loadavg, MemAvailable, wlp3s0
+  operstate, mt7921e/NVRM error deltas). Follows the `install-memwatch.sh` root-owned install
+  pattern.
+- `scripts/collect-freeze-evidence.sh` — gathers vmcore/dmesg + last N HOSTWATCH samples + the
+  previous-boot kernel tail and writes a `SUMMARY.md` whose first line is the classification
+  (the table above). An unrecognised shape **fails** (exit 3) rather than silently reporting
+  "unknown".
+- `scripts/crash-reporting-check.sh` — health check (apport/whoopsie/kdump/retention/disk); its
+  `kdump` block reports config presence, but proof requires a real dump (see 8.2).
+
+### 8.4 Near-real-time diagnosis
+
+Do not wait for the next panic blankly: `scripts/collect-freeze-evidence.sh` after any reboot turns
+"what happened?" into a one-line answer within a minute, and the `HOSTWATCH` lines tell you the
+machine was alive (temps/load) right up to the fault.
 
 ---
 

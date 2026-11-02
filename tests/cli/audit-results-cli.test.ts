@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execAsync, enterTempDir, leaveTempDir, writeConfig, writeInitSemaphore, cliPath } from './cli-helpers.js';
+import { computeContentFingerprint } from '../../src/audit-fingerprint.js';
 
 describe('wl audit-set command', () => {
   let state: { tempDir: string; originalCwd: string };
@@ -350,10 +351,15 @@ describe('audit fingerprint persistence (WL-0MUBVH5S0008NQ9K AC2)', () => {
     expect(result.audit.fingerprint).toBe('sha256-explicit');
   });
 
-  it('legacy audit-set without --fingerprint leaves fingerprint null', async () => {
-    await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close yes --summary "legacy"`);
+  it('audit-set without --fingerprint auto-records the content fingerprint (WL-0MVK01BBD005V7KK)', async () => {
+    const { stdout: showOut } = await execAsync(`tsx ${cliPath} --json show ${targetId}`);
+    const item = JSON.parse(showOut).workItem;
+
+    await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close yes --summary "manual approval"`);
     const { stdout } = await execAsync(`tsx ${cliPath} --json audit-show ${targetId}`);
     const result = JSON.parse(stdout);
-    expect(result.audit.fingerprint).toBeNull();
+    expect(result.audit.fingerprint).toBe(
+      computeContentFingerprint({ title: item.title, description: item.description }),
+    );
   });
 });

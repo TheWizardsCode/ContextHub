@@ -22,24 +22,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
 import { cliInvocation } from './cli-bundle.js';
+import { fixtureGitEnv } from './git-helpers.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
-const projectRoot = path.resolve(__dirname, '..', '..');
 /** The CLI under test: the pre-compiled bundle of `src/cli.ts`, so these
  * tests never depend on a possibly stale `dist/` build (WL-0MVII17N3003FJWT). */
 const [cliCommand, cliEntry] = cliInvocation();
-const mockBinDir = path.join(__dirname, 'mock-bin');
-
-/** PATH without the test mock-bin so we run the real git binary. */
-function realGitPath(): string {
-  return (process.env.PATH || '')
-    .split(path.delimiter)
-    .filter(p => path.resolve(p) !== path.resolve(mockBinDir))
-    .join(path.delimiter);
-}
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf-8', env: { ...process.env, PATH: realGitPath() } });
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
 }
 
 let tempDir: string;
@@ -99,7 +90,7 @@ function runSyncViaSpawn(): Promise<{ code: number | null; stdout: string; stder
       [cliEntry, '--json', 'sync', '--if-idle'],
       {
         cwd: tempDir,
-        env: { ...process.env, PATH: realGitPath() },
+        env: fixtureGitEnv(),
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );
@@ -164,4 +155,41 @@ it('single wl sync works identically and reports success', async () => {
   expect(parsed.success).toBe(true);
   expect(parsed.skipped).toBeUndefined();
   expect(fs.existsSync(lockPath())).toBe(false);
+}, 60000);
+
+// ---------------------------------------------------------------------------
+// Fixture isolation: a leaked repository override never reaches fixture git
+// (WL-0MVVWRPRO006IQ61)
+// ---------------------------------------------------------------------------
+
+it('ignores a GIT_INDEX_FILE leaked by an enclosing test gate', () => {
+  // `implement.py finish` validates a would-be-commit tree with a temporary
+  // GIT_INDEX_FILE exported to the suite. Before the hermetic fixture
+  // environment, this fixture's `git add`/`git commit` wrote into THAT index
+  // (whose object references belong to the implementation worktree), the
+  // enclosing gate then refused the run as unattributable, and this suite
+  // failed with "invalid object ... / Error building trees".
+  const leakedIndex = path.join(createTempDir(), 'leaked-gate.index');
+  const previous = process.env.GIT_INDEX_FILE;
+  process.env.GIT_INDEX_FILE = leakedIndex;
+  try {
+    fs.writeFileSync(path.join(tempDir, 'isolated.txt'), 'isolated\n', 'utf8');
+    git(tempDir, 'add', 'isolated.txt');
+    git(tempDir, 'commit', '-m', 'commit under a leaked GIT_INDEX_FILE');
+
+    // The fixture repo's own index recorded the commit...
+    const tracked = git(tempDir, 'ls-files');
+    expect(tracked).toContain('isolated.txt');
+    // ...with nothing staged or modified left behind (the `.worklog/` fixture
+    // churn from beforeEach is untracked and irrelevant here).
+    const status = git(tempDir, 'status', '--porcelain', 'isolated.txt');
+    expect(status.trim()).toBe('');
+    const log = git(tempDir, 'log', '--oneline');
+    expect(log).toContain('commit under a leaked GIT_INDEX_FILE');
+    // ...and the enclosing gate's index was never touched.
+    expect(fs.existsSync(leakedIndex)).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.GIT_INDEX_FILE;
+    else process.env.GIT_INDEX_FILE = previous;
+  }
 }, 60000);

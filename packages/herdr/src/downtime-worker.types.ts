@@ -356,88 +356,24 @@ export type LlamaStatusFetcher = (
   init?: { signal?: unknown },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 /**
- * Locality priority the dispatcher asks the proxy to schedule a turn with.
- * Advisory to the proxy; unknown values are the proxy's to reject.
+ * Local-capacity reservation handshake wire types (parent WL-0MVIKRFP0005JDL8,
+ * slice C1). Defined in `downtime-worker.local-reservation.contract.ts` to
+ * keep this module under the split guard's 1000-line ceiling; re-exported
+ * here so every existing `./downtime-worker.types.js` import is unchanged.
  */
-export type LocalReservationPriority = 'interactive' | 'background';
-/**
- * Prefix-cache expectation for the turn: `warm` (the proxy's cache should
- * serve the prefill), `cold` (it should not) or `unknown` (the caller cannot
- * tell — the proxy decides).
- */
-export type LocalReservationCacheState = 'warm' | 'cold' | 'unknown';
-/**
- * Request body for `POST /llama/local/reserve`: the pane's expected token
- * size, its scheduling priority and its cache state. The proxy contract is
- * additive-only, so extra fields are permitted and ignored by this consumer.
- */
-export interface LocalReservationRequest {
-  /** Expected prompt + completion token size for the turn. */
-  expected_tokens: number;
-  /** Scheduling priority the proxy may use to admit or refuse. */
-  priority: LocalReservationPriority;
-  /** Whether the proxy's prefix cache is expected to serve this prefill. */
-  cache_state: LocalReservationCacheState;
-  /** Additive fields are allowed (additive-only proxy contract). */
-  [extra: string]: unknown;
-}
-/**
- * Granted reserve response body (`2xx`). Field names are the documented
- * contract; {@link parseLocalReservationResponse} additionally accepts the
- * `ticket` / `ttl_seconds` aliases while the proxy contract settles.
- */
-export interface LocalReservationGrantedBody {
-  ticket_id: string;
-  ttl_s: number;
-  [extra: string]: unknown;
-}
-/**
- * Refused reserve response body (`429`): `reason` is an OPEN vocabulary
- * (`reserved-fallback`, `prefill-gate`, `queue-full`, …) — consumers accept
- * any non-empty string and never branch on an unknown one.
- */
-export interface LocalReservationRefusedBody {
-  reason: string;
-  retry_after_s: number;
-  [extra: string]: unknown;
-}
-/** A granted gate ticket: its id goes on the pane's first request. */
-export interface LocalReservationTicket {
-  /** Gate ticket id, surfaced as `X-Local-Reservation`. */
-  ticketId: string;
-  /** Seconds the ticket remains valid (always finite and > 0). */
-  ttlSeconds: number;
-}
-/** A refusal: defer by `retryAfterSeconds`, record `reason` as evidence. */
-export interface LocalReservationRefusal {
-  /** Proxy-supplied refusal reason (open vocabulary). */
-  reason: string;
-  /** Seconds to wait before asking again (finite, >= 0). */
-  retryAfterSeconds: number;
-}
-/** Parsed reservation outcome: a ticket to claim with, or a refusal to defer on. */
-export type LocalReservationResult =
-  | { status: 'granted'; ticket: LocalReservationTicket }
-  | { status: 'refused'; refusal: LocalReservationRefusal };
-/**
- * Injectable POST boundary for the reserve handshake (mirrors the existing
- * `LlamaStatusFetcher` injectable-seam pattern; narrow enough that tests can
- * stub it with a plain object).
- */
-export type LocalReserveFetcher = (
-  url: string,
-  init: { method: 'POST'; headers: Record<string, string>; body: string; signal?: unknown },
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
-/**
- * The reserve client: asks the proxy for an admission ticket. Resolves the
- * typed result, or `null` on ANY unusable outcome (endpoint absent, server
- * error, timeout, malformed body) — NEVER throws. A `null` means "this proxy
- * does not reserve": the caller fails open to today's polling behaviour
- * (parent AC2).
- */
-export type LocalReserveClient = (
-  request: LocalReservationRequest,
-) => Promise<LocalReservationResult | null>;
+export type {
+  LocalReservationCacheState,
+  LocalReservationGrantedBody,
+  LocalReservationPriority,
+  LocalReservationRefusal,
+  LocalReservationRefusedBody,
+  LocalReservationRequest,
+  LocalReservationResult,
+  LocalReservationTicket,
+  LocalReservationUnavailable,
+  LocalReserveClient,
+  LocalReserveFetcher,
+} from './downtime-worker.local-reservation.contract.js';
 /** Observation-fed state for the one-per-idle-window launch fence. */
 export interface IdleWindowLaunchObservation {
   /** True when the poll reports a continuous idle window (started/ongoing). */

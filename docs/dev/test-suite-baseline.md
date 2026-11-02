@@ -771,6 +771,452 @@ python3 <test-skill>/scripts/run_tests.py --suite pytest --force --json
   moves, so an idle CI host will show a smaller proportional win than the
   loaded measurements here — but a strictly faster suite in absolute terms.
 
+## In-process CLI harness cost (WL-0MVVXFXM6007QZ2L)
+
+**Work item:** WL-0MVVXFXM6007QZ2L (child of WL-0MVHVZMCH0092JCY — *Investigate
+in-process CLI harness cost*)
+**Machine-readable artefact:** `bench/inproc-harness-profile.json`
+**One command:** `npm run benchmark:inproc-harness -- --runs 5`
+**Profiler:** `bench/inproc-harness-profile.ts` (a bench script, not a vitest
+test — it is never run through `vitest`/`npm test`)
+**Captured:** 2026-10-31T11:38Z on `rgardler-AI-Laptop` (16-core AMD Ryzen 7
+4800H), node v22.22.1, **load average 4.14 / 6.56 / 7.99** (1/5/15 min)
+**Method:** median of **5 runs per scenario**, 1 discarded warmup run, one
+**fresh temporary worklog store per measured run** (never the repository
+`.worklog/`, which the profiler does not open even in its copy mode).
+
+### What is attributed
+
+Phase marks come from the harness itself: `tests/cli/cli-inproc.ts` takes them
+only when `WL_INPROC_PROFILE=1` is set (the switch is **off by default**, so the
+suite takes exactly the same code path and performs no timing calls). Buckets:
+
+| Bucket | Phases | Kind |
+|---|---|---|
+| `argvAndOverride` | argv split/normalisation + `--worklog-dir` override | harness-side |
+| `commanderRegistration` | `Command` construction + registration of the ~29 built-in commands | harness-side |
+| `pluginContext` | `createPluginContext(program)` | harness-side |
+| `configLoad` | `ctx.utils.getConfig()` (YAML parse; **nested** in the action) | production startup |
+| `dbOpen` | database open incl. schema creation/migrations (**nested** in the action) | production startup |
+| `dbClose` | database close | production startup |
+| `commandAction` | the command's own work, **excluding** the two nested phases | command work |
+| `harnessBookkeeping` | stream/console patch + restore, throttler drain | harness-side |
+
+`configLoad` and `dbOpen` are nested inside the `command_action` window, so
+they are counted in their own bucket **and** inside the action total but never
+added twice: the buckets sum to the top-level attribution, which is compared
+with the measured per-call wall time. The remainder is reported explicitly as
+**unattributed harness overhead** (timers, promise scheduling, GC, clock
+calls) — see the `residual` column. Reconciliation target: **≥ 90 %** of the
+call attributed; the profiler exits non-zero when a scenario misses it.
+
+### Attribution — fresh temporary store (the regime the suite uses)
+
+Milliseconds, median of 5 runs per scenario:
+
+| scenario | total | argv+ovr | cmdReg | pluginCtx | config | dbOpen | dbClose | cmdAction | bookkeeping | residual |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `wl --help` | 2.3 | 0.0 | 1.1 | 0.5 | 0.0 | 0.0 | 0.0 | 0.5 | 0.1 | 0.0 |
+| `wl list --json` | 4.7 | 0.0 | 1.2 | 0.3 | 0.0 | 2.2 | 0.3 | 0.5 | 0.1 | 0.1 |
+| `wl create -t <item> --json` | 5.1 | 0.0 | 0.6 | 0.2 | 0.2 | 2.1 | 0.3 | 1.6 | 0.1 | 0.0 |
+| `wl status --json` | 4.0 | 0.0 | 0.7 | 0.2 | 0.2 | 1.8 | 0.3 | 0.3 | 0.1 | 0.0 |
+
+Same numbers as a share of each call, with the attributed total:
+
+| scenario | argv+ovr | cmdReg | pluginCtx | config | dbOpen | dbClose | cmdAction | bookkeeping | attributed |
+|---|---|---|---|---|---|---|---|---|---|
+| `wl --help` | 0.9 % | 49.4 % | 19.3 % | 0.0 % | 0.0 % | 0.0 % | 22.7 % | 3.4 % | **98.3 %** |
+| `wl list --json` | 0.4 % | 24.5 % | 6.1 % | 0.0 % | 47.3 % | 6.8 % | 9.9 % | 1.5 % | **98.9 %** |
+| `wl create` | 0.4 % | 10.9 % | 3.8 % | 3.8 % | 42.1 % | 6.3 % | 31.2 % | 1.2 % | **99.4 %** |
+| `wl status` | 0.7 % | 18.2 % | 5.0 % | 5.0 % | 44.8 % | 7.0 % | 8.0 % | 1.5 % | **99.3 %** |
+
+Grouped by cost category (median share of the call):
+
+| scenario | harness-side | production startup | command work |
+|---|---|---|---|
+| `wl --help` | 1.7 ms (73.0 %) | 0.0 ms (0.0 %) | 0.5 ms (22.7 %) |
+| `wl list --json` | 1.5 ms (32.5 %) | 2.6 ms (54.0 %) | 0.5 ms (9.9 %) |
+| `wl create` | 0.8 ms (16.2 %) | 2.6 ms (52.2 %) | 1.6 ms (31.2 %) |
+| `wl status` | 1.0 ms (25.4 %) | 2.3 ms (56.7 %) | 0.3 ms (8.0 %) |
+
+The **first** in-process call in a process is recorded separately rather than
+averaged in, because it also pays module-graph and JIT warm-up: `wl --help`
+measured **19.5 ms** cold (commander registration 9.9 ms, plugin context
+5.3 ms, command action 3.4 ms) versus 2.3 ms warm. That difference — not a
+hidden per-call cost — is what the seed `~72 ms` figure for `--help` reflects.
+
+### Attribution — production-sized store (the parent's ~196–257 ms path)
+
+The seed measurements in the parent item (`list --json`, `create`, `status` at
+~196–257 ms) only reproduce against a **production-sized store**, not the
+small temp stores the suite creates. Measured against a copy of the
+repository's own 109 MiB `worklog.db` (median of 3 runs, load 4.21 / 6.23 /
+7.81, same host, source store copied per run and never opened):
+
+| scenario | total | cmdReg | pluginCtx | config | dbOpen | dbClose | cmdAction | bookkeeping | cmdAction share |
+|---|---|---|---|---|---|---|---|---|---|
+| `wl list --json` | 201.3 | 1.3 | 0.7 | 0.0 | 2.1 | 0.9 | **195.1** | 0.1 | **96.9 %** |
+| `wl create -t <item> --json` | 216.6 | 3.4 | 0.6 | 0.6 | 1.8 | 1.5 | **211.2** | 0.1 | **97.5 %** |
+| `wl status --json` | 143.6 | 1.2 | 0.3 | 0.4 | 2.3 | 1.2 | **139.1** | 0.1 | **96.9 %** |
+
+In this regime the harness-side buckets total **1.7–4.2 ms (1.1–1.9 %)** and
+production startup (config load + DB open + close) **3.0–3.9 ms (1.5–2.7 %)**.
+Opening even the 109 MiB store costs ~2 ms; reading/serialising thousands of
+work items in the command action costs ~140–210 ms. `create` is the slowest
+because it writes into that store.
+
+### Decision-gate verdict (parent AC 3)
+
+- **Dominant phase on the ~196–257 ms path:** the **command action** —
+  **195.1 ms, 96.9 %** of the 201.3 ms `wl list --json` call (211.2 ms / 97.5 %
+  for `create`, 139.1 ms / 96.9 % for `status`).
+- **Classification:** the call is **not** harness overhead and **not** startup.
+  Harness-side overhead is 2.2 ms (1.1 %) and production startup 3.0 ms
+  (1.5 %); the remainder is the command's own production work on a large
+  store. Reducing it would change what the test asserts, so the parent's
+  **re-scope branch** applies to this path: it is a `src/`/data-shape
+  decision, not a test-harness one.
+- **Harness-reuse ceiling on the suite's actual regime:** a fresh temp store
+  costs 4.0–5.1 ms per warm call, of which harness-side work is 1.0–1.5 ms
+  (~25–33 %). Across the ~1200 in-process invocations the parent estimated,
+  the entire addressable harness-side cost is therefore **~1.2–1.8 s**, not
+  the ~240 s attributed to a ~200 ms/call figure. Reuse can still remove part
+  of that 1.0–1.5 ms, but it cannot move the suite by minutes.
+- **Per-scenario dominant phases (fresh store):** `--help` → commander
+  registration (harness-side); `list --json` → DB open (production startup);
+  `create` → DB open (production startup); `status` → DB open (production
+  startup).
+
+### Reuse-safety contract and harness counters (WL-0MVVXG0EQ0068WQB)
+
+The attribution above is only half the story: any change that removes the
+harness-side 1.0–1.5 ms by **reusing** a `Command`, a plugin context, a parsed
+config or a DB handle across calls can leak commander option state or the global
+`--worklog-dir` override (`setWorklogDirOverride` / `_worklogDirOverride` in
+`src/worklog-paths.ts`) between tests and turn a pass into an order-dependent
+accident (the parent item's recorded fidelity risk). Two pieces pin that
+contract:
+
+- **Counters (always on, behaviour-neutral).** `tests/cli/cli-inproc.ts`
+  exports `getInprocHarnessStats()` / `resetInprocHarnessStats()` reporting
+  `calls`, `commandsConstructed`, `pluginContextsCreated` and
+  `databasesOpened`. They are plain integer increments (no timing calls, no
+  behaviour change) and are the machine-readable form of the per-call cost:
+  one construction, one plugin context and one DB open **per call** today.
+- **Contract tests.** `tests/cli/inproc-harness-reuse.test.ts` (in-process only,
+  no spawns) characterises that per-call cost and pins the reuse-safety
+  contract: interleaved `--worklog-dir` stores never leak into each other,
+  `--json` / `--verbose` / `-F/--format` / `-w/--watch` state never survives
+  into the next call, in-process reads observe every preceding mutation (no
+  stale cached DB), every patched process global is restored after each call,
+  and a mixed read/write sequence produces the same output per call and the
+  same final state when reversed.
+
+The "reuse actually happens" assertion is **RED-pinned** with `it.fails(...)`
+(the same convention used by the fast-path and lazy-registry work) because no
+reuse exists yet. Recorded pre-change evidence for three consecutive stateless
+`list --json` calls:
+
+```text
+{ calls: 3, commandsConstructed: 3, pluginContextsCreated: 3, databasesOpened: 3 }
+```
+
+The pinned expectation is one shared construction and one shared plugin context
+for the run of read calls (`expected 3 to be less than or equal to 1` is the
+red failure); `databasesOpened` stays at most one per call because DB open was
+classified here as production startup, not harness overhead. The child that
+reduces the harness cost (WL-0MVVXG4B200968BF) flips `it.fails(` to `it(` when
+reuse lands — or adjusts the expectation together with its recorded re-scope
+finding.
+
+### Re-scope decision: no harness reuse (WL-0MVVXG4B200968BF)
+
+The harness-reduction child took the **production-startup / re-scope branch**,
+not the harness-side branch, and therefore lands **no** cross-call reuse in
+`tests/cli/cli-inproc.ts`:
+
+- On the regime the suite actually runs in (fresh temp store), the dominant
+  single phase of every data-access call is the **SQLite open incl. schema
+  creation/migrations** — 2.2 ms of 4.7 ms (47.3 %) for `list --json`, 1.8 ms
+  of 4.0 ms (44.8 %) for `status`, 2.1 ms of 5.1 ms (42.1 %) for `create` —
+  with a further ~0.2 ms of config (re)parsing. That is **production startup**:
+  `getDatabase()` re-parses the config and `WorklogDatabase` re-runs the store
+  bootstrap on every open.
+- Harness-side work is a minority of those calls (1.0–1.5 ms, 25–33 %), so the
+  entire addressable harness-side cost across the ~1200 in-process invocations
+  is **~1.2–1.8 s**, not the ~240 s implied by a ~200 ms/call figure. Caching a
+  `Command`, a plugin context or a DB handle could not move the suite by
+  minutes, and it would add exactly the cross-call state the reuse-safety
+  contract above exists to police.
+- The remaining per-call cost is therefore re-scoped into production code:
+  **WL-0MVWLBZG4003A803** — *Reduce per-command production startup: skip
+  repeated schema/migration bootstrap and config re-parse* (`discovered-from`
+  WL-0MVHVZMCH0092JCY). Its ACs require a schema-version fast path, a
+  change-keyed config cache and a ≥ 30 % drop in the warm `list --json` median,
+  with the migration slow path still covered by tests.
+
+The RED-pinned reuse-contract case in
+`tests/cli/inproc-harness-reuse.test.ts` remains the characterisation of the
+current per-call cost (one construction, one plugin context, one DB open per
+call). No harness-side workaround was added, so the saving in the follow-up item
+is real production saving rather than a test-only illusion.
+
+### Budget guard: harness per-call cost is ratcheted (WL-0MVVXG3UW00250V5)
+
+The per-call cost above is locked in by a checked-in budget, in the same shape
+as the startup import budget:
+
+| Piece | Path |
+|---|---|
+| Budget artefact (ratchet input) | `bench/inproc-harness-budget.json` |
+| Guard test | `tests/cli/inproc-harness-budget.test.ts` |
+| Policy module | `bench/inproc-harness-budget.ts` |
+| Regenerate (deliberate) | `npm run benchmark:inproc-harness -- --update-budget` |
+
+**The standing rule:** the in-process harness's per-call cost is budgeted. A
+change that slows a warm in-process call by an order of magnitude, that loses or
+edits the budget artefact, or that drops a scenario from it, fails
+`tests/cli/inproc-harness-budget.test.ts`. A deliberate change (for example the
+`src/` startup work in WL-0MVWLBZG4003A803) regenerates the artefact with the
+command above and records the before/after numbers on its work item.
+
+The guard is host-load tolerant. A fresh 3-run measurement of the four
+scenarios is compared with `baseline * (1 + headroomPct/100) * loadFactor`,
+where `loadFactor = clamp(load1minNow / load1minAtCapture, 1, maxHostLoadFactor)`
+— 1 on a quiet host, capped at 8 on a saturated one. With the documented
+`headroomPct` of 250 and the recorded medians (2.3–5.1 ms), the limit is **3.5x
+the recorded median on an idle host** and up to 28x on a saturated host: it
+catches a real regression without flaking on load noise, which is the
+appropriate ratchet while the recorded outcome is a **re-scope** (no harness
+improvement landed — see the decision above) rather than a measured win. The
+guard costs ~230 ms of suite time (190 ms of profiling) and writes nothing.
+
+### Caveats
+
+- **Same-host medians only.** Absolute values are load sensitive; the tables
+  above quote the load average captured with them. Compare only runs taken in
+  the same conditions, as medians — a single run proves nothing (the same
+  scenario varied 4.0–7.2 ms across loaded and quiet runs on this host).
+- **Reconciliation is a share rule applied to medians.** A single ~2 ms warm
+  call on a loaded host can lose up to a millisecond to timer granularity and
+  scheduling noise, which is more than 10 % of such a short call; the ≥ 90 %
+  attribution standard is therefore asserted on each scenario's median, not on
+  one sample.
+- **`db_open` covers the first-open path** (schema creation + migrations)
+  because every measured run uses a fresh store, matching a per-test
+  `beforeEach` fixture. Re-opening an existing store is cheaper.
+- **The copy regime is for reference.** It describes a production-sized store
+  (what an operator or a real-project test sees), not the suite's temp stores;
+  the profiler copies the named store's own files (`worklog.db`, `-wal`,
+  `-shm`, `config.yaml`, `config.defaults.yaml`, `initialized`) per run and
+  never opens, mutates or copies the rest of the directory.
+- **The earlier "~200 ms/call" note** in the test-suite runtime section above
+  is true only for a production-sized store; the suite's own temp stores cost
+  4–5 ms per warm in-process call.
+- **Bounded and safe to repeat.** A full run measured 0.7–4.3 s of process wall
+  time (the tsx compile of the CLI import graph dominates the first run), well
+  inside the 60 s bound; all stores are temporary and removed on exit.
+
+### Reproduce
+
+```bash
+# fresh-store regime (the suite's) — median of 5 runs, writes the artefact
+npm run benchmark:inproc-harness -- --runs 5
+
+# machine-readable only, nothing written
+npm run benchmark:inproc-harness -- --json --no-write
+
+# production-sized store: profiles a COPY of the given store per run
+npx tsx bench/inproc-harness-profile.ts --runs 3 --scenarios list-json,status \
+  --store <path-to-a-/.worklog> --no-write
+```
+
+Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
+`--out <path>`, `--no-write`, `--json`, `--keep`, `--update-budget`.
+
+## Test-suite parallelism: maxWorkers 4 → 6 (WL-0MVHVZTYA003TNN0)
+
+**Work item:** WL-0MVHVZTYA003TNN0 — Test-suite parallelism: reconsider
+maxWorkers on hosts with more cores (**discovered-from** WL-0MVF9JJUH0077OB8)
+**Measured:** intake 2026-11-01 (legacy two-command set); re-validation
+2026-11-02 (current umbrella set, below)
+**Host:** shared 16-core dev box, 29 GB RAM.
+
+### Decision
+
+`vitest.config.ts` raises `maxWorkers` **4 → 6** (pool stays `'forks'`,
+`isolate: true` unchanged; the stale "memory guardrails" rationale and the
+dead `singleFork` comment text are removed — dead-key removal itself is
+tracked in WL-0MVHVZDPT005KDQK). 8 is deliberately **not** the default: it
+adds no wall-clock win and raises aggregate test time under host contention.
+
+### Intake evidence (2026-11-01, legacy `tests/cli` + `tests/unit`, 165 files)
+
+Measured on the shared host at load average 16–22 (median of ≥3 green runs;
+all runs green — 165 files / 1660 tests passed):
+
+| `maxWorkers` | Wall clock runs (s) | Median wall (s) | Aggregate test time (s) | Notes |
+|---|---|---|---|---|
+| 4 (old) | 264.1, 230.4, 175.7 | **230.4** | 899.9, 813.7, 608.9 | baseline |
+| 6 | 129.8, 126.8, 157.9, 152.0, 174.3, 221.2 | **142.0** | 668.7, 648.6, 798.7, 786.1, 871.9, 1113.4 | 6 consecutive green runs |
+| 8 | 121.1, 134.0, 177.6, 130.5 | **132.3** | 830.6, 902.6, 1218.4, 876.6 | 4 runs, all green |
+
+- 4 → 6: median wall **230.4 → ~130–142 s (−38–44 %)**; aggregate test time
+drops too (median ~814 → ~707 s) — the speedup is not a parallelism illusion.
+- 6 → 8: median wall flat (~132 s) but aggregate test time **rises** (median
+~890 s vs ~707 s) — more concurrent forks mean extra transform/import
+overhead and host contention with other projects' suites; no win.
+- Memory at 8 workers: fork-tree peak ~1.3–1.8 GB, largest single fork
+~230 MB (`ps` sampling) on the 29 GB host — the old "memory guardrails"
+rationale was not the binding constraint (6 workers ≈ 1 GB peak).
+
+### Re-validation (2026-11-02, current umbrella `npm --silent test -- tests`)
+
+AC2/AC3 gate at the final config (`maxWorkers: 6`), run from the worktree via
+the test-skill runner (`run_tests.py --scope full --force`, fresh run each
+iteration — never served from the gate cache), 298 files / 4284 tests
+(297 passed + 1 skipped):
+
+| Run | Wall clock (s) | Vitest duration (s) | Aggregate test time (s) | Fork-tree peak RSS | Single-fork peak RSS | Result |
+|---|---|---|---|---|---|---|
+| 1 | 215.5 | 214.4 | 722.5 | 1.14 GB | 290 MB | green |
+| 2 | 206.2 | 205.2 | 685.6 | 1.41 GB | 263 MB | green |
+| 3 | 222.9 | 221.9 | 735.5 | 1.66 GB | 356 MB | green |
+
+Host load during re-validation: load average ~4.7–6.5 (1/5/15 min),
+quieter than the intake window — absolute numbers are conservative upper
+bounds.
+
+- **Determinism (AC3):** 3 consecutive green runs with no intermittent
+test-timeout or hook-timeout failures (vitest report exit 0, no notices).
+- **Memory (AC2):** fork-tree peak ≤ **1.66 GB** and largest single fork
+≤ **356 MB** across all runs — comfortable headroom on the 29 GB host;
+no OOM. The worktree's `dist/` build is included in the fork peak (built CLI
++libraries are loaded into the largest forks); the fork-level number is the
+per-worker cost to keep in mind on smaller hosts.
+- **Config intent confirmed:** the config module declares `maxWorkers: 6`,
+`pool: 'forks'`, `isolate: true` (see the guard below).
+
+#### Regression guard: declared-config check
+
+`tests/unit/maxworkers-config-guard.test.ts` pins the declared parallelism
+contract so a future edit cannot silently regress the measured choice:
+
+- `maxWorkers` is **6** (the measured optimum on this host;
+WL-0MVHVZTYA003TNN0);
+- `pool` is `'forks'` and `isolate` is `true` (unchanged constraints);
+- the top-level `singleFork` key is **dead config**: vitest 4 consumes no such
+option (`singleFork` appears nowhere in vitest's 4.0.18 dist). Its key removal
+is WL-0MVHVZDPT005KDQK.
+
+The guard reads the values from the `vitest.config.ts` module itself, and
+derives the repo root from its own file location rather than `process.cwd()`.
+Both choices are deliberate:
+
+- 27 suite files call `process.chdir()` for temp-dir fixtures, so a worker may
+run this file with cwd somewhere else entirely;
+- `vitest/node`'s `resolveConfig()` is **not** used: inside a full-suite run it
+re-resolves with the ambient test-run state and returns the main checkout's
+value (`maxWorkers: 4`) even when its own `configFile` correctly points at the
+worktree's file — a quirk measured while building this guard. The imported
+config module is the object the suite is declared with, and it resolves
+identically in isolation and under the full umbrella (verified by 3
+consecutive green umbrella runs).
+
+### What changed
+
+- `vitest.config.ts`: `maxWorkers` 4 → 6; comments rewritten to cite the
+measurement basis above (wall-clock/aggregate-time/memory table); the stale
+"memory guardrails" rationale and the misleading `singleFork` comment text
+("1 active worker per file sequence") are removed.
+- `tests/unit/maxworkers-config-guard.test.ts`: regression guard above.
+- `README.md`: updated the Vitest Configuration bullet to the new value and
+its evidence link.
+
+### Reproduce
+
+```bash
+# from the worktree, with dist built so the entry-point tests are faithful
+npx tsc
+python3 <test-skill>/scripts/run_tests.py --scope full --force --json
+# direct resolve (effective values the suite runs with)
+node --import tsx -e "const m = await import('./vitest.config.ts'); console.log(m.default.test.maxWorkers, m.default.test.pool, m.default.test.isolate)"
+```
+
+### Notes for producers/auditors
+
+- The re-validation used the **current umbrella** suite (298 files, 4284
+tests, incl. the guard) per AC3's prescription; the intake table was measured
+on the legacy 165-file set, so its absolute numbers are not directly
+comparable — the *relative* 4-vs-6-vs-8 comparison (taken under one
+contention window) is.
+- CI (GitHub `ubuntu-latest`, 4 vCPU) runs the same fixed `maxWorkers: 6`;
+6 forks on 4 cores is mild oversubscription, benign for this mostly
+subprocess/IO-bound suite (see `.github/workflows/cli-tests.yml`). Revisit
+only if CI moves to a smaller runner.
+- **Run the determinism gate serially.** Two full suites launched
+concurrently on this host (12 heavy forks on 16 cores) produced one
+load-induced flake: `tests/cli/process-lifecycle.test.ts` > *"killTrackedProcesses
+is registered for process exit so no orphans remain after test worker dies"*
+waits a fixed 900 ms for a spawned process to register in `pidTrackingSet`,
+and under that contention the spawn had not registered yet (`expected 0 to be
+greater than 0`). It passed in every serial run before and after. This is a
+pre-existing timing window in that test, not an effect of the parallelism
+setting — but it is why the AC3 evidence above is from **3 serial runs**.
+
+## install-herdr script tests: hermetic install + explicit timeout (WL-0MVWL88MO002SQ2B)
+
+### Failure mode
+
+The install-herdr tests spawn `scripts/install-herdr.sh`. Step 0 of that
+script installs `packages/herdr`'s dependencies (`npm ci`). When a test ran
+from a linked git worktree the script resolved `REPO_ROOT` to the **main
+checkout** (first `git worktree list --porcelain` entry —
+WL-0MSRG481O007QVEA) and that checkout's `packages/herdr/node_modules` is
+symlinked into the worktree by `implement.py`, so the install was shared with
+every concurrent agent build. Under heavy host load (load average 30–43, ~41
+concurrent `run_tests` waiters) that install alone exceeded vitest's 30 s
+default `testTimeout` (`Test timed out in 30000ms` in
+`tests/scripts/install-herdr.test.ts`); the same test passed on the next
+fresh full-suite run. Triage determination: **flaky**, load-induced — not a
+product regression.
+
+WL-0MVWJ4IKT005SAHT then removed the shared-tree damage on the worktree path
+(a linked-worktree build **skips** the install and reuses the main checkout's
+`node_modules`, repairing the `@worklog/shared` link instead). That fixes the
+worst case but not the test-level exposure: a main-checkout run (CI, a plain
+`npm test`) still performs a real install inside the test.
+
+### Remediation (stub + explicit timeout)
+
+- **Hermetic `npm`/`node` stubs.** The test file prepends a per-file stub
+directory (`worklog-herdr-stub-*`) to the PATH of every spawn it controls.
+Stub `npm` records its invocation and exits 0; stub `node` exits 0 (so
+`link-shared.mjs` never rewrites the executing checkout). No real install and
+no workspace-link rewrite happens during these tests, whichever checkout the
+suite runs in.
+- **Explicit per-test timeout.** Every test in the file runs through
+  `itScript(...)` with the 60 s budget (the 45–60 s window
+  `vitest.config.ts` prescribes for subprocess tests), as a safety net for the
+  real-`git` worktree fixtures and for host-load spikes.
+- **Regression guard.** `intercepts the dependency install with a stub from a
+  main checkout (hermetic)` runs the installer from a fixture main checkout
+  (the path that still reaches the install step) and asserts the stub served
+  `npm ci` and that `node_modules` was not wiped. Dropping the stub from the
+  test PATH fails that test instead of silently restoring a real install.
+
+The two upstream worktree fixtures (plugin-link target, worktree install skip)
+build their own PATHs on purpose — they assert the script's real behaviour with
+real `git` and fake `npm`/`herdr`, so the stub does not apply to them.
+
+### Reproduce
+
+```bash
+# the specific test that flaked (vitest worker, not pytest)
+npx vitest run tests/scripts/install-herdr.test.ts \
+  -t 'migrates a legacy open-worklist binding in-place to the new action'
+```
+
 ## Related
 
 - Parent epic: WL-0MV28X3BT0079JM3 — Deduplicate legacy `test/` vs `tests/`
@@ -793,3 +1239,22 @@ python3 <test-skill>/scripts/run_tests.py --suite pytest --force --json
   WL-0MVODOJWB004G03J
 - Herdr package suite exclusion (producer decision, won't-fix):
   WL-0MVFZVIA50062TJ8
+- In-process CLI harness cost baseline (attribution, decision gate):
+  WL-0MVVXFXM6007QZ2L — see
+  [In-process CLI harness cost](#in-process-cli-harness-cost-wl-0mvvxfxm6007qz2l)
+- In-process harness reuse-safety contract + counters (red-first tests):
+  WL-0MVVXG0EQ0068WQB — see
+  [Reuse-safety contract and harness counters](#reuse-safety-contract-and-harness-counters-wl-0mvvxg0eq0068wqb)
+- Harness-cost re-scope decision (production startup, follow-up `src/` work):
+  WL-0MVVXG4B200968BF → WL-0MVWLBZG4003A803 — see
+  [Re-scope decision: no harness reuse](#re-scope-decision-no-harness-reuse-wl-0mvvxg4b200968bf)
+- Harness per-call cost budget guard (ratchet): WL-0MVVXG3UW00250V5 — see
+  [Budget guard: harness per-call cost is ratcheted](#budget-guard-harness-per-call-cost-is-ratcheted-wl-0mvwxg3uw00250v5)
+- install-herdr test hermeticity + explicit per-test timeout (load-induced
+  30 s timeout): WL-0MVWL88MO002SQ2B — see
+  [install-herdr script tests: hermetic install + explicit timeout](#install-herdr-script-tests-hermetic-install--explicit-timeout-wl-0mvwl88mo002sq2b)
+- Test-suite parallelism (maxWorkers 4 → 6, measured):
+  WL-0MVHVZTYA003TNN0 — see
+  [Test-suite parallelism: maxWorkers 4 → 6](#test-suite-parallelism-maxworkers-4--6-wl-0mvhvztya003tnn0)
+- Dead top-level `singleFork` key removal (adjacent):
+  WL-0MVHVZDPT005KDQK

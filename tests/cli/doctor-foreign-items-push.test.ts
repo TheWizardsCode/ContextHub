@@ -21,22 +21,11 @@ import * as os from 'os';
 import { spawnSync } from 'child_process';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
 import { cliInvocation } from './cli-bundle.js';
+import { fixtureGitEnv } from './git-helpers.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
-const projectRoot = path.resolve(__dirname, '..', '..');
-const mockBinDir = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
-
-/** PATH without the test mock-bin so subprocesses run the real git binary. */
-function realGitEnv(): Record<string, string> {
-  const pathVal = (process.env.PATH || '')
-    .split(path.delimiter)
-    .filter(p => path.resolve(p) !== path.resolve(mockBinDir))
-    .join(path.delimiter);
-  return { ...process.env as Record<string, string>, PATH: pathVal };
-}
-
 function git(cwd: string, ...args: string[]): string {
-  const res = spawnSync('git', args, { cwd, encoding: 'utf-8', env: realGitEnv() });
+  const res = spawnSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
   if (res.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${res.stderr || res.stdout}`);
   }
@@ -45,7 +34,7 @@ function git(cwd: string, ...args: string[]): string {
 
 function runCli(cwd: string, ...args: string[]): { stdout: string; status: number } {
   const [command, entry] = cliInvocation();
-  const res = spawnSync(command, [entry, ...args], { cwd, encoding: 'utf-8', env: realGitEnv() });
+  const res = spawnSync(command, [entry, ...args], { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
   return { stdout: res.stdout || '', status: res.status ?? -1 };
 }
 
