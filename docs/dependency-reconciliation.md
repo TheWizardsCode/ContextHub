@@ -31,17 +31,32 @@ reads its `outbound` slice.
 
 ## How It Works
 
-1. **Trigger**: `db.update()` and `db.deleteSingle()` check whether the status or stage changed. If so, they call `reconcileDependentStatus(id)` to reconcile the item itself, then `reconcileDependentsForTarget(itemId)` to reconcile the item's dependents.
+1. **Trigger**: `db.update()` and `db.deleteSingle()` check whether the status or stage changed. If so, they call `reconcileDependentStatus(id)` to reconcile the item itself, then `reconcileDependentsForTarget(itemId)` to reconcile the item's dependents. `db.update()` returns the **persisted post-reconcile** record, so callers (including `wl update --json`) report the value the store actually holds.
 
 2. **Self-reconciliation**: `reconcileDependentStatus(id)` checks if the item itself should be blocked or unblocked based on its own dependency edges. For example, when a completed item is reopened and its prerequisite is still active, it gets re-blocked.
 
-3. **Fan-out**: `reconcileDependentsForTarget()` finds all items that depend on the changed item using `getInboundDependents()`.
+3. **Explicit status/stage writes win** (WL-0MVTVYXZD002NDMP): the self-reconciliation in step 2 is derived state, so an explicitly requested status/stage must never be overwritten by it. `db.update(id, input, options)` and `db.updateIfMatches(...)` accept `UpdateOptions` with `reconcileSelf` (default `true`); `wl update` passes `reconcileSelf: false` whenever the caller supplied `--status`/`--stage`. Fan-out to **dependents** (steps 4–7) and the `wl dep add` / `wl dep rm` paths are unaffected — dependency-derived blocks and unblocks behave exactly as before.
 
-4. **Per-dependent check**: For each dependent, `reconcileDependentStatus()` calls `hasActiveBlockers()` to determine if any remaining blockers are still active.
+   Defence in depth (WL-0MVTVZ9RU003D4WW): opting out of the known
+   reverting write is not enough on its own, because any *other* late writer
+   (a competing process, a future reconcile) could still win. After the
+   write, `wl update` therefore **re-reads the persisted record** — never the
+   update's return value — and, for an explicit `--status` request, compares
+   it with the requested value. On divergence the per-id result is a failure
+   with the distinct error code `status-not-persisted` naming both values
+   (`requestedStatus` and `persistedStatus`), and the command exits non-zero.
+   No update path (including the "no fields changed" path) can report
+   `success: true` for an explicit `--status` request whose persisted status
+   differs. The guard reports a lost write; it does not repair it —
+   investigate the store before retrying.
 
-5. **Status update**: If no active blockers remain and the dependent is currently `blocked`, its status is set to `open`. If active blockers exist and the dependent is not already `blocked`, its status is set to `blocked`.
+4. **Fan-out**: `reconcileDependentsForTarget()` finds all items that depend on the changed item using `getInboundDependents()`.
 
-6. **Cascade**: The status update on the dependent itself triggers another round of reconciliation via `saveWorkItem()`, so chain dependencies (A blocks B blocks C) resolve transitively.
+5. **Per-dependent check**: For each dependent, `reconcileDependentStatus()` calls `hasActiveBlockers()` to determine if any remaining blockers are still active.
+
+6. **Status update**: If no active blockers remain and the dependent is currently `blocked`, its status is set to `open`. If active blockers exist and the dependent is not already `blocked`, its status is set to `blocked`.
+
+7. **Cascade**: The status update on the dependent itself triggers another round of reconciliation via `saveWorkItem()`, so chain dependencies (A blocks B blocks C) resolve transitively.
 
 ## Behaviour Summary
 
@@ -75,3 +90,5 @@ The `wl dep add` command (`src/commands/dep.ts`) adds a dependency edge and then
 
 - **Unit tests**: `tests/database.test.ts` — `dependency edges` describe block contains tests for single-blocker unblock, multi-blocker scenarios, chain dependencies, delete unblock, reopen re-block, idempotence, `in_review` stage unblocking (single blocker, partial multi-blocker, all blockers, mixed in_review/completed, idempotence, re-block on stage revert, multiple dependents), and more.
 - **CLI integration tests**: `tests/cli/issue-management.test.ts` — tests for `close` and `dep` commands verifying end-to-end unblock behaviour through the CLI, including `in_review` stage unblocking (single blocker → in_review, partial multi-blocker, all blockers → in_review).
+- **Explicit-status regression tests**: `tests/regression-explicit-blocked-status.test.ts` — an explicit `wl update --status blocked` persists for items with no edges, with inbound-only edges, and with an active outbound blocker; an explicit `--status open` is not re-blocked by the self-reconcile; `dep rm` still unblocks; and `db.update` returns the persisted post-reconcile record (including with `reconcileSelf: false`).
+- **Persistence-guard tests**: `tests/update-status-persistence-guard.test.ts` — through a stubbed database seam that lets a competing write win, an explicit `--status` write exits non-zero with `status-not-persisted` naming both values (never `success: true`); the consistent path still reports success; and an explicit `--status` that never reaches the store fails the same way.

@@ -47,6 +47,7 @@ import {
   stripSkillName,
 } from './pane-title.js';
 import { applyActivePaneMarkers, createProductionHydratorDeps } from './hydrator.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -66,6 +67,7 @@ import {
   dirHasRecentModifications,
   parsePaneProcessInfo,
 } from './pane-close-herdr.js';
+import { observeDispatchedPaneOutcome } from './downtime-worker.route-outcome.js';
 import { runScheduledPaneClose } from './pane-close-scheduler.js';
 import {
   createDowntimeWorker,
@@ -74,6 +76,7 @@ import {
   spawnDowntimePane,
   parseNextCandidatesOutput,
   parseAuditCandidatesOutput,
+  parseAuditCandidateScopeOutput,
   parseImplementCandidatesOutput,
   parseCriticalCandidatesOutput,
   selectAuditCandidate,
@@ -112,6 +115,7 @@ import {
   createLocalReserver,
 } from './downtime-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
+import type { AuditCandidateScopeResult } from './downtime-worker.gates.js';
 import {
   appendDowntimeLogEntry,
   appendPaneCloseLogEntry,
@@ -572,6 +576,34 @@ export function createDowntimeDeps(
         // caller counts it as a strike (WL-0MSLWJ2KP0002SV0).
         // Capture error details for the three-strike pause log (WL-0MTL4PC0Y005GXTI).
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    // Leaf-vs-parent audit scope (parent WL-0MSORQ8Y4004YT63 AC1, child C2
+    // WL-0MVV1EZ8G006PSBE): `wl show <id> --children --json` is the only
+    // trustworthy signal for whether the audit candidate is a single-session
+    // LEAF (1 free slot) or a PARENT whose Phase 2 fans out (all-slots-style
+    // gate). Same wl discipline as every other wl-backed seam: per-root
+    // targeting (`<cwd>/.worklog`, WL-0MTQ14W7L003II5A — the candidate lives
+    // in ITS OWN worklog root), transient retry, and the bounded timeout
+    // (WL-0MSJIPHD0001L1J9) that kills a hung wl child. Fail-closed: any
+    // untrustworthy result (CLI error, timeout, parse failure, missing /
+    // non-array `children`, non-root candidate) resolves `{ok:false}`, which
+    // `classifyAuditScope` maps to `'parent'` — the gate can be relaxed only
+    // on a positively confirmed leaf, never by an unanswered lookup.
+    async getAuditCandidateScope(
+      itemId: string,
+      cwd: string,
+    ): Promise<AuditCandidateScopeResult> {
+      try {
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
+          'wl',
+          buildWlArgsForRoot(cwd, ['show', itemId, '--children', '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        ));
+        return parseAuditCandidateScopeOutput(stdout);
+      } catch {
+        // Fail-closed: an unanswerable lookup is never a leaf.
+        return { ok: false };
       }
     },
     async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
@@ -1063,7 +1095,7 @@ export function createDowntimeDeps(
       expected?: { itemId: string; kind: string },
     ): Promise<boolean> {
       try {
-        const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+        const herdrBin = resolveHerdrBin();
         if (expected) {
           const { stdout } = await getExecFileAsync()(
             herdrBin,
@@ -1119,9 +1151,14 @@ export function createDowntimeDeps(
       cwd: string,
       opts: { idleThresholdMinutes: number; ledgerPath?: string },
     ): Promise<void> {
-      const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+      const herdrBin = resolveHerdrBin();
       const invokingPaneId =
         process.env.HERDR_PANE_ID ?? process.env.HERDR_PANE ?? undefined;
+      // AC10 (WL-0MVWEZF4Z004UNYT): after the pane's work window closes the
+      // dispatch record gains its OBSERVED local/remote split (from the
+      // bounded route log, correlated by ticket/session — never inferred
+      // from the ticket). Fail-open: a route-outcome failure never blocks a
+      // pane close.
       const deps = createHerdrReaperDeps({
         listPanesRaw: async () => {
           const { stdout } = await getExecFileAsync()(herdrBin, ['pane', 'list'], {
@@ -1142,6 +1179,14 @@ export function createDowntimeDeps(
             return false; // fail-closed: a failed close is recorded, never thrown
           }
         },
+        // AC10: observed-routing-outcome recorder for a closed pane.
+        recordDispatchedPaneOutcome: (pane) =>
+          observeDispatchedPaneOutcome(cwd, {
+            itemId: pane.itemId,
+            paneId: pane.id,
+            sessionId: pane.sessionId,
+            kind: pane.kind,
+          }),
         invokingPaneId,
         // Item lookup (parent AC2/AC6): fetch both the producer-review flag
         // and the work-item stage so the close-decision snapshot records the
@@ -1505,6 +1550,11 @@ export async function main(): Promise<void> {
         // like the other downtime settings, so a threshold change (or `0` to
         // disable) applies without a plugin restart.
         cpuGatePercent: s.downtimeCpuGatePercent,
+        // OPT-IN race-accepting leaf-audit variant (WL-0MVV1F1P1005PO5M):
+        // re-read each tick like the other downtime settings, so turning the
+        // escape hatch on/off applies without a plugin restart. Default OFF —
+        // the fail-closed C4 admission (full idle threshold) is unchanged.
+        leafAuditImmediate: s.downtimeLeafAuditImmediate,
         browseItemCount: s.browseItemCount,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable

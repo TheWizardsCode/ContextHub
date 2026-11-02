@@ -24,7 +24,9 @@ import { join } from 'node:path';
 
 import {
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS,
   DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS,
+  DEFAULT_RESERVATION_TTL_SECONDS,
   LOCAL_FALLBACK_REASON_HEADER,
   LOCAL_PREFERENCE_ENV_VAR,
   LOCAL_PREFERENCE_HEADER,
@@ -54,6 +56,7 @@ import {
   reserveRefused429,
   reserveServerError,
   reserveTimeout,
+  reserveWireContractBroken,
 } from './downtime-worker.fixtures.js';
 import { defaultSettings, loadSettings } from './settings.js';
 
@@ -94,6 +97,32 @@ describe('parseLocalReservationResponse — granted ticket (AC1)', () => {
     });
   });
 
+  it('AC5: pins the LIVE proxy grant shape (reservation_id + ttl_s) so a rename can never degrade silently', () => {
+    // Captured from the running proxy (2026-11-01, non-dry-run):
+    // `{"admit":true,"reservation_id":"…","projected_wait_s":13.1,"ttl_s":10}`.
+    // The parser reads `reservation_id` FIRST — without this pin the old
+    // `ticket_id` accessor would silently fail open (bad-body) and the ticket
+    // would never reach the pane, exactly the silent degradation this item
+    // exists to prevent.
+    expect(
+      parse({
+        status: 200,
+        body: {
+          admit: true,
+          reservation_id: 'cc4dfc109cdb8a9aeb90459f410555743fe706ccef9c0617',
+          projected_wait_s: 13.1,
+          ttl_s: 10,
+        },
+      }),
+    ).toEqual({
+      status: 'granted',
+      ticket: {
+        ticketId: 'cc4dfc109cdb8a9aeb90459f410555743fe706ccef9c0617',
+        ttlSeconds: 10,
+      },
+    });
+  });
+
   it('AC1: additive proxy fields never break an otherwise valid grant', () => {
     // Strict-but-tolerant parsing: the proxy may add fields at any time.
     const result = parse(reserveGranted({ proxy_build: '2026-10-23', admit: true }));
@@ -109,6 +138,7 @@ describe('parseLocalReservationResponse — granted ticket (AC1)', () => {
     // are unknown until the proxy lands, so the accessor accepts aliases.
     const result = parse(
       reserveGranted({
+        reservation_id: undefined,
         ticket_id: undefined,
         ticket: 'tkt-aliased',
         ttl_s: undefined,
@@ -123,8 +153,8 @@ describe('parseLocalReservationResponse — granted ticket (AC1)', () => {
   });
 
   it('AC1: a missing ticket id fails open to null', () => {
-    expect(parse(reserveGranted({ ticket_id: undefined }))).toBeNull();
-    expect(parse(reserveGranted({ ticket_id: '' }))).toBeNull();
+    expect(parse(reserveGranted({ reservation_id: undefined }))).toBeNull();
+    expect(parse(reserveGranted({ reservation_id: '' }))).toBeNull();
   });
 
   it('AC1: a non-positive or non-finite TTL is not a usable ticket → null', () => {
@@ -293,7 +323,11 @@ function fixtureFetcher(fixture: { status: number; body: unknown }) {
   return vi.fn().mockResolvedValue(jsonResponseFixture(fixture.body, fixture.status));
 }
 
-const RESERVE_REQUEST = { expected_tokens: 8192, priority: 'background', cache_state: 'unknown' } as const;
+const RESERVE_REQUEST = {
+  estimated_tokens: DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS,
+  priority: 'background',
+  cache_state: 'unknown',
+} as const;
 
 describe('createLocalReserver — reserve client (AC1)', () => {
   it('AC1: POSTs the request to {proxyUrl}/llama/local/reserve and returns the typed ticket', async () => {
@@ -326,19 +360,62 @@ describe('createLocalReserver — reserve client (AC1)', () => {
     });
   });
 
-  it('AC3: absent (404) and server-error (500) endpoints fail open to null, one request each', async () => {
-    for (const fixture of [reserveEndpointAbsent, reserveServerError]) {
+  it('AC3: absent (404) and server-error (500) endpoints fail open to an unavailable outcome naming the exchange, one request each', async () => {
+    for (const [fixture, reason] of [
+      [reserveEndpointAbsent, 'http-404'],
+      [reserveServerError, 'http-500'],
+    ] as const) {
       const fetcher = fixtureFetcher(fixture);
       const reserve = createLocalReserver(
         'http://proxy:8000',
         fetcher as unknown as LocalReserveFetcher,
       );
-      await expect(reserve({ ...RESERVE_REQUEST })).resolves.toBeNull();
+      // AC4 (WL-0MVWEZF4Z004UNYT): an unusable exchange is a TYPED
+      // `unavailable` outcome naming the failing exchange — never a bare
+      // null and never a refusal, so a broken contract (400) can never look
+      // like an old proxy (404) or a paced stop (429).
+      await expect(reserve({ ...RESERVE_REQUEST })).resolves.toEqual({
+        status: 'unavailable',
+        reason,
+      });
       expect(fetcher).toHaveBeenCalledTimes(1);
     }
   });
 
-  it('AC3: a timed-out / aborted reserve fails open to null and never throws', async () => {
+  it('AC4: a wire-contract 400 (missing estimated_tokens) is recorded as http-400, distinct from an old proxy (404)', async () => {
+    // The exact 400 the proxy answers for a body without `estimated_tokens`:
+    // with the AC1 fix the client never SENDS such a body, but a future
+    // rename on either side must surface here as `http-400` — never as the
+    // old-proxy fail-open this item's bug hid behind.
+    const contractFetcher = fixtureFetcher(reserveWireContractBroken);
+    const reserve = createLocalReserver(
+      'http://proxy:8000',
+      contractFetcher as unknown as LocalReserveFetcher,
+    );
+
+    await expect(reserve({ ...RESERVE_REQUEST })).resolves.toEqual({
+      status: 'unavailable',
+      reason: 'http-400',
+    });
+  });
+
+  it('AC4: http-400 (contract break) and http-404 (old proxy) are DISTINCT reasons', async () => {
+    const contract = await createLocalReserver(
+      'http://proxy:8000',
+      fixtureFetcher(reserveWireContractBroken) as unknown as LocalReserveFetcher,
+    )({ ...RESERVE_REQUEST });
+    const absent = await createLocalReserver(
+      'http://proxy:8000',
+      fixtureFetcher(reserveEndpointAbsent) as unknown as LocalReserveFetcher,
+    )({ ...RESERVE_REQUEST });
+
+    expect(contract).toEqual({ status: 'unavailable', reason: 'http-400' });
+    expect(absent).toEqual({ status: 'unavailable', reason: 'http-404' });
+    // A broken contract can never again look like an old proxy.
+    expect(contract).not.toEqual(absent);
+  });
+
+  it('AC3: a timed-out / aborted reserve fails open to an unavailable timeout outcome and never throws', async () => {
     const fetcher = vi
       .fn()
       .mockRejectedValue(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
@@ -347,28 +424,54 @@ describe('createLocalReserver — reserve client (AC1)', () => {
       fetcher as unknown as LocalReserveFetcher,
     );
 
-    await expect(reserve({ ...RESERVE_REQUEST })).resolves.toBeNull();
+    await expect(reserve({ ...RESERVE_REQUEST })).resolves.toEqual({
+      status: 'unavailable',
+      reason: 'timeout',
+    });
   });
 
-  it('AC3: a 2xx with an unusable body fails open to null (no throw)', async () => {
+  it('AC3: a 2xx with an unusable body fails open to an unavailable bad-body outcome (no throw)', async () => {
     const reserve = createLocalReserver(
       'http://proxy:8000',
       fixtureFetcher({ status: 200, body: '<html>not json</html>' }) as unknown as LocalReserveFetcher,
     );
 
-    await expect(reserve({ ...RESERVE_REQUEST })).resolves.toBeNull();
+    await expect(reserve({ ...RESERVE_REQUEST })).resolves.toEqual({
+      status: 'unavailable',
+      reason: 'bad-body',
+    });
   });
 });
 
-describe('reserve client — request shape (AC1)', () => {
-  it('AC1: a downtime dispatch reserves a background, cache-unknown turn', () => {
+describe('reserve client — request shape (AC1, WL-0MVWEZF4Z004UNYT)', () => {
+  it('AC1: a downtime dispatch reserves a background, cache-unknown turn with the proxy contract field estimated_tokens', () => {
     const request = buildLocalReservationRequest({ priority: 'critical' });
 
     expect(request).toEqual({
-      expected_tokens: DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS,
+      estimated_tokens: DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS,
       priority: 'background',
       cache_state: 'unknown',
     });
+  });
+
+  it('AC1: pins the exact wire body against the documented proxy contract (admission_reserve.py)', () => {
+    // The proxy handler reads ONLY `estimated_tokens` and answers 400 for
+    // any other spelling — the original `expected_tokens` name made this
+    // handshake fail open silently (the bug this item fixes). This is the
+    // rename-canary: a rename on either side fails HERE, not as a silent
+    // null in a dispatch record.
+    const body = buildLocalReservationRequest({ priority: 'background' });
+    expect(Object.keys(body)).toEqual(expect.arrayContaining(['estimated_tokens']));
+    expect(body.estimated_tokens).toBe(DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS);
+    expect((body as unknown as Record<string, unknown>).expected_tokens).toBeUndefined();
+    // The constant name mirrors the wire field (both renamed together).
+    expect(DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS).toBe(8_192);
+  });
+
+  it('AC9: pins the documented client-side TTL bound (proxy DEFAULT_RESERVE_TTL_SECONDS = 10)', () => {
+    // Mirrors `llm/proxy/proxy/admission_reserve.py` — a grant below this
+    // window is never treated as capacity by the dispatcher.
+    expect(DEFAULT_RESERVATION_TTL_SECONDS).toBe(10);
   });
 });
 
@@ -751,6 +854,187 @@ describe('dispatch reserve gate — fail-open backcompat (AC3)', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
     expect(spawnOpts.reservationTicketId).toBeUndefined();
+  });
+});
+
+describe('dispatch reserve gate — unavailable distinguishable from refusal (AC4, WL-0MVWEZF4Z004UNYT)', () => {
+  it('AC4: a wire-contract 400 still dispatches (fail-open) but the marker names the failing exchange', async () => {
+    const fetchStub = fixtureFetcher(reserveWireContractBroken);
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+      recordDecision,
+      reserveLocalCapacity: createLocalReserver(
+        'http://proxy:8000',
+        fetchStub as unknown as LocalReserveFetcher,
+      ),
+    });
+
+    const outcome = await runDispatchTick(deps);
+
+    // Fail-open is preserved (AC3): the dispatch still proceeds with no ticket.
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.reservationTicketId).toBeUndefined();
+    // AC4: the record names the failing exchange — `http-400`, NOT a bare
+    // fail-open, NOT a refusal. The original bug looked exactly like an old
+    // proxy; this field makes a broken contract visible again.
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationUnavailable: 'http-400' }),
+    );
+  });
+
+  it('AC4: a 404 (old proxy) is recorded as http-404, distinct from a refusal (no deferral entry)', async () => {
+    const fetchStub = fixtureFetcher(reserveEndpointAbsent);
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+      recordDecision,
+      reserveLocalCapacity: createLocalReserver(
+        'http://proxy:8000',
+        fetchStub as unknown as LocalReserveFetcher,
+      ),
+    });
+
+    const outcome = await runDispatchTick(deps);
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationUnavailable: 'http-404' }),
+    );
+    // An unusable exchange is NOT a refusal: no no-dispatch decision entry
+    // with `admit:false` and no deferral advice.
+    expect(recordedDecisions(recordDecision).some((d) => d.fields.admit === false)).toBe(false);
+  });
+
+  it('AC4: a timeout is recorded as timeout, and no client wired records nothing', async () => {
+    const fetchStub = vi.fn().mockRejectedValue(new Error('reserve timed out'));
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+      reserveLocalCapacity: createLocalReserver(
+        'http://proxy:8000',
+        fetchStub as unknown as LocalReserveFetcher,
+      ),
+    });
+
+    expect((await runDispatchTick(deps)).dispatched).toBe(true);
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationUnavailable: 'timeout' }),
+    );
+
+    // No client wired (older install): NO reservation fields at all.
+    const noClient = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+    });
+    expect((await runDispatchTick(noClient)).dispatched).toBe(true);
+    const marker = (noClient.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(marker.reservationUnavailable).toBeUndefined();
+    expect(marker.reservationSkipped).toBeUndefined();
+    expect(marker.reservationTicketId).toBeUndefined();
+  });
+});
+
+describe('dispatch reserve gate — remote-ok skips, local-preferred reserves (AC8, WL-0MVWEZF4Z004UNYT)', () => {
+  it('AC8: a remote-ok dispatch skips the reserve call and records the decision in the marker', async () => {
+    const fetchStub = fixtureFetcher(reserveGranted());
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+      reserveLocalCapacity: createLocalReserver(
+        'http://proxy:8000',
+        fetchStub as unknown as LocalReserveFetcher,
+      ),
+    });
+
+    const outcome = await runDispatchTick(deps, {
+      localPreference: 'remote-ok',
+      localPreferenceMode: 'operator-setting',
+    });
+
+    // The remote-ok pane's first request goes remote and could never consume
+    // a ticket — NEVER reserve capacity it will not use.
+    expect(outcome.dispatched).toBe(true);
+    expect(fetchStub).not.toHaveBeenCalled();
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.reservationTicketId).toBeUndefined();
+    // The record explains the missing ticket (never "reservationTicketId:null,
+    // reservation:null" with no deferral reason — the old silent shape).
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationSkipped: 'remote-ok' }),
+    );
+  });
+
+  it('AC8: a low-priority candidate resolves local-preferred and still reserves, forwarding the ticket', async () => {
+    const fetchStub = fixtureFetcher(reserveGranted());
+    const deps = makeDeps({
+      getHerdrListHead: vi
+        .fn()
+        .mockResolvedValue({ ok: true, items: [{ ...planCandidate('WL-LOW'), priority: 'low' }] }),
+      reserveLocalCapacity: createLocalReserver(
+        'http://proxy:8000',
+        fetchStub as unknown as LocalReserveFetcher,
+      ),
+    });
+
+    const outcome = await runDispatchTick(deps, { localPreferenceMode: 'priority-rule' });
+
+    // `low` priority → local-preferred → the pane's first request IS local,
+    // so a ticket has a real beneficiary (AC7) — reserve and forward it.
+    expect(outcome.dispatched).toBe(true);
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.reservationTicketId).toBe('tkt-granted-1');
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationTicketId: 'tkt-granted-1' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ localPreference: 'local-preferred', localPreferenceReason: 'priority-low' }),
+    );
+  });
+});
+
+describe('dispatch reserve gate — TTL bound (AC9, WL-0MVWEZF4Z004UNYT)', () => {
+  it('AC9: a grant with less than the documented TTL window is NOT treated as capacity (fail-open, recorded)', async () => {
+    const fetchStub = fixtureFetcher(reserveGranted({ ttl_s: 5 }));
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+      reserveLocalCapacity: createLocalReserver(
+        'http://proxy:8000',
+        fetchStub as unknown as LocalReserveFetcher,
+      ),
+    });
+
+    const outcome = await runDispatchTick(deps);
+
+    // The ticket is single-use AND below the usable window: never forwarded,
+    // never counted as capacity — the dispatch fails open without it.
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.reservationTicketId).toBeUndefined();
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationUnavailable: 'ttl-below-bound' }),
+    );
+    expect(deps.recordDispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ reservationTicketId: 'tkt-granted-1' }),
+    );
+  });
+
+  it('AC9: a grant at or above the TTL bound is usable capacity (ticket forwarded)', async () => {
+    const fetchStub = fixtureFetcher(reserveGranted({ ttl_s: 10 }));
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+      reserveLocalCapacity: createLocalReserver(
+        'http://proxy:8000',
+        fetchStub as unknown as LocalReserveFetcher,
+      ),
+    });
+
+    const outcome = await runDispatchTick(deps);
+
+    expect(outcome.dispatched).toBe(true);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.reservationTicketId).toBe('tkt-granted-1');
   });
 });
 

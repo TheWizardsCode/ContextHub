@@ -1412,6 +1412,217 @@ describe('wl next regression tests (WL-0MM2FKKOW1H0C0G4)', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────
+  // Subtree priority inheritance (WL-0MVYCVSPN007CMAJ)
+  // A root item's effective priority is the max of its own priority and the
+  // priorities of its non-closed descendants (children, transitively through
+  // grandchildren), so a root hosting a critical child ranks as critical even
+  // though the child itself is hidden from `wl next` (strict root-only).
+  // ─────────────────────────────────────────────────────────────────────
+  describe('subtree priority inheritance (WL-0MVYCVSPN007CMAJ)', () => {
+    it('computeEffectivePriority inherits critical priority from an open child', () => {
+      const root = db.create({ title: 'Root', priority: 'high', status: 'open' });
+      const criticalChild = db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: root.id,
+      });
+
+      const result = db.computeEffectivePriority(root);
+      expect(result.value).toBe(4); // critical
+      expect(result.inheritedFrom).toBe(criticalChild.id);
+      expect(result.reason).toContain('inherited from');
+      expect(result.reason).toContain(criticalChild.id);
+    });
+
+    it('inherits critical priority transitively through a grandchild', () => {
+      const root = db.create({ title: 'Root', priority: 'high', status: 'open' });
+      const child = db.create({
+        title: 'Child',
+        priority: 'medium',
+        status: 'open',
+        parentId: root.id,
+      });
+      const grandchild = db.create({
+        title: 'Critical grandchild',
+        priority: 'critical',
+        status: 'open',
+        parentId: child.id,
+      });
+
+      const result = db.computeEffectivePriority(root);
+      expect(result.value).toBe(4);
+      expect(result.inheritedFrom).toBe(grandchild.id);
+      expect(result.reason).toContain(grandchild.id);
+    });
+
+    it('does not inherit from a completed critical child', () => {
+      const root = db.create({ title: 'Root', priority: 'high', status: 'open' });
+      db.create({
+        title: 'Completed critical child',
+        priority: 'critical',
+        status: 'completed',
+        parentId: root.id,
+      });
+
+      const result = db.computeEffectivePriority(root);
+      expect(result.value).toBe(3); // own high
+      expect(result.inheritedFrom).toBeUndefined();
+    });
+
+    it('does not inherit from a deleted critical child', () => {
+      const root = db.create({ title: 'Root', priority: 'high', status: 'open' });
+      db.create({
+        title: 'Deleted critical child',
+        priority: 'critical',
+        status: 'deleted',
+        parentId: root.id,
+      });
+
+      const result = db.computeEffectivePriority(root);
+      expect(result.value).toBe(3); // own high
+      expect(result.inheritedFrom).toBeUndefined();
+    });
+
+    it('does not inherit from a blocked critical child — its blockers carry the urgency', () => {
+      // A blocked child's urgency is carried by *its own* blockers through
+      // the dependents path, never by the parent: the parent must not
+      // outrank a root-level blocker that unblocks the child
+      // (WL-0MQFIYPZK00680H1).
+      const root = db.create({ title: 'Root', priority: 'high', status: 'open' });
+      db.create({
+        title: 'Blocked critical child',
+        priority: 'critical',
+        status: 'blocked',
+        parentId: root.id,
+      });
+
+      const result = db.computeEffectivePriority(root);
+      expect(result.value).toBe(3); // own high
+      expect(result.inheritedFrom).toBeUndefined();
+    });
+
+    it('takes the maximum of own priority and inherited child priority', () => {
+      // Root is already critical (own) with a high child — effective stays
+      // critical; no inheritedFrom is recorded for a lower child.
+      const root = db.create({ title: 'Critical root', priority: 'critical', status: 'open' });
+      db.create({
+        title: 'High child',
+        priority: 'high',
+        status: 'open',
+        parentId: root.id,
+      });
+
+      const result = db.computeEffectivePriority(root);
+      expect(result.value).toBe(4);
+      expect(result.inheritedFrom).toBeUndefined();
+    });
+
+    it('resolves deep subtree chains deterministically without recursion blow-up', () => {
+      const root = db.create({ title: 'Deep root', priority: 'low', status: 'open' });
+      let parent = root;
+      for (let i = 0; i < 60; i += 1) {
+        parent = db.create({
+          title: `Level ${i}`,
+          priority: 'low',
+          status: 'open',
+          parentId: parent.id,
+        });
+      }
+
+      // All-low 60-deep chain: terminates and stays at own low priority
+      // (no critical item anywhere in the subtree).
+      const result = db.computeEffectivePriority(root);
+      expect(result.value).toBe(1);
+      expect(result.inheritedFrom).toBeUndefined();
+    });
+
+    it('still finds a critical descendant deep in the subtree', () => {
+      const root = db.create({ title: 'Deep root', priority: 'low', status: 'open' });
+      let parent = root;
+      for (let i = 0; i < 49; i += 1) {
+        parent = db.create({
+          title: `Level ${i}`,
+          priority: 'low',
+          status: 'open',
+          parentId: parent.id,
+        });
+      }
+      const deepCritical = db.create({
+        title: 'Deep critical leaf',
+        priority: 'critical',
+        status: 'open',
+        parentId: parent.id,
+      });
+
+      const result = db.computeEffectivePriority(root);
+      expect(result.value).toBe(4);
+      expect(result.inheritedFrom).toBe(deepCritical.id);
+    });
+
+    it('is cycle-safe on a degenerate parentId cycle', () => {
+      const root = db.create({ title: 'Root', priority: 'low', status: 'open' });
+      const child = db.create({
+        title: 'Child',
+        priority: 'low',
+        status: 'open',
+        parentId: root.id,
+      });
+      // Degenerate: point the root back at its own child to form a cycle.
+      db.update(root.id, { parentId: child.id });
+
+      const result = db.computeEffectivePriority(root);
+      // Terminates deterministically; never below own/inherited low.
+      expect(result.value).toBeGreaterThanOrEqual(1);
+    });
+
+    it('wl next selects a root hosting a critical child over a standalone root', async () => {
+      const rootWithCriticalChild = db.create({
+        title: 'Root with critical child',
+        priority: 'low',
+        status: 'open',
+      });
+      db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: rootWithCriticalChild.id,
+      });
+      await wait(10);
+      db.create({
+        title: 'Standalone medium root',
+        priority: 'medium',
+        status: 'open',
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem).not.toBeNull();
+      // Effective priority (critical via the hidden child) wins the
+      // tie-break over the standalone medium root.
+      expect(result.workItem!.id).toBe(rootWithCriticalChild.id);
+    });
+
+    it('never surfaces the critical child itself (single and batch, root-only)', () => {
+      const parent = db.create({ title: 'Open parent', priority: 'low', status: 'open' });
+      const criticalChild = db.create({
+        title: 'Critical child',
+        priority: 'critical',
+        status: 'open',
+        parentId: parent.id,
+      });
+
+      const single = db.findNextWorkItem();
+      expect(single.workItem).not.toBeNull();
+      expect(single.workItem!.id).toBe(parent.id);
+
+      const batch = db.findNextWorkItems(3);
+      const ids = batch.map(r => r.workItem?.id).filter(Boolean);
+      expect(ids).not.toContain(criticalChild.id);
+      expect(ids).toContain(parent.id);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
   // childCount enrichment (WL-0MQF32M6P003GCT9)
   // `wl next --json` output should include a `childCount` field for each
   // work item representing the number of direct children.

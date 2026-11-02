@@ -28,6 +28,7 @@ import { spawnSync } from 'child_process';
 
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
 import { cliInvocation } from './cli-bundle.js';
+import { fixtureGitEnv } from './git-helpers.js';
 import { performSync } from '../../src/commands/sync.js';
 import { WorklogDatabase } from '../../src/database.js';
 import {
@@ -36,24 +37,14 @@ import {
   formatSyncPhaseTimings,
 } from '../../src/sync-phase-timings.js';
 
-const mockBinDir = path.join(path.dirname(new URL(import.meta.url).pathname), 'mock-bin');
-
 /**
  * PATH without the test mock-bin so subprocesses run the real git binary
  * (mirrors tests/cli/sync-delta-push.test.ts: a real bare remote push needs
  * real git, not the minimal mock).
  */
-function realGitEnv(): Record<string, string> {
-  const pathVal = (process.env.PATH || '')
-    .split(path.delimiter)
-    .filter((p) => path.resolve(p) !== path.resolve(mockBinDir))
-    .join(path.delimiter);
-  return { ...(process.env as Record<string, string>), PATH: pathVal };
-}
-
 /** git helper mirroring tests/cli/sync-delta-push.test.ts (real git). */
 function git(cwd: string, ...args: string[]): string {
-  const res = spawnSync('git', args, { cwd, encoding: 'utf-8', env: realGitEnv() });
+  const res = spawnSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
   if (res.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${res.stderr || res.stdout}`);
   }
@@ -65,7 +56,7 @@ function runCli(cwd: string, ...args: string[]): { stdout: string; stderr: strin
   const res = spawnSync(command, [entry, ...args], {
     cwd,
     encoding: 'utf-8',
-    env: realGitEnv(),
+    env: fixtureGitEnv(),
   });
   return { stdout: res.stdout || '', stderr: res.stderr || '', status: res.status ?? -1 };
 }
@@ -126,7 +117,7 @@ describe('wl sync phase timings (WL-0MVK6SD5O001K901)', () => {
       try {
         // performSync shells out to git via execAsync: run the real binary, not
         // the test mock-bin that setup-tests prepends to PATH.
-        process.env.PATH = realGitEnv().PATH;
+        process.env.PATH = fixtureGitEnv().PATH;
         git(root, 'init', '-q');
         git(root, 'config', 'user.email', 'test@example.com');
         git(root, 'config', 'user.name', 'Test User');

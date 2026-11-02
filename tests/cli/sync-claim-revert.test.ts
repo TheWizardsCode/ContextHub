@@ -61,11 +61,9 @@ import * as path from 'path';
 import * as os from 'os';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
 import { cliInvocation } from './cli-bundle.js';
+import { fixtureGitEnv } from './git-helpers.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
-const projectRoot = path.resolve(__dirname, '..', '..');
-const mockBinDir = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
-
 function cliSpawn(args: string[], options: Parameters<typeof spawn>[2]) {
   const [command, entry] = cliInvocation();
   return spawn(command, [entry, ...args], options);
@@ -76,17 +74,8 @@ function cliSpawnSync(args: string[], options: Parameters<typeof spawnSync>[2]) 
   return spawnSync(command, [entry, ...args], options);
 }
 
-/** PATH without the test mock-bin so subprocesses run the real git binary. */
-function realGitEnv(): Record<string, string> {
-  const pathVal = (process.env.PATH || '')
-    .split(path.delimiter)
-    .filter(p => path.resolve(p) !== path.resolve(mockBinDir))
-    .join(path.delimiter);
-  return { ...process.env as Record<string, string>, PATH: pathVal };
-}
-
 function git(cwd: string, ...args: string[]): string {
-  const res = spawnSync('git', args, { cwd, encoding: 'utf-8', env: realGitEnv() });
+  const res = spawnSync('git', args, { cwd, encoding: 'utf-8', env: fixtureGitEnv() });
   if (res.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${res.stderr || res.stdout}`);
   }
@@ -101,7 +90,7 @@ function runCli(
   const res = cliSpawnSync(args, {
     cwd,
     encoding: 'utf-8',
-    env: env ?? realGitEnv(),
+    env: env ?? fixtureGitEnv(),
     timeout: 60000,
   });
   return { stdout: res.stdout || '', stderr: res.stderr || '', status: res.status ?? -1 };
@@ -186,7 +175,7 @@ function setupProject(): Setup {
   const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-claim-git-shim-'));
   const marker = path.join(shimDir, 'fetch-started');
   const release = path.join(shimDir, 'fetch-release');
-  const realGit = execFileSync('which', ['git'], { encoding: 'utf-8', env: realGitEnv() }).trim();
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf-8', env: fixtureGitEnv() }).trim();
   const shim = [
     '#!/bin/sh',
     'if [ "$1" = "fetch" ]; then',
@@ -207,8 +196,8 @@ function setupProject(): Setup {
 
 function shimEnv(s: Setup): Record<string, string> {
   return {
-    ...realGitEnv(),
-    PATH: `${s.shimDir}${path.delimiter}${realGitEnv().PATH}`,
+    ...fixtureGitEnv(),
+    PATH: `${s.shimDir}${path.delimiter}${fixtureGitEnv().PATH}`,
     GIT_SHIM_MARKER: s.marker,
     GIT_SHIM_RELEASE: s.release,
     GIT_SHIM_REAL: s.realGit,

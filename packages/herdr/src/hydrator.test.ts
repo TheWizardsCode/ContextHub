@@ -17,6 +17,7 @@ import {
 import {
   ALLOWED_STAGES_BY_STATUS,
   applyActivePaneMarkers,
+  buildReleaseComment,
   collectPaneWorkItemIds,
   compatibleStage,
   createHydratorFileLog,
@@ -29,13 +30,15 @@ import {
   isActivePaneMatch,
   markItemsActiveByPane,
   runHydrationOnce,
+  type DemotionOptions,
   type HydrationResult,
   type HydratorDepTarget,
   type HydratorDeps,
   type HydratorItem,
   type HydratorPane,
 } from './hydrator.js';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import type { ClaimHolderVerdict } from './claim-lock.js';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorklogDatabase } from '@worklog/shared';
@@ -365,6 +368,33 @@ describe('decideDemotion', () => {
       stage: 'intake_complete',
     });
   });
+
+  // ── Live claim holder (WL-0MVWDB3IG004NRIU) ──────────────────────────
+  // `held` is evaluated AFTER the `in_review` and `blocked` branches, so a
+  // held claim suppresses ONLY the release-to-`open` branch and never
+  // overrides the audit-tier or dependency transitions.
+
+  it('suppresses the open release while a claim holder is live', () => {
+    expect(decideDemotion(inProgress('plan_complete'), { hasActivePane: false, blocked: false, held: true })).toBeNull();
+  });
+
+  it('held never overrides the in_review → completed branch', () => {
+    expect(decideDemotion(inProgress('in_review'), { hasActivePane: false, blocked: false, held: true })).toEqual({
+      status: 'completed',
+      stage: 'in_review',
+    });
+  });
+
+  it('held never overrides the blocked branch', () => {
+    expect(decideDemotion(inProgress('plan_complete'), { hasActivePane: false, blocked: true, held: true })).toEqual({
+      status: 'blocked',
+      stage: 'plan_complete',
+    });
+  });
+
+  it('pane match stays primary even when the claim is held', () => {
+    expect(decideDemotion(inProgress('plan_complete'), { hasActivePane: true, blocked: false, held: true })).toBeNull();
+  });
 });
 
 // ── Pane-title active detection (AC2 / WL-0MV1BWETT005GSUJ) ──────────
@@ -555,6 +585,542 @@ describe('runHydrationOnce', () => {
   });
 });
 
+// ── Busy = pane OR live claim holder (WL-0MVWDB3IG004NRIU) ────────────
+// A pane-less driven session still holds its per-child `flock` claim, so an
+// item whose `<worklog>/locks/child-<id>.lock` is held by a LIVE holder must
+// be left untouched (counted skipped, logged `kept … live claim holder`)
+// instead of being released mid-work. The probe is batched ONCE per cycle
+// over the pane-less candidates, bounded by the per-tick cap, and fail-open
+// (timeout/throw/unavailable/missing-verdict → suppress, never release).
+
+describe('live claim holder probe (orchestration)', () => {
+  const heldVerdict = (over: Partial<ClaimHolderVerdict> = {}): ClaimHolderVerdict => ({
+    held: true,
+    reason: 'flock-held',
+    pid: 4123,
+    sessionId: 'sess-1',
+    ...over,
+  });
+  const freeVerdict = (over: Partial<ClaimHolderVerdict> = {}): ClaimHolderVerdict => ({
+    held: false,
+    reason: 'no-lock-file',
+    ...over,
+  });
+
+  it('keeps an in-progress item (counted skipped) while its claim holder is live and logs kept', async () => {
+    const logs: string[] = [];
+    const probe = vi.fn(
+      async () => new Map<string, ClaimHolderVerdict>([[WL, heldVerdict()]]),
+    ) as unknown as HydratorDeps['hasLiveClaimHolder'];
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      hasLiveClaimHolder: probe,
+      log: (m) => logs.push(m),
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 0, skipped: 1 });
+    expect(applied).toEqual([]);
+    expect(logs).toContain(`[hydrator] kept ${WL}: live claim holder pid 4123 session sess-1`);
+  });
+
+  it('releases a pane-less item whose recorded holder is dead, logging the dead-holder signal', async () => {
+    const logs: string[] = [];
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      hasLiveClaimHolder: async () =>
+        new Map<string, ClaimHolderVerdict>([[WL, freeVerdict({ reason: 'stale' })]]),
+      log: (m) => logs.push(m),
+    });
+
+    await runHydrationOnce(deps);
+
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
+    expect(
+      logs.some((l) =>
+        l.includes(`[hydrator] released ${WL}:`) && l.includes('(no pane, claim holder dead)'),
+      ),
+    ).toBe(true);
+  });
+
+  it('never probes an item with a matching pane (zero probe calls, pane wins)', async () => {
+    const probe = vi.fn(async () => new Map<string, ClaimHolderVerdict>()) as unknown as HydratorDeps['hasLiveClaimHolder'];
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listActivePanes: async () => [
+        { pane_id: 'wC:p1', label: `Downtime triggered implement Foo - ${WL}`, workspace_id: 'wCurrent' },
+      ],
+      listOutboundDeps: async () => [],
+      hasLiveClaimHolder: probe,
+    });
+
+    await runHydrationOnce(deps, 'wCurrent');
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(applied).toEqual([]);
+  });
+
+  it('queries the batched probe once per cycle over exactly the pane-less candidates (cost discipline)', async () => {
+    const items = makeWorstCaseItems(10);
+    // Panes in wCurrent titled with the first four item IDs → those four are
+    // pane-matched and must NEVER be sent to the claim probe.
+    const matched = items.slice(0, 4);
+    const panes: HydratorPane[] = matched.map((item, i) => ({
+      pane_id: `pane-${i}`,
+      label: `Downtime triggered implement Foo - ${item.id}`,
+      workspace_id: 'wCurrent',
+    }));
+    const probe = vi.fn(
+      async (ids: string[]) => {
+        const map = new Map<string, ClaimHolderVerdict>();
+        for (const id of ids) map.set(id, freeVerdict());
+        return map;
+      },
+    ) as unknown as HydratorDeps['hasLiveClaimHolder'];
+    const batch = vi.fn(
+      async (ids: string[]) => {
+        const map = new Map<string, HydratorDepTarget[] | undefined>();
+        for (const id of ids) map.set(id, []);
+        return map;
+      },
+    ) as unknown as HydratorDeps['listOutboundDepsBatch'];
+    const perItem = vi.fn(async () => []) as unknown as HydratorDeps['listOutboundDeps'];
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => items,
+      listActivePanes: async () => panes,
+      listOutboundDeps: perItem,
+      listOutboundDepsBatch: batch,
+      hasLiveClaimHolder: probe,
+    });
+
+    await runHydrationOnce(deps, 'wCurrent');
+
+    // One batched claim-probe call for the whole cycle, no per-item spawns.
+    expect(probe).toHaveBeenCalledTimes(1);
+    // The batched dep-read fast path is intact and untouched.
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(perItem).not.toHaveBeenCalled();
+    // The probe sees the same pane-less candidate set as the dep read …
+    const probed = probe.mock.calls[0][0];
+    const depIds = batch.mock.calls[0][0];
+    expect(probed).toEqual(depIds);
+    // … bounded to the pane-less items only (none of the matched four).
+    expect(probed).toHaveLength(6);
+    for (const item of matched) expect(probed).not.toContain(item.id);
+    // The pane-less six are released (probe says free), the matched four kept.
+    expect(applied).toHaveLength(6);
+  });
+
+  it('suppresses only the open release: a held in_review item is still completed', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'in_review' }],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      hasLiveClaimHolder: async () => new Map<string, ClaimHolderVerdict>([[WL, heldVerdict()]]),
+    });
+
+    await runHydrationOnce(deps);
+
+    expect(applied).toEqual([{ id: WL, status: 'completed', stage: 'in_review' }]);
+  });
+
+  it('suppresses only the open release: a held item with an active blocker is still blocked', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'in_progress' }],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [{ id: 'WL-OTHER', status: 'open', stage: 'plan_complete' }],
+      hasLiveClaimHolder: async () => new Map<string, ClaimHolderVerdict>([[WL, heldVerdict()]]),
+    });
+
+    await runHydrationOnce(deps);
+
+    expect(applied).toEqual([{ id: WL, status: 'blocked', stage: 'plan_complete' }]);
+  });
+
+  it('treats a missing per-item verdict as ambiguous evidence and suppresses that item', async () => {
+    const logs: string[] = [];
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      // The probe ran but returned no verdict for this item → no release.
+      hasLiveClaimHolder: async () => new Map<string, ClaimHolderVerdict>(),
+      log: (m) => logs.push(m),
+    });
+
+    await runHydrationOnce(deps);
+
+    expect(applied).toEqual([]);
+    expect(logs.some((l) => l.includes(`[hydrator] kept ${WL}: live claim holder`))).toBe(true);
+  });
+
+  it('aborts the cycle (no demotion) when the claim-probe step exceeds its budget', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      hasLiveClaimHolder: () => new Promise<Map<string, ClaimHolderVerdict>>(() => {}),
+      stepTimeoutMs: 50,
+      log: () => {},
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason ?? '').toContain('claim-probe');
+    expect(result.reason ?? '').toContain('timeout');
+    expect(result.demoted).toBe(0);
+    expect(applied).toEqual([]);
+  });
+
+  it('aborts the cycle (no demotion) when the claim probe throws or returns an abnormal result', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      hasLiveClaimHolder: async () => {
+        throw new Error('probe exploded');
+      },
+      log: () => {},
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason ?? '').toContain('claim-probe');
+    expect(result.demoted).toBe(0);
+    expect(applied).toEqual([]);
+  });
+
+  // ── Production wiring: the real probe, zero CLI spawns ──────────────
+
+  /** Seed a throwaway worklog store with a `locks/` dir. */
+  function seedLockStore(lockFiles: Record<string, string> = {}): {
+    rootDir: string;
+    worklogDir: string;
+  } {
+    const rootDir = mkdtempSync(join(tmpdir(), 'herdr-claim-probe-'));
+    const worklogDir = join(rootDir, '.worklog');
+    const locksDir = join(worklogDir, 'locks');
+    mkdirSync(locksDir, { recursive: true });
+    for (const [name, body] of Object.entries(lockFiles)) {
+      writeFileSync(join(locksDir, name), body, 'utf8');
+    }
+    return { rootDir, worklogDir };
+  }
+
+  it('production hasLiveClaimHolder reports a stale lock (dead pid) and spawns no CLI', async () => {
+    const seeded = seedLockStore({
+      [`child-${WL}.lock`]: JSON.stringify({
+        agent: 'implement',
+        pid: 999_999_999, // provably not alive on any host
+        session_id: 'dead-session',
+        started_at: '2026-10-31T10:00:00.000Z',
+        token: 'tok',
+      }),
+    });
+    const spawns: string[] = [];
+    setExecFileAsync((async (bin: string, args: string[]) => {
+      spawns.push(`${bin} ${args.join(' ')}`);
+      return { stdout: '{}', stderr: '' };
+    }) as never);
+    setWorklogDir(seeded.worklogDir);
+    try {
+      const deps = createProductionHydratorDeps({ log: () => {} });
+      const verdicts = await deps.hasLiveClaimHolder!([WL, 'WL-ABSENT000001']);
+
+      expect(verdicts.get(WL)?.held).toBe(false);
+      expect(verdicts.get(WL)?.reason).toBe('stale');
+      expect(verdicts.get(WL)?.pid).toBe(999_999_999);
+      expect(verdicts.get('WL-ABSENT000001')?.held).toBe(false);
+      expect(verdicts.get('WL-ABSENT000001')?.reason).toBe('no-lock-file');
+      // Local probe only: not one `wl`/`herdr` spawn for the batch.
+      expect(spawns).toEqual([]);
+    } finally {
+      resetWorklogDir();
+      rmSync(seeded.rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('production hasLiveClaimHolder fails open when the locks directory is absent', async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'herdr-claim-probe-nolocks-'));
+    const worklogDir = join(rootDir, '.worklog');
+    mkdirSync(worklogDir, { recursive: true }); // no locks/ subdirectory
+    setWorklogDir(worklogDir);
+    try {
+      const deps = createProductionHydratorDeps({ log: () => {} });
+      const verdicts = await deps.hasLiveClaimHolder!([WL]);
+
+      expect(verdicts.get(WL)?.held).toBe(true);
+      expect(verdicts.get(WL)?.reason).toBe('locks-dir-unreadable');
+    } finally {
+      resetWorklogDir();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Release clears the scheduling hold (WL-0MVWDB7F2003SORI) ─────────
+// A non-empty `assignee` is the scheduling hold (WL-0MV85WDOM007BKF8), so a
+// release that writes only status/stage leaves the item permanently
+// undispatchable (live evidence: `LP-0MVUH9OMY004MQ3U` was `open` with
+// `assignee=Map` after its release). Every release therefore clears the hold
+// with a CAS guard on the holder it observed (mirroring
+// `rollbackClaimWorkItem()`) and records that holder in a `herdr-hydrator`
+// audit comment. Failed comments are tolerated — the demotion stands.
+
+describe('release clears the scheduling hold', () => {
+  it('buildReleaseComment names the signal and the previous holder, or (none)', () => {
+    expect(
+      buildReleaseComment('released because no pane and claim holder dead', 'implement'),
+    ).toBe('released because no pane and claim holder dead; previous assignee: implement');
+    expect(buildReleaseComment('released because no matching pane')).toBe(
+      'released because no matching pane; previous assignee: (none)',
+    );
+    // An explicitly empty holder is "no holder", never an empty suffix.
+    expect(buildReleaseComment('released because no matching pane', '')).toBe(
+      'released because no matching pane; previous assignee: (none)',
+    );
+  });
+
+  it('demotes with --assignee "" CAS-guarded by --if-assignee, then comments the signal and holder', async () => {
+    resetWorklogDir();
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    const applied = await deps.applyDemotion(WL, 'open', 'intake_complete', {
+      previousAssignee: 'implement',
+      reason: 'released because no pane and claim holder dead',
+    });
+
+    expect(applied).toBe(true);
+    const update = calls.find((call) => call.args.includes('update'));
+    expect(update).toBeDefined();
+    // AC1: the hold is always cleared; the observed holder is a CAS guard so a
+    // concurrent assignee change makes the demotion stale instead of a clobber.
+    expect(update!.args).toEqual([
+      'update',
+      WL,
+      '--status',
+      'open',
+      '--stage',
+      'intake_complete',
+      '--assignee',
+      '',
+      '--if-assignee',
+      'implement',
+      '--json',
+    ]);
+
+    // AC2: the release trail names the deciding signal and the previous holder.
+    const comment = calls.find((call) => call.args.includes('comment'));
+    expect(comment).toBeDefined();
+    expect(comment!.args).toEqual([
+      'comment',
+      'add',
+      WL,
+      '--comment',
+      'released because no pane and claim holder dead; previous assignee: implement',
+      '--author',
+      'herdr-hydrator',
+      '--json',
+    ]);
+  });
+
+  it('omits --if-assignee and records (none) when the item has no assignee', async () => {
+    resetWorklogDir();
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    const applied = await deps.applyDemotion(WL, 'open', 'intake_complete', {
+      reason: 'released because no matching pane',
+    });
+
+    expect(applied).toBe(true);
+    const update = calls.find((call) => call.args.includes('update'));
+    expect(update).toBeDefined();
+    expect(update!.args).toEqual([
+      'update',
+      WL,
+      '--status',
+      'open',
+      '--stage',
+      'intake_complete',
+      '--assignee',
+      '',
+      '--json',
+    ]);
+    expect(update!.args).not.toContain('--if-assignee');
+
+    const comment = calls.find((call) => call.args.includes('comment'));
+    expect(comment).toBeDefined();
+    expect(comment!.args).toContain(
+      'released because no matching pane; previous assignee: (none)',
+    );
+  });
+
+  it('does not comment when the CAS guard rejects the demotion (holder changed concurrently)', async () => {
+    resetWorklogDir();
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    setExecFileAsync((async (bin: string, args: string[]) => {
+      calls.push({ bin, args });
+      // The CAS guard rejected the write (success:false), as `wl` does when
+      // `--if-assignee` no longer matches.
+      return { stdout: JSON.stringify({ success: false }), stderr: '' };
+    }) as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    const applied = await deps.applyDemotion(WL, 'open', 'intake_complete', {
+      previousAssignee: 'implement',
+      reason: 'released because no matching pane',
+    });
+
+    expect(applied).toBe(false);
+    expect(calls.some((call) => call.args.includes('comment'))).toBe(false);
+  });
+
+  it('tolerates a failing comment: the demotion stands, is logged, and the cycle neither aborts nor re-demotes', async () => {
+    resetWorklogDir();
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    const logs: string[] = [];
+    setExecFileAsync((async (bin: string, args: string[]) => {
+      calls.push({ bin, args });
+      if (args.includes('comment')) throw new Error('wl comment exploded');
+      if (args.includes('pane')) {
+        return { stdout: JSON.stringify({ result: { panes: [] } }), stderr: '' };
+      }
+      if (args.includes('dep')) {
+        return { stdout: JSON.stringify({ outbound: [] }), stderr: '' };
+      }
+      if (args.includes('update')) {
+        return { stdout: JSON.stringify({ success: true }), stderr: '' };
+      }
+      if (args.includes('list')) {
+        return {
+          stdout: JSON.stringify({
+            workItems: [
+              {
+                id: WL,
+                status: 'in-progress',
+                stage: 'plan_complete',
+                assignee: 'implement',
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '{}', stderr: '' };
+    }) as never);
+    const deps: HydratorDeps = {
+      ...createProductionHydratorDeps({ log: (message) => logs.push(message) }),
+      // The claim probe would touch the real filesystem: pin a dead holder so
+      // the release signal is deterministic and local.
+      hasLiveClaimHolder: async () =>
+        new Map<string, ClaimHolderVerdict>([[WL, { held: false, reason: 'stale' }]]),
+    };
+
+    const result = await runHydrationOnce(deps);
+
+    expect(result).toMatchObject({ ok: true, demoted: 1 });
+    // Exactly ONE demotion write: the failed comment never triggers a retry.
+    expect(calls.filter((call) => call.args.includes('update'))).toHaveLength(1);
+    expect(
+      logs.some(
+        (line) => line.includes('release comment failed') && line.includes(WL),
+      ),
+    ).toBe(true);
+    // The release log line (the primary local trail) is still emitted.
+    expect(logs.some((line) => line.includes(`[hydrator] released ${WL}:`))).toBe(true);
+  });
+
+  it('emits neither an assignee clear nor a comment for a kept item (pane-matched and live holder)', async () => {
+    const other = 'WL-0MVWDB7F2OTHER1';
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    setExecFileAsync((async (bin: string, args: string[]) => {
+      calls.push({ bin, args });
+      return { stdout: '{}', stderr: '' };
+    }) as never);
+    const deps: HydratorDeps = {
+      ...createProductionHydratorDeps({ log: () => {} }),
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'implement' },
+        { id: other, status: 'in-progress', stage: 'plan_complete', assignee: 'implement' },
+      ],
+      listActivePanes: async () => [
+        { pane_id: 'wC:p1', label: `implement - ${WL}`, workspace_id: 'wCurrent' },
+      ],
+      listOutboundDeps: async () => [],
+      hasLiveClaimHolder: async () =>
+        new Map<string, ClaimHolderVerdict>([[other, { held: true, reason: 'flock-held' }]]),
+    };
+
+    const result = await runHydrationOnce(deps, 'wCurrent');
+
+    expect(result).toMatchObject({ ok: true, demoted: 0, skipped: 2 });
+    // No `wl update` and no `wl comment add` for kept items — the spawn list
+    // is empty because every lookup was served by the injected seams.
+    expect(calls).toEqual([]);
+  });
+
+  it('logs the deciding signal for every applied demotion (no-pane release)', async () => {
+    const logs: string[] = [];
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'implement' },
+      ],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      log: (message) => logs.push(message),
+    });
+
+    await runHydrationOnce(deps);
+
+    expect(applied).toEqual([
+      { id: WL, status: 'open', stage: 'intake_complete' },
+    ]);
+    expect(logs).toContain(
+      `[hydrator] released ${WL}: in-progress/plan_complete → open/intake_complete (no matching pane)`,
+    );
+  });
+
+  it('passes the observed holder and the deciding signal to the demotion seam', async () => {
+    const seen: Array<{ id: string; opts?: DemotionOptions }> = [];
+    const { deps } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'implement' },
+      ],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      hasLiveClaimHolder: async () =>
+        new Map<string, ClaimHolderVerdict>([[WL, { held: false, reason: 'stale' }]]),
+      applyDemotion: async (id, _status, _stage, opts) => {
+        seen.push({ id, opts });
+        return true;
+      },
+    });
+
+    await runHydrationOnce(deps);
+
+    expect(seen).toEqual([
+      {
+        id: WL,
+        opts: {
+          previousAssignee: 'implement',
+          reason: 'released because no pane and claim holder dead',
+        },
+      },
+    ]);
+  });
+});
+
 // ── Visibility-gated runner (AC4/AC5) ─────────────────────────────────
 
 describe('createHydratorRunner', () => {
@@ -605,11 +1171,13 @@ describe('createHydratorRunner', () => {
 // ── Production wiring ─────────────────────────────────────────────────
 
 describe('createProductionHydratorDeps', () => {
-  it('exposes the four injectable seams', () => {
+  it('exposes the five injectable seams', () => {
     const deps = createProductionHydratorDeps();
     expect(typeof deps.listInProgressItems).toBe('function');
     expect(typeof deps.listActivePanes).toBe('function');
     expect(typeof deps.listOutboundDeps).toBe('function');
+    expect(typeof deps.listOutboundDepsBatch).toBe('function');
+    expect(typeof deps.hasLiveClaimHolder).toBe('function');
     expect(typeof deps.applyDemotion).toBe('function');
   });
 });
@@ -925,8 +1493,10 @@ describe('production active-detection spawns (pane list)', () => {
     await deps.applyDemotion(WL, 'open', 'plan_complete');
 
     // Every recorded spawn must not include `tab` for the active-detection
-    // lookup (pane titles are the signal).
-    expect(calls).toHaveLength(4);
+    // lookup (pane titles are the signal). Five spawns: in-progress list,
+    // pane list, per-item dep list, demotion update and its release comment
+    // (WL-0MVWDB7F2003SORI added the comment spawn).
+    expect(calls).toHaveLength(5);
     // The seam uses `herdr pane list` (bin may be a full path when
     // HERDR_BIN_PATH is set).
     const paneCall = calls.find(
@@ -1102,9 +1672,10 @@ describe('hydrator CLI stdio isolation (AC1)', () => {
     await deps.listOutboundDeps(WL);
     await deps.applyDemotion(WL, 'open', 'plan_complete');
 
-    // All four hydrator spawn shapes were exercised (in-progress list, pane
-    // list, per-item dep list, demotion apply).
-    expect(calls).toHaveLength(4);
+    // All five hydrator spawn shapes were exercised (in-progress list, pane
+    // list, per-item dep list, demotion update and its release comment —
+    // WL-0MVWDB7F2003SORI added the comment spawn).
+    expect(calls).toHaveLength(5);
     expect(calls.some((call) => call.args.includes('pane'))).toBe(true);
     expect(calls.some((call) => call.args.includes('dep'))).toBe(true);
     expect(calls.some((call) => call.args.includes('update'))).toBe(true);

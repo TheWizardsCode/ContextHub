@@ -11,7 +11,10 @@
  * compute the *effective* priority used for tie-breaking in candidate
  * selection: an item's own priority, raised to the priority of any active
  * item that depends on it (transparent priority inheritance). An item that
- * blocks a critical task is elevated to critical effective priority.
+ * blocks a critical task is elevated to critical effective priority, and a
+ * root whose non-closed subtree holds a critical child inherits the
+ * highest declared priority anywhere in that subtree (subtree priority
+ * inheritance, WL-0MVYCVSPN007CMAJ).
  *
  * ## Boundary
  *
@@ -145,10 +148,18 @@ export function getPriorityValue(priority?: string): number {
  *   - The item's own priority
  *   - The priority of any active (non-completed, non-deleted) item that
  *     depends on this item (i.e., this item is a prerequisite for)
+ *   - The highest declared priority anywhere in this item's non-closed
+ *     subtree — children, transitively through grandchildren (subtree
+ *     priority inheritance, WL-0MVYCVSPN007CMAJ), so a root hosting a
+ *     critical child ranks as critical even though the child itself is
+ *     hidden by strict root-only selection. Children whose own work is
+ *     blocked are skipped — their blockers carry the urgency through the
+ *     dependents path instead (WL-0MQFIYPZK00680H1).
  *
  * This implements transparent, deterministic priority inheritance:
  * an item that blocks a critical task is elevated to critical effective
- * priority for tie-breaking in sortIndex selection.
+ * priority for tie-breaking in sortIndex selection, and a root carrying
+ * critical work in its subtree is elevated the same way.
  *
  * Results are cached in the optional `cache` map to avoid redundant
  * dependency lookups across a candidate pool.
@@ -213,6 +224,49 @@ export function computeEffectivePriority(
         inheritedFromPriority = parent.priority;
       }
     }
+  }
+
+  // Child/descendant inheritance (subtree priority, WL-0MVYCVSPN007CMAJ):
+  // an item rises to the highest declared priority anywhere in its non-closed
+  // subtree (children, transitively through grandchildren), so a root hosting
+  // a critical child is treated — and ranked — as critical even though the
+  // child itself is hidden from `wl next` (strict root-only selection). The
+  // walk is a deterministic breadth-first pass over direct children;
+  // cycle-safe on deep/degenerate subtrees via a visited set plus a depth
+  // cap; and reuses the in-progress-subtree skip from the dependents path so
+  // children hidden inside an in-progress subtree never leak into
+  // inheritance. Blocked children (and their subtrees) are skipped too: a
+  // blocked child's urgency is carried by *its own* blockers through the
+  // dependents path above, not by the parent — so a root with a blocked
+  // critical child never outranks the root-level blocker that unblocks it
+  // (WL-0MQFIYPZK00680H1). Only *declared* priorities are considered, so the
+  // parent → child inheritance above can never loop back through here.
+  const MAX_SUBTREE_DEPTH = 50;
+  const subtreeVisited = new Set<string>([item.id]);
+  let frontier = hooks.getNonClosedChildren(item.id, edgeCache);
+  let depth = 0;
+  while (frontier.length > 0 && depth < MAX_SUBTREE_DEPTH) {
+    const nextFrontier: WorkItem[] = [];
+    for (const child of frontier) {
+      if (subtreeVisited.has(child.id)) continue;
+      subtreeVisited.add(child.id);
+      // Children whose own work is blocked never count (nor does their
+      // subtree): their blockers carry the urgency instead.
+      if (child.status === 'blocked') continue;
+      // Children hidden inside an in-progress subtree (any ancestor is
+      // in-progress) must not influence inheritance — mirroring the
+      // dependents path. The rest of that hidden subtree is skipped too.
+      if (items && hooks.isInProgressSubtree(child, items)) continue;
+      const childValue = getPriorityValue(child.priority);
+      if (childValue > maxInheritedValue) {
+        maxInheritedValue = childValue;
+        inheritedFromId = child.id;
+        inheritedFromPriority = child.priority;
+      }
+      nextFrontier.push(...hooks.getNonClosedChildren(child.id, edgeCache));
+    }
+    frontier = nextFrontier;
+    depth += 1;
   }
 
   const effectiveValue = Math.max(ownValue, maxInheritedValue);

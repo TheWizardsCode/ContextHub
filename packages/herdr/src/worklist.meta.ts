@@ -30,13 +30,13 @@ import {
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown } from './md-viewer.js';
 import { ANSI } from './worklist.constants.js';
-import { formatTimestamp } from './worklist.format.js';
+import { formatTimestamp, formatTitleWithAssignee } from './worklist.format.js';
 
 /**
  * Build the metadata table rows for a work item (label/value pairs).
  *
  * Includes every tracked field: ID, Title, Status, Stage, Priority, Type,
- * Risk, Effort, Children, Parent, Tags, GitHub Issue, Created, Updated,
+ * Risk, Effort, Assignee, Children, Parent, Tags, GitHub Issue, Created, Updated,
  * Audit, and Audited At. When the item's `Key Files:` section
  * contains `.md` paths, a `Related Docs` row lists every one of them (joined
  * with `, `); the row is omitted when there are no `.md` Key Files
@@ -97,7 +97,9 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   };
 
   addMeta('ID', item.id);
-  addMeta('Title', item.title);
+  // Title carries the shared `[assignee] ` prefix (WL-0MVTPEB3A0091RDH AC2/AC5)
+  // so the preview panel and detail table show who holds the item.
+  addMeta('Title', formatTitleWithAssignee(item.title, item.assignee));
   addMeta('Status', iconText(noIcons ? '' : statusIcon(item.status), item.status));
   // Stage mirrors the list's audit-aware in_review icon via the shared
   // stageDisplayIcon helper (AC2). A covered child's inherited parent-audit
@@ -126,6 +128,14 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('Type', item.issueType);
   addMetaOrDash('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
   addMetaOrDash('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
+  // Assignee — the claim / scheduling-hold field (WL-0MVTPEB3A0091RDH AC1).
+  // Placed immediately after Effort so `pairMetaRows` compound pairing
+  // (Status+Stage, Priority+Type, Created+Updated, Audit+AuditedAt) can never
+  // absorb or reorder it. A whitespace-only assignee is treated as unassigned
+  // (assumption A3); the stored value renders verbatim (no icon — the shared
+  // icon set has no assignee glyph, assumption A2).
+  const assignee = (item.assignee ?? '').trim() === '' ? undefined : item.assignee;
+  addMeta('Assignee', assignee);
   // Dispatch provenance for log-derived rows (WL-0MUL2IY8L009S3PQ).
   if (item.isLogDerived) {
     addMeta('Dispatch', item.dispatchKind);

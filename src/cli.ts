@@ -17,27 +17,35 @@
  * recorded ratchet is deliberately tightened.
  */
 
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname as pathDirname, join as pathJoin, sep as pathSep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeFieldsArgv, extractCommandFromArgv } from './argv-normalize.js';
 import { recordSpawn } from './spawn-counter.js';
 import { WORKLOG_VERSION } from './version.js';
 
-// ── Shared workspace build-output preflight (WL-0MVPADZ1Z000FOSG AC4) ──────
+// ── Shared workspace build-output preflight (WL-0MVPADZ1Z000FOSG AC4, WL-0MVWK20DK004TQZM AC3) ──────
 //
 // `@worklog/shared/*` resolves through the workspace link into
 // `packages/shared/dist` — gitignored build output. When a concurrent actor
 // wipes it, every command used to die with a bare `ERR_MODULE_NOT_FOUND`
 // stack trace naming a path nobody recognises. The helpers below turn that
-// into one actionable line naming the missing artifact and the exact
-// remediation (`npm run build:shared`).
+// into one actionable diagnostic naming the missing artifact and the exact
+// remediation (`git restore` + `npm run build:shared`, or the one-command
+// `scripts/repair-shared-package.sh`).
 //
 // The check mirrors the runtime resolution (`import.meta.resolve` from THIS
 // module, then an existence check) rather than guessing a repo root, so a
 // linked worktree without its own `dist/` — where the runtime resolves the
 // main checkout's build output through the symlinked `node_modules` — never
 // sees a false positive.
+//
+// Root discovery is deliberately independent of `packages/shared/package.json`
+// surviving: the 2026-10-31 recurrence deleted the tracked sources *and* the
+// gitignored `dist/` (the whole directory), so a root walk keyed on the
+// package manifest alone returned `null` and the diagnostic stayed silent —
+// exactly the state that left `wl` broken machine-wide (WL-0MVWK20DK004TQZM
+// AC3). The markers below cover that state (see {@link looksLikeWorklogRepo}).
 //
 // The helpers live in this file (rather than a new module) because the
 // startup import budget forbids growing the fast path's boot graph, and they
@@ -56,10 +64,10 @@ const REPO_ROOT_SEARCH_DEPTH = 8;
 /**
  * Best-effort absolute path of the artifact the runtime would load.
  *
- * Walks up from the module's directory (bounded) to the repository root (the
- * nearest directory owning `packages/shared/package.json`). Returns `null`
- * when no such root exists (a relocated bundle), so callers never invent a
- * path.
+ * Walks up from the module's directory (bounded) to the repository root and
+ * returns `null` when no such root exists (a relocated bundle), so callers
+ * never invent a path. Root detection must not depend on
+ * `packages/shared/package.json` surviving — see {@link looksLikeWorklogRepo}.
  *
  * @param moduleUrl - module URL to anchor the search (defaults to this module)
  */
@@ -68,7 +76,7 @@ export function expectedSharedDistArtifactPath(
 ): string | null {
   let dir = pathDirname(fileURLToPath(moduleUrl));
   for (let depth = 0; depth <= REPO_ROOT_SEARCH_DEPTH; depth++) {
-    if (existsSync(pathJoin(dir, 'packages', 'shared', 'package.json'))) {
+    if (looksLikeWorklogRepo(dir)) {
       return pathJoin(dir, ...SHARED_DIST_ARTIFACT_RELPATH.split('/'));
     }
     const parent = pathDirname(dir);
@@ -79,8 +87,56 @@ export function expectedSharedDistArtifactPath(
 }
 
 /**
+ * True when `dir` is a Worklog repository root for the purposes of the
+ * shared-dist preflight.
+ *
+ * Markers, strongest first — so the check still fires when the tracked
+ * sources are gone:
+ *   1. the workspace package manifest (`packages/shared/package.json`),
+ *   2. a surviving `packages/shared` directory (partial deletion),
+ *   3. the root `package.json` declaring `@worklog/shared` as a local
+ *      (`file:`/workspace) dependency — this survives a whole-directory
+ *      wipe of `packages/shared` (the 2026-10-31 recurrence).
+ */
+export function looksLikeWorklogRepo(dir: string): boolean {
+  if (existsSync(pathJoin(dir, 'packages', 'shared', 'package.json'))) {
+    return true;
+  }
+  let sharedDirStat;
+  try {
+    sharedDirStat = statSync(pathJoin(dir, 'packages', 'shared'));
+  } catch {
+    sharedDirStat = null;
+  }
+  if (sharedDirStat !== null && sharedDirStat.isDirectory()) {
+    return true;
+  }
+  const manifestPath = pathJoin(dir, 'package.json');
+  if (!existsSync(manifestPath)) return false;
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const dependencies = manifest.dependencies as Record<string, unknown> | undefined;
+    const dep = dependencies?.['@worklog/shared'];
+    return (
+      typeof dep === 'string' &&
+      (dep.startsWith('file:') || dep.includes('packages/shared'))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The single actionable diagnostic printed when the artifact is missing:
  * the missing artifact, the absolute path checked, and the exact remediation.
+ *
+ * The remediation covers both halves of the 2026-10-31 recurrence
+ * (WL-0MVWK20DK004TQZM AC3): deleted tracked sources under `packages/shared`
+ * (`git restore` — never stash/reset) and the gitignored `dist/` build
+ * output (`npm run build:shared`), plus the one-command recovery script.
  */
 export function missingSharedDistDiagnostic(artifactPath: string): string {
   // <repo>/packages/shared/dist/worklog-paths.js → <repo>
@@ -92,7 +148,11 @@ export function missingSharedDistDiagnostic(artifactPath: string): string {
     `  Missing artifact: ${artifactPath}`,
     '  wl resolves @worklog/shared/* from packages/shared/dist, which is',
     '  gitignored build output (a wiped build tree produces this).',
-    `  Fix: run \`npm run build:shared\` in ${repoRoot} and retry.`,
+    '  Tracked sources under packages/shared were deleted too?',
+    `    git -C ${repoRoot} restore -- packages/shared`, // never stash/reset (WL-0MVWK20DK004TQZM AC4)
+    '  Then rebuild the gitignored output:',
+    `    (cd ${repoRoot} && npm run build:shared)`,
+    `  One-command recovery: bash ${repoRoot}/scripts/repair-shared-package.sh`,
   ].join('\n');
 }
 

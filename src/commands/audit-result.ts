@@ -8,6 +8,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import { promises as fs } from 'fs';
 import { extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText, resolveAuditAuthor } from '../audit.js';
+import { computeContentFingerprint } from '../audit-fingerprint.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
 
 export default function register(ctx: PluginContext): void {
@@ -167,11 +168,20 @@ export default function register(ctx: PluginContext): void {
       // summary. The audit skill's persist_audit.py embeds the fingerprint in
       // the report text, so this path picks it up without a flag change
       // (WL-0MUBVH5S0008NQ9K AC2).
+      //
+      // Pure fallback (WL-0MVK01BBD005V7KK): a manual/synthetic write — the
+      // herdr `a-y` chord, or any other `wl audit-set` without a fingerprint —
+      // stores the item's CURRENT schema-2 content fingerprint. Without it the
+      // audit has no stored fingerprint, `isAuditFresh` degrades to the fragile
+      // 60 s time gate, and non-content `updatedAt` churn (e.g. a worklog sync
+      // re-timestamp) wrongly marks an unchanged manual approval stale. The
+      // explicit inputs above always win; this never overrides them and never
+      // backfills an existing audit.
       const fingerprint =
         options.fingerprint ??
         extractAuditFingerprint(rawOutput) ??
         extractAuditFingerprint(summary) ??
-        null;
+        computeContentFingerprint({ title: item.title, description: item.description });
 
       try {
         db.saveAuditResult({

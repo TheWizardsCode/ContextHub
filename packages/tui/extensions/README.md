@@ -567,11 +567,17 @@ per-turn capacity claim against the llama-proxy:
   retryable 429 + `Retry-After` when the local slot is contended (never a silent
   remote fallback); `remote-ok` lets background work go remote.
 - **Response** — parses `X-Local-Route` / `X-Local-Fallback-Reason` on
-  `after_provider_response` and appends one bounded JSONL line per response to
-  `<cwd>/.worklog/local-route.log` (rolling, capped at 2000 entries;
+  `after_provider_response` and appends one bounded JSONL line per
+  **admitted** response to `<cwd>/.worklog/local-route.log` (rolling, capped at
+  2000 entries;
   `{ at, sessionId, preference, route, fallbackReason, model, ticket? }`). The
   session id and reservation ticket let a dispatcher decision be correlated
-  with the turns it produced.
+  with the turns it produced. A refused attempt (retryable 429) never reaches
+  `after_provider_response`, so it writes nothing — and a **headless**
+  (`pi -p`) session behaves identically: a completed headless turn writes the
+  same line as an interactive pane (WL-0MVTN5M3E007DU9Z), so a missing line
+  means "no admitted provider response in that process", never "headless does
+  not log".
 - **Fail-open** — with no knob set (an interactive pane), no header is sent and
   no log is written; an older proxy with no route headers writes no entry; a
   capture or write failure never throws into a turn. An **invalid** value —

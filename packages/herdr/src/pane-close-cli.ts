@@ -29,6 +29,7 @@ import {
   dirHasRecentModifications,
   parsePaneProcessInfo,
 } from './pane-close-herdr.js';
+import { resolveHerdrBin } from './herdr-bin.js';
 import type { ReaperDeps } from './pane-close-reaper.js';
 import { runReaperCli } from './pane-close-reaper.js';
 
@@ -84,7 +85,7 @@ export function extractJsonValue(raw: string): unknown {
  * classifier without side effects.
  */
 export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string): ReaperDeps {
-  const herdrBin = io.env.HERDR_BIN_PATH ?? 'herdr';
+  const herdrBin = resolveHerdrBin(io.env);
   const invokingPaneId = io.env.HERDR_PANE_ID ?? io.env.HERDR_PANE ?? undefined;
 
   if (fixtureRaw !== undefined) {

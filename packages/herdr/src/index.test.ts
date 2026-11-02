@@ -35,6 +35,7 @@ import {
   isHostAuditActive,
 } from './machine-coordination.js';
 import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type HerdrPaneRecord, type ScheduledPrompt } from './downtime-worker.js';
+import { classifyAuditScope } from './downtime-worker.gates.js';
 import { SCHEDULED_PROMPTS_FILE, scheduledPromptsPath } from './scheduled-prompts.js';
 import {
   fetchItemsByStage,
@@ -1758,6 +1759,120 @@ describe('createDowntimeDeps', () => {
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.getNextAuditCandidate(cwd);
     expect(result).toEqual({ ok: true, candidate: { id: 'WL-OK', title: 'ok item', stage: 'audit' } });
+  });
+
+  // Audit-candidate scope lookup (parent WL-0MSORQ8Y4004YT63 AC1, child C2
+  // WL-0MVV1EZ8G006PSBE): `wl show <id> --children --json` is the only
+  // trustworthy leaf-vs-parent signal for the audit tier. The dep must use
+  // the same wl discipline as every other wl-backed seam (per-root targeting,
+  // bounded timeout, transient retry) and fail closed on ANY untrustworthy
+  // result.
+  it('getAuditCandidateScope runs wl show <id> --children --json for the candidate root and classifies a leaf', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        workItem: { id: 'WL-LEAF', title: 'Root leaf', parentId: '' },
+        children: [],
+        ancestors: [],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getAuditCandidateScope('WL-LEAF', '/repo');
+
+    // Per-root targeting (WL-0MTQ14W7L003II5A): the candidate lives in ITS
+    // OWN worklog root, so the lookup resolves against <cwd>/.worklog rather
+    // than the pane's module-level override.
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['--worklog-dir', '/repo/.worklog', 'show', 'WL-LEAF', '--children', '--json'],
+      expect.anything(),
+    );
+    expect(result).toEqual({ ok: true, scope: 'leaf' });
+  });
+
+  it('getAuditCandidateScope reports a parent when the candidate has children', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        workItem: { id: 'WL-EPIC', title: 'Epic', parentId: '' },
+        children: [{ id: 'WL-CHILD-1' }, { id: 'WL-CHILD-2' }],
+        ancestors: [],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await expect(deps.getAuditCandidateScope('WL-EPIC', '/repo')).resolves.toEqual({
+      ok: true,
+      scope: 'parent',
+    });
+  });
+
+  it('getAuditCandidateScope passes a bounded timeout so a hung wl fails closed', async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, workItem: { id: 'WL-X', parentId: '' }, children: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.getAuditCandidateScope('WL-X', '/repo');
+
+    // Same bounded-timeout discipline as the other wl-backed deps
+    // (WL-0MSJIPHD0001L1J9): a hung wl child is killed and the lookup fails
+    // closed instead of wedging the dispatch tick.
+    const [, , options] = mockExec.mock.calls[0];
+    expect(options).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
+  });
+
+  it('getAuditCandidateScope fails closed on a wl error — a missing lookup never relaxes the gate', async () => {
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+
+    const result = await deps.getAuditCandidateScope('WL-X', '/repo');
+
+    expect(result).toEqual({ ok: false });
+    // Every caller maps an untrustworthy lookup to the conservative parent
+    // gate (all-slots style) — never to a leaf.
+    expect(classifyAuditScope(result)).toBe('parent');
+  });
+
+  it('getAuditCandidateScope fails closed on an unparseable payload', async () => {
+    setExecFileAsync(
+      vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' }) as never,
+    );
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+
+    const result = await deps.getAuditCandidateScope('WL-X', '/repo');
+
+    expect(result).toEqual({ ok: false });
+    expect(classifyAuditScope(result)).toBe('parent');
+  });
+
+  it('getAuditCandidateScope fails closed for a NON-ROOT candidate (audit tier is root-only)', async () => {
+    // `wl list --root-only` should never surface a child, but the scope
+    // lookup is the last line of defence: an epic-grandchild payload whose
+    // children array is empty must NOT be read as a leaf.
+    setExecFileAsync(
+      vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({
+          success: true,
+          workItem: { id: 'WL-CHILD', parentId: 'WL-PARENT' },
+          children: [],
+        }),
+        stderr: '',
+      }) as never,
+    );
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+
+    const result = await deps.getAuditCandidateScope('WL-CHILD', '/repo');
+
+    expect(result).toEqual({ ok: false });
+    expect(classifyAuditScope(result)).toBe('parent');
   });
 
   it('getNextImplementCandidate runs wl next plan_complete risk/effort batch and selects the first open item', async () => {

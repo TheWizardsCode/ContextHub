@@ -11,6 +11,7 @@ import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
 import { validatePodcastScripts } from '../doctor/podcast-scripts-check.js';
+import { probeAuditFingerprintSkewFinding } from '../doctor/audit-fingerprint-skew-check.js';
 import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults, rewriteAndForcePushDataFile } from '../sync.js';
 import { getSyncDefaults } from './sync.js';
@@ -1337,12 +1338,18 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
         }
       }
 
+      // Installed-vs-expected audit fingerprint schema (WL-0MVS2RAR5007CBD5):
+      // a warning-only, global (itemId: null) finding — read-only and never
+      // allowed to change the exit status. `null` means ok/skip or no skew.
+      const auditFingerprintSkew = probeAuditFingerprintSkewFinding();
+
       let findings: any[] = [
         ...validateStatusStageItems(items, rules),
         ...validateDependencyEdges(items, dependencyEdges),
         ...validateParentReferences(items),
         ...priorityFindings,
         ...validatePodcastScripts(items),
+        ...(auditFingerprintSkew ? [auditFingerprintSkew] : []),
       ];
 
       // If --fix was provided, attempt to apply safe fixes and prompt per non-safe finding
@@ -1576,11 +1583,14 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
 
       console.log('Doctor: validation findings');
       console.log('Rules source: docs/validation/status-stage-inventory.md');
+      // Findings are keyed by work item; a global finding (itemId: null, e.g.
+      // audit-fingerprint.schema-skew) is grouped under a `(global)` heading.
       const byItem = new Map<string, typeof findings>();
       for (const finding of findings) {
-        const existing = byItem.get(finding.itemId) || [];
+        const groupKey = finding.itemId ?? '(global)';
+        const existing = byItem.get(groupKey) || [];
         existing.push(finding);
-        byItem.set(finding.itemId, existing);
+        byItem.set(groupKey, existing);
       }
 
       for (const [itemId, itemFindings] of byItem.entries()) {
@@ -1619,7 +1629,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
           console.log(`\nType: ${type}`);
           for (const f of group) {
             // Show basic message
-            let line = `  - ${f.itemId}: ${f.message}`;
+            let line = `  - ${f.itemId ?? '(global)'}: ${f.message}`;
             // Include suggested allowed values if available
             const proposed = f.proposedFix as any;
             const ctx = (f as any).context || {};

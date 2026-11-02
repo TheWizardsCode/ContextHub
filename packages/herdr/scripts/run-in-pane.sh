@@ -70,7 +70,9 @@
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-herdr_bin="${HERDR_BIN_PATH:-herdr}"
+# shellcheck source=../shared/herdr-bin.sh
+. "$script_dir/../shared/herdr-bin.sh"
+herdr_bin="$(resolve_herdr_bin)"
 
 # Extract the pane id from a `herdr pane split` JSON envelope. Tolerates the
 # `pane_id` / `paneId` / `id` key variants and nested `result` envelopes

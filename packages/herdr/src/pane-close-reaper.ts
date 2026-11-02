@@ -35,6 +35,14 @@ export interface ReaperDeps {
   closePane(paneId: string): Promise<{ success: boolean; error?: string }>;
   /** Terminate the session-scoped process group for a pane. */
   terminateProcessGroup(pid: number, opts?: { graceMs?: number }): Promise<TerminateResult>;
+  /**
+   * Best-effort observed-routing-outcome record (WL-0MVWEZF4Z004UNYT AC10):
+   * called once per pane AFTER a successful close, so the dispatch record
+   * gains its observed local/remote split at the work-window close. Must
+   * never throw into the close loop (the caller wraps it fail-open). Absent
+   * → legacy callers skip the outcome record entirely.
+   */
+  recordDispatchedPaneOutcome?(pane: PaneStatus): Promise<void>;
 }
 
 /**
@@ -72,6 +80,14 @@ export interface PaneStatus {
   sessionTail?: string[];
   /** Whether the agent process is alive. */
   agentProcessAlive: boolean;
+  /**
+   * Pi session id of the pane (WL-0MVWEZF4Z004UNYT AC10), when it can be
+   * derived from the session-log path. Used to attribute the pane's route
+   * log entries when no reservation ticket was forwarded. Optional/tolerant:
+   * absent → the outcome record falls back to ticket correlation or
+   * `notObserved`.
+   */
+  sessionId?: string;
   /** Idle time in milliseconds. */
   idleMs: number;
   /** Whether the work item needs producer review. */
@@ -326,6 +342,21 @@ export async function runReaper(
       } catch (err) {
         success = false;
         error = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    // AC10 (WL-0MVWEZF4Z004UNYT): a successfully closed pane's work window
+    // is over — record its observed local/remote split in the dispatch log.
+    // Best-effort and fail-open: the outcome record must never block, crash
+    // or un-close a pane.
+    if (decision.close && !options.dryRun && success) {
+      try {
+        await deps.recordDispatchedPaneOutcome?.(pane);
+      } catch (err) {
+        // fail-open: observability must never break the close loop
+        console.error(
+          `reaper: route-outcome record failed for ${pane.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
 

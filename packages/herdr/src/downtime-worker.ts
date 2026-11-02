@@ -37,6 +37,7 @@ export type { CoordinationEntry } from './coordination.js';
 export {
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
   DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -132,6 +133,7 @@ export {
 } from './downtime-worker.selection.js';
 export {
   criticalSkillKind,
+  parseAuditCandidateScopeOutput,
   parseAuditCandidatesOutput,
   parseCriticalCandidatesOutput,
   parseDepListBlockersOutput,
@@ -205,11 +207,32 @@ export type {
   DowntimeErrorEvent,
 } from './downtime-worker.dispatch-contract.js';
 export {
+  DEFAULT_LOCAL_RESERVATION_ESTIMATED_TOKENS,
   DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS,
+  DEFAULT_RESERVATION_TTL_SECONDS,
   buildLocalReservationRequest,
   createLocalReserver,
   parseLocalReservationResponse,
 } from './downtime-worker.local-reservation.js';
+
+// ── Observed routing outcome (WL-0MVWEZF4Z004UNYT AC10) ──────────────
+// Reader + split computation over the bounded route log (`local-route.log`,
+// written by the Worklog pi extension) and the route-outcome record written
+// at a dispatched pane's work-window close.
+export {
+  buildRouteOutcomeEntry,
+  computeRouteSplit,
+  isLocalRoute,
+  isRemoteRoute,
+  observeDispatchedPaneOutcome,
+  readLocalRouteLogEntries,
+  sessionIdFromSessionPath,
+} from './downtime-worker.route-outcome.js';
+export type {
+  RouteLogLine,
+  RouteOutcomeEntry,
+  RouteSplitOutcome,
+} from './downtime-worker.route-outcome.js';
 
 // ── Coordination (WL-0MVLII1AO007TTRK) ─────────────────────────────────
 export { computeMostImportantItem, coordinationTierRank } from './downtime-worker.coordination.js';

@@ -30,7 +30,10 @@
 
 set -uo pipefail
 
-herdr_bin="${HERDR_BIN_PATH:-herdr}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=../shared/herdr-bin.sh
+. "$script_dir/../shared/herdr-bin.sh"
+herdr_bin="$(resolve_herdr_bin)"
 TAB_LABEL="${TAB_LABEL:-Worklog}"
 
 fail() {

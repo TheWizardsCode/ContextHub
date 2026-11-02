@@ -34,6 +34,20 @@
  * identical to the Python implementation. `json.dumps` semantics are covered
  * by tests; the arrangement of the payload mirrors the Python source.
  *
+ * **Fail-on-skew contract.** A digest is only meaningful against an installed
+ * audit skill built to the same schema. The parity test
+ * (`tests/unit/audit-fingerprint-parity.test.ts`) probes the installed helper's
+ * `inspect.signature` and `_AUDIT_CONTENT_FINGERPRINT_SCHEMA` through the
+ * shared probe in `audit-fingerprint-installed.ts` and **fails** on any
+ * declared schema other than 2, on an undeclared schema, and on a signature
+ * that cannot accept `work_item=`. A skew must never be a silent skip: a
+ * schema-1 digest can never match this one, so the failure is the signal to
+ * fix the host. Only missing host tooling (no scripts directory, no
+ * `python3`, or an unimportable helper) is skipped, keeping CI images green.
+ * `wl doctor` surfaces the same skew as the warning-level
+ * `audit-fingerprint.schema-skew` check; remediation is in
+ * `docs/dev/audit-fingerprint.md` § "Parity check and host tooling skew".
+ *
  * The git/path helpers below (`resolveTouchedFiles`, `computePathFingerprints`,
  * `extractKeyFiles`, `normaliseRepoPath`) are no longer part of the fingerprint;
  * they are retained because they are exported utilities with their own tests

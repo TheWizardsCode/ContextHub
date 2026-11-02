@@ -405,6 +405,57 @@ describe('registerLocalPreference hooks', () => {
     expect(line.preference).toBe('local-preferred');
   });
 
+  it('writes the entry for a headless (pi -p) print-mode ctx with no UI (WL-0MVTN5M3E007DU9Z)', async () => {
+    const { handlers } = await register();
+    const cwd = makeTempCwd();
+    process.env[ENV_VAR] = 'local-preferred';
+
+    // The ctx pi delivers on the `-p` (print) path: mode "print", no UI, and
+    // cwd/model/sessionManager resolved from the headless session.
+    // (WL-0MVTN5M3E007DU9Z recorded a headless turn that produced no line; the
+    // real cause was a turn whose only responses were refusals, not a missing
+    // ctx.) A UI access throws here, so a hook that starts depending on TUI
+    // context fails loudly instead of going quiet in headless dispatches.
+    const headlessCtx = {
+      mode: 'print',
+      cwd,
+      get ui(): never {
+        throw new Error('no UI in a headless session');
+      },
+      hasUI: () => false,
+      model: { id: 'plan' },
+      sessionManager: {
+        getSessionId: () => '01a187e9-2e34-72c3-b1b0-cf42d269c1a0',
+      },
+    };
+
+    const response = handlers.after_provider_response as (
+      event: Record<string, unknown>,
+      c: unknown,
+    ) => void;
+    response(
+      { status: 200, headers: { 'x-local-route': 'local' } },
+      headlessCtx,
+    );
+
+    // Fire-and-forget write: it must land without the caller awaiting it.
+    await vi.waitFor(() => {
+      const raw = readFileSync(join(cwd, '.worklog', 'local-route.log'), 'utf8');
+      expect(raw).toContain('"route":"local"');
+    });
+    const line = JSON.parse(
+      readFileSync(join(cwd, '.worklog', 'local-route.log'), 'utf8').trim(),
+    );
+    // The same evidence an interactive pane records, so a headless dispatch
+    // turn can be audited through the route log (the item's motivation).
+    expect(line).toMatchObject({
+      sessionId: '01a187e9-2e34-72c3-b1b0-cf42d269c1a0',
+      preference: 'local-preferred',
+      route: 'local',
+      model: 'plan',
+    });
+  });
+
   it('records preference "remote-ok" in the route log for a remote-ok pane (WL-0MVNUHWH500196K1 AC4)', async () => {
     const { handlers } = await register();
     const cwd = makeTempCwd();

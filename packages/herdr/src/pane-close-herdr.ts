@@ -13,6 +13,7 @@ import { closeSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { PaneStatus, ReaperDeps } from './pane-close-reaper.js';
+import { sessionIdFromSessionPath } from './downtime-worker.route-outcome.js';
 import { terminateProcessGroup } from './process-group.js';
 
 // ── Raw herdr pane-list shape ─────────────────────────────────────────
@@ -496,6 +497,14 @@ export interface HerdrReaperIo {
    * activity). Platform-specific and kept injectable.
    */
   hasActiveNetworkConnections?(pane: ParsedHerdrPane): boolean;
+  /**
+   * Observed-routing-outcome recorder (WL-0MVWEZF4Z004UNYT AC10): called
+   * once per pane after a successful close so the dispatch record gains its
+   * observed local/remote split. Absent → the outcome record is skipped
+   * (legacy callers keep today's behaviour). Must never throw into the close
+   * loop (the reaper wraps it fail-open).
+   */
+  recordDispatchedPaneOutcome?(pane: PaneStatus): Promise<void>;
   /** Clock (injectable for tests). */
   now?(): number;
 }
@@ -585,6 +594,7 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           sessionTail,
           agentProcessAlive,
           agentStatus: pane.agentStatus,
+          sessionId: sessionIdFromSessionPath(pane.sessionPath ?? ''),
           idleMs,
           needsProducerReview,
           isInvokingPane: pane.paneId === io.invokingPaneId,
@@ -604,6 +614,11 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
+    },
+
+    async recordDispatchedPaneOutcome(pane: PaneStatus): Promise<void> {
+      if (typeof io.recordDispatchedPaneOutcome !== 'function') return;
+      await io.recordDispatchedPaneOutcome(pane);
     },
 
     terminateProcessGroup,
