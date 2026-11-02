@@ -1,0 +1,42 @@
+{
+  "dep-add-json": {
+    "status": 0,
+    "stdout": "{\n  \"success\": true,\n  \"edge\": {\n    \"fromId\": \"<LOCAL_DEPENDENT_JSON>\",\n    \"toId\": \"<LOCAL_BLOCKER_JSON>\",\n    \"createdAt\": \"<TIMESTAMP>\"\n  }\n}\n",
+    "stderr": ""
+  },
+  "dep-list-json": {
+    "status": 0,
+    "stdout": "{\n  \"success\": true,\n  \"item\": \"<LOCAL_DEPENDENT_JSON>\",\n  \"inbound\": [],\n  \"outbound\": [\n    {\n      \"id\": \"<LOCAL_BLOCKER_JSON>\",\n      \"title\": \"Local blocker one\",\n      \"status\": \"open\",\n      \"priority\": \"medium\",\n      \"direction\": \"depends-on\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  "dep-list-human": {
+    "status": 0,
+    "stdout": "Dependencies for Local dependent one (<LOCAL_DEPENDENT_JSON>)\n\nDepends on:\n  - Local blocker one (<LOCAL_BLOCKER_JSON>) Status: open Priority: medium Direction: depends-on\n\nDepended on by:\n  (none)\n",
+    "stderr": ""
+  },
+  "dep-rm-json": {
+    "status": 0,
+    "stdout": "{\n  \"success\": true,\n  \"removed\": true,\n  \"edge\": {\n    \"fromId\": \"<LOCAL_DEPENDENT_JSON>\",\n    \"toId\": \"<LOCAL_BLOCKER_JSON>\"\n  }\n}\n",
+    "stderr": ""
+  },
+  "dep-add-human": {
+    "status": 0,
+    "stdout": "Successfully added dependency between\nLocal dependent two (<LOCAL_DEPENDENT_HUMAN>) which depends on\nLocal blocker two (<LOCAL_BLOCKER_HUMAN>).\n",
+    "stderr": ""
+  },
+  "dep-list-human-second": {
+    "status": 0,
+    "stdout": "Dependencies for Local dependent two (<LOCAL_DEPENDENT_HUMAN>)\n\nDepends on:\n  - Local blocker two (<LOCAL_BLOCKER_HUMAN>) Status: open Priority: medium Direction: depends-on\n\nDepended on by:\n  (none)\n",
+    "stderr": ""
+  },
+  "dep-list-json-second": {
+    "status": 0,
+    "stdout": "{\n  \"success\": true,\n  \"item\": \"<LOCAL_DEPENDENT_HUMAN>\",\n  \"inbound\": [],\n  \"outbound\": [\n    {\n      \"id\": \"<LOCAL_BLOCKER_HUMAN>\",\n      \"title\": \"Local blocker two\",\n      \"status\": \"open\",\n      \"priority\": \"medium\",\n      \"direction\": \"depends-on\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  "dep-rm-human": {
+    "status": 0,
+    "stdout": "Successfully removed dependency between\nLocal dependent two (<LOCAL_DEPENDENT_HUMAN>) no longer depends on\nLocal blocker two (<LOCAL_BLOCKER_HUMAN>).\n",
+    "stderr": ""
+  }
+}
