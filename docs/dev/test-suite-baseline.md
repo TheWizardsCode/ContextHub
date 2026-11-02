@@ -1034,6 +1034,136 @@ npx tsx bench/inproc-harness-profile.ts --runs 3 --scenarios list-json,status \
 Flags: `--runs N` (≥ 3), `--no-warmup`, `--scenarios a,b`, `--store <dir>`,
 `--out <path>`, `--no-write`, `--json`, `--keep`, `--update-budget`.
 
+## Test-suite parallelism: maxWorkers 4 → 6 (WL-0MVHVZTYA003TNN0)
+
+**Work item:** WL-0MVHVZTYA003TNN0 — Test-suite parallelism: reconsider
+maxWorkers on hosts with more cores (**discovered-from** WL-0MVF9JJUH0077OB8)
+**Measured:** intake 2026-11-01 (legacy two-command set); re-validation
+2026-11-02 (current umbrella set, below)
+**Host:** shared 16-core dev box, 29 GB RAM.
+
+### Decision
+
+`vitest.config.ts` raises `maxWorkers` **4 → 6** (pool stays `'forks'`,
+`isolate: true` unchanged; the stale "memory guardrails" rationale and the
+dead `singleFork` comment text are removed — dead-key removal itself is
+tracked in WL-0MVHVZDPT005KDQK). 8 is deliberately **not** the default: it
+adds no wall-clock win and raises aggregate test time under host contention.
+
+### Intake evidence (2026-11-01, legacy `tests/cli` + `tests/unit`, 165 files)
+
+Measured on the shared host at load average 16–22 (median of ≥3 green runs;
+all runs green — 165 files / 1660 tests passed):
+
+| `maxWorkers` | Wall clock runs (s) | Median wall (s) | Aggregate test time (s) | Notes |
+|---|---|---|---|---|
+| 4 (old) | 264.1, 230.4, 175.7 | **230.4** | 899.9, 813.7, 608.9 | baseline |
+| 6 | 129.8, 126.8, 157.9, 152.0, 174.3, 221.2 | **142.0** | 668.7, 648.6, 798.7, 786.1, 871.9, 1113.4 | 6 consecutive green runs |
+| 8 | 121.1, 134.0, 177.6, 130.5 | **132.3** | 830.6, 902.6, 1218.4, 876.6 | 4 runs, all green |
+
+- 4 → 6: median wall **230.4 → ~130–142 s (−38–44 %)**; aggregate test time
+drops too (median ~814 → ~707 s) — the speedup is not a parallelism illusion.
+- 6 → 8: median wall flat (~132 s) but aggregate test time **rises** (median
+~890 s vs ~707 s) — more concurrent forks mean extra transform/import
+overhead and host contention with other projects' suites; no win.
+- Memory at 8 workers: fork-tree peak ~1.3–1.8 GB, largest single fork
+~230 MB (`ps` sampling) on the 29 GB host — the old "memory guardrails"
+rationale was not the binding constraint (6 workers ≈ 1 GB peak).
+
+### Re-validation (2026-11-02, current umbrella `npm --silent test -- tests`)
+
+AC2/AC3 gate at the final config (`maxWorkers: 6`), run from the worktree via
+the test-skill runner (`run_tests.py --scope full --force`, fresh run each
+iteration — never served from the gate cache), 298 files / 4284 tests
+(297 passed + 1 skipped):
+
+| Run | Wall clock (s) | Vitest duration (s) | Aggregate test time (s) | Fork-tree peak RSS | Single-fork peak RSS | Result |
+|---|---|---|---|---|---|---|
+| 1 | 215.5 | 214.4 | 722.5 | 1.14 GB | 290 MB | green |
+| 2 | 206.2 | 205.2 | 685.6 | 1.41 GB | 263 MB | green |
+| 3 | 222.9 | 221.9 | 735.5 | 1.66 GB | 356 MB | green |
+
+Host load during re-validation: load average ~4.7–6.5 (1/5/15 min),
+quieter than the intake window — absolute numbers are conservative upper
+bounds.
+
+- **Determinism (AC3):** 3 consecutive green runs with no intermittent
+test-timeout or hook-timeout failures (vitest report exit 0, no notices).
+- **Memory (AC2):** fork-tree peak ≤ **1.66 GB** and largest single fork
+≤ **356 MB** across all runs — comfortable headroom on the 29 GB host;
+no OOM. The worktree's `dist/` build is included in the fork peak (built CLI
++libraries are loaded into the largest forks); the fork-level number is the
+per-worker cost to keep in mind on smaller hosts.
+- **Config intent confirmed:** the config module declares `maxWorkers: 6`,
+`pool: 'forks'`, `isolate: true` (see the guard below).
+
+#### Regression guard: declared-config check
+
+`tests/unit/maxworkers-config-guard.test.ts` pins the declared parallelism
+contract so a future edit cannot silently regress the measured choice:
+
+- `maxWorkers` is **6** (the measured optimum on this host;
+WL-0MVHVZTYA003TNN0);
+- `pool` is `'forks'` and `isolate` is `true` (unchanged constraints);
+- the top-level `singleFork` key is **dead config**: vitest 4 consumes no such
+option (`singleFork` appears nowhere in vitest's 4.0.18 dist). Its key removal
+is WL-0MVHVZDPT005KDQK.
+
+The guard reads the values from the `vitest.config.ts` module itself, and
+derives the repo root from its own file location rather than `process.cwd()`.
+Both choices are deliberate:
+
+- 27 suite files call `process.chdir()` for temp-dir fixtures, so a worker may
+run this file with cwd somewhere else entirely;
+- `vitest/node`'s `resolveConfig()` is **not** used: inside a full-suite run it
+re-resolves with the ambient test-run state and returns the main checkout's
+value (`maxWorkers: 4`) even when its own `configFile` correctly points at the
+worktree's file — a quirk measured while building this guard. The imported
+config module is the object the suite is declared with, and it resolves
+identically in isolation and under the full umbrella (verified by 3
+consecutive green umbrella runs).
+
+### What changed
+
+- `vitest.config.ts`: `maxWorkers` 4 → 6; comments rewritten to cite the
+measurement basis above (wall-clock/aggregate-time/memory table); the stale
+"memory guardrails" rationale and the misleading `singleFork` comment text
+("1 active worker per file sequence") are removed.
+- `tests/unit/maxworkers-config-guard.test.ts`: regression guard above.
+- `README.md`: updated the Vitest Configuration bullet to the new value and
+its evidence link.
+
+### Reproduce
+
+```bash
+# from the worktree, with dist built so the entry-point tests are faithful
+npx tsc
+python3 <test-skill>/scripts/run_tests.py --scope full --force --json
+# direct resolve (effective values the suite runs with)
+node --import tsx -e "const m = await import('./vitest.config.ts'); console.log(m.default.test.maxWorkers, m.default.test.pool, m.default.test.isolate)"
+```
+
+### Notes for producers/auditors
+
+- The re-validation used the **current umbrella** suite (298 files, 4284
+tests, incl. the guard) per AC3's prescription; the intake table was measured
+on the legacy 165-file set, so its absolute numbers are not directly
+comparable — the *relative* 4-vs-6-vs-8 comparison (taken under one
+contention window) is.
+- CI (GitHub `ubuntu-latest`, 4 vCPU) runs the same fixed `maxWorkers: 6`;
+6 forks on 4 cores is mild oversubscription, benign for this mostly
+subprocess/IO-bound suite (see `.github/workflows/cli-tests.yml`). Revisit
+only if CI moves to a smaller runner.
+- **Run the determinism gate serially.** Two full suites launched
+concurrently on this host (12 heavy forks on 16 cores) produced one
+load-induced flake: `tests/cli/process-lifecycle.test.ts` > *"killTrackedProcesses
+is registered for process exit so no orphans remain after test worker dies"*
+waits a fixed 900 ms for a spawned process to register in `pidTrackingSet`,
+and under that contention the spawn had not registered yet (`expected 0 to be
+greater than 0`). It passed in every serial run before and after. This is a
+pre-existing timing window in that test, not an effect of the parallelism
+setting — but it is why the AC3 evidence above is from **3 serial runs**.
+
 ## install-herdr script tests: hermetic install + explicit timeout (WL-0MVWL88MO002SQ2B)
 
 ### Failure mode
@@ -1123,3 +1253,8 @@ npx vitest run tests/scripts/install-herdr.test.ts \
 - install-herdr test hermeticity + explicit per-test timeout (load-induced
   30 s timeout): WL-0MVWL88MO002SQ2B — see
   [install-herdr script tests: hermetic install + explicit timeout](#install-herdr-script-tests-hermetic-install--explicit-timeout-wl-0mvwl88mo002sq2b)
+- Test-suite parallelism (maxWorkers 4 → 6, measured):
+  WL-0MVHVZTYA003TNN0 — see
+  [Test-suite parallelism: maxWorkers 4 → 6](#test-suite-parallelism-maxworkers-4--6-wl-0mvhvztya003tnn0)
+- Dead top-level `singleFork` key removal (adjacent):
+  WL-0MVHVZDPT005KDQK

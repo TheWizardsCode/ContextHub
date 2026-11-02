@@ -229,7 +229,7 @@ npm run test:coverage # Tests with coverage report
 The project uses [Vitest](https://vitest.dev/) with the following settings in `vitest.config.ts`:
 
 - **Pool:** `'forks'` (child processes) — supports tests that use `process.chdir()` for temp directory setup
-- **maxWorkers:** `4` — limits concurrent worker count to prevent unbounded memory growth during test execution
+- **maxWorkers:** `6` — measured parallelism cap for the canonical suite on the 16-core shared dev host (median wall-clock ~230 s → ~130–142 s vs the old 4, aggregate test time also drops; see [docs/dev/test-suite-baseline.md](docs/dev/test-suite-baseline.md#test-suite-parallelism-maxworkers-4--6-wl-0mvhvztya003tnn0) for the 4/6/8 evidence — WL-0MVHVZTYA003TNN0)
 - **Exclusions:** Worktree directories (`.worklog/worktrees/**`) are excluded to prevent duplicate test file discovery
 
 See [tests/README.md](tests/README.md) for detailed testing documentation.
