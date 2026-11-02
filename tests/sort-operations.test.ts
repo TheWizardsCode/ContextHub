@@ -557,4 +557,50 @@ describe('Sort Operations', () => {
       expect(item3Result?.sortIndex).toBe(200);
     });
   });
+
+  describe('subtree priority inheritance in re-sort (WL-0MVYCVSPN007CMAJ)', () => {
+    it('re-sorts a root hosting a critical child into the critical tier above non-critical roots', () => {
+      const criticalHost = db.create({ title: 'Root with critical child', priority: 'high', status: 'open', sortIndex: 500 });
+      db.create({ title: 'Critical child', priority: 'critical', status: 'open', parentId: criticalHost.id });
+      const highestNonCritical = db.create({ title: 'High standalone', priority: 'high', status: 'open', sortIndex: 100 });
+
+      db.reSort();
+
+      const hostAfter = db.get(criticalHost.id)!;
+      const otherAfter = db.get(highestNonCritical.id)!;
+      // The host of a critical child is re-sorted into the critical band
+      // (lower sortIndex = higher rank) ahead of any non-critical root.
+      expect(hostAfter.sortIndex).toBeLessThan(otherAfter.sortIndex);
+    });
+
+    it('keeps a genuine critical root above a root that merely hosts a critical child', () => {
+      const genuineCritical = db.create({ title: 'Genuine critical', priority: 'critical', status: 'open', sortIndex: 500 });
+      const host = db.create({ title: 'Root with critical child', priority: 'high', status: 'open', sortIndex: 400 });
+      db.create({ title: 'Critical child', priority: 'critical', status: 'open', parentId: host.id });
+
+      db.reSort();
+
+      const genuineAfter = db.get(genuineCritical.id)!;
+      const hostAfter = db.get(host.id)!;
+      // Genuine critical work outranks inherited critical — the inherited
+      // tier must not overrank via the audit-not-ready boost (which is
+      // suppressed for effective-critical items).
+      expect(genuineAfter.sortIndex).toBeLessThan(hostAfter.sortIndex);
+    });
+
+    it('does not lift a root whose critical child is completed (re-sort ranking unchanged)', async () => {
+      const highStandalone = db.create({ title: 'High standalone', priority: 'high', status: 'open', sortIndex: 100 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const host = db.create({ title: 'Root with completed critical child', priority: 'high', status: 'open', sortIndex: 400 });
+      db.create({ title: 'Completed critical child', priority: 'critical', status: 'completed', parentId: host.id });
+
+      db.reSort();
+
+      const hostAfter = db.get(host.id)!;
+      const otherAfter = db.get(highStandalone.id)!;
+      // Closed children contribute nothing: host stays an ordinary high item,
+      // ranking after the older high peer (no critical-tier lift).
+      expect(hostAfter.sortIndex).toBeGreaterThan(otherAfter.sortIndex);
+    });
+  });
 });
