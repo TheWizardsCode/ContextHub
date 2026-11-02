@@ -223,3 +223,131 @@ describe('migrations: add last_export_timestamps table', () => {
     }
   });
 });
+
+describe('migrations: foreign dependency-edge targets (cross-repo D2)', () => {
+  const MIGRATION_ID = '20261102-drop-dependency-edge-target-fk';
+
+  /** A schemaVersion 8 store whose `dependency_edges.toId` still has a FK. */
+  function createLegacyDbWithTargetForeignKey(dbPath: string): void {
+    const db = new Database(dbPath);
+    try {
+      db.exec(`
+        CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE workitems (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+        CREATE TABLE dependency_edges (
+          fromId TEXT NOT NULL,
+          toId TEXT NOT NULL,
+          createdAt TEXT NOT NULL,
+          PRIMARY KEY (fromId, toId),
+          FOREIGN KEY (fromId) REFERENCES workitems(id) ON DELETE CASCADE,
+          FOREIGN KEY (toId) REFERENCES workitems(id) ON DELETE CASCADE
+        );
+        INSERT INTO workitems (id, title) VALUES ('LEG-LOCAL', 'Local dependent');
+        INSERT INTO workitems (id, title) VALUES ('LEG-BLOCKER', 'Local blocker');
+        INSERT INTO dependency_edges (fromId, toId, createdAt)
+          VALUES ('LEG-LOCAL', 'LEG-BLOCKER', '2026-01-01T00:00:00.000Z');
+        INSERT OR REPLACE INTO metadata (key, value) VALUES ('schemaVersion', '8');
+      `);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Foreign-key targets currently declared on `dependency_edges`. */
+  function targetForeignKeyColumns(dbPath: string): string[] {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const fks = db.prepare(`PRAGMA foreign_key_list('dependency_edges')`).all() as Array<{
+        from: string;
+      }>;
+      return fks.map((fk) => fk.from);
+    } finally {
+      db.close();
+    }
+  }
+
+  it('lists the migration as pending for a legacy db that constrains the target', () => {
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      createLegacyDbWithTargetForeignKey(dbPath);
+
+      expect(targetForeignKeyColumns(dbPath)).toContain('toId');
+      expect(listPendingMigrations(dbPath).map((m) => m.id)).toContain(MIGRATION_ID);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+
+  it('rebuilds the table without the toId foreign key, keeps the local edge and is idempotent', () => {
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      createLegacyDbWithTargetForeignKey(dbPath);
+
+      const applied = runMigrations({ confirm: true }, dbPath);
+      expect(applied.applied.map((m) => m.id)).toContain(MIGRATION_ID);
+
+      // The local `fromId` constraint is kept; the target constraint is gone.
+      const columns = targetForeignKeyColumns(dbPath);
+      expect(columns).toContain('fromId');
+      expect(columns).not.toContain('toId');
+
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        // Existing edges survive the rebuild, and an index still serves lookups.
+        const edges = db.prepare('SELECT fromId, toId FROM dependency_edges').all();
+        expect(edges).toEqual([{ fromId: 'LEG-LOCAL', toId: 'LEG-BLOCKER' }]);
+        const indexes = db
+          .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='dependency_edges'")
+          .all() as Array<{ name: string }>;
+        expect(indexes.map((i) => i.name)).toEqual(
+          expect.arrayContaining(['idx_dependency_edges_fromId', 'idx_dependency_edges_toId']),
+        );
+      } finally {
+        db.close();
+      }
+
+      // A foreign (cross-project) target is now storable, which is the whole
+      // point of the migration (parent D2).
+      const writer = new Database(dbPath);
+      try {
+        writer
+          .prepare('INSERT INTO dependency_edges (fromId, toId, createdAt) VALUES (?, ?, ?)')
+          .run('LEG-LOCAL', 'OTHER-0000000000000001', '2026-01-02T00:00:00.000Z');
+      } finally {
+        writer.close();
+      }
+
+      const secondRun = runMigrations({ confirm: true }, dbPath);
+      expect(secondRun.applied.map((m) => m.id)).not.toContain(MIGRATION_ID);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+
+  it('creates a fresh database without the target foreign key and without a pending migration', async () => {
+    const { WorklogDatabase } = await import('../src/database.js');
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      const db = new WorklogDatabase(
+        'MIG',
+        dbPath,
+        path.join(tempDir, 'worklog-data.jsonl'),
+        true,
+        false,
+      );
+      try {
+        db.create({ title: 'Fresh item' });
+      } finally {
+        db.close();
+      }
+
+      expect(targetForeignKeyColumns(dbPath)).not.toContain('toId');
+      expect(listPendingMigrations(dbPath).map((m) => m.id)).not.toContain(MIGRATION_ID);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+});

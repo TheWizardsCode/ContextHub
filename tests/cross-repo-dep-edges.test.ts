@@ -42,10 +42,11 @@
  *
  * ## RED pinning
  *
- * F4 (WL-0MVWEENZL008XGYC) implements the foreign branch in
- * `src/commands/dep.ts` and flips `it.fails(` → `it(` on the foreign blocks.
- * The same-project baseline, the snapshot control and the normaliser are plain
- * `it(...)` so a broken harness cannot hide behind a RED pin.
+ * F4 (WL-0MVWEENZL008XGYC) implemented the foreign branch in
+ * `src/commands/dep.ts` and flipped the foreign blocks from `it.fails(` to
+ * `it(`. The same-project baseline, the snapshot control and the normaliser
+ * were plain `it(...)` from the start so a broken harness could not hide
+ * behind a RED pin.
  *
  * ## Same-project regression baseline
  *
@@ -62,6 +63,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import { runCliProcess } from './cli/cli-bundle.js';
 import { writeInitSemaphore } from './cli/cli-helpers.js';
 import { cleanupTempDir, createTempDir } from './test-utils.js';
@@ -174,6 +176,13 @@ function readStoreItems(store: StoreHandle): WorkItem[] {
     return db.getAll();
   } finally {
     db.close();
+    // A read-only open of a WAL-mode store still leaves `-wal`/`-shm` sidecars
+    // in the store directory (SQLite creates them even for a reader). Restore
+    // the fixture's clean state so the AC5 snapshot below measures the CLI
+    // under test rather than this helper.
+    for (const transient of ['worklog.db-wal', 'worklog.db-shm']) {
+      fs.rmSync(path.join(store.worklogDir, transient), { force: true });
+    }
   }
 }
 
@@ -288,7 +297,7 @@ function captureSameProjectScenarios(
 
 // ── suite ────────────────────────────────────────────────────────────────
 
-describe('cross-repo foreign dependency edges (AC2/AC5 — RED until F4)', () => {
+describe('cross-repo foreign dependency edges (AC2/AC5)', () => {
   const disposables: Array<() => void> = [];
   let fixture: ProjectsRootFixture | undefined;
 
@@ -319,7 +328,7 @@ describe('cross-repo foreign dependency edges (AC2/AC5 — RED until F4)', () =>
     return { consumer, sibling, foreignItem };
   }
 
-  it.fails('records a foreign edge, lists its title/status and blocks the dependent (F4)', () => {
+  it('records a foreign edge, lists its title/status and blocks the dependent (F4)', () => {
     const { consumer, foreignItem } = setup();
     const [dependent] = seedLocalItems(consumer, [{ title: 'Local dependent' }]);
 
@@ -375,7 +384,7 @@ describe('cross-repo foreign dependency edges (AC2/AC5 — RED until F4)', () =>
     );
   });
 
-  it.fails('persists the foreign edge across a re-read of the local store (F4)', () => {
+  it('persists the foreign edge across a re-read of the local store (F4)', () => {
     const { consumer, foreignItem } = setup();
     const [dependent] = seedLocalItems(consumer, [{ title: 'Local dependent' }]);
 
@@ -403,7 +412,7 @@ describe('cross-repo foreign dependency edges (AC2/AC5 — RED until F4)', () =>
     ).toEqual([foreignItem.id]);
   });
 
-  it.fails('removes the foreign edge and reconciles the dependent back to open (F4)', () => {
+  it('removes the foreign edge and reconciles the dependent back to open (F4)', () => {
     const { consumer, foreignItem } = setup();
     const [dependent] = seedLocalItems(consumer, [{ title: 'Local dependent' }]);
 
@@ -433,7 +442,7 @@ describe('cross-repo foreign dependency edges (AC2/AC5 — RED until F4)', () =>
     );
   });
 
-  it.fails('records and evaluates a foreign edge without writing, locking or syncing the sibling store (AC5)', () => {
+  it('records and evaluates a foreign edge without writing, locking or syncing the sibling store (AC5)', () => {
     const { consumer, sibling, foreignItem } = setup();
     const [dependent] = seedLocalItems(consumer, [{ title: 'Local dependent' }]);
 
@@ -459,7 +468,7 @@ describe('cross-repo foreign dependency edges (AC2/AC5 — RED until F4)', () =>
     }
   });
 
-  it.fails('refuses an ambiguous foreign prefix instead of guessing an owner (F4)', () => {
+  it('refuses an ambiguous foreign prefix instead of guessing an owner (F4)', () => {
     fixture = makeProjectsRoot({ standard: false });
     const [first, second] = fixture.addDuplicatePrefix(SIBLING_PREFIX);
     const consumer = makeConsumer(fixture.root);
@@ -491,6 +500,72 @@ describe('cross-repo foreign dependency edges (AC2/AC5 — RED until F4)', () =>
     } finally {
       db.close();
     }
+  });
+
+  it('degrades an unreadable sibling store to foreign_dependency "unavailable" without throwing', () => {
+    const { consumer, sibling, foreignItem } = setup();
+    const [dependent] = seedLocalItems(consumer, [{ title: 'Local dependent' }]);
+
+    expect(
+      run(consumer, ['--json', 'dep', 'add', dependent.id, foreignItem.id]).status,
+    ).toBe(0);
+
+    // The sibling project is still discovered (config + initialized marker),
+    // but its database is gone — the resolver must report `unavailable`
+    // instead of throwing (parent D3 fail-safe).
+    fs.rmSync(sibling.dbPath, { force: true });
+
+    const listed = run(consumer, ['--json', 'dep', 'list', dependent.id]);
+    expect(listed.status, listed.stderr).toBe(0);
+    const payload = parseJson<{ outbound: Array<Record<string, unknown>> }>(listed);
+    expect(payload.outbound).toHaveLength(1);
+    expect(payload.outbound[0]).toMatchObject({
+      id: foreignItem.id,
+      foreign: true,
+      foreign_dependency: 'unavailable',
+      title: '(missing)',
+      status: 'deleted',
+    });
+
+    // The edge itself is untouched local data.
+    const db = readLocalStore(consumer);
+    try {
+      expect(db.listDependencyEdgesFrom(dependent.id).map((edge) => edge.toId)).toEqual([
+        foreignItem.id,
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('reports a missing foreign item as foreign_dependency "unresolved"', () => {
+    const { consumer, sibling, foreignItem } = setup();
+    const [dependent] = seedLocalItems(consumer, [{ title: 'Local dependent' }]);
+
+    expect(
+      run(consumer, ['--json', 'dep', 'add', dependent.id, foreignItem.id]).status,
+    ).toBe(0);
+
+    // Remove the target from the (readable) sibling store: the store resolves,
+    // the item does not. `WorklogDatabase.delete()` is a soft delete (the row
+    // survives with status `deleted`), so the row is removed directly.
+    const siblingDb = new Database(sibling.dbPath);
+    try {
+      siblingDb.prepare('DELETE FROM workitems WHERE id = ?').run(foreignItem.id);
+    } finally {
+      siblingDb.close();
+    }
+
+    const listed = run(consumer, ['--json', 'dep', 'list', dependent.id]);
+    expect(listed.status, listed.stderr).toBe(0);
+    const payload = parseJson<{ outbound: Array<Record<string, unknown>> }>(listed);
+    expect(payload.outbound[0]).toMatchObject({
+      id: foreignItem.id,
+      foreign: true,
+      foreign_dependency: 'unresolved',
+      title: '(missing)',
+      status: 'deleted',
+    });
   });
 });
 

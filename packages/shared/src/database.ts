@@ -1869,10 +1869,18 @@ export class WorklogDatabase {
   /**
    * Add a dependency edge (fromId depends on toId)
    *
+   * `toId` may reference a foreign (cross-project) item when the caller passes
+   * `allowForeignTarget` after validating it read-only against the sibling
+   * store (D2 — WL-0MVWABT2Z001XMSD).
+   *
    * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
    */
-  addDependencyEdge(fromId: string, toId: string): DependencyEdge | null {
-    return dependenciesModule.addDependencyEdge(this.ctx, fromId, toId);
+  addDependencyEdge(
+    fromId: string,
+    toId: string,
+    options: dependenciesModule.AddDependencyEdgeOptions = {},
+  ): DependencyEdge | null {
+    return dependenciesModule.addDependencyEdge(this.ctx, fromId, toId, options);
   }
 
   /**

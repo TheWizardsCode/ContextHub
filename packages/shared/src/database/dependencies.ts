@@ -54,14 +54,39 @@ import {
 } from './context.js';
 
 /**
+ * Options for {@link addDependencyEdge}.
+ */
+export interface AddDependencyEdgeOptions {
+  /**
+   * Permit `toId` to reference an item that lives in **another project's**
+   * store (parent WL-0MVWABT2Z001XMSD, design constraint D2).
+   *
+   * The edge is still written to the **local** store and the local `fromId`
+   * endpoint is still validated here; only the `toId` existence check is
+   * delegated to the caller, which must have validated the foreign endpoint
+   * against its own store **read-only**. Defaults to `false`, so the historical
+   * local-endpoint invariant is unchanged for every existing call site.
+   */
+  allowForeignTarget?: boolean;
+}
+
+/**
  * Add a dependency edge (fromId depends on toId)
+ *
+ * `fromId` must exist locally. `toId` must exist locally too unless the caller
+ * passes `allowForeignTarget` after resolving it against a sibling store
+ * (read-only, D2).
  */
 export function addDependencyEdge(
   ctx: WorklogDatabaseContext,
   fromId: string,
   toId: string,
+  options: AddDependencyEdgeOptions = {},
 ): DependencyEdge | null {
-  if (!ctx.store.getWorkItem(fromId) || !ctx.store.getWorkItem(toId)) {
+  if (!ctx.store.getWorkItem(fromId)) {
+    return null;
+  }
+  if (!options.allowForeignTarget && !ctx.store.getWorkItem(toId)) {
     return null;
   }
 

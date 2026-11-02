@@ -29,7 +29,7 @@ interface DbMetadata {
   schemaVersion: number;
 }
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 /**
  * Normalize a single value for use as a better-sqlite3 binding parameter.
@@ -290,10 +290,35 @@ export class SqlitePersistentStore {
         toId TEXT NOT NULL,
         createdAt TEXT NOT NULL,
         PRIMARY KEY (fromId, toId),
-        FOREIGN KEY (fromId) REFERENCES workitems(id) ON DELETE CASCADE,
-        FOREIGN KEY (toId) REFERENCES workitems(id) ON DELETE CASCADE
+        FOREIGN KEY (fromId) REFERENCES workitems(id) ON DELETE CASCADE
       )
     `);
+
+    // `toId` deliberately carries **no** foreign key: a dependency edge may
+    // target an item that lives in another project's store (cross-repo
+    // dependencies, parent WL-0MVWABT2Z001XMSD, design constraint D2). The
+    // local `fromId` endpoint stays constrained, and deleting an item still
+    // removes every edge that references it explicitly (`deleteWorkItem`),
+    // so the removed `ON DELETE CASCADE` behaviour is preserved in code.
+    // Existing databases are migrated by
+    // `20261102-drop-dependency-edge-target-fk`.
+
+    // Record that migration's sentinel when the table already has the required
+    // shape (a fresh database, or one already migrated), so the doctor
+    // migration does not stay pending forever on healthy stores.
+    try {
+      const dependencyEdgeFks = this.db
+        .prepare(`PRAGMA foreign_key_list('dependency_edges')`)
+        .all() as Array<{ from?: unknown }>;
+      if (
+        !dependencyEdgeFks.some((fk) => String(fk.from) === 'toId') &&
+        this.getMetadata('dependency_edges_foreign_target') !== '1'
+      ) {
+        this.setMetadata('dependency_edges_foreign_target', '1');
+      }
+    } catch (_e) {
+      /* best-effort: never fail an open because a sentinel could not be written */
+    }
 
     // Create audit_results table for storing the latest audit per work item
     // This table is the sole source of truth for audit state (see WL-0MPZNJVWT000IKG7).

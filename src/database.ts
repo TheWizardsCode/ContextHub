@@ -10,6 +10,7 @@
 import {
   WorklogDatabase as SharedWorklogDatabase,
   type WorklogDatabaseServices,
+  type WorklogDatabaseOptions,
   type GitTarget,
   type JsonlImportResult,
 } from '@worklog/shared';
@@ -76,7 +77,8 @@ export type { WorklogDatabaseServices, GitTarget, JsonlImportResult };
  *
  * Backward-compatible constructor signature — existing callers like
  * `new WorklogDatabase(prefix, dbPath, jsonlPath, silent, autoSync, syncProvider)`
- * continue to work identically.
+ * continue to work identically; the trailing `options` argument forwards
+ * `readOnly` (and any future open option) to the shared class.
  */
 export class WorklogDatabase extends SharedWorklogDatabase {
   constructor(
@@ -86,8 +88,9 @@ export class WorklogDatabase extends SharedWorklogDatabase {
     silent: boolean = false,
     autoSync: boolean = false,
     syncProvider?: () => Promise<void>,
+    options: WorklogDatabaseOptions = {},
   ) {
     const services = createDefaultServices();
-    super(prefix, dbPath, jsonlPath, silent, autoSync, syncProvider, services);
+    super(prefix, dbPath, jsonlPath, silent, autoSync, syncProvider, services, options);
   }
 }

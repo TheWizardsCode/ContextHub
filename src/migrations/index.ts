@@ -241,6 +241,48 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
         db.exec(`UPDATE workitems SET needsProducerReview = 1 WHERE trim(assignee) = 'Map' AND needsProducerReview = 0`);
       } catch (_e) { /* best-effort: columns may be absent on partial schemas */ }
     }
+  },
+  {
+    id: '20261102-drop-dependency-edge-target-fk',
+    description:
+      'Drop the dependency_edges.toId foreign key so an edge may target a foreign (cross-project) item (WL-0MVWABT2Z001XMSD D2)',
+    safe: true,
+    requiredColumn: '__meta:dependency_edges_foreign_target',
+    apply: (db: Database.Database) => {
+      // A cross-repo dependency edge is stored locally with a foreign id as
+      // `toId` (D2), which the original `toId` foreign key rejected. Rebuild
+      // the table without that key, keeping the local `fromId` constraint.
+      // Idempotent: a database already created from the current schema has no
+      // `toId` foreign key and is left untouched.
+      const tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dependency_edges'")
+        .all() as any[];
+      if (tables.length > 0) {
+        const fks = db.prepare(`PRAGMA foreign_key_list('dependency_edges')`).all() as any[];
+        const hasTargetForeignKey = fks.some((fk) => String(fk.from) === 'toId');
+        if (hasTargetForeignKey) {
+          db.exec(`
+            CREATE TABLE dependency_edges_new (
+              fromId TEXT NOT NULL,
+              toId TEXT NOT NULL,
+              createdAt TEXT NOT NULL,
+              PRIMARY KEY (fromId, toId),
+              FOREIGN KEY (fromId) REFERENCES workitems(id) ON DELETE CASCADE
+            );
+            INSERT OR IGNORE INTO dependency_edges_new (fromId, toId, createdAt)
+              SELECT fromId, toId, createdAt FROM dependency_edges;
+            DROP TABLE dependency_edges;
+            ALTER TABLE dependency_edges_new RENAME TO dependency_edges;
+            CREATE INDEX IF NOT EXISTS idx_dependency_edges_fromId ON dependency_edges(fromId);
+            CREATE INDEX IF NOT EXISTS idx_dependency_edges_toId ON dependency_edges(toId);
+          `);
+        }
+      }
+      db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run(
+        'dependency_edges_foreign_target',
+        '1',
+      );
+    }
   }
 ];
 
@@ -397,7 +439,7 @@ export function runMigrations(opts: RunOptions = {}, dbPath?: string, filter?: {
 
       // Update metadata schemaVersion deterministically to current schema.
       try {
-        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('schemaVersion', '8');
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('schemaVersion', '9');
       } catch (err) {
         // Best-effort: don't fail migration if metadata update fails, but log
         logger.error?.(`Failed to update metadata.schemaVersion: ${(err as Error).message}`);
