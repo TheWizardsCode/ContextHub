@@ -1,5 +1,10 @@
 # Worktree node_modules — end-to-end verification (WL-0MSGQ64N2006TQB2)
 
+> How a worktree resolves `@worklog/shared` (through the symlinked
+> `node_modules` into the **main checkout's** `packages/shared/dist`), and why a
+> worktree `packages/shared` edit goes unseen, is documented in
+> [Module resolution in a worktree](./worktree-isolation.md#module-resolution-in-a-worktree).
+
 ## Problem
 
 `implement.py start` creates a fresh git worktree with no `node_modules`, so
