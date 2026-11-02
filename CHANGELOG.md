@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.0.25 (2026-11-02)
+> **Release focus:** This release focuses on improving the reliability and speed of work item tracking, audits, and testing, with fixes for stale audits, flaky and slow test runs, and items being wrongly released or reverted. It also strengthens sync and approval behavior, plugin stability, and auditability of headless and GPU-related runs.
+### Features
+- Work items now show who holds them, so you can spot claimed or held tasks at a glance. (WL-0MVTPEB3A0091RDH)
+- Audits no longer show as stale when they're actually up to date. (WL-0MVOE11V60050Q6Y)
+- Audits can now run in partially idle capacity, so background checks finish sooner. (WL-0MSORQ8Y4004YT63)
+- Parents now inherit their children's urgency, so critical work hidden inside a parent no longer loses priority. (WL-0MVYCVSPN007CMAJ)
+- Sync reliability improved with no change to how syncing works for you. (WL-0MVGKGMU400631VZ)
+- Tests now run faster, so you spend less time waiting for the suite to finish. (WL-0MVHVZMCH0092JCY)
+- Tests now run up to 44% faster, so you spend less time waiting between changes. (WL-0MVHVZTYA003TNN0)
+- Manual approvals now stay valid through sync updates until the item's content actually changes. (WL-0MVK01BBD005V7KK)
+### Bug Fixes
+- Fixed flaky test failures caused by leftover environment settings interfering with test runs. (WL-0MVVWRPRO006IQ61)
+- Test results are now reliably fresh, so pass/fail checks can't be fooled by outdated cached runs. (WL-0MVPO9P610055UQ3)
+- Blocking an item now actually sticks instead of silently reverting to open. (WL-0MVTUKSJZ003WK82)
+- Fixed an intermittent test timeout so automated checks run reliably under heavy load. (WL-0MVWL88MO002SQ2B)
+- Work items being actively worked on are no longer wrongly released back to the queue. (WL-0MVW9UQQ6004KSXY)
+- Plugin actions now keep working after a herdr update instead of failing. (WL-0MVXRZL9H001GQ7A)
+- Unattended work now actually checks and reports whether it used your local GPU, so you can spot runs that quietly went all-remote. (WL-0MVWEZF4Z004UNYT)
+- Test runs no longer interfere with the finish check, so valid changes won't be wrongly blocked. (WL-0MVWRR4GD001M9LA)
+- Shared tools no longer break machine-wide when files go missing, and recovery is now a single command. (WL-0MVWK20DK004TQZM)
+- Building in a worktree no longer breaks the CLI, so tests and commands keep working. (WL-0MVWJ4IKT005SAHT)
+- Headless sessions now record their local routing decisions, making automated runs auditable. (WL-0MVTN5M3E007DU9Z)
+
 ## v1.0.24 (2026-10-29)
 > **Release focus:** This release focuses on making background and downtime work more reliable and responsive, with smarter dispatch to local or remote capacity, automatic retries, and fixes for stalls, idle workers, and idle leaders. It also improves sync speed, memory safety during large database loads, save-data import handling, and overall stability during heavy activity.
 ### Features
