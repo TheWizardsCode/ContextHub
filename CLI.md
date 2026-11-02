@@ -1362,6 +1362,7 @@ Subcommands:
 - `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
 - `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
+- `prefix [options]` — Preview (default, read-only) or apply a rename of the project's ID prefix, rewriting every ID-bearing record in the SQLite store plus the `prefix:` entry in `.worklog/config.yaml` and writing a revertible rename map. Options: `--to <prefix>` (target prefix; ASCII letters and digits only), `--apply` (request the rename and prompt for an explicit `y`; fails closed without a TTY), `--confirm` (apply without prompting; required for non-interactive runs), `--prefix <prefix>` (override the source prefix). See [`doctor prefix`](#doctor-prefix-options).
 - `audit-gaps [options]` — Read-only report of every `completed`/`in_review` item with **no audit record**, showing root vs `child of <parent-id>`, age (from `activityAt`/`updatedAt`), and coverage/waiver status (`uncovered` / `covered` / `waived`). Omits items with a fresh audit; a child covered by a fresh-audited direct parent is reported as `covered`, not flagged. Options: `--prefix <prefix>`. No `--apply` (read-only).
 - `cache [options]` — Report or prune the bounded read-cache **state directory** (`<cache-dir>/state`, one small counter file per worklog dir ever seen; see `CONFIG.md`). Options: `--prune` (remove stale counters and enforce the file bound; default is report-only), `--dry-run` (report-only; always wins when combined with `--prune`), `--max-files <n>` (counter bound, default 1000), `--ttl-days <n>` (remove counters untouched for this many days, default 7). Works without a worklog (pure cache hygiene).
 
@@ -1440,6 +1441,20 @@ Options:
 - `--confirm` — Apply the rename without prompting (required for
   non-interactive runs).
 - `--prefix <prefix>` — Override the default prefix (optional).
+
+Preview is the default: a bare `wl doctor prefix` (or `--to` without
+`--apply`/`--confirm`) reports counts and sample renames and writes nothing. The
+write path must be requested explicitly. `--apply` then runs the confirmation
+gate: only an answer of `y` proceeds (`yes`, `n`, an empty answer and anything
+else decline), and a non-interactive session without `--confirm` refuses.
+
+Exit codes:
+
+- `0` — preview rendered, rename applied, an interactive prompt declined, or an
+  idempotent replay (the store already carries the target prefix).
+- `1` — refusal or validation error: an invalid `--to` value, a write requested
+  in a non-interactive session without `--confirm`, or a missing
+  `.worklog/config.yaml`. Nothing is written on any non-zero exit.
 
 Examples:
 

@@ -152,9 +152,29 @@ worklog update MOB-0J8L1JQ3H8ZQ2K6D -s completed --prefix MOB
 
 ## Migrating Existing Data
 
-If you have existing data with `WI` prefix and want to migrate to a new prefix:
+Once work items exist, the project prefix cannot simply be hand-edited in
+`.worklog/config.yaml`: `wl` treats any item whose ID prefix differs from the
+configured one as *foreign* (`wl doctor foreign-items`), which breaks
+cross-project lookups. Use the managed rename instead
+(WL-0MVZ2U4E0003IVSZ):
 
-1. Initialize config with your new prefix
-2. Your existing `WI-*` items will continue to work
-3. New items will use the new prefix
-4. Both old and new items can coexist in the same database
+```bash
+# 1. Preview (default; read-only): counts per record type plus sample IDs
+wl doctor prefix --to WEB
+
+# 2. Apply — confirmation-gated (`--apply` prompts for `y`; `--confirm` for
+#    non-interactive runs)
+wl doctor prefix --to WEB --apply
+wl doctor prefix --to WEB --confirm
+```
+
+The rename rewrites the `prefix:` entry in `.worklog/config.yaml` and every
+ID-bearing record in the store in one transaction, preserving each item's
+suffix (`WI-0J8L1JQ3H8ZQ2K6D` → `WEB-0J8L1JQ3H8ZQ2K6D`) — so the whole backlog
+moves to the new prefix and there are no lingering old-prefix items. It also
+writes `.worklog/prefix-rename-<timestamp>.json` mapping every old ID to its
+new one. Re-running is an idempotent no-op; a mid-run failure rolls back and
+leaves the store untouched. ID references held outside the store (code
+comments, docs, test fixtures, commit messages, branch and worktree names) are
+out of scope — sweep them with the rename map. See
+[DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#renaming-the-project-prefix-wl-doctor-prefix).

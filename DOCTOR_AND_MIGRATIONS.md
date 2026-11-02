@@ -175,6 +175,14 @@ wl doctor prefix --to CC --apply
 **Preview is the default and never writes.** It reports the current prefix, the
 target prefix, `counts` (`items`, `comments`, `dependencyEdges`,
 `auditRecords`), up to 10 sample `{ from, to }` ID pairs and `renamedCount`.
+Only an explicit write request (`--apply` or `--confirm`) reaches the rename
+path.
+
+**Confirmation gate.** `--confirm` applies without prompting (required when
+stdin is not a TTY). `--apply` runs the interactive gate: it asks for an
+explicit `y` — `yes`, `n`, an empty answer and anything else decline — and a
+non-TTY run without `--confirm` fails closed with a non-zero exit and **zero
+writes**.
 
 **`--to <PREFIX>`** must be non-empty and ASCII alphanumeric: `-` (the ID
 separator), whitespace, punctuation and non-ASCII characters are rejected with
@@ -191,8 +199,12 @@ transaction covering every ID-bearing record:
 - the top-level `prefix:` entry in `.worklog/config.yaml`.
 
 Only the substring before the first `-` changes, so `OSL-0MVK31VYQ007CN37`
-becomes `CC-0MVK31VYQ007CN37`. A mid-run failure rolls the whole rewrite back
-(including the config line), leaving the store exactly as it was.
+becomes `CC-0MVK31VYQ007CN37`.
+
+**Recoverability.** The store rewrite and the config-prefix rewrite commit
+together or not at all: a mid-run failure rolls the whole transaction back
+(including the `prefix:` line) and no rename map is written, leaving the store
+exactly as it was. There is therefore no partial rename to repair by hand.
 
 After a successful rename a machine-readable map is written to
 `.worklog/prefix-rename-<timestamp>.json`:
@@ -211,6 +223,14 @@ docs, test fixtures, commit messages, branch and worktree names). Re-running the
 same `--confirm` rename is an idempotent no-op: `applied` is `false`,
 `renamedCount` is `0`, `renameMapPath` is `null` and no second map file is
 written.
+
+**Out of scope: the external reference sweep.** The command never rewrites ID
+references held outside the worklog store — code comments, documentation, test
+fixtures, git commit messages, branch and worktree names. Those references keep
+their old prefix until the owning project sweeps them, and the rename map is
+the machine-readable hand-off for that sweep (it lists every old ID → new ID
+pair, so the sweep can be scripted and audited). Hand-editing references inside
+the store is never necessary: the rename covers every ID-bearing column above.
 
 Because the rename deliberately does not touch record timestamps (bumping
 `updatedAt` would mark every audit stale), push a full sync afterwards so the
