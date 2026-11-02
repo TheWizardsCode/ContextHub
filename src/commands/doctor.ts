@@ -18,6 +18,11 @@ import { getSyncDefaults } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
 import { buildForeignItemReport, applyForeignItemCleanup } from '../doctor/foreign-items-check.js';
+import {
+  runPrefixRename,
+  type PrefixRenameRunResult,
+} from '../doctor/prefix-check.js';
+import { getConfigPath } from '../config.js';
 import { buildAuditGapReport } from '../doctor/audit-gaps-check.js';
 import {
   pruneStateDir,
@@ -835,6 +840,50 @@ export default function register(ctx: PluginContext): void {
       }
       console.log(`\nTotal: ${report.deletedForeignCount} deleted, ${report.nonDeletedForeignCount} non-deleted foreign item(s).`);
       console.log('Dry-run only; nothing was modified. Use --apply to hard-delete foreign items.');
+    });
+
+  // ── Prefix rename (WL-0MVZ2U4E0003IVSZ, parent WL-0MVM8V79C003XH2J) ──
+  doctor
+    .command('prefix')
+    .description(
+      'Preview (default) or apply a project ID-prefix rename: rewrites every ID-bearing record, ' +
+      'the config prefix and a rename map',
+    )
+    .option('--to <prefix>', 'Target ID prefix (ASCII letters and digits only)')
+    .option('--apply', 'Request the rename; prompts for confirmation and fails closed without a TTY')
+    .option('--confirm', 'Apply the rename without prompting (non-interactive)')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action(async (opts: { to?: string; apply?: boolean; confirm?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      const result: PrefixRenameRunResult = await runPrefixRename({
+        opts,
+        configPrefix: utils.getConfig()?.prefix ?? null,
+        dataPath: ctx.dataPath,
+        configPath: getConfigPath(),
+        isJsonMode: utils.isJsonMode(),
+        stdinIsTTY: Boolean(process.stdin.isTTY),
+        db: utils.getDatabase(opts.prefix),
+        withMutationLock: (fn) => withStoreMutationLock(ctx.dataPath, fn),
+        prompt: async (question: string) => {
+          const readlineMod = await import('node:readline');
+          return new Promise<string>((resolve) => {
+            const rl = readlineMod.createInterface({ input: process.stdin, output: process.stdout });
+            rl.question(question, (answer: string) => {
+              rl.close();
+              resolve(answer);
+            });
+          });
+        },
+      });
+
+      if (utils.isJsonMode()) {
+        output.json(result.json);
+      } else if (result.error) {
+        console.error(`Doctor prefix: ${result.error}`);
+      } else {
+        for (const line of result.lines) console.log(line);
+      }
+      if (result.exitCode !== 0) process.exitCode = result.exitCode;
     });
 
   doctor

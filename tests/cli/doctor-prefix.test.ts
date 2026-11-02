@@ -3,15 +3,14 @@
  * WL-0MVM8V79C003XH2J).
  *
  * The `prefix` subcommand is added by the implementation child
- * (WL-0MVZ2U4E0003IVSZ), so every spec here is RED-pinned with
- * `it.fails(...)`: the body asserts post-implementation behaviour and today
- * fails because the subcommand does not exist (the CLI exits non-zero).
- * The implementation child flips `it.fails(` → `it(` as the command lands, so
- * the gated suite stays green until then.
+ * (WL-0MVZ2U4E0003IVSZ). These specs were RED-pinned with `it.fails(...)` by
+ * the test-first child (without the subcommand the CLI exits non-zero) and the
+ * implementation child flipped `it.fails(` to `it(` as the command landed.
  *
  * Contract exercised (JSON mode):
  *
  *   wl --json doctor prefix --to <PREFIX>              → preview (default)
+ *   wl --json doctor prefix --to <PREFIX> --apply      → request apply (prompts; non-TTY fails closed)
  *   wl --json doctor prefix --to <PREFIX> --confirm    → apply
  *
  * Both modes emit exactly one machine-readable report on stdout:
@@ -37,9 +36,16 @@
  *
  *      { fromPrefix, toPrefix, renamedAt, ids: { "<old>": "<new>", ... } }
  *
- * Confirmation gate: a non-TTY run without `--confirm` aborts with a non-zero
- * exit, zero writes, and a message naming `--confirm`. The interactive
- * prompt's accept/decline rule lives in the pure helper
+ * Confirmation gate: the preview is the default and never writes; a run that
+ * *requests* the rename (`--apply`, or `--confirm` which both requests and
+ * confirms it) is the write path. On that path, a non-TTY run without
+ * `--confirm` aborts with a non-zero exit, zero writes, and a message naming
+ * `--confirm`. (The original draft of this suite asserted the abort for a bare
+ * `--to` run, which contradicts the preview-by-default contract asserted by
+ * the first spec — a bare `--to` run must preview. The apply request that the
+ * gate guards is therefore explicit: `--apply`. Amended by
+ * WL-0MVZ2U4E0003IVSZ and documented in the work item.)
+ * The interactive prompt's accept/decline rule lives in the pure helper
  * `decidePrefixConfirmation` and is covered by
  * `tests/unit/doctor-prefix-check.test.ts` — this suite cannot allocate a TTY,
  * so a piped-stdin run is deliberately treated as the non-interactive case.
@@ -151,7 +157,7 @@ describe('doctor prefix command', () => {
     return path.isAbsolute(reported) ? reported : path.join(tempState.tempDir, reported);
   }
 
-  it.fails(
+  it(
     'preview is the default and reports counts plus samples without writing',
     async () => {
       seedFixture();
@@ -187,8 +193,8 @@ describe('doctor prefix command', () => {
     60000,
   );
 
-  it.fails(
-    'non-interactive run without --confirm aborts with a non-zero exit and zero writes',
+  it(
+    'non-interactive apply request without --confirm aborts with a non-zero exit and zero writes',
     async () => {
       seedFixture();
       const idsBefore = await listIds();
@@ -196,7 +202,9 @@ describe('doctor prefix command', () => {
       let failure: any;
       try {
         // Piped stdin (no TTY) and no --confirm: the gate must fail closed.
-        await execAsync(`tsx ${cliPath} --json doctor prefix --to CC`);
+        // `--apply` is the explicit *request* to rename; without it the run is
+        // a read-only preview (covered by the first spec).
+        await execAsync(`tsx ${cliPath} --json doctor prefix --to CC --apply`);
       } catch (err) {
         failure = err;
       }
@@ -213,7 +221,7 @@ describe('doctor prefix command', () => {
     60000,
   );
 
-  it.fails(
+  it(
     'invalid --to values fail with a non-zero exit and zero writes',
     async () => {
       seedFixture();
@@ -240,7 +248,7 @@ describe('doctor prefix command', () => {
     60000,
   );
 
-  it.fails(
+  it(
     '--confirm rewrites every ID-bearing record and writes the rename map',
     async () => {
       seedFixture();
@@ -307,7 +315,7 @@ describe('doctor prefix command', () => {
     60000,
   );
 
-  it.fails(
+  it(
     'reports zero foreign items and resolves the renumbered IDs after a confirmed rename',
     async () => {
       seedFixture();
@@ -327,7 +335,7 @@ describe('doctor prefix command', () => {
     60000,
   );
 
-  it.fails(
+  it(
     're-running after a successful rename is an idempotent no-op',
     async () => {
       seedFixture();

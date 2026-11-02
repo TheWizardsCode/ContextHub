@@ -150,6 +150,74 @@ See [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEAN
 
 Adding `--push` rewrites the project's remote worklog ref (`origin refs/worklog/data`, or the configured `syncBranch`) so it contains only the project's own items, bypassing the polluted remote history entirely (a fresh orphan commit is force-pushed and the local tracking ref is updated to match). `--push` requires `--apply` — rewriting the ref without cleaning the DB would publish foreign items. After the push, a subsequent `wl sync` pulls the clean ref and cannot re-import foreign items.
 
+### Renaming the project prefix (`wl doctor prefix`)
+
+`wl doctor prefix` is the supported way to change a project's ID prefix once
+work items exist (WL-0MVZ2U4E0003IVSZ). Without it, hand-editing `prefix:` in
+`.worklog/config.yaml` would make the whole backlog look *foreign* to
+`wl doctor foreign-items` and break cross-project lookups.
+
+```bash
+# Preview (default; read-only): current prefix, counts and sample renames
+wl doctor prefix --to CC
+
+# Machine-readable preview
+wl --json doctor prefix --to CC
+
+# Apply non-interactively (required when stdin is not a TTY)
+wl doctor prefix --to CC --confirm
+
+# Request the rename interactively (prompts for an explicit `y`; when stdin
+# is not a TTY it fails closed and writes nothing)
+wl doctor prefix --to CC --apply
+```
+
+**Preview is the default and never writes.** It reports the current prefix, the
+target prefix, `counts` (`items`, `comments`, `dependencyEdges`,
+`auditRecords`), up to 10 sample `{ from, to }` ID pairs and `renamedCount`.
+
+**`--to <PREFIX>`** must be non-empty and ASCII alphanumeric: `-` (the ID
+separator), whitespace, punctuation and non-ASCII characters are rejected with
+a non-zero exit and no writes.
+
+**`--confirm`** performs the rename. The rewrite is a single SQLite
+transaction covering every ID-bearing record:
+
+- `workitems.id` and `workitems.parentId`;
+- `comments.id`, `comments.workItemId` and the IDs inside the `refs` JSON array;
+- `dependency_edges.fromId` / `toId`;
+- `audit_results.work_item_id`;
+- `worklog_fts.itemId` / `parentId` (so `wl search` keeps resolving);
+- the top-level `prefix:` entry in `.worklog/config.yaml`.
+
+Only the substring before the first `-` changes, so `OSL-0MVK31VYQ007CN37`
+becomes `CC-0MVK31VYQ007CN37`. A mid-run failure rolls the whole rewrite back
+(including the config line), leaving the store exactly as it was.
+
+After a successful rename a machine-readable map is written to
+`.worklog/prefix-rename-<timestamp>.json`:
+
+```json
+{
+  "fromPrefix": "OSL",
+  "toPrefix": "CC",
+  "renamedAt": "2026-11-02T21:00:00.000Z",
+  "ids": { "OSL-0MVK31VYQ007CN37": "CC-0MVK31VYQ007CN37" }
+}
+```
+
+Use it to sweep ID references that live **outside** the store (code comments,
+docs, test fixtures, commit messages, branch and worktree names). Re-running the
+same `--confirm` rename is an idempotent no-op: `applied` is `false`,
+`renamedCount` is `0`, `renameMapPath` is `null` and no second map file is
+written.
+
+Because the rename deliberately does not touch record timestamps (bumping
+`updatedAt` would mark every audit stale), push a full sync afterwards so the
+renumbered rows reach the remote data file. Then verify with
+`wl doctor foreign-items` (it must report `foreignCount: 0`) and
+`wl show <new-id>`.
+
 ### Reporting audit gaps (`wl doctor audit-gaps`)
 
 Work items can reach `completed`/`in_review` — and ship — without an audit record. `wl doctor audit-gaps` is a **read-only** report of every such item (WL-0MUBVH9FV0027COG):

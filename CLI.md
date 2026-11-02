@@ -1383,6 +1383,10 @@ wl doctor foreign-items                  # Report foreign-prefix work items (rea
 wl doctor foreign-items --dry-run --json # JSON report of foreign items
 wl doctor foreign-items --apply          # Hard-delete foreign items (destructive)
 wl doctor foreign-items --apply --push  # Clean DB and rewrite remote worklog ref
+wl doctor prefix                        # Preview an ID-prefix rename (read-only; default)
+wl doctor prefix --to CC                # Preview renumbering every ID to the CC prefix
+wl doctor prefix --to CC --confirm      # Apply the rename (writes a rename map)
+wl doctor prefix --to CC --apply        # Interactive apply (prompts; fails closed without a TTY)
 wl doctor audit-gaps                    # Report completed/in_review items with no audit (read-only)
 wl doctor audit-gaps --json             # Machine-readable audit-gap report
 wl doctor cache                         # Report read-cache state counters (dry run)
@@ -1419,6 +1423,39 @@ When the read-cache state directory holds pruneable counters, a synthetic
 finding with `checkId: "read-cache.state"` and `type: "maintenance"` is appended
 the same additive way (`itemId: null`); its `message` names the counts and points
 at `wl doctor cache` / `wl doctor cache --prune`.
+
+### `doctor prefix` [options]
+
+Preview (default) or apply a rename of the project's ID prefix, rewriting every
+ID-bearing record in the SQLite store plus the `prefix:` entry in
+`.worklog/config.yaml` (WL-0MVZ2U4E0003IVSZ). Prefixes are validated (non-empty,
+ASCII alphanumeric, no `-`); only the substring before the first `-` changes, so
+suffixes are preserved.
+
+Options:
+
+- `--to <prefix>` — Target prefix (defaults to the current prefix: pure report).
+- `--apply` — Request the rename; prompts for an explicit `y` and fails closed
+  (non-zero exit, zero writes) when stdin is not a TTY.
+- `--confirm` — Apply the rename without prompting (required for
+  non-interactive runs).
+- `--prefix <prefix>` — Override the default prefix (optional).
+
+Examples:
+
+```sh
+wl doctor prefix --to CC               # Preview counts + sample renames (no writes)
+wl --json doctor prefix --to CC        # Machine-readable preview
+wl doctor prefix --to CC --confirm     # Apply; writes .worklog/prefix-rename-<timestamp>.json
+wl doctor prefix --to CC --apply       # Interactive apply (prompts for `y`)
+```
+
+The JSON report carries `success`, `dryRun`, `applied`, `fromPrefix`,
+`toPrefix`, `counts` (`items`, `comments`, `dependencyEdges`, `auditRecords`),
+`samples` (up to 10 `{ from, to }` pairs), `renamedCount` and `renameMapPath`
+(`null` unless this run wrote). Re-running a completed rename is an idempotent
+no-op (`applied: false`, `renamedCount: 0`, `renameMapPath: null`). See
+[DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#renaming-the-project-prefix-wl-doctor-prefix).
 
 ### `re-sort` [options]
 
