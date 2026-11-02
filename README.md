@@ -14,6 +14,7 @@ At the heart of that orchestration is **Worklog**: a lightweight, Git-friendly i
 - **CLI + API**: Manage work items from the command line or a REST API
 - **Git-Friendly Syncing**: JSONL format enables seamless team collaboration via Git with automatic conflict resolution
 - **Multi-Project Support**: Custom prefixes for issue IDs per project
+- **Cross-Repo Dependencies**: Block a work item on a work item in another project's store — sibling projects are discovered automatically, a missing one is cloned via `wl project add`, and an unresolvable foreign blocker keeps the dependent blocked instead of silently unblocking it (see [Cross-repo dependencies](MULTI_PROJECT_GUIDE.md#cross-repo-dependencies))
 
 ## Installation
 
@@ -140,7 +141,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [Heartbeat Skill](skill/heartbeat/SKILL.md) | Automated work item monitoring and audit orchestration for the Pi agent |
 | [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) | Plugin development guide and API reference |
 | [LOCAL_LLM.md](LOCAL_LLM.md) | Configure local LLM providers (Ollama, Foundry) and the direct `llm.*` chat config used by `wl interview` |
-| [MULTI_PROJECT_GUIDE.md](MULTI_PROJECT_GUIDE.md) | Multi-project setup with custom prefixes |
+| [MULTI_PROJECT_GUIDE.md](MULTI_PROJECT_GUIDE.md) | Multi-project setup with custom prefixes and [cross-repo dependencies](MULTI_PROJECT_GUIDE.md#cross-repo-dependencies) |
 | [API.md](API.md) | REST API endpoints and usage |
 | [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) | File path convention for work item descriptions |
 | [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) | Detecting and removing cross-project worklog pollution (`wl doctor foreign-items`) |

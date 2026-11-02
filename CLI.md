@@ -649,14 +649,21 @@ Behavior:
 - `dep add` automatically sets `itemId` status to `blocked` when the dependency is active (i.e. `dependsOnId` is not completed or deleted).
 - `dep rm` warns and exits 0 when ids are missing.
 - `dep list` warns and exits 0 when ids are missing.
-- `dep list --outgoing` shows only outbound dependencies.
-- `dep list --incoming` shows only inbound dependencies.
+
+Options (per subcommand):
+
+- `--prefix <prefix>` — Override the default prefix (`add`, `rm` and `list`).
+- `--outgoing` — `list` only: show outbound dependencies.
+- `--incoming` — `list` only: show inbound dependencies.
 
 **Foreign (cross-project) ids.** An id whose prefix belongs to a discovered
 sibling project is resolved **read-only** from that project's store, and the
 edge is recorded in the local store (see
 [`CONFIG.md`](CONFIG.md#cross-repo-project-discovery-projectsroot)). `dep add`,
-`dep rm` and `dep list` all accept such ids; `wl dep --help` states it too.
+`dep rm` and `dep list` all accept such ids; `wl dep --help` states it too. The
+full workflow — discovery, ambiguity, the fail-safe states and clone
+remediation — is documented in
+[`MULTI_PROJECT_GUIDE.md`](MULTI_PROJECT_GUIDE.md#cross-repo-dependencies).
 
 **Unknown project remediation.** When the prefix belongs to **no** discovered
 project, `dep add` and `dep list` exit non-zero with an actionable payload
