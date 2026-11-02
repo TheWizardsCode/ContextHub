@@ -37,9 +37,11 @@
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { WorklogDatabase } from '../../packages/shared/src/database.js';
 import type { WorkItemStatus } from '../../packages/shared/src/types.js';
 import { cleanupTempDir, createTempDir } from '../test-utils.js';
+import { fixtureGitEnv } from '../cli/git-helpers.js';
 
 /** Prefixes of the standard layout; the discovery spec asserts against them. */
 export const FIXTURE_PREFIXES = {
@@ -170,6 +172,96 @@ export function writeProjectConfig(
     initialiseGitRepo(projectDir);
   }
   return projectDir;
+}
+
+// ── git origin fixture (F7 — clone remediation) ─────────────────────────
+
+/** Options for {@link createGitOriginRepo}. */
+export interface GitOriginOptions {
+  /** Prefix declared in the origin's `.worklog/config.yaml` (default: `GAMMA`). */
+  prefix?: string;
+}
+
+/** A real, local git repository usable as a `git clone` source. */
+export interface GitOriginRepo {
+  /** Working tree of the origin repository. */
+  dir: string;
+  /** `file://` URL suitable for `git clone` — never touches the network. */
+  url: string;
+  /** Prefix declared in the origin's `.worklog/config.yaml`. */
+  prefix: string;
+  /** Remove the origin (idempotent). */
+  cleanup(): void;
+}
+
+/**
+ * Build a **real** git repository to clone from — `git init`, one commit, a
+ * tracked `.worklog/config.yaml` declaring `prefix`, and a `README.md` marker
+ * that proves a later clone actually copied the repository.
+ *
+ * The URL is a `file://` URL, so the spec needs no network access and no git
+ * credentials (parent D4 assumption). The fixture git environment is scrubbed
+ * through the shared `fixtureGitEnv()` helper so the suite's mock `git` on
+ * `PATH` (whose `clone` only copies a local directory) cannot silently stand
+ * in for the real binary while the origin is being built.
+ *
+ * The origin is deliberately **not** a genuine worklog store (it has no
+ * `initialized` marker and no database): a real project repository tracks
+ * only `.worklog/config.yaml`, which is exactly what the clone-prefix
+ * validation in `wl project add` must read.
+ */
+export function createGitOriginRepo(options: GitOriginOptions = {}): GitOriginRepo {
+  const prefix = (options.prefix ?? 'GAMMA').toUpperCase();
+  const parentDir = createTempDir();
+
+  const dir = path.join(parentDir, `${prefix.toLowerCase()}-origin`);
+  fs.mkdirSync(dir, { recursive: true });
+
+  writeProjectConfig(dir, {
+    prefix,
+    projectName: `${prefix} Origin`,
+    git: false,
+  });
+  fs.writeFileSync(path.join(dir, 'README.md'), `# ${prefix} origin fixture\n`, 'utf-8');
+
+  commitOriginRepo(dir, `${prefix} origin fixture`);
+
+  let cleaned = false;
+  return {
+    dir,
+    url: pathToFileURL(dir).href,
+    prefix,
+    cleanup() {
+      if (cleaned) return;
+      cleaned = true;
+      cleanupTempDir(parentDir);
+    },
+  };
+}
+
+/**
+ * `git init` + one commit in `dir`, using the real git binary and a scrubbed
+ * environment so an inherited `GIT_*` override can never redirect the commit.
+ */
+function commitOriginRepo(dir: string, message: string): void {
+  const env = fixtureGitEnv();
+  const git = (args: string[]): void => {
+    execFileSync('git', args, { cwd: dir, stdio: 'ignore', env });
+  };
+  git(['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  git(['add', '-A', '-f']);
+  git([
+    '-c',
+    'user.name=Worklog Fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '--quiet',
+    '-m',
+    message,
+  ]);
 }
 
 /** Options for `makeProjectsRoot()`. */
