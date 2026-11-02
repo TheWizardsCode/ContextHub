@@ -153,6 +153,43 @@ describe('collect-freeze-evidence.sh', () => {
     expect(silent.summaryFirst).toMatch(/^Classification: silent \(confidence: low\)$/);
   });
 
+  it('ranks a deliberate shutdown above incidental fault lines', () => {
+    // This host logs stray mt7921e warnings during ordinary use. A normal
+    // reboot must NOT be reported as an mt7921e failure (AC-I expects the
+    // clean-shutdown signature), but a crash with the same lines and NO
+    // shutdown markers must still be reported as mt7921e-timeout.
+    const rebootWithWarnings = run(
+      {
+        klog: [
+          'mt7921e 0000:03:00.0: Timeout for driver own',
+          'NVRM: GPU0 Xid 79',
+          'systemd-shutdown[1]: Syncing filesystems and block devices.',
+          'systemd-shutdown[1]: Sending SIGTERM to remaining processes...',
+        ].join('\n'),
+      },
+      path.join(tmp, 'out-reboot-warn'),
+    );
+    expect(rebootWithWarnings.exitCode).toBe(0);
+    expect(rebootWithWarnings.summaryFirst).toMatch(
+      /^Classification: clean-shutdown \(confidence: high\)$/,
+    );
+
+    const crashNoShutdown = run(
+      {
+        klog: [
+          'mt7921e 0000:03:00.0: driver own failed',
+          'mt7921e 0000:03:00.0: chip reset failed',
+          'BUG: unable to handle page fault for address: ffffd55c00250ff0',
+        ].join('\n'),
+      },
+      path.join(tmp, 'out-crash'),
+    );
+    expect(crashNoShutdown.exitCode).toBe(0);
+    expect(crashNoShutdown.summaryFirst).toMatch(
+      /^Classification: mt7921e-timeout \(confidence: high\)$/,
+    );
+  });
+
   it('fails (exit 3) on an unrecognised shape — never silently "unknown"', () => {
     const res = run({}); // empty fixtures: no klog lines, no dmesg, no vmcore
     expect(res.exitCode).toBe(3);

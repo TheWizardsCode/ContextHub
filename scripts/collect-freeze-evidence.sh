@@ -18,12 +18,15 @@
 #        - silent                 — boot ended with no signature at all
 #        (an unrecognised shape FAILS with exit 3 — never silently "unknown")
 #
-# Classification decision order (later tests are narrower):
-#   panic-dump-available wins (a real trace beats all inferences);
+# Classification decision order (answers "why did this boot end?"):
+#   panic-dump-available wins outright — a real trace beats every inference.
+#   clean-shutdown next: shutdown markers prove the boot ended deliberately, so
+#   incidental fault lines (this host logs stray mt7921e/NVRM warnings during
+#   ordinary use) must NOT be reported as the cause of a normal reboot.
+#   Only when the boot did NOT end cleanly do fault lines become the cause:
 #   then mt7921e-timeout beats NVRM-storm (the observed coexistence favours the
-#   Wi-Fi wedge cascading into the GPU path); then NVRM-storm; else silent.
-#   A boot with NO end-of-boot boundary evidence at all (no journal for the
-#   previous boot, no new dump, no kernel tail) is UNRECOGNIZED → exit 3.
+#   Wi-Fi wedge cascading into the GPU path), then NVRM-storm, then silent.
+#   A boot with no end-of-boot boundary evidence at all is UNRECOGNIZED → exit 3.
 #
 # Exit codes:
 #   0 = bundle written, classification produced
@@ -216,7 +219,18 @@ if [[ -n "$VMCORE_DMESG" && "$VMCORE_DMESG" != "<would-extract: "* ]]; then
 fi
 
 if [[ -z "$classification" ]]; then
-  if (( mt79 > 0 )); then
+  if (( shutdown_markers > 0 )); then
+    # Deliberate reboot/power-off: NOT a freeze. Checked BEFORE the fault-line
+    # classes because an ordinary reboot on this host collects incidental
+    # mt7921e/NVRM warnings; reporting those as the cause of a clean reboot
+    # would be a false alarm (AC-I expects exactly this classification).
+    classification="clean-shutdown"
+    confidence="high"
+    reasons+=("previous-boot kernel tail shows a deliberate shutdown sequence")
+    if (( mt79 > 0 || nvrm > 0 )); then
+      reasons+=("incidental fault lines ignored ($mt79 mt7921e, $nvrm NVRM) — boot ended cleanly")
+    fi
+  elif (( mt79 > 0 )); then
     classification="mt7921e-timeout"
     if (( oops > 0 )); then confidence="high"; else confidence="medium"; fi
     reasons+=("$mt79 mt7921e/mt76 fault lines in previous-boot kernel tail")
@@ -225,12 +239,6 @@ if [[ -z "$classification" ]]; then
     classification="NVRM-storm"
     confidence="medium"
     reasons+=("$nvrm NVRM/Xid lines in previous-boot kernel tail")
-  elif (( shutdown_markers > 0 )); then
-    # Deliberate reboot/power-off: NOT a freeze. The AC-I end-to-end check
-    # verifies this shape specifically.
-    classification="clean-shutdown"
-    confidence="high"
-    reasons+=("previous-boot kernel tail shows a deliberate shutdown sequence")
   elif (( tail_lines > 0 )); then
     # Boot ended with journal content but no shutdown sequence and no fault
     # signature: the silent-freeze class.
