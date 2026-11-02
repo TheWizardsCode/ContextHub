@@ -13,8 +13,9 @@
  * `removeDependencyEdge`, `listDependencyEdgesFrom`, `listDependencyEdgesTo`,
  * `getAllDependencyEdges`), the "is this target still blocking?" predicate
  * (`isDependencyActive`), the blocker queries built on it
- * (`getActiveDependencyBlockers`, `getInboundDependents`,
- * `hasActiveBlockers`), and the reconciliation that flips a dependent between
+ * (`getActiveDependencyBlockers`, `getForeignDependencyViews`,
+ * `getInboundDependents`, `hasActiveBlockers`), and the reconciliation that
+ * flips a dependent between
  * `blocked` and `open` (`reconcileBlockedStatus`, `reconcileDependentStatus`,
  * `reconcileDependentsForTarget`).
  *

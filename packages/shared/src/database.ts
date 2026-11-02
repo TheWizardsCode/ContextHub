@@ -5,7 +5,7 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, AuditWaiver, DemotedParent, RevertedItem } from './types.js';
+import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, ForeignDependencyView, AuditResult, AuditWaiver, DemotedParent, RevertedItem } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
 // Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
 // relative `icons.js` import; `@worklog/shared/icons` is the canonical path
@@ -1959,6 +1959,18 @@ export class WorklogDatabase {
    */
   getInboundDependents(targetId: string): WorkItem[] {
     return dependenciesModule.getInboundDependents(this.ctx, targetId);
+  }
+
+  /**
+   * The foreign (cross-project) dependency edges of `itemId`, resolved from
+   * their own stores and reported in the shared view every gating surface
+   * emits. Empty when the item has no foreign edges or no resolver is
+   * injected.
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
+   */
+  getForeignDependencyViews(itemId: string, edgeCache?: EdgeCache): ForeignDependencyView[] {
+    return dependenciesModule.getForeignDependencyViews(this.ctx, itemId, edgeCache);
   }
 
   /**
