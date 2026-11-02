@@ -172,6 +172,10 @@ export function handleCriticalEscalation(
       const dependencyBlockers = hooks.getActiveDependencyBlockers(critical.id, options.edgeCache);
       for (const blocker of dependencyBlockers) {
         if (excluded?.has(blocker.id)) continue;
+        // A resolved foreign target may block the critical item, but it is not
+        // a local work item and must never be surfaced as a `wl next` result
+        // (cross-repo AC3).
+        if (!hooks.isLocalWorkItem(blocker.id)) continue;
         blockingPairs.push({ blocking: blocker, critical });
         hooks.debug(`${debugPrefix}   blocker: dep ${blocker.id} ("${blocker.title}") blocks critical ${critical.id}`);
       }

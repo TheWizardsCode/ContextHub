@@ -51,9 +51,12 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { WorklogDatabase } from '../database.js';
+// The shared class, not the CLI wrapper: this module must stay importable from
+// `src/database.ts` (which wires the resolver service) without a module cycle.
+// A snapshot read needs no CLI services (JSONL, sync, file-lock, search).
+import { WorklogDatabase } from '@worklog/shared';
 import type { WorkItem } from '../types.js';
-import { discoverProjects } from './project-registry.js';
+import { discoverProjects, type DiscoveryResult } from './project-registry.js';
 
 /** Resolution state of a foreign dependency target. */
 export type ForeignDependencyState = 'resolved' | 'unresolved' | 'unavailable';
@@ -80,6 +83,15 @@ export interface ForeignItemResolution {
   projectPath?: string;
   /** The projects root that was scanned. */
   projectsRoot?: string;
+  /**
+   * `true` when a project owning the id's prefix was discovered — even when
+   * its store could not be read or the prefix is ambiguous.
+   *
+   * This is the gating fail-safe discriminator (parent D3): an `unavailable`
+   * target with a discovered project keeps the dependent blocked, while an
+   * undiscoverable prefix stays a non-blocking coordination note.
+   */
+  discoveredProject: boolean;
   /** `true` when several projects declare {@link prefix}. */
   ambiguous?: boolean;
   /** Every project declaring {@link prefix}, sorted; present when ambiguous. */
@@ -98,6 +110,24 @@ export function prefixOfWorkItemId(id: string): string {
 }
 
 /**
+ * Per-process memo of foreign resolutions, keyed by projects root + item id.
+ *
+ * The gating hot path (`wl next`, `hasActiveBlockers` during reconciliation)
+ * asks the same question repeatedly and each uncached answer copies the
+ * sibling's SQLite file into a temp directory. A CLI invocation is
+ * short-lived, so a process-lifetime memo cannot serve a stale answer across
+ * a sibling-store mutation that happened in another process. Call
+ * {@link clearForeignResolutionCache} when a long-lived caller knows the
+ * sibling layout or data changed in-process.
+ */
+const resolutionCache = new Map<string, ForeignItemResolution>();
+
+/** Drop the per-process foreign resolution memo. */
+export function clearForeignResolutionCache(): void {
+  resolutionCache.clear();
+}
+
+/**
  * Resolve `id` against the discovered sibling projects, opening the owning
  * store **read-only**.
  *
@@ -110,16 +140,32 @@ export function resolveForeignItem(
   options: ResolveForeignItemOptions = {},
 ): ForeignItemResolution {
   const normalisedId = id.trim().toUpperCase();
-  const prefix = prefixOfWorkItemId(normalisedId);
-
   const discovery = discoverProjects({
     cwd: options.cwd,
     projectsRoot: options.projectsRoot,
   });
+
+  const cacheKey = `${discovery.projectsRoot}\u0000${normalisedId}`;
+  const cached = resolutionCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const resolution = resolveForeignItemFromDiscovery(id, normalisedId, discovery);
+  resolutionCache.set(cacheKey, resolution);
+  return resolution;
+}
+
+/** The uncached resolution body — see {@link resolveForeignItem}. */
+function resolveForeignItemFromDiscovery(
+  id: string,
+  normalisedId: string,
+  discovery: DiscoveryResult,
+): ForeignItemResolution {
+  const prefix = prefixOfWorkItemId(normalisedId);
   const base: ForeignItemResolution = {
     id: normalisedId,
     prefix,
     state: 'unavailable',
+    discoveredProject: false,
     projectsRoot: discovery.projectsRoot,
   };
 
@@ -142,6 +188,9 @@ export function resolveForeignItem(
     const candidates = project.candidates ?? [];
     return {
       ...base,
+      // A project owns the prefix, but more than one does: never guess an
+      // owner. Gating treats this as a discovered, unreadable target.
+      discoveredProject: true,
       ambiguous: true,
       candidates,
       reason:
@@ -160,6 +209,7 @@ export function resolveForeignItem(
   } catch (error) {
     return {
       ...base,
+      discoveredProject: true,
       projectPath,
       reason:
         `Could not read the '${prefix}' store at ${dbPath} ` +
@@ -172,6 +222,7 @@ export function resolveForeignItem(
     return {
       ...base,
       state: 'unresolved',
+      discoveredProject: true,
       projectPath,
       reason: `Work item ${normalisedId} was not found in the '${prefix}' store at ${projectPath}.`,
     };
@@ -180,6 +231,7 @@ export function resolveForeignItem(
   return {
     ...base,
     state: 'resolved',
+    discoveredProject: true,
     projectPath,
     item,
   };
@@ -218,6 +270,7 @@ function readItemFromSnapshot(
       path.join(snapshotDir, 'worklog-data.jsonl'),
       true,
       false,
+      undefined,
       undefined,
       { readOnly: true },
     );

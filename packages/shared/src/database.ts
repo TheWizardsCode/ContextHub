@@ -13,6 +13,7 @@ import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, Persis
 import type { AuditInvalidationVerdict } from '@worklog/shared/icons';
 import {
   EdgeCache,
+  ForeignDependencyResolver,
   generateId,
   generateCommentId,
   getPrefix,
@@ -145,6 +146,16 @@ export interface WorklogDatabaseServices {
   /** Persistent store services (migration list, etc.) */
   persistentStoreServices?: PersistentStoreServices;
 
+  /**
+   * Read-only resolver for foreign (cross-project) dependency targets.
+   *
+   * Injected by the CLI (`src/cross-repo/foreign-store.ts`); when omitted, an
+   * edge whose target is not in this store is treated exactly as before —
+   * local-only gating. The shared package never imports the CLI's filesystem
+   * discovery, so the dependency direction stays one-way.
+   */
+  foreign?: ForeignDependencyResolver;
+
   /** Optional cache configuration for SqlitePersistentStore (Phase 5) */
   cacheOptions?: PersistentStoreCacheOptions;
 }
@@ -212,6 +223,7 @@ export class WorklogDatabase {
         getActiveDependencyBlockers: (itemId, edgeCache) => this.getActiveDependencyBlockers(itemId, edgeCache),
         isInProgressSubtree: (item, allItems) => this.isInProgressSubtree(item, allItems),
         isDependencyActive: (target) => this.isDependencyActive(target),
+        isLocalWorkItem: (id) => this.get(id) !== null,
         getDescendants: (parentId) => this.getDescendants(parentId),
         orderBySortIndex: (items, sortOrderCache) => this.orderBySortIndex(items, sortOrderCache),
         selectBySortIndex: (items, effectivePriorityCache, sortOrderCache, edgeCache, allItems) =>
@@ -1952,10 +1964,13 @@ export class WorklogDatabase {
   /**
    * True when `itemId` depends on at least one still-active item.
    *
+   * Foreign (cross-project) targets are resolved from their own store; an
+   * unresolved target keeps the dependent blocked (D3 fail-safe).
+   *
    * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
    */
-  hasActiveBlockers(itemId: string): boolean {
-    return dependenciesModule.hasActiveBlockers(this.ctx, itemId);
+  hasActiveBlockers(itemId: string, edgeCache?: EdgeCache): boolean {
+    return dependenciesModule.hasActiveBlockers(this.ctx, itemId, edgeCache);
   }
 
   /**

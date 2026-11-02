@@ -128,7 +128,16 @@ export default function register(ctx: PluginContext): void {
       if (utils.isJsonMode()) {
         if (count === 1) {
           const single = selection.results[0];
-          output.json({ success: true, workItem: single?.workItem ?? null, reason: single?.reason ?? '' });
+          output.json({
+            success: true,
+            workItem: single?.workItem ?? null,
+            reason: single?.reason ?? '',
+            // Present only when the selected item has foreign edges, so the
+            // shape for items without them is unchanged.
+            ...(single?.foreign_dependencies
+              ? { foreign_dependencies: single.foreign_dependencies }
+              : {}),
+          });
           return;
         }
 

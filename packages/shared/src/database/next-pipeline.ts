@@ -41,6 +41,10 @@ import {
   buildEdgeCache,
 } from './context.js';
 import {
+  getForeignDependencyViews,
+  hasActiveBlockers,
+} from './dependencies.js';
+import {
   computeEffectivePriority,
   effortOrdinal,
   getPriorityValue,
@@ -183,20 +187,11 @@ export function filterCandidates(
   let candidates = pool;
   if (!includeBlocked) {
     const ec = options.edgeCache;
-    candidates = pool.filter(item => {
-      const edges = ec
-        ? (ec.outbound.get(item.id) ?? [])
-        : ctx.store.getDependencyEdgesFrom(item.id);
-      for (const edge of edges) {
-        const target = ec
-          ? (ec.itemsById.get(edge.toId) ?? null)
-          : ctx.store.getWorkItem(edge.toId);
-        if (hooks.isDependencyActive(target ?? null)) {
-          return false;
-        }
-      }
-      return true;
-    });
+    // `hasActiveBlockers` is foreign-aware: an edge whose target lives in
+    // another project's store is resolved there (and fails safe when the store
+    // is unavailable), so a foreign blocker excludes the dependent exactly
+    // like a same-project blocker (AC3, D3).
+    candidates = pool.filter(item => !hasActiveBlockers(ctx, item.id, ec));
     hooks.debug(`${debugPrefix} filter: after dep-blocked=${candidates.length}`);
   }
 
@@ -248,7 +243,7 @@ export function resolveBlockerToRoot(
   ) {
     return null;
   }
-  if (hooks.getActiveDependencyBlockers(parent.id).length > 0) {
+  if (hasActiveBlockers(ctx, parent.id)) {
     return null;
   }
   if (excluded?.has(parent.id)) {
@@ -258,6 +253,23 @@ export function resolveBlockerToRoot(
     return null;
   }
   return parent;
+}
+
+/**
+ * Attach the shared foreign-dependency view to a selection result.
+ *
+ * The key is omitted entirely when the item has no foreign edges, so output
+ * for items without cross-project edges stays byte-identical to before.
+ */
+function withForeignDependencies(
+  ctx: WorklogDatabaseContext,
+  result: NextWorkItemResult,
+  edgeCache?: EdgeCache,
+): NextWorkItemResult {
+  if (!result.workItem) return result;
+  const foreignDependencies = getForeignDependencyViews(ctx, result.workItem.id, edgeCache);
+  if (foreignDependencies.length === 0) return result;
+  return { ...result, foreign_dependencies: foreignDependencies };
 }
 
 /**
@@ -332,7 +344,7 @@ export function findNextWorkItemFromItems(
       sortOrderCache,
     });
     if (criticalResult) {
-      return criticalResult;
+      return withForeignDependencies(ctx, criticalResult, edgeCache);
     }
   }
 
@@ -391,6 +403,10 @@ export function findNextWorkItemFromItems(
         const dependencyBlockers = hooks.getActiveDependencyBlockers(blockedItem.id, edgeCache);
         for (const blocker of dependencyBlockers) {
           if (excluded?.has(blocker.id)) continue;
+          // A resolved foreign target is not a local work item: it may block
+          // the dependent, but it must never be promoted as a `wl next`
+          // result (AC3).
+          if (!hooks.isLocalWorkItem(blocker.id)) continue;
           blockingPairs.push({ blocking: blocker, blocked: blockedItem });
         }
   
@@ -451,10 +467,10 @@ export function findNextWorkItemFromItems(
           const selectedBlocker = orderedBlockers[0];
           if (selectedBlocker) {
             const pair = filteredBlockers.find(p => p.blocking.id === selectedBlocker.id)!;
-            return {
+            return withForeignDependencies(ctx, {
               workItem: selectedBlocker,
               reason: `Blocking issue for ${pair.blocked.priority}-priority item ${pair.blocked.id} (${pair.blocked.title})`
-            };
+            }, edgeCache);
           }
         }
       }
@@ -499,10 +515,10 @@ export function findNextWorkItemFromItems(
     const selected = hooks.selectBySortIndex(fallbackItems, effectivePriorityCache, sortOrderCache, edgeCache, items);
     hooks.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
     const effectiveInfo = selected ? computeEffectivePriority(ctx, hooks, selected, effectivePriorityCache, edgeCache, items) : null;
-    return {
+    return withForeignDependencies(ctx, {
       workItem: selected,
       reason: `Next open item by sort_index${selected ? ` (${effectiveInfo?.inheritedFrom ? effectiveInfo.reason : `priority ${selected.priority}`})` : ''}`
-    };
+    }, edgeCache);
   }
 
   const selectedRoot = hooks.selectBySortIndex(rootCandidates, effectivePriorityCache, sortOrderCache, edgeCache, items);
@@ -515,10 +531,10 @@ export function findNextWorkItemFromItems(
   // Return the selected root directly — do NOT descend into children.
   // The parent represents the unit of work; children are tracked within it.
   const rootEffectiveInfo = computeEffectivePriority(ctx, hooks, selectedRoot, effectivePriorityCache, edgeCache, items);
-  return {
+  return withForeignDependencies(ctx, {
     workItem: selectedRoot,
     reason: `Next open item by sort_index${rootEffectiveInfo ? ` (${rootEffectiveInfo.inheritedFrom ? rootEffectiveInfo.reason : `priority ${selectedRoot.priority}`})` : ''}`
-  };
+  }, edgeCache);
 }
 
 /**

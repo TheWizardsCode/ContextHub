@@ -47,9 +47,10 @@
  * surface is unchanged (parent AC — public API untouched).
  */
 
-import { DependencyEdge, WorkItem } from '../types.js';
+import { DependencyEdge, ForeignDependencyView, WorkItem } from '../types.js';
 import {
   EdgeCache,
+  ForeignDependencyResolution,
   WorklogDatabaseContext,
 } from './context.js';
 
@@ -144,6 +145,164 @@ export function getAllDependencyEdges(ctx: WorklogDatabaseContext): DependencyEd
 }
 
 /**
+ * The prefix segment of a work-item id (`ALPHA-…` → `ALPHA`), or `''` when the
+ * id carries no separator.
+ */
+function prefixOfWorkItemId(id: string): string {
+  const separator = id.indexOf('-');
+  return separator < 0 ? '' : id.slice(0, separator).toUpperCase();
+}
+
+/**
+ * True when `toId` names a target that can only live in **another project's**
+ * store: it carries a prefix and that prefix is not this store's own.
+ *
+ * An id with this store's prefix that is absent locally is a genuinely missing
+ * local endpoint (the existing `dependency.missing-endpoint` case), never a
+ * foreign target — resolving it against siblings could only find a project
+ * that cannot own it.
+ */
+function isForeignTarget(ctx: WorklogDatabaseContext, toId: string): boolean {
+  const prefix = prefixOfWorkItemId(toId);
+  if (prefix === '') return false;
+  const localPrefix = (ctx.prefix || '').toUpperCase();
+  return prefix !== localPrefix;
+}
+
+/**
+ * Resolve a foreign target through the injected read-only resolver.
+ *
+ * Returns `null` when no resolver is injected (a consumer that only ever holds
+ * local edges, e.g. the shared package used outside the CLI) or when the id is
+ * not foreign. A resolver that throws is degraded to an `unavailable` result
+ * that still counts as a discovered project, so a broken resolver can never
+ * silently unblock a dependent (D3 fail-safe).
+ */
+function resolveForeignTarget(
+  ctx: WorklogDatabaseContext,
+  toId: string,
+): ForeignDependencyResolution | null {
+  if (!isForeignTarget(ctx, toId)) return null;
+  const resolver = ctx.services?.foreign;
+  if (!resolver) return null;
+  try {
+    const resolution = resolver.resolve(toId);
+    if (!resolution) return null;
+    return {
+      ...resolution,
+      id: (resolution.id || toId).toUpperCase(),
+      discoveredProject: Boolean(resolution.discoveredProject),
+    };
+  } catch (error) {
+    return {
+      id: toId.toUpperCase(),
+      state: 'unavailable',
+      discoveredProject: true,
+      reason:
+        `The foreign dependency resolver failed for ${toId} ` +
+        `(${error instanceof Error ? error.message : String(error)}) — ` +
+        'treating the foreign dependency as unavailable.',
+    };
+  }
+}
+
+/**
+ * True when a foreign resolution keeps the dependent blocked.
+ *
+ * Uses the same terminal semantics as a local target — {@link isDependencyActive}
+ * is reused, never forked — and fails safe for an unresolved target or a
+ * discovered-but-unreadable store. An undiscoverable prefix (no project owns
+ * it) stays a non-blocking coordination note.
+ */
+function foreignResolutionBlocks(resolution: ForeignDependencyResolution): boolean {
+  if (resolution.state === 'resolved') {
+    return isDependencyActive(resolution.item ?? null);
+  }
+  if (resolution.state === 'unresolved') return true;
+  return resolution.discoveredProject;
+}
+
+/**
+ * Turn a foreign resolution into the shared view emitted by every gating
+ * surface. A `resolved` view deliberately carries no `reason`.
+ */
+function toForeignDependencyView(
+  resolution: ForeignDependencyResolution,
+): ForeignDependencyView {
+  const unresolved =
+    resolution.state === 'unresolved' ||
+    (resolution.state === 'unavailable' && resolution.discoveredProject);
+  const view: ForeignDependencyView = {
+    id: resolution.id,
+    foreign: true,
+    foreign_dependency: resolution.state,
+    unresolved,
+    blocking: foreignResolutionBlocks(resolution),
+  };
+  if (resolution.state !== 'resolved') {
+    view.reason =
+      resolution.reason ??
+      `Foreign dependency ${resolution.id} could not be resolved (${resolution.state}).`;
+  }
+  return view;
+}
+
+/** Foreign ids whose unresolved state has already been warned about (once per process). */
+const warnedForeignTargets = new Set<string>();
+
+/**
+ * Emit at most one warning per foreign target per process. Interactive runs
+ * (silent=false) see it on stderr; JSON callers do not get noise on stdout.
+ *
+ * Only a target that actually blocks is warned about: an undiscoverable prefix
+ * is a coordination note, so warning about it would be false alarm.
+ */
+function warnUnresolvedForeign(
+  ctx: WorklogDatabaseContext,
+  resolution: ForeignDependencyResolution,
+): void {
+  if (ctx.silent) return;
+  const key = `${resolution.id}\u0000${resolution.state}`;
+  if (warnedForeignTargets.has(key)) return;
+  warnedForeignTargets.add(key);
+  try {
+    process.stderr.write(
+      `[wl:dep] warning: foreign dependency ${resolution.id} is ${resolution.state}` +
+        `${resolution.reason ? ` (${resolution.reason})` : ''}; the dependent stays blocked.\n`,
+    );
+  } catch {
+    // stderr is best-effort; a closed pipe must never fail the gating path.
+  }
+}
+
+/**
+ * The foreign dependency edges of `itemId`, resolved from their own stores and
+ * reported in the shared {@link ForeignDependencyView} shape.
+ *
+ * Returns `[]` when the item has no foreign edges or no resolver is injected,
+ * so output for items without foreign edges is byte-identical to before.
+ */
+export function getForeignDependencyViews(
+  ctx: WorklogDatabaseContext,
+  itemId: string,
+  edgeCache?: EdgeCache,
+): ForeignDependencyView[] {
+  const edges = edgeCache
+    ? (edgeCache.outbound.get(itemId) ?? [])
+    : ctx.store.getDependencyEdgesFrom(itemId);
+  const views: ForeignDependencyView[] = [];
+  for (const edge of edges) {
+    const resolution = resolveForeignTarget(ctx, edge.toId);
+    if (!resolution) continue;
+    if (foreignResolutionBlocks(resolution)) {
+      warnUnresolvedForeign(ctx, resolution);
+    }
+    views.push(toForeignDependencyView(resolution));
+  }
+  return views;
+}
+
+/**
  * True when a dependency target still blocks: not completed, not deleted, and
  * not sitting in a closing stage (`in_review` / `done`).
  */
@@ -182,8 +341,18 @@ export function getActiveDependencyBlockers(
     const target = edgeCache
       ? (edgeCache.itemsById.get(edge.toId) ?? null)
       : ctx.store.getWorkItem(edge.toId);
-    if (isDependencyActive(target) && target) {
-      blockers.push(target);
+    if (target) {
+      if (isDependencyActive(target)) blockers.push(target);
+      continue;
+    }
+    // No local row: a foreign edge is resolved from its own store (never from
+    // a local row that cannot exist — AC: `buildEdgeCache` keeps foreign
+    // targets out of `itemsById`). An unresolved foreign target blocks the
+    // dependent but has no `WorkItem` to return; `hasActiveBlockers` is the
+    // authoritative predicate for that case.
+    const resolution = resolveForeignTarget(ctx, edge.toId);
+    if (resolution && foreignResolutionBlocks(resolution) && resolution.item) {
+      blockers.push(resolution.item);
     }
   }
   return blockers;
@@ -213,13 +382,23 @@ export function getInboundDependents(
 export function hasActiveBlockers(
   ctx: WorklogDatabaseContext,
   itemId: string,
+  edgeCache?: EdgeCache,
 ): boolean {
-  const edges = listDependencyEdgesFrom(ctx, itemId);
+  const edges = edgeCache
+    ? (edgeCache.outbound.get(itemId) ?? [])
+    : listDependencyEdgesFrom(ctx, itemId);
   for (const edge of edges) {
-    const target = ctx.store.getWorkItem(edge.toId);
-    if (isDependencyActive(target)) {
-      return true;
+    const target = edgeCache
+      ? (edgeCache.itemsById.get(edge.toId) ?? null)
+      : ctx.store.getWorkItem(edge.toId);
+    if (target) {
+      if (isDependencyActive(target)) return true;
+      continue;
     }
+    // A foreign target is resolved from its own store; an unresolved one keeps
+    // the dependent blocked (fail-safe), an undiscoverable prefix does not.
+    const resolution = resolveForeignTarget(ctx, edge.toId);
+    if (resolution && foreignResolutionBlocks(resolution)) return true;
   }
   return false;
 }

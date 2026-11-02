@@ -19,7 +19,7 @@
  */
 
 import type { WorklogDatabase } from './database.js';
-import type { WorkItem } from './types.js';
+import type { ForeignDependencyView, WorkItem } from './types.js';
 import { extractFilePaths, type GroupAssignment } from './commands/helpers.js';
 import { assignItemGroups, compareGroupedItems } from './commands/grouping.js';
 
@@ -39,6 +39,11 @@ export interface BrowseFeedEntry {
   workItem: EnrichedNextWorkItem | null;
   /** Human-readable reason the item was selected. */
   reason?: string;
+  /**
+   * Foreign dependency edges of the selected item. Present only when the item
+   * has at least one cross-project edge (cross-repo gating, AC3).
+   */
+  foreign_dependencies?: ForeignDependencyView[];
   /** 1-indexed parallel-safe group (only when more than one item was requested). */
   group?: number;
   /** Human-readable group label (only when more than one item was requested). */

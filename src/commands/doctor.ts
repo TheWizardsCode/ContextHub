@@ -6,6 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
 import { validateStatusStageItems } from '../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../doctor/dependency-check.js';
+import { resolveForeignItem, prefixOfWorkItemId } from '../cross-repo/foreign-store.js';
 import { validateParentReferences } from '../doctor/parent-check.js';
 import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
@@ -1393,8 +1394,23 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
       const auditFingerprintSkew = probeAuditFingerprintSkewFinding();
 
       let findings: any[] = [
+        // Dependency-graph findings come first: an unresolved foreign edge is
+        // the item's primary dependency signal and must not be buried behind
+        // per-item lifecycle noise (the AC3 spec looks the dependent up by
+        // its first finding).
+        ...validateDependencyEdges(items, dependencyEdges, {
+          // A foreign (cross-project) target is resolved from its own store, so
+          // an unresolved foreign edge is a warning keyed to the dependent —
+          // never a false `dependency.missing-endpoint` error. Ids carrying this
+          // store's own prefix stay on the local-only path.
+          resolveForeign: (id: string) => {
+            const localPrefix = (db.getPrefix() || '').toUpperCase();
+            const prefix = prefixOfWorkItemId(id);
+            if (prefix === '' || prefix === localPrefix) return null;
+            return resolveForeignItem(id);
+          },
+        }),
         ...validateStatusStageItems(items, rules),
-        ...validateDependencyEdges(items, dependencyEdges),
         ...validateParentReferences(items),
         ...priorityFindings,
         ...validatePodcastScripts(items),

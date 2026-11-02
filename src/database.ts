@@ -28,6 +28,7 @@ import {
   getEmbeddingStorePath,
   WorklogSearch,
 } from './lib/search.js';
+import { resolveForeignItem } from './cross-repo/foreign-store.js';
 
 // ── Build default CLI services ─────────────────────────────────────────
 
@@ -61,6 +62,12 @@ function createDefaultServices(): WorklogDatabaseServices {
       EmbeddingStore,
       createSearch,
       WorklogSearch,
+    },
+    // Cross-project dependency gating (parent WL-0MVWABT2Z001XMSD): the
+    // shared blocker queries resolve a foreign target from its own store
+    // through this injected read-only resolver.
+    foreign: {
+      resolve: (id: string) => resolveForeignItem(id),
     },
   };
 }

@@ -77,13 +77,17 @@
  *     foreign target is no longer misreported as a local
  *     `dependency.missing-endpoint`.
  *
- * ## RED pinning
+ * ## RED pinning (retired by F6)
  *
- * The gating assertions are `it.fails(...)`: the behaviour does not exist until
- * F6, and vitest reports an expected failure as a pass so the suite stays
- * green between the spec and its implementation. The harness controls are plain
- * `it(...)` so a broken fixture cannot hide behind a RED pin — F6 flips
- * `it.fails(` → `it(` once the gating ships.
+ * The spec was written as `it.fails(...)` while the behaviour did not exist.
+ * F6 (WL-0MVWEEQ8K0013DOY) implemented the gating and flipped every pin to
+ * plain `it(...)`, so a regression now fails the suite instead of passing as
+ * an expected failure. The harness controls were always plain `it(...)` so a
+ * broken fixture could never hide behind a RED pin.
+ *
+ * The ambiguous-prefix case (a prefix declared by two discovered projects) is
+ * pinned here as well: it must stay blocking and report `unresolved: true`
+ * with an `ambiguous` reason, never resolve to one candidate.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -356,7 +360,7 @@ describe('cross-repo foreign blocker gating (AC3)', () => {
     return { consumer, sibling, foreignItem };
   }
 
-  it.fails(
+  it(
     'excludes an item whose only active blocker is foreign, and includes it with --include-blocked (F6)',
     () => {
       const { consumer, foreignItem } = setup();
@@ -395,7 +399,7 @@ describe('cross-repo foreign blocker gating (AC3)', () => {
     { label: 'completed status', changes: { status: 'completed', stage: 'in_review' } },
     { label: 'deleted status', changes: { status: 'deleted' } },
   ])('foreign blocker reaches a terminal state — $label', ({ label, changes }) => {
-    it.fails(
+    it(
       `selects the dependent once the foreign target is ${label} (F6)`,
       () => {
         const { consumer, sibling, foreignItem } = setup();
@@ -428,7 +432,7 @@ describe('cross-repo foreign blocker gating (AC3)', () => {
     );
   });
 
-  it.fails(
+  it(
     'keeps the dependent blocked with unresolved:true and a reason when the sibling store disappears (F6)',
     () => {
       const { consumer, sibling, foreignItem } = setup();
@@ -463,7 +467,7 @@ describe('cross-repo foreign blocker gating (AC3)', () => {
     },
   );
 
-  it.fails(
+  it(
     'does not block on an undiscoverable prefix but reports foreign_dependency "unavailable" (F6)',
     () => {
       fixture = makeProjectsRoot({ standard: false });
@@ -493,7 +497,41 @@ describe('cross-repo foreign blocker gating (AC3)', () => {
     },
   );
 
-  it.fails(
+  it(
+    'never resolves an ambiguous foreign prefix to one candidate — it stays blocking (F6)',
+    () => {
+      fixture = makeProjectsRoot({ standard: false });
+      const [first, second] = fixture.addDuplicatePrefix('DUP');
+      expect(first.prefix).toBe('DUP');
+      expect(second.prefix).toBe('DUP');
+      const consumer = makeConsumer(fixture.root);
+      disposables.push(() => cleanupTempDir(consumer.dir));
+      const [dependent] = seedLocalItems(consumer, [{ title: 'Local dependent' }]);
+
+      // Two discovered projects declare DUP, so no owner can be chosen. The
+      // edge is seeded directly because `wl dep add` refuses an ambiguous
+      // prefix; the gating decision must still treat it as a real foreign
+      // target (discovered, unreadable) and never unblock the dependent.
+      const ambiguousId = 'DUP-0000000000000000';
+      seedForeignEdge(consumer, dependent.id, ambiguousId);
+
+      expect(nextSingle(consumer).workItem).toBeNull();
+
+      const included = nextSingle(consumer, ['--include-blocked']);
+      expect(included.workItem?.id).toBe(dependent.id);
+      const [view] = included.foreign_dependencies ?? [];
+      expect(view).toMatchObject({
+        id: ambiguousId,
+        foreign: true,
+        foreign_dependency: 'unavailable',
+        unresolved: true,
+        blocking: true,
+      });
+      expect(view?.reason).toMatch(/ambiguous|refusing to guess/i);
+    },
+  );
+
+  it(
     'surfaces the same unresolved foreign state in wl worklist and wl doctor (F6)',
     () => {
       const { consumer, sibling, foreignItem } = setup();
