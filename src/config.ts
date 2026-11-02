@@ -569,6 +569,79 @@ export function saveConfig(config: WorklogConfig): void {
   fs.writeFileSync(getConfigPath(), content, 'utf-8');
 }
 
+/** One recorded `prefix → project` mapping (`projects:` in config.yaml). */
+export interface RecordedProjectMapping {
+  /** Absolute path of the project checkout. */
+  path?: string;
+  /** Git URL the project was cloned from. */
+  gitUrl?: string;
+}
+
+/**
+ * Read `.worklog/config.yaml` as a plain object, without validation, defaults
+ * or section resolution.
+ *
+ * Write-through updates (`wl project add`) must preserve every key the
+ * operator already has, so they cannot round-trip through {@link loadConfig}
+ * (which fills defaults and rejects partially configured stores).
+ *
+ * @throws when the file exists but is not a readable YAML mapping — callers
+ *   must not overwrite an unparsable config with a partial one.
+ */
+function readRawConfigObject(): Record<string, unknown> {
+  const configPath = getConfigPath();
+  if (!fs.existsSync(configPath)) return {};
+
+  const raw = fs.readFileSync(configPath, 'utf-8');
+  const parsed = yaml.load(raw, { schema: yaml.CORE_SCHEMA });
+  if (parsed === undefined || parsed === null) return {};
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${configPath} does not contain a YAML mapping`);
+  }
+  return { ...(parsed as Record<string, unknown>) };
+}
+
+/** The recorded prefix → project mappings in `.worklog/config.yaml`. */
+export function readProjectMappings(): Record<string, RecordedProjectMapping> {
+  let config: Record<string, unknown>;
+  try {
+    config = readRawConfigObject();
+  } catch {
+    return {};
+  }
+  const projects = config.projects;
+  if (!projects || typeof projects !== 'object' || Array.isArray(projects)) return {};
+  return { ...(projects as Record<string, RecordedProjectMapping>) };
+}
+
+/**
+ * Record (or refresh) one `prefix → project` mapping in
+ * `.worklog/config.yaml`, preserving every other key.
+ *
+ * The prefix is normalised to upper case, matching discovery. Recording the
+ * same mapping twice is idempotent.
+ */
+export function recordProjectMapping(
+  prefix: string,
+  mapping: RecordedProjectMapping,
+): void {
+  const config = readRawConfigObject();
+  const existing = config.projects;
+  const projects =
+    existing && typeof existing === 'object' && !Array.isArray(existing)
+      ? { ...(existing as Record<string, unknown>) }
+      : {};
+
+  projects[prefix.trim().toUpperCase()] = { ...mapping };
+  config.projects = projects;
+
+  const configDir = getConfigDir();
+  if (!fs.existsSync(configDir)) {
+    fs.mkdirSync(configDir, { recursive: true });
+  }
+  fs.writeFileSync(getConfigPath(), yaml.dump(config), 'utf-8');
+}
+
 /**
  * Get the default prefix (WI if no config exists)
  */

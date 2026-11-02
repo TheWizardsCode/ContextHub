@@ -94,16 +94,16 @@
  * directory and cannot clone a `file://` URL, so it could not exercise the
  * behaviour this spec pins.
  *
- * ## RED pinning (retired by F8)
+ * ## Pinning (F8 landed)
  *
- * The remediation/clone blocks are written as `it.fails(...)` while the
- * behaviour does not exist, so the suite stays green until F8 lands. F8 flips
- * `it.fails(` → `it(` as the command is implemented, so a regression then
- * fails the suite instead of passing as an expected failure. Every RED pin
- * asserts the *feature exists* (a JSON payload / `cloned` field), never just
- * "exit non-zero and no mapping", so a command that is simply absent cannot
- * pass as an expected failure. The harness controls at the bottom are plain
- * `it(...)` so a broken fixture cannot hide behind a RED pin.
+ * The remediation/clone blocks were written as `it.fails(...)` while the
+ * behaviour did not exist, so the suite stayed green until F8 landed. F8
+ * flipped `it.fails(` to `it(`, so a regression now fails the suite instead of
+ * passing as an expected failure. Every pin asserts the *feature exists* (a
+ * JSON payload / `cloned` field), never just "exit non-zero and no mapping",
+ * so a command that is simply absent cannot pass as an expected failure. The
+ * harness controls at the bottom are plain `it(...)` so a broken fixture
+ * cannot hide behind a pin.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -325,7 +325,7 @@ describe('cross-repo missing-project remediation (AC4)', () => {
     return consumer;
   }
 
-  it.fails(
+  it(
     'reports an unknown dependency prefix with the exact project-add remediation (F8)',
     () => {
       const consumer = setup();
@@ -351,7 +351,7 @@ describe('cross-repo missing-project remediation (AC4)', () => {
     60_000,
   );
 
-  it.fails(
+  it(
     'clones a file:// origin into the projects root and records the mapping (F8)',
     () => {
       const consumer = setup();
@@ -398,7 +398,7 @@ describe('cross-repo missing-project remediation (AC4)', () => {
     60_000,
   );
 
-  it.fails(
+  it(
     'is idempotent: a second run clones nothing and leaves the mapping unchanged (F8)',
     () => {
       const consumer = setup();
@@ -436,7 +436,7 @@ describe('cross-repo missing-project remediation (AC4)', () => {
     90_000,
   );
 
-  it.fails(
+  it(
     'refuses a prefix mismatch and leaves no mapping behind (F8)',
     () => {
       const consumer = setup();
@@ -472,7 +472,7 @@ describe('cross-repo missing-project remediation (AC4)', () => {
     60_000,
   );
 
-  it.fails(
+  it(
     'refuses a failed clone and leaves no mapping behind (F8)',
     () => {
       const consumer = setup();
@@ -505,7 +505,7 @@ describe('cross-repo missing-project remediation (AC4)', () => {
     60_000,
   );
 
-  it.fails(
+  it(
     'never reads stdin without --interactive: a missing --git-url fails deterministically (F8)',
     () => {
       const consumer = setup();
@@ -529,6 +529,89 @@ describe('cross-repo missing-project remediation (AC4)', () => {
       expect(projectMapping(consumer, ADDED_PREFIX)).toBeUndefined();
     },
     30_000,
+  );
+
+  it(
+    'reports the unknown_project remediation from `wl dep list` too (F8)',
+    () => {
+      const consumer = setup();
+      const unknownId = `${UNKNOWN_PREFIX}-0000000000000000`;
+
+      const captured = run(consumer, ['--json', 'dep', 'list', unknownId]);
+
+      expect(typeof captured.status).toBe('number');
+      expect(captured.status).not.toBe(0);
+
+      const payload = parseJsonOutput<UnknownProjectPayload>(captured);
+      expect(payload.success).toBe(false);
+      expect(payload.error_code).toBe('unknown_project');
+      expect(payload.prefix).toBe(UNKNOWN_PREFIX);
+      expect(real(String(payload.projects_root))).toBe(real(fixture!.root));
+      expect(String(payload.remediation)).toContain(
+        `wl project add ${UNKNOWN_PREFIX} --git-url <url>`,
+      );
+    },
+    60_000,
+  );
+
+  it(
+    'honours --path: clones into the requested directory and records that path (F8)',
+    () => {
+      const consumer = setup();
+      const origin = createGitOriginRepo({ prefix: ADDED_PREFIX });
+      disposables.push(() => origin.cleanup());
+      const customPath = path.join(fixture!.root, 'custom-gamma-checkout');
+
+      const captured = run(consumer, [
+        '--json',
+        'project',
+        'add',
+        ADDED_PREFIX,
+        '--git-url',
+        origin.url,
+        '--path',
+        customPath,
+      ]);
+      expect(captured.status, captured.stderr).toBe(0);
+
+      const payload = parseJson<ProjectAddSuccess>(captured);
+      expect(payload.success).toBe(true);
+      expect(payload.cloned).toBe(true);
+      expect(real(String(payload.path))).toBe(real(customPath));
+      expect(fs.existsSync(path.join(customPath, '.git'))).toBe(true);
+
+      const mapping = projectMapping(consumer, ADDED_PREFIX);
+      expect(real(String(mapping?.path))).toBe(real(customPath));
+      expect(mapping?.gitUrl).toBe(origin.url);
+    },
+    60_000,
+  );
+
+  it(
+    'prompts for the URL only with --interactive (F8)',
+    () => {
+      const consumer = setup();
+      const origin = createGitOriginRepo({ prefix: ADDED_PREFIX });
+      disposables.push(() => origin.cleanup());
+
+      // No --git-url: the URL arrives on stdin because --interactive was
+      // explicitly requested. Without the flag the previous pin proves the
+      // command never reads stdin.
+      const captured = run(consumer, ['--json', 'project', 'add', ADDED_PREFIX, '--interactive'], {
+        input: `${origin.url}\n`,
+        timeout: 60_000,
+      });
+      expect(captured.status, captured.stderr).toBe(0);
+
+      const payload = parseJson<ProjectAddSuccess>(captured);
+      expect(payload.success).toBe(true);
+      expect(payload.cloned).toBe(true);
+      expect(payload.gitUrl).toBe(origin.url);
+
+      const mapping = projectMapping(consumer, ADDED_PREFIX);
+      expect(mapping?.gitUrl).toBe(origin.url);
+    },
+    60_000,
   );
 });
 

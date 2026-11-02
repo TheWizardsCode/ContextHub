@@ -3,12 +3,57 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
+import type { ForeignDependencyView } from '../types.js';
 import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.js';
 import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
 import { selectBrowseFeed } from '../worklist-selection.js';
 import { invalidateCacheForWrite } from '../read-cache-cli.js';
+import { resolveForeignItem } from '../cross-repo/foreign-store.js';
+import { unknownProjectRemediation } from '../cross-repo/project-registry.js';
+
+/**
+ * Attach the missing-project remediation (parent D4) to foreign-dependency
+ * views whose prefix **no** discovered project declares.
+ *
+ * The shared gating layer reports the tri-state state and a reason; the CLI
+ * owns filesystem discovery and the actionable wording, so the
+ * `unknown_project` payload (`prefix`, `projects_root`, `remediation`) is
+ * added here — `wl next --json` then quotes the same
+ * `wl project add <PREFIX> --git-url <url>` command as `wl dep add`/`list`
+ * instead of leaving the agent with a bare not-found reason.
+ *
+ * A discovered-but-unreadable target keeps its fail-safe `unresolved` view
+ * unchanged: its remediation is to restore that store, not to clone it.
+ */
+function withUnknownProjectRemediation(
+  views: ForeignDependencyView[] | undefined,
+):
+  | Array<
+      ForeignDependencyView & {
+        error_code?: 'unknown_project';
+        prefix?: string;
+        projects_root?: string;
+        remediation?: string;
+      }
+    >
+  | undefined {
+  if (!views) return views;
+  return views.map((view) => {
+    if (view.foreign_dependency !== 'unavailable') return view;
+    const resolution = resolveForeignItem(view.id);
+    if (resolution.discoveredProject) return view;
+    const projectsRoot = resolution.projectsRoot ?? '';
+    return {
+      ...view,
+      error_code: 'unknown_project' as const,
+      prefix: resolution.prefix,
+      projects_root: projectsRoot,
+      remediation: unknownProjectRemediation(resolution.prefix, projectsRoot),
+    };
+  });
+}
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -128,15 +173,16 @@ export default function register(ctx: PluginContext): void {
       if (utils.isJsonMode()) {
         if (count === 1) {
           const single = selection.results[0];
+          const foreignDependencies = withUnknownProjectRemediation(
+            single?.foreign_dependencies,
+          );
           output.json({
             success: true,
             workItem: single?.workItem ?? null,
             reason: single?.reason ?? '',
             // Present only when the selected item has foreign edges, so the
             // shape for items without them is unchanged.
-            ...(single?.foreign_dependencies
-              ? { foreign_dependencies: single.foreign_dependencies }
-              : {}),
+            ...(foreignDependencies ? { foreign_dependencies: foreignDependencies } : {}),
           });
           return;
         }

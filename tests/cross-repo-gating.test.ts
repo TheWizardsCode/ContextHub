@@ -140,6 +140,11 @@ interface ForeignDependencyView {
   unresolved: boolean;
   blocking: boolean;
   reason?: string;
+  /** `unknown_project` remediation (D4/F8), present for an undiscoverable prefix. */
+  error_code?: 'unknown_project';
+  prefix?: string;
+  projects_root?: string;
+  remediation?: string;
 }
 
 /** A `wl next` result entry (single-item and batch shapes share the fields). */
@@ -491,7 +496,15 @@ describe('cross-repo foreign blocker gating (AC3)', () => {
         foreign_dependency: 'unavailable',
         unresolved: false,
         blocking: false,
+        // F8 (D4): the view quotes the same clone remediation as `wl dep
+        // add` / `wl dep list`, so `wl next --json` is actionable too.
+        error_code: 'unknown_project',
+        prefix: UNDISCOVERABLE_PREFIX,
+        projects_root: fixture.root,
       });
+      expect(String(view?.remediation)).toContain(
+        `wl project add ${UNDISCOVERABLE_PREFIX} --git-url <url>`,
+      );
       expect(typeof view?.reason).toBe('string');
       expect(view?.reason?.length ?? 0).toBeGreaterThan(0);
     },

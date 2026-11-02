@@ -652,6 +652,33 @@ Behavior:
 - `dep list --outgoing` shows only outbound dependencies.
 - `dep list --incoming` shows only inbound dependencies.
 
+**Foreign (cross-project) ids.** An id whose prefix belongs to a discovered
+sibling project is resolved **read-only** from that project's store, and the
+edge is recorded in the local store (see
+[`CONFIG.md`](CONFIG.md#cross-repo-project-discovery-projectsroot)). `dep add`,
+`dep rm` and `dep list` all accept such ids; `wl dep --help` states it too.
+
+**Unknown project remediation.** When the prefix belongs to **no** discovered
+project, `dep add` and `dep list` exit non-zero with an actionable payload
+instead of a bare `Work item not found`:
+
+```json
+{
+  "success": false,
+  "error": "No discovered project declares the prefix 'GHOST'. Run `wl project add GHOST --git-url <url>` to clone the project into /home/me/projects, then retry.",
+  "error_code": "unknown_project",
+  "prefix": "GHOST",
+  "projects_root": "/home/me/projects",
+  "remediation": "Run `wl project add GHOST --git-url <url>` to clone the project into /home/me/projects, then retry."
+}
+```
+
+A *same-project* missing id keeps the plain not-found payload — the
+remediation is only for a foreign prefix. `wl next --json` reports the same
+`error_code`, `prefix`, `projects_root` and `remediation` on a
+`foreign_dependencies` entry whose prefix no project declares (it stays a
+non-blocking coordination note, so the dependent remains selectable).
+
 **Automatic unblocking:** Dependents are automatically unblocked when all their blockers
 become inactive (completed, deleted, or moved to a non-blocking stage such as `in_review`
 or `done`). This reconciliation happens via `db.update()` and
@@ -1225,28 +1252,43 @@ Notes on defaults and behavior:
 
 ### `project` (subcommands)
 
-Inspect the sibling projects `wl` discovered for cross-repo dependencies.
+Inspect the sibling projects `wl` discovered for cross-repo dependencies, and
+clone a missing one so its work items can be depended on.
 
 Subcommands:
 
 - `list` — Print the `prefix → path` map of discovered projects, sorted by
   prefix. Options: `--projects-root <path>` (override the configured projects
   root for this run).
+- `add <prefix>` — Clone a project into the projects root and record its
+  `prefix → path/gitUrl` mapping in this checkout's `.worklog/config.yaml`.
+  Options:
+  - `--git-url <url>` — Repository URL to clone. Required unless
+    `--interactive` is passed.
+  - `--path <dir>` — Clone target directory (default:
+    `<projectsRoot>/<prefix-lowercased>`). Relative paths resolve against the
+    current directory.
+  - `--interactive` — Prompt for the git URL when `--git-url` is omitted. This
+    is the **only** path that reads stdin: agents cannot answer prompts, so a
+    run without `--git-url` and without this flag fails deterministically
+    (`error_code: "missing_git_url"`).
+  - `--projects-root <path>` — Override the projects root to clone into.
 
-The scan is the single implementation used by the whole framework
-(`src/cross-repo/project-registry.ts`): it reads the immediate subdirectories
-of the projects root once and keeps only **git repositories** that hold a
-**genuine** worklog store (`.worklog/initialized` or `.worklog/worklog.db`).
-Hidden folders, non-git folders and worktree-shaped stubs (only the tracked
-`.worklog/config.yaml`) are excluded. The projects root is the `projectsRoot`
-key in `.worklog/config.yaml`, defaulting to the parent of the current
-checkout — see [`CONFIG.md`](CONFIG.md#cross-repo-project-discovery-projectsroot).
+The scan behind `list` is the single implementation used by the whole
+framework (`src/cross-repo/project-registry.ts`): it reads the immediate
+subdirectories of the projects root once and keeps only **git repositories**
+that hold a **genuine** worklog store (`.worklog/initialized` or
+`.worklog/worklog.db`). Hidden folders, non-git folders and worktree-shaped
+stubs (only the tracked `.worklog/config.yaml`) are excluded. The projects
+root is the `projectsRoot` key in `.worklog/config.yaml`, defaulting to the
+parent of the current checkout — see
+[`CONFIG.md`](CONFIG.md#cross-repo-project-discovery-projectsroot).
 
 A prefix declared by more than one project is reported as **ambiguous** — both
 paths are shown and no owner is guessed. A missing or unreadable projects root
 prints a warning and an empty list (never an error).
 
-`--json` output shape:
+`project list --json` output shape:
 
 ```json
 {
@@ -1260,13 +1302,76 @@ prints a warning and an empty list (never an error).
 }
 ```
 
-Examples:
+#### `project add` behaviour
+
+`wl project add` is the remediation for an `unknown_project` dependency error
+(see [`dep`](#dep-subcommands)): it makes the missing project present at the
+location discovery scans and records the mapping explicitly.
+
+- **Clone only when absent.** An existing directory is never re-cloned: a
+  second run against a correct clone is a no-op that reports
+  `"cloned": false`, keeps the clone (untracked files included) and re-records
+  the same mapping.
+- **Prefix validation.** The cloned (or existing) checkout's
+  `.worklog/config.yaml` must declare the requested prefix. A mismatch exits
+  non-zero with `error_code: "prefix_mismatch"`, names both prefixes, removes a
+  clone it just made and records **no** mapping.
+- **Clone failure.** An unreachable URL exits non-zero with
+  `error_code: "clone_failed"`; a partial clone directory is removed and no
+  mapping is recorded.
+- **Credentials.** `git clone` runs with the operator's existing git
+  configuration; the command never prompts for credentials.
+- **Config preservation.** Only the `projects.<PREFIX>` entry is added — every
+  other `.worklog/config.yaml` key is preserved.
+
+`--json` success shape:
+
+```json
+{
+  "success": true,
+  "prefix": "GAMMA",
+  "path": "/home/me/projects/gamma",
+  "gitUrl": "git@github.com:example/gamma.git",
+  "cloned": true
+}
+```
+
+`--json` failure shape (written to stderr, like every CLI error payload):
+
+```json
+{
+  "success": false,
+  "error": "Prefix mismatch: … declares DELTA but GAMMA was requested. No mapping was recorded.",
+  "error_code": "prefix_mismatch",
+  "prefix": "GAMMA",
+  "declared_prefix": "DELTA"
+}
+```
+
+`error_code` is one of `invalid_prefix`, `missing_git_url`, `invalid_project`,
+`prefix_mismatch`, `clone_failed` or `config_error`.
+
+`list` examples:
 
 ```sh
 wl project list
 wl --json project list
 wl project list --projects-root /srv/checkouts
 ```
+
+`add` examples:
+
+```sh
+wl project add GAMMA --git-url git@github.com:example/gamma.git
+wl --json project add GAMMA --git-url git@github.com:example/gamma.git --path /srv/checkouts/gamma
+wl project add GAMMA --interactive   # prompts for the URL (only interactive path)
+```
+
+> **Discovery still requires a genuine store.** The recorded mapping is a
+> durable record of where the project lives; discovery continues to derive the
+> `prefix → path` map from each sibling's own store. A freshly cloned
+> repository that has no local `.worklog/worklog.db` yet becomes discoverable
+> once its store exists (for example after `wl sync` inside the clone).
 
 ### `export` [options]
 

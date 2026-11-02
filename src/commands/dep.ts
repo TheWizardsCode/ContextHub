@@ -12,7 +12,8 @@ import type { PluginContext } from '../plugin-types.js';
 import type { DepOptions } from '../cli-types.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { classifyWorkItemId } from '../cli-utils.js';
-import { resolveForeignItem, type ForeignItemResolution } from '../cross-repo/foreign-store.js';
+import { resolveForeignItem, prefixOfWorkItemId, type ForeignItemResolution } from '../cross-repo/foreign-store.js';
+import { unknownProjectResult } from '../cross-repo/project-registry.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
 
 export default function register(ctx: PluginContext): void {
@@ -45,6 +46,34 @@ export default function register(ctx: PluginContext): void {
     }
     process.exitCode = 1;
   };
+
+  /**
+   * Refuse an unknown foreign prefix with the actionable `unknown_project`
+   * payload (parent D4): the projects root that was scanned plus the exact
+   * `wl project add <PREFIX> --git-url <url>` remediation, instead of a bare
+   * `Work item not found`.
+   */
+  const refuseUnknownProject = (prefix: string, extraErrors: string[] = []): void => {
+    const payload = unknownProjectResult(prefix);
+    const message = `No discovered project declares the prefix '${prefix}'. ${payload.remediation}`;
+    if (utils.isJsonMode()) {
+      output.error(message, {
+        ...payload,
+        error: message,
+        ...(extraErrors.length > 0 ? { errors: extraErrors } : {}),
+      });
+    } else {
+      console.error(chalk.red(`Error: ${message}`));
+      extraErrors.forEach((error) => console.error(chalk.red(`Error: ${error}`)));
+    }
+    process.exitCode = 1;
+  };
+
+  /** True when `classification` is a foreign prefix no discovered project owns. */
+  const isUnknownProject = (classification: ReturnType<typeof classifyWorkItemId>): boolean =>
+    classification.origin === 'unknown' &&
+    classification.foreign !== undefined &&
+    classification.foreign.discoveredProject === false;
 
   const depCommand = program
     .command('dep')
@@ -87,6 +116,14 @@ export default function register(ctx: PluginContext): void {
           if (foreignTarget?.state === 'resolved') {
             dependsOn = foreignTarget.item ?? null;
           }
+        } else if (isUnknownProject(classification)) {
+          // The prefix belongs to no discovered project: emit the clone
+          // remediation instead of a bare not-found (D4).
+          refuseUnknownProject(
+            classification.foreign?.prefix ?? prefixOfWorkItemId(dependsOnIdLookup),
+            item ? [] : [`Work item not found: ${normalizedItemId}`],
+          );
+          return;
         }
       }
 
@@ -228,7 +265,16 @@ export default function register(ctx: PluginContext): void {
 
       const warnings: string[] = [];
       const item = db.get(itemIdLookup);
-      if (!item) warnings.push(`Work item not found: ${normalizedItemId}`);
+      if (!item) {
+        const classification = classifyWorkItemId(db, itemIdLookup);
+        if (isUnknownProject(classification)) {
+          // Listing an id whose prefix no discovered project owns: emit the
+          // clone remediation rather than a bare not-found (D4).
+          refuseUnknownProject(classification.foreign?.prefix ?? prefixOfWorkItemId(itemIdLookup));
+          return;
+        }
+        warnings.push(`Work item not found: ${normalizedItemId}`);
+      }
 
       if (warnings.length > 0) {
         if (utils.isJsonMode()) {

@@ -89,6 +89,33 @@ export interface DiscoverProjectsOptions {
   cwd?: string;
 }
 
+/** Resolved projects root plus any fail-open diagnostics. */
+export interface ProjectsRootResolution {
+  /** Absolute directory scanned for sibling projects. */
+  root: string;
+  /** Fail-open diagnostics (unreadable config, …). Never an error. */
+  warnings: string[];
+}
+
+/**
+ * Machine-readable result for a dependency id whose prefix no discovered
+ * project declares (parent D4 — missing-project remediation).
+ *
+ * The payload carries the exact command form an agent can run verbatim; it
+ * replaces the bare `Work item not found` that gave the producer nothing to
+ * act on.
+ */
+export interface UnknownProjectPayload {
+  success: false;
+  error_code: 'unknown_project';
+  /** Upper-cased prefix segment of the unknown id. */
+  prefix: string;
+  /** The projects root that was scanned. */
+  projects_root: string;
+  /** The exact `wl project add <PREFIX> --git-url <url>` remediation. */
+  remediation: string;
+}
+
 /** Memoised scans keyed by resolved projects root. */
 const discoveryCache = new Map<string, DiscoveryResult>();
 
@@ -163,6 +190,55 @@ function readConfiguredProjectsRoot(cwd: string): {
 }
 
 /**
+ * Resolve the projects root that discovery would scan, without scanning it.
+ *
+ * Exposed so `wl project add` clones into exactly the directory discovery
+ * consults (same precedence: explicit option → config → parent of the
+ * checkout). Never throws for filesystem problems.
+ */
+export function getProjectsRoot(
+  options: DiscoverProjectsOptions = {},
+): ProjectsRootResolution {
+  const cwd = path.resolve(options.cwd ?? process.cwd());
+  const explicitRoot =
+    options.projectsRoot !== undefined ? path.resolve(cwd, options.projectsRoot) : undefined;
+
+  return resolveProjectsRoot(cwd, explicitRoot);
+}
+
+/**
+ * The actionable remediation text for an unknown project prefix.
+ *
+ * Kept in one place so every surface (`wl dep add`, `wl dep list`, the
+ * foreign-dependency view in `wl next`) quotes the identical command form.
+ */
+export function unknownProjectRemediation(prefix: string, projectsRoot: string): string {
+  return (
+    `Run \`wl project add ${prefix} --git-url <url>\` to clone the project into ` +
+    `${projectsRoot}, then retry.`
+  );
+}
+
+/**
+ * Build the `unknown_project` payload for a dependency id whose prefix no
+ * discovered project declares (parent D4).
+ */
+export function unknownProjectResult(
+  prefix: string,
+  options: DiscoverProjectsOptions = {},
+): UnknownProjectPayload {
+  const normalised = prefix.trim().toUpperCase();
+  const { root } = getProjectsRoot(options);
+  return {
+    success: false,
+    error_code: 'unknown_project',
+    prefix: normalised,
+    projects_root: root,
+    remediation: unknownProjectRemediation(normalised, root),
+  };
+}
+
+/**
  * Discover local worklog projects under the projects root.
  *
  * See the module doc comment for the discovery rule, ambiguity handling and
@@ -170,11 +246,7 @@ function readConfiguredProjectsRoot(cwd: string): {
  * unreadable root is reported through `warnings`.
  */
 export function discoverProjects(options: DiscoverProjectsOptions = {}): DiscoveryResult {
-  const cwd = path.resolve(options.cwd ?? process.cwd());
-  const explicitRoot =
-    options.projectsRoot !== undefined ? path.resolve(cwd, options.projectsRoot) : undefined;
-
-  const { root, warnings: rootWarnings } = resolveProjectsRoot(cwd, explicitRoot);
+  const { root, warnings: rootWarnings } = getProjectsRoot(options);
 
   let scanned = discoveryCache.get(root);
   if (scanned === undefined) {
@@ -256,6 +328,16 @@ function hasGitEntry(projectDir: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Read the (upper-cased) prefix a project directory declares, if readable.
+ *
+ * Used by `wl project add` to validate a clone before recording its mapping;
+ * shares {@link readProjectPrefix} so the config shape is parsed once.
+ */
+export function readDeclaredPrefix(projectDir: string): string | undefined {
+  return readProjectPrefix(path.join(projectDir, '.worklog'));
 }
 
 /** Read the (upper-cased) prefix a project declares, if readable. */

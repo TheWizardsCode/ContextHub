@@ -174,7 +174,7 @@ by a work item in another project's store). Discovery is implemented once, in
 # .worklog/config.yaml
 projectsRoot: /home/me/projects
 
-# Reserved for `wl project add` (F8): recorded prefix → project mappings.
+# Recorded prefix → project mappings, written by `wl project add`.
 projects:
   SA:
     path: /home/me/projects/SorraAgents
@@ -204,9 +204,11 @@ wl project list
 wl --json project list
 ```
 
-The `projects` map is reserved for explicitly recorded mappings written by
-`wl project add` (see [`CLI.md`](CLI.md#project-subcommands)); discovery itself
-derives the map from the sibling stores.
+The `projects` map records the mappings written by `wl project add` (see
+[`CLI.md`](CLI.md#project-subcommands)); discovery itself derives the map from
+the sibling stores. `wl project add` clones a missing project into the
+projects root and adds only its `projects.<PREFIX>` entry, preserving every
+other key in `.worklog/config.yaml`.
 
 ## Project CTA (Call-to-Action)
 
