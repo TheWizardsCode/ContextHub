@@ -101,7 +101,7 @@ describe('interview split guard — live tree', () => {
     // The default export is the command registration function.
     expect(typeof barrel.default).toBe('function');
     expect(typeof barrel.runInterview).toBe('function');
-    expect(typeof barrel.register).toBe('function');
+    expect(typeof barrel.defaultClearPrompt).toBe('function');
   });
 
   it('has an acyclic interview-family import graph (static and runtime)', () => {
@@ -121,9 +121,9 @@ describe('interview split guard — live tree', () => {
     expect(modules.map((m) => m.file)).toContain(INTERVIEW_BARREL);
     const oversized = findOversizedModules(modules, SPLIT_ALLOWLIST);
     expect(oversized.map((m) => `${m.file}: ${m.lineCount} lines`)).toEqual([]);
-    // The monolith is exempt only while the extraction is in flight; the
-    // exemption can never cover any other module.
-    expect(SPLIT_ALLOWLIST).toEqual(['commands/interview.ts']);
+    // The allowlist was emptied at closeout: every family module, including
+    // the entry, must stay under the ceiling with no exemptions.
+    expect(SPLIT_ALLOWLIST).toEqual([]);
     expect(findAllowlistViolations(SPLIT_ALLOWLIST)).toEqual([]);
     expect([...SPLIT_ALLOWLIST_CEILING]).toEqual(['commands/interview.ts']);
   });

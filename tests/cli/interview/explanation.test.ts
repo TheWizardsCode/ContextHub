@@ -59,7 +59,7 @@ function flaggedItem(description: string, flagged = true): any {
 
 /** Load the interview module namespace (helpers may not exist yet). */
 async function loadInterview(): Promise<Record<string, any>> {
-  return import('../../src/commands/interview.js');
+  return import('../../../src/commands/interview.js');
 }
 
 describe('buildProducerReviewExplanation (RED-contract, restored)', () => {

@@ -345,35 +345,3 @@ describe('interview LLM progress feedback', () => {
     }
   });
 });
-
-// ── Restored producer-review flag flow (WL-0MVAMS4RO000H3B0 F1) ─────────
-// RED-pinned contract: the flag explain/clear flow was removed with
-// `needsProducerReview` (WL-0MV85WFYU0071YQ9). These specs pin the restored
-// interface. They are wrapped in `it(...)` so the gated suite stays
-// green while the contract is failing; F5 (theme/interview/shortcuts restore)
-// flips `it(` → `it(`.
-//
-// Documented interface (function names/signatures, per the item's AC):
-//   buildProducerReviewExplanation(item, opts) → Promise<string|null>
-//   buildProducerReviewExplanationResult(item, opts) → { text, usedLlm } | null
-//   buildExplanationPrompt(item, comments, auditResult) → string
-//   buildFallbackExplanation(item, comments, auditResult) → string
-//   renderExplanation(text, maxChars?, maxLines?) → string
-//   PRODUCER_REVIEW_INSTRUCTION : string
-//   MAX_PROMPT_CONTEXT_BYTES : number
-//   MAX_AUDIT_RAW_OUTPUT_BYTES : number
-// (`comment` and `fakeChatClient` helpers are already defined above.)
-
-function flaggedItem(description: string, flagged = true): any {
-  return {
-    id: 'WL-TEST-1',
-    title: 'Sample',
-    description,
-    needsProducerReview: flagged,
-  } as any;
-}
-
-/** Load the interview module namespace (helpers may not exist yet). */
-async function loadInterview(): Promise<Record<string, any>> {
-  return import('../../src/commands/interview.js');
-}

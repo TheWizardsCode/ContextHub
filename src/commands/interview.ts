@@ -49,6 +49,23 @@
  * fallback notice) (WL-0MUH7ACKJ0024VGF, WL-0MUX2W8IN005RW66).
  *
  * WL-0MU55UDBJ008DJ67
+ *
+ * ## Module layout
+ *
+ * This file is the command entry point (Commander registration and the
+ * readline prompt loop) **and** the public barrel for the `wl interview`
+ * backend. The behaviour lives in cohesive modules under `src/interview/`:
+ *
+ * - `section.ts` — clarifying-section heading detection and extraction.
+ * - `qa.ts` — Q/A parsing, answer-region computation, lossless rebuild.
+ * - `explanation.ts` — producer-review explanation (LLM + structured fallback).
+ * - `extraction.ts` — LLM-assisted question extraction and section insert/merge.
+ * - `loop.ts` — interactive walkthrough (prompt, persist, outcome accounting).
+ *
+ * The dependency direction is one-way: `commands/interview.ts` → `interview/*`
+ * → `lib/*`; no `src/interview/*` module imports this barrel, and the family
+ * import graph is acyclic. The full public surface is re-exported below and
+ * frozen by `tests/interview/split-guard.test.ts` (WL-0MVGKGXN80006V9P).
  */
 
 import type { PluginContext } from '../plugin-types.js';

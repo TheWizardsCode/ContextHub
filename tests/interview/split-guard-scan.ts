@@ -41,10 +41,13 @@ export const MAX_MODULE_LINES = 1000;
 /**
  * Family modules currently exempt from the size gate.
  *
- * Shrink-only: it may only ever lose entries. It starts with the in-flight
- * monolith and is emptied by the closeout child (WL-0MVXY39OF009S3V0).
+ * A *shrink-only* allowlist: it may only ever lose entries. It started with
+ * the 1,630-line monolith and the closeout child removed that entry once
+ * `src/commands/interview.ts` became a thin registration + barrel module
+ * (WL-0MVXY39OF009S3V0), so every family module must stay under
+ * {@link MAX_MODULE_LINES} with no exemptions.
  */
-export const SPLIT_ALLOWLIST: readonly string[] = ['commands/interview.ts'];
+export const SPLIT_ALLOWLIST: readonly string[] = [];
 
 /** The allowlist as it stood at plan time; the live list must be a subset. */
 export const SPLIT_ALLOWLIST_CEILING: readonly string[] = ['commands/interview.ts'];

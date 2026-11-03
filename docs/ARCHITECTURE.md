@@ -342,6 +342,56 @@ import-cycle-free (WL-0MVP9PCOU004L8HN AC4).
 See [docs/dev/worklog-sync.md](dev/worklog-sync.md) for the dev-facing
 orientation to this layout.
 
+## Interview Module Layout
+
+`src/commands/interview.ts` is the command entry point **and** the stable public
+barrel for the `wl interview` backend. It keeps Commander registration and the
+readline prompt loop; every behavioural concern lives in a focused module under
+`src/interview/`, so a Q/A parsing fix does not require reading the LLM and
+registration code (WL-0MVGKGXN80006V9P).
+
+### Module responsibilities
+
+| Module | Responsibility | Public symbols re-exported by the barrel |
+|---|---|---|
+| `src/commands/interview.ts` | Command registration, prompt loop, deps surface; public barrel re-exporting the frozen 41-symbol surface. | `InterviewPromptLoop`, `InterviewCommandDeps`, `defaultClearPrompt`, default `register` |
+| `src/interview/section.ts` | Clarifying-section heading detection and body extraction. | `ClarifyingSection`, `extractClarifyingSection` |
+| `src/interview/qa.ts` | Q/A parsing, answer-region computation and lossless re-serialisation. | `ClarifyingQAPair`, `parseQAPairs`, `rebuildQAPairs`, `rebuildDescription` |
+| `src/interview/explanation.ts` | Producer-review explanation: evidence formatting, prompt, render, structured fallback, LLM call. | `PRODUCER_REVIEW_INSTRUCTION`, `MAX_PROMPT_CONTEXT_BYTES`, `MAX_AUDIT_SUMMARY_BYTES`, `MAX_AUDIT_RAW_OUTPUT_BYTES`, `MAX_EXPLANATION_LENGTH`, `MAX_EXPLANATION_LINES`, `EXPLANATION_TIMEOUT_MS`, `ProducerReviewAuditContext`, `ProducerReviewExplanationDeps`, `renderExplanation`, `buildExplanationPrompt`, `buildFallbackExplanation`, `ProducerReviewExplanationResult`, `buildProducerReviewExplanationResult`, `buildProducerReviewExplanation` |
+| `src/interview/extraction.ts` | LLM-assisted question extraction plus canonical-section insert/merge. | `EXTRACTION_INSTRUCTION`, `MAX_EXTRACTION_DESCRIPTION_BYTES`, `EXTRACTION_TIMEOUT_MS`, `buildExtractionPrompt`, `parseExtractedQuestions`, `LlmExtractionResult`, `tryExtractQuestionsWithLlm`, `extractQuestionsWithLlm`, `buildExtractedPairs`, `EXTRACTED_SECTION_HEADER`, `insertClarifyingSection` |
+| `src/interview/loop.ts` | Interactive walkthrough: prompt/persist answers, outcome accounting. | `InterviewStore`, `InterviewIO`, `InterviewOutcome`, `InterviewRunOptions`, `runInterview` |
+
+### Cycle-safe layering
+
+The dependency direction is one-way and acyclic:
+
+```
+section / qa
+      ↓
+extraction (type-imports qa)
+      ↓
+loop (imports section, qa, extraction)
+      ↑
+src/commands/interview.ts (entry + barrel; nothing under src/interview/ imports it)
+```
+
+No module under `src/interview/` imports `../commands/interview.js` — not even
+type-only — so the barrel can never be part of a cycle.
+`tests/interview/split-guard.test.ts` enforces this statically, alongside the
+1,000-line ceiling (no exemptions) and the frozen public surface.
+
+### Where to find X in the interview module
+
+| I want to… | Look in |
+|---|---|
+| change how the clarifying-questions heading is found | `src/interview/section.ts` |
+| change Q/A parsing or the lossless re-serialiser | `src/interview/qa.ts` |
+| change the producer-review explanation or its prompt | `src/interview/explanation.ts` |
+| change LLM question extraction or section insert/merge | `src/interview/extraction.ts` |
+| change the interactive walkthrough, persistence or outcome accounting | `src/interview/loop.ts` |
+| change a CLI flag, the JSON shape or the prompt loop | `src/commands/interview.ts` |
+| change the shared surface consumers import | `src/commands/interview.ts` (barrel) |
+
 ## File Structure
 
 ```
