@@ -23,33 +23,45 @@ export { setVerboseLogger } from './github/transport.js';
 export { isSecondaryRateLimitText, SecondaryRateLimitError } from './github/transport.js';
 export { ghApiAsyncScheduled, ghApiDetailedScheduled, ghApiJsonScheduled } from './github/transport.js';
 
-export interface GithubConfig {
-  repo: string;
-  labelPrefix: string;
-}
+// The shared type declarations moved to `./github/types.ts` (WL-0MVVLXXGC0026427);
+// re-exporting them here keeps all six importable from `'./github.js'` unchanged.
+// The type-only re-export keeps the runtime surface at exactly 52 value exports.
+export type {
+  GithubConfig,
+  GithubIssueRecord,
+  GithubIssueComment,
+  IssueHierarchy,
+  AssignGithubIssueResult,
+  LabelEvent,
+} from './github/types.js';
 
-export interface GithubIssueRecord {
-  id: number;
-  number: number;
-  title: string;
-  body: string | null;
-  state: 'open' | 'closed';
-  labels: string[];
-  updatedAt: string;
-  subIssuesSummary?: { total: number; completed: number };
-}
+// Repo-slug resolution moved to `./github/repo-slug.ts` and the worklog marker
+// format + body parsers to `./github/markers.ts` (WL-0MVVLXXGC0026427); the
+// public names are re-exported below so consumers of `'./github.js'` are
+// unaffected.
+export { parseRepoSlug, getRepoFromGitRemote } from './github/repo-slug.js';
+export {
+  buildWorklogMarker,
+  buildWorklogCommentMarker,
+  stripWorklogMarkers,
+  extractWorklogId,
+  extractWorklogCommentId,
+  extractParentId,
+  extractParentIssueNumber,
+  extractChildIds,
+  extractChildIssueNumbers,
+} from './github/markers.js';
 
-export interface GithubIssueComment {
-  id: number;
-  body: string | null;
-  updatedAt: string;
-  author?: string;
-}
-
-const WORKLOG_MARKER_PREFIX = '<!-- worklog:id=';
-const WORKLOG_MARKER_SUFFIX = ' -->';
-const WORKLOG_COMMENT_MARKER_PREFIX = '<!-- worklog:comment=';
-const WORKLOG_COMMENT_MARKER_SUFFIX = ' -->';
+import type {
+  AssignGithubIssueResult,
+  GithubConfig,
+  GithubIssueComment,
+  GithubIssueRecord,
+  IssueHierarchy,
+  LabelEvent,
+} from './github/types.js';
+import { parseRepoSlug } from './github/repo-slug.js';
+import { buildWorklogMarker, stripWorklogMarkers } from './github/markers.js';
 
 function labelColor(label: string): string {
   let hash = 0;
@@ -169,107 +181,6 @@ function ensureGithubLabels(config: GithubConfig, labels: string[]): void {
 export function normalizeGithubLabelPrefix(prefix?: string): string {
   if (!prefix) return 'wl:';
   return prefix.endsWith(':') ? prefix : `${prefix}:`;
-}
-
-export function parseRepoSlug(repo: string): { owner: string; name: string } {
-  const parts = repo.split('/');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    throw new Error(`Invalid GitHub repo: ${repo}`);
-  }
-  return { owner: parts[0], name: parts[1] };
-}
-
-export function getRepoFromGitRemote(): string | null {
-  try {
-    const output = runGh('gh repo view --json nameWithOwner');
-    const parsed = JSON.parse(output) as { nameWithOwner?: string };
-    return parsed.nameWithOwner || null;
-  } catch {
-    return null;
-  }
-}
-
-export function buildWorklogMarker(workItemId: string): string {
-  return `${WORKLOG_MARKER_PREFIX}${workItemId}${WORKLOG_MARKER_SUFFIX}`;
-}
-
-export function buildWorklogCommentMarker(commentId: string): string {
-  return `${WORKLOG_COMMENT_MARKER_PREFIX}${commentId}${WORKLOG_COMMENT_MARKER_SUFFIX}`;
-}
-
-export function stripWorklogMarkers(body?: string | null): string {
-  if (!body) {
-    return '';
-  }
-  const lines = body.split('\n');
-  const filtered = lines.filter(line => {
-    const trimmed = line.trim();
-    if (trimmed.startsWith(WORKLOG_MARKER_PREFIX)) {
-      return false;
-    }
-    if (trimmed.startsWith(WORKLOG_COMMENT_MARKER_PREFIX)) {
-      return false;
-    }
-    return true;
-  });
-  return filtered.join('\n').trim();
-}
-
-export function extractWorklogId(body?: string | null): string | null {
-  if (!body) return null;
-  const start = body.indexOf(WORKLOG_MARKER_PREFIX);
-  if (start === -1) return null;
-  const end = body.indexOf(WORKLOG_MARKER_SUFFIX, start + WORKLOG_MARKER_PREFIX.length);
-  if (end === -1) return null;
-  const id = body.slice(start + WORKLOG_MARKER_PREFIX.length, end).trim();
-  return id || null;
-}
-
-export function extractWorklogCommentId(body?: string | null): string | null {
-  if (!body) return null;
-  const start = body.indexOf(WORKLOG_COMMENT_MARKER_PREFIX);
-  if (start === -1) return null;
-  const end = body.indexOf(WORKLOG_COMMENT_MARKER_SUFFIX, start + WORKLOG_COMMENT_MARKER_PREFIX.length);
-  if (end === -1) return null;
-  const id = body.slice(start + WORKLOG_COMMENT_MARKER_PREFIX.length, end).trim();
-  return id || null;
-}
-
-export function extractParentId(body?: string | null): string | null {
-  if (!body) return null;
-  const lines = body.split('\n');
-  for (const line of lines) {
-    if (!line.startsWith('Parent:')) {
-      continue;
-    }
-    const match = line.match(/^Parent:\s*([^\s-]+(?:-[^\s-]+)*)/);
-    if (match && match[1]) {
-      return match[1];
-    }
-    return null;
-  }
-  return null;
-}
-
-export function extractParentIssueNumber(body?: string | null): number | null {
-  if (!body) return null;
-  const lines = body.split('\n');
-  for (const line of lines) {
-    if (!line.startsWith('Parent:')) {
-      continue;
-    }
-    const match = line.match(/#(\d+)/);
-    if (match && match[1]) {
-      return Number(match[1]);
-    }
-    return null;
-  }
-  return null;
-}
-
-export interface IssueHierarchy {
-  parentIssueNumber: number | null;
-  childIssueNumbers: number[];
 }
 
 function getIssueNodeId(config: GithubConfig, issueNumber: number): string {
@@ -454,67 +365,6 @@ export function listParentIssueNumbersFromTimeline(config: GithubConfig, issueNu
   return parents;
 }
 
-export function extractChildIds(body?: string | null): string[] {
-  if (!body) return [];
-  const lines = body.split('\n');
-  const childIds: string[] = [];
-  let inChildren = false;
-  for (const line of lines) {
-    if (line.trim() === '') {
-      if (inChildren) {
-        break;
-      }
-      continue;
-    }
-    if (line.startsWith('Children:') || line.startsWith('Pending children:')) {
-      inChildren = true;
-      continue;
-    }
-    if (!inChildren) {
-      continue;
-    }
-    if (!line.startsWith('- ')) {
-      break;
-    }
-    const match = line.match(/^-\s*([^\s-]+(?:-[^\s-]+)*)/);
-    if (match && match[1]) {
-      childIds.push(match[1]);
-    }
-  }
-  return childIds;
-}
-
-export function extractChildIssueNumbers(body?: string | null): number[] {
-  if (!body) return [];
-  const lines = body.split('\n');
-  const childIssueNumbers: number[] = [];
-  let inChildren = false;
-  for (const line of lines) {
-    if (line.trim() === '') {
-      if (inChildren) {
-        break;
-      }
-      continue;
-    }
-    if (line.startsWith('Sub-issues:') || line.startsWith('Children:')) {
-      inChildren = true;
-      continue;
-    }
-    if (!inChildren) {
-      continue;
-    }
-    const match = line.match(/#(\d+)/);
-    if (!match || !match[1]) {
-      if (!line.startsWith('-')) {
-        break;
-      }
-      continue;
-    }
-    childIssueNumbers.push(Number(match[1]));
-  }
-  return childIssueNumbers;
-}
-
 export function workItemToIssuePayload(
   item: WorkItem,
   comments: Comment[],
@@ -663,11 +513,6 @@ export async function getGithubIssueCommentAsync(config: GithubConfig, commentId
 // ---------------------------------------------------------------------------
 // Issue assignment helpers
 // ---------------------------------------------------------------------------
-
-export interface AssignGithubIssueResult {
-  ok: boolean;
-  error?: string;
-}
 
 /**
  * Assign a GitHub user to an issue via `gh issue edit --add-assignee`.
@@ -1180,18 +1025,6 @@ function normalizeGithubIssue(raw: any): GithubIssueRecord {
 // ---------------------------------------------------------------------------
 // Label event fetching and caching for import conflict resolution
 // ---------------------------------------------------------------------------
-
-/**
- * Represents a single label add/remove event from the GitHub issue events API.
- */
-export interface LabelEvent {
-  /** The full label name, e.g. "wl:stage:done" */
-  label: string;
-  /** Whether the label was added or removed */
-  action: 'labeled' | 'unlabeled';
-  /** ISO-8601 timestamp of the event */
-  createdAt: string;
-}
 
 /**
  * In-memory cache for label events, scoped to a single import run.
