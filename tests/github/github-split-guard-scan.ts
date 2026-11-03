@@ -105,12 +105,13 @@ export const BASELINE_PATH = 'tests/github/github.split-baseline.json';
 /**
  * Family modules currently exempt from the size gate.
  *
- * A *shrink-only* allowlist: it may only ever lose entries. It starts with the
- * 1,755-line monolith; the final barrel child removes that entry once
- * `src/github.ts` is a thin re-export façade, so every family module must then
- * stay under {@link MAX_MODULE_LINES} with no exemptions.
+ * A *shrink-only* allowlist: it may only ever lose entries. It started with the
+ * 1,755-line monolith; the labels child (WL-0MVVLXY42003Q047) dropped
+ * `src/github.ts` to 848 lines, so the entry is now stale and has been removed
+ * — every family module must stay under {@link MAX_MODULE_LINES} with no
+ * exemptions.
  */
-export const GITHUB_SPLIT_ALLOWLIST: readonly string[] = ['github.ts'];
+export const GITHUB_SPLIT_ALLOWLIST: readonly string[] = [];
 
 /**
  * The allowlist as it stood at plan time. {@link GITHUB_SPLIT_ALLOWLIST} must

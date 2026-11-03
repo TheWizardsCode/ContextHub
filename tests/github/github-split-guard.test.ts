@@ -516,13 +516,18 @@ describe('github split guard — gates fail on broken input', () => {
     expect(hasLeadingJsDoc('/** */\nexport const x = 1;\n')).toBe(false);
   });
 
-  it('exempts only the oversized allowlisted barrel from the JSDoc gate', () => {
+  it('covers every family module with the JSDoc gate once the allowlist is empty', () => {
+    // The labels child (WL-0MVVLXY42003Q047) dropped `src/github.ts` under the
+    // ceiling and so removed the last size exemption: module size no longer
+    // exempts anything from the header gate, oversized or not.
+    expect([...GITHUB_SPLIT_ALLOWLIST]).toEqual([]);
+
     const oversized = indexFromSources({ [GITHUB_BARREL]: lines(MAX_MODULE_LINES + 1) });
-    // The monolith has no header yet, but is size-allowlisted while in flight.
-    expect(githubFamilyModulesRequiringJsDoc(oversized).map((m) => m.file)).toEqual([]);
+    expect(githubFamilyModulesRequiringJsDoc(oversized).map((m) => m.file)).toEqual([
+      GITHUB_BARREL,
+    ]);
 
     const shrunk = indexFromSources({ [GITHUB_BARREL]: lines(MAX_MODULE_LINES) });
-    // Once the barrel is a façade it must carry a header like every other module.
     expect(githubFamilyModulesRequiringJsDoc(shrunk).map((m) => m.file)).toEqual([
       GITHUB_BARREL,
     ]);
