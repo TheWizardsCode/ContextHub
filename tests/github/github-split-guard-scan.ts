@@ -30,6 +30,13 @@
  *    contain only a header JSDoc and `export … from` statements — no imports
  *    and no local declarations — so a move that leaves a stray helper behind
  *    in `src/github.ts` is a test failure rather than a review finding.
+ * 6. **Documentation drift (AC5, WL-0MVVLY0QW007L9ZB).** The
+ *    `## GitHub Module Layout` section of `docs/ARCHITECTURE.md` must name
+ *    every family module and the public symbols it really documents: every
+ *    `` `backticked` `` file path exists, every family module appears in the
+ *    responsibilities table, and every symbol in its third column is really
+ *    re-exported by the barrel. Docs that drift from the tree fail the suite
+ *    rather than a review.
  *
  * The gates are **pure predicates over parsed modules** rather than assertions
  * over the live tree, so `github-split-guard.test.ts` can prove each gate
@@ -325,6 +332,136 @@ export function findAbsentAllowlistedGithubBarrelImports(
       .map((imp) => imp.file),
   );
   return allowlist.filter((file) => !present.has(file)).sort();
+}
+
+// ── Gate 4: architecture-doc drift (WL-0MVVLY0QW007L9ZB) ─────────────
+
+/** The document that owns the "GitHub Module Layout" section (AC5). */
+export const ARCHITECTURE_DOC_PATH = 'docs/ARCHITECTURE.md';
+
+/** Heading of the github layout section the doc gate reads. */
+export const GITHUB_LAYOUT_HEADING = '## GitHub Module Layout';
+
+/** Heading of the responsibilities table inside that section. */
+export const RESPONSIBILITIES_HEADING = '### Module responsibilities';
+
+/** A repository-relative file path, as written in the docs. */
+// A repo-relative path starts with a word character: module specifiers such
+// as `../github.js` are edges, not tree paths, and must not be existence-checked.
+const DOC_PATH_PATTERN = /^\w[\w@./-]*\.(?:ts|tsx|js|jsx|json|md|yaml|yml)$/;
+
+/** A bare identifier, as written in the responsibilities table. */
+const DOC_SYMBOL_PATTERN = /^[A-Za-z_$][\w$]*$/;
+
+/**
+ * Body of the level-2 section under `heading`, excluding the heading itself.
+ *
+ * Returns `null` when the document has no such section, so a deleted section is
+ * a loud failure rather than an empty (trivially green) scan. The scan stops at
+ * the next level-2 heading, so the sibling `## Sync Module Layout` and
+ * `## Interview Module Layout` sections are never read.
+ */
+export function extractDocSection(markdown: string, heading: string): string | null {
+  const lines = markdown.split('\n');
+  const start = lines.findIndex((line) => line.trim() === heading);
+  if (start === -1) return null;
+  const body: string[] = [];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^##\s/.test(lines[i])) break;
+    body.push(lines[i]);
+  }
+  return body.join('\n');
+}
+
+/**
+ * Rows of the first markdown table under `heading`, as trimmed cell arrays.
+ *
+ * Purely structural: the header row and the `|---|` separator are skipped, and
+ * the scan stops at the first line that is not a table row after the table has
+ * started. Returns `[]` when the heading or its table is missing.
+ */
+function tableRows(section: string, heading: string): string[][] {
+  const lines = section.split('\n');
+  const start = lines.findIndex((line) => line.trim() === heading);
+  if (start === -1) return [];
+  const rows: string[][] = [];
+  let started = false;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line.startsWith('|')) {
+      if (started) break;
+      continue;
+    }
+    started = true;
+    const cells = line
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((cell) => cell.trim());
+    if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+    rows.push(cells);
+  }
+  return rows;
+}
+
+/**
+ * Repository-relative file paths named in `` `backticks` `` inside `section`.
+ *
+ * Deduplicated and sorted, so a doc gate compares stable lists. Only tokens
+ * that look like files are kept — symbol names, prose and `all 58`-style cells
+ * are ignored.
+ */
+export function extractDocumentedPaths(section: string): string[] {
+  const paths = new Set<string>();
+  for (const match of section.matchAll(/`([^`\n]+)`/g)) {
+    const token = match[1].trim();
+    if (DOC_PATH_PATTERN.test(token)) paths.add(token);
+  }
+  return [...paths].sort();
+}
+
+/** Documented paths that do not exist in the tree, judged by `exists`. */
+export function findMissingDocumentedPaths(
+  section: string,
+  exists: (relPath: string) => boolean,
+): string[] {
+  return extractDocumentedPaths(section).filter((relPath) => !exists(relPath));
+}
+
+/**
+ * Public symbols the responsibilities table claims the barrel re-exports.
+ *
+ * Reads the third column (`Public symbols re-exported by the barrel`) of the
+ * table under {@link RESPONSIBILITIES_HEADING}; `6 types` / `all 58` cells
+ * contribute nothing because they carry no `` `backticked` `` identifier.
+ */
+export function extractResponsibilitySymbols(section: string): string[] {
+  const symbols = new Set<string>();
+  for (const cells of tableRows(section, RESPONSIBILITIES_HEADING)) {
+    for (const match of (cells[2] ?? '').matchAll(/`([^`\n]+)`/g)) {
+      const token = match[1].trim();
+      if (DOC_SYMBOL_PATTERN.test(token)) symbols.add(token);
+    }
+  }
+  return [...symbols].sort();
+}
+
+/** Documented symbols that the barrel does not really re-export. */
+export function findMissingDocumentedSymbols(
+  section: string,
+  exported: Iterable<string>,
+): string[] {
+  const available = new Set(exported);
+  return extractResponsibilitySymbols(section).filter((symbol) => !available.has(symbol));
+}
+
+/** Family modules the responsibilities table fails to name. */
+export function findUndocumentedModules(
+  section: string,
+  modules: readonly string[],
+): string[] {
+  const documented = new Set(extractDocumentedPaths(section));
+  return modules.filter((file) => !documented.has(file)).sort();
 }
 
 // ── Baseline ──────────────────────────────────────────────────────────

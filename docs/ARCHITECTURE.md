@@ -406,7 +406,7 @@ WL-0MVVLY034000MDVA).
 | Module | Responsibility | Public symbols re-exported by the barrel |
 |---|---|---|
 | `src/github.ts` | Public barrel: re-exports the frozen 58-symbol surface (52 values + 6 types) and documents where each concern lives. | all 58 |
-| `src/github/types.ts` | Shared type declarations (`GithubConfig`, `GithubIssueRecord`, `GithubIssueComment`, `IssueHierarchy`, `AssignGithubIssueResult`, `LabelEvent`). | 6 types |
+| `src/github/types.ts` | Shared type declarations (`GithubConfig`, `GithubIssueRecord`, `GithubIssueComment`, `IssueHierarchy`, `AssignGithubIssueResult`, `LabelEvent`). | 6 types: `GithubConfig`, `GithubIssueRecord`, `GithubIssueComment`, `IssueHierarchy`, `AssignGithubIssueResult`, `LabelEvent` |
 | `src/github/transport.ts` | `gh` CLI plumbing: command execution (sync/async/detailed), scheduling through the central throttler, rate-limit detection, stdout capture and shell escaping. | `setVerboseLogger`, `isSecondaryRateLimitText`, `SecondaryRateLimitError`, `ghApiAsyncScheduled`, `ghApiDetailedScheduled`, `ghApiJsonScheduled` |
 | `src/github/repo-slug.ts` | Repo-slug resolution from config or the `origin` git remote. | `parseRepoSlug`, `getRepoFromGitRemote` |
 | `src/github/markers.ts` | The worklog marker format and body parsers (item id, comment id, parent/child ids and issue numbers). | `buildWorklogMarker`, `buildWorklogCommentMarker`, `stripWorklogMarkers`, `extractWorklogId`, `extractWorklogCommentId`, `extractParentId`, `extractParentIssueNumber`, `extractChildIds`, `extractChildIssueNumbers` |
@@ -439,7 +439,11 @@ src/github.ts (barrel — re-exports the family modules; nothing imports it)
 No module under `src/github/` imports `../github.js` — not even type-only — so
 the barrel can never be part of a cycle. `tests/github/github-split-guard.test.ts`
 enforces this statically, alongside the 1,000-line ceiling (no exemptions) and
-the frozen public surface (`tests/github/github.split-baseline.json`).
+the frozen public surface (`tests/github/github.split-baseline.json`). The same
+guard also fails when this section drifts: every file path named here must
+exist, every module in the table above must be a real family module, and every
+symbol in its last column must really be re-exported by the barrel
+(WL-0MVVLY0QW007L9ZB).
 
 ### Where to find X in the github module
 

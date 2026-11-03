@@ -19,7 +19,7 @@ Use `escapeShellArg` when constructing command strings passed to `execSync`, `ex
 
 ### `quoteShellValue(value: string): string`
 
-POSIX‑only single‑quote wrapping (same as the POSIX branch of `escapeShellArg`). Provided for backward compatibility with existing `src/github.ts` usage.
+POSIX‑only single‑quote wrapping (same as the POSIX branch of `escapeShellArg`). Re-exported by `src/github/transport.ts` for the GitHub integration, whose command builders (`src/github/issues.ts`, `src/github/hierarchy.ts`) call it.
 
 ## Audited Files
 
@@ -28,8 +28,10 @@ All files in `src/` that construct shell commands have been audited for proper e
 | File | Escaping Used | Status |
 |------|---------------|--------|
 | `src/sync.ts` | `escapeShellArg()` | Safe — applied consistently |
-| `src/github.ts` | `JSON.stringify()`, `quoteShellValue()` | Safe — both provide equivalent protection |
-| `src/github/transport.ts` | Executes `gh` commands built upstream; interpolates no user text | Safe — callers escape before building the command |
+| `src/github/issues.ts` | `JSON.stringify()`, `quoteShellValue()` | Safe — both provide equivalent protection |
+| `src/github/labels.ts` | `JSON.stringify()` | Safe — escaped before the command is built |
+| `src/github/hierarchy.ts` | `quoteShellValue()` | Safe — every interpolated value is single‑quote wrapped |
+| `src/github/transport.ts` | Executes `gh` commands built upstream; interpolates no user text; re-exports `quoteShellValue()` | Safe — callers escape before building the command |
 | `src/commands/sync.ts` | No user text in shell commands | Safe — hardcoded git commands only |
 | `src/commands/init.ts` | No user text in shell commands | Safe — hardcoded git commands only |
 | `src/worklog-paths.ts` | No user text in shell commands | Safe — hardcoded git command only |
@@ -45,4 +47,4 @@ All files in `src/` that construct shell commands have been audited for proper e
 
 ## Exceptions
 
-`JSON.stringify()` is used in `src/github.ts` for shell escaping in gh CLI commands. This is safe because `JSON.stringify()` produces a properly quoted and escaped string that is valid in a shell context. However, `escapeShellArg()` is recommended for new code to maintain consistency.
+`JSON.stringify()` is used in `src/github/issues.ts` and `src/github/labels.ts` for shell escaping in gh CLI commands, and `quoteShellValue()` in `src/github/issues.ts` and `src/github/hierarchy.ts`. This is safe because `JSON.stringify()` produces a properly quoted and escaped string that is valid in a shell context. However, `escapeShellArg()` is recommended for new code to maintain consistency.

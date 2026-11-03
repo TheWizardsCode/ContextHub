@@ -24,6 +24,7 @@
  * | every family module documented with a JSDoc header | AC5 |
  * | guard suite documented like the modules it protects | AC5 |
  * | every gate fails on deliberately broken input | AC7 |
+ * | layout docs name only real paths / modules / symbols | AC5 (WL-0MVVLY0QW007L9ZB) |
  *
  * The gates are **additive and read-only**: they parse the module tree with the
  * TypeScript parser (via `./github-split-guard-scan.js`; no program, no type
@@ -43,28 +44,37 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import {
+  ARCHITECTURE_DOC_PATH,
   BASELINE_GENERATION_COMMAND,
   BASELINE_PATH,
   FAMILY_ROOTS,
   GITHUB_BARREL,
+  GITHUB_LAYOUT_HEADING,
   GITHUB_SPLIT_ALLOWLIST,
   GITHUB_SPLIT_ALLOWLIST_CEILING,
   MAX_MODULE_LINES,
+  RESPONSIBILITIES_HEADING,
   TYPE_ONLY_BARREL_ALLOWLIST,
   buildGithubImportGraph,
   collectExportKinds,
   consumerImportNames,
   dynamicImportNames,
+  extractDocSection,
+  extractDocumentedPaths,
+  extractResponsibilitySymbols,
   findAbsentAllowlistedGithubBarrelImports,
   findAllowlistViolations,
   findBarrelLocalLogic,
   findGithubBarrelImports,
   findGithubBarrelTypeOnlyImportsOutsideAllowlist,
+  findMissingDocumentedPaths,
+  findMissingDocumentedSymbols,
   findMissingExports,
   findOversizedModules,
   findRuntimeCyclesForGithub,
   findStaleAllowlistEntries,
   findUnexplainedStaticCyclesForGithub,
+  findUndocumentedModules,
   githubFamilyModules,
   githubFamilyModulesRequiringJsDoc,
   hasLeadingJsDoc,
@@ -258,6 +268,44 @@ describe('github split guard — live tree', () => {
       expect(hasLeadingJsDoc(source), `${rel} lacks a top-level JSDoc header`).toBe(true);
       expect(source.slice(0, source.indexOf('*/'))).toMatch(/guard/i);
     }
+  });
+});
+
+// ── The architecture docs must not drift from the tree (AC5) ────────
+
+describe('github module layout documentation', () => {
+  const markdown = fs.readFileSync(path.join(repoRoot, ARCHITECTURE_DOC_PATH), 'utf-8');
+  const section = extractDocSection(markdown, GITHUB_LAYOUT_HEADING);
+
+  it('documents the layout in its own section beside the sync layout', () => {
+    // A deleted/renamed section must not make the rest of this suite vacuous.
+    expect(section).not.toBeNull();
+    expect(markdown).toContain('## Sync Module Layout');
+    expect(section).toContain(RESPONSIBILITIES_HEADING);
+    expect(section).toContain('### Cycle-safe layering');
+  });
+
+  it('names only file paths that exist in the tree', () => {
+    // The section really does cite modules, so a vacuous scan is impossible.
+    expect(extractDocumentedPaths(section!)).toContain(GITHUB_BARREL);
+    expect(
+      findMissingDocumentedPaths(section!, (rel) => fs.existsSync(path.join(repoRoot, rel))),
+    ).toEqual([]);
+  });
+
+  it('names every github-family module in the responsibilities table', () => {
+    const modules = githubFamilyModules(loadModuleIndex(repoRoot, FAMILY_ROOTS)).map((m) => m.file);
+    expect(modules).toContain(GITHUB_BARREL);
+    expect(modules.length).toBeGreaterThan(1);
+    expect(findUndocumentedModules(section!, modules)).toEqual([]);
+  });
+
+  it('names only public symbols the barrel really re-exports', () => {
+    const surface = liveSurface();
+    // The table documents the public surface exactly — no missing symbol and no
+    // invented one — so the docs cannot describe a surface the code lacks.
+    expect(extractResponsibilitySymbols(section!)).toEqual([...surface.all].sort());
+    expect(findMissingDocumentedSymbols(section!, surface.all)).toEqual([]);
   });
 });
 
@@ -580,5 +628,81 @@ describe('github split guard — gates fail on broken input', () => {
     expect(githubFamilyModulesRequiringJsDoc(shrunk).map((m) => m.file)).toEqual([
       GITHUB_BARREL,
     ]);
+  });
+
+  it('reports a documented path that no longer exists', () => {
+    const doc = [
+      GITHUB_LAYOUT_HEADING,
+      '',
+      '| Module | Responsibility | Public symbols re-exported by the barrel |',
+      '|---|---|---|',
+      '| `src/github.ts` | barrel | none |',
+      '| `src/github/gone.ts` | removed module | none |',
+    ].join('\n');
+    const section = extractDocSection(doc, GITHUB_LAYOUT_HEADING)!;
+    expect(extractDocumentedPaths(section)).toEqual([GITHUB_BARREL, 'src/github/gone.ts']);
+    expect(findMissingDocumentedPaths(section, (rel) => rel === GITHUB_BARREL)).toEqual([
+      'src/github/gone.ts',
+    ]);
+  });
+
+  it('returns no section when the heading is absent (no cross-section leak)', () => {
+    const markdown = [
+      '## Sync Module Layout',
+      '`src/sync.ts` is the barrel.',
+      '',
+      '## Something Else',
+      '`src/other.ts`',
+    ].join('\n');
+    expect(extractDocSection(markdown, GITHUB_LAYOUT_HEADING)).toBeNull();
+    // A sibling section is never mistaken for the github one.
+    expect(extractDocSection(markdown, '## Sync Module Layout')).toContain('src/sync.ts');
+    expect(extractDocSection(markdown, '## Sync Module Layout')).not.toContain('src/other.ts');
+  });
+
+  it('reports an undocumented family module and an invented symbol', () => {
+    const doc = [
+      GITHUB_LAYOUT_HEADING,
+      '',
+      RESPONSIBILITIES_HEADING,
+      '',
+      '| Module | Responsibility | Public symbols re-exported by the barrel |',
+      '|---|---|---|',
+      '| `src/github.ts` | barrel | `keptValue` |',
+      '| `src/github/comments.ts` | comments | `createGithubIssueAsync` |',
+    ].join('\n');
+    const section = extractDocSection(doc, GITHUB_LAYOUT_HEADING)!;
+    expect(extractResponsibilitySymbols(section)).toEqual([
+      'createGithubIssueAsync',
+      'keptValue',
+    ]);
+    expect(findMissingDocumentedSymbols(section, ['createGithubIssueAsync'])).toEqual([
+      'keptValue',
+    ]);
+    expect(
+      findUndocumentedModules(section, [
+        GITHUB_BARREL,
+        'src/github/comments.ts',
+        'src/github/labels.ts',
+      ]),
+    ).toEqual(['src/github/labels.ts']);
+  });
+
+  it('ignores prose and aggregate cells when scanning the table', () => {
+    const doc = [
+      GITHUB_LAYOUT_HEADING,
+      '',
+      RESPONSIBILITIES_HEADING,
+      '',
+      '| Module | Responsibility | Public symbols re-exported by the barrel |',
+      '|---|---|---|',
+      '| `src/github.ts` | re-exports the frozen 58-symbol surface | all 58 |',
+      '| `src/github/types.ts` | Shared type declarations (`GithubConfig`) | 6 types |',
+      '',
+      'See the sync layout for orientation.',
+    ].join('\n');
+    const section = extractDocSection(doc, GITHUB_LAYOUT_HEADING)!;
+    expect(extractDocumentedPaths(section)).toEqual([GITHUB_BARREL, 'src/github/types.ts']);
+    expect(extractResponsibilitySymbols(section)).toEqual([]);
   });
 });
