@@ -25,18 +25,10 @@ import {
 } from '../doctor/prefix-check.js';
 import { getConfigPath } from '../config.js';
 import { buildAuditGapReport } from '../doctor/audit-gaps-check.js';
-import {
-  pruneStateDir,
-  resolveCacheDir,
-  DEFAULT_STATE_MAX_FILES,
-  DEFAULT_STATE_TTL_MS,
-} from '../read-cache.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
 import {
-  DAY_MS,
-  formatCacheBytes,
   type DoctorOptions,
   detectPendingUpgrades,
   buildPendingUpgradeFinding,
@@ -44,6 +36,7 @@ import {
   detectPendingCacheState,
   printPendingCacheNotice,
 } from './doctor/notices.js';
+import { registerCacheCommand } from './doctor/cache.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -487,71 +480,7 @@ export default function register(ctx: PluginContext): void {
       }
     });
 
-  doctor
-    .command('cache')
-    .description('Report and prune the bounded read-cache state directory (<cache-dir>/state)')
-    .option('--prune', 'Remove stale counters and enforce the file bound (default: report only)')
-    .option('--dry-run', 'Report only — never delete anything (default)')
-    .option('--max-files <n>', `Max per-worklog-dir counters to keep (default ${DEFAULT_STATE_MAX_FILES})`)
-    .option('--ttl-days <n>', `Remove counters untouched for this many days (default ${DEFAULT_STATE_TTL_MS / 86_400_000})`)
-    .action((opts: { prune?: boolean; dryRun?: boolean; maxFiles?: string; ttlDays?: string }) => {
-      // Cache maintenance is worklog-independent: no `requireInitialized()`,
-      // so a stale cache can be reclaimed from anywhere.
-      const fail = (message: string): void => {
-        if (utils.isJsonMode()) output.json({ success: false, error: message });
-        else console.error(`Doctor cache failed: ${message}`);
-        process.exitCode = 1;
-      };
-
-      const maxFiles = Number(String(opts.maxFiles ?? DEFAULT_STATE_MAX_FILES));
-      const ttlDays = Number(String(opts.ttlDays ?? DEFAULT_STATE_TTL_MS / DAY_MS));
-      if (!Number.isInteger(maxFiles) || maxFiles < 0) {
-        fail(`--max-files must be a non-negative integer (got "${opts.maxFiles ?? ''}")`);
-        return;
-      }
-      if (!Number.isFinite(ttlDays) || ttlDays < 0) {
-        fail(`--ttl-days must be a non-negative number (got "${opts.ttlDays ?? ''}")`);
-        return;
-      }
-
-      try {
-        // `--prune` applies; `--dry-run` always wins when both are given.
-        const dryRun = opts.prune !== true || opts.dryRun === true;
-        const ttlMs = Math.floor(ttlDays * DAY_MS);
-        const result = pruneStateDir(resolveCacheDir(), {
-          maxFiles,
-          ttlMs,
-          dryRun,
-          invalidateEntries: !dryRun,
-        });
-
-        if (utils.isJsonMode()) {
-          output.json({ success: true, ...result, maxFiles, ttlMs });
-          return;
-        }
-
-        console.log(`Read-cache state: ${result.stateDir}`);
-        console.log(` - counters: ${result.filesScanned} (${formatCacheBytes(result.totalBytes)})`);
-        console.log(` - stale by TTL: ${result.staleByTtl}`);
-        console.log(` - over bound: ${result.overBound}`);
-        console.log(` - bound: ${maxFiles} file(s), TTL ${ttlDays} day(s)`);
-        if (result.dryRun) {
-          console.log(
-            `Dry run: would remove ${result.removed} counter(s), reclaiming ${formatCacheBytes(result.bytesReclaimed)}.`
-          );
-          if (result.removed > 0) console.log('Run `wl doctor cache --prune` to reclaim the space.');
-        } else {
-          console.log(
-            `Removed ${result.removed} counter(s), reclaimed ${formatCacheBytes(result.bytesReclaimed)} (remaining: ${result.remaining}).`
-          );
-          if (result.invalidatedEntries > 0) {
-            console.log(`Dropped ${result.invalidatedEntries} cache entr(y/ies) belonging to pruned counters.`);
-          }
-        }
-      } catch (err) {
-        fail(err instanceof Error ? err.message : String(err));
-      }
-    });
+  registerCacheCommand(doctor, { output, utils });
 
   doctor
     .command('foreign-items')
