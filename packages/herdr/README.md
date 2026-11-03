@@ -262,6 +262,8 @@ The plugin respects the following environment variables:
 
 - `WL_COUNT` — Number of work items to fetch (default: 20, now superseded by `browseItemCount` in settings)
 - `HERDR_SOCKET_PATH` — Path to the herdr Unix socket used by the event subscription (default `~/.config/herdr/herdr.sock`). When unset/unreachable the plugin falls back to polling.
+- `HERDR_COORDINATION_DIR` — Machine coordination directory override (default `~/.herdr/downtime`); the host dispatch-budget ledger and its `budget.json` live here.
+- `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — Per-tier machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. Values clamp to `0`–`32`; `0` disables that tier host-wide (a per-tier kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`). See *Host-wide dispatch budget* under the downtime worker.
 
 #### Plugin Settings (config file)
 
@@ -492,6 +494,34 @@ dispatches; the other herdr instances coordinate instead of polling:
   never a `no-candidate` cooldown, never an evicted coordination entry, and
   deliberately NOT counted as local-model capacity starvation. See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-cpu-dispatch-gate-wl-0mvk0uo3q002txw6).
+- **Host-wide dispatch budget (WL-0MVXWQFGV000D2AB, F1–F5)** — the operator
+  can cap how many `implement` and `audit` panes this **machine** runs at
+  once, regardless of how many herdr instances or projects are open. The
+  budget is a machine-scoped ledger
+  (`~/.herdr/downtime/dispatch-budget.json`, one entry per in-flight dispatch)
+  with per-tier caps in `~/.herdr/downtime/budget.json` (`{"maxImplement":
+  2, "maxAudit": 1}`; `0` disables a tier host-wide), overridable by
+  `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — **not** a per-instance
+  `settings.json` key, deliberately: a host cap stored per instance drifts by
+  construction (which is why `downtimeRequiredFreeSlots` cannot express it),
+  while one elected leader already dispatches for every root so a machine
+  file is authoritative. Dispatcher-fired work over quota is a neutral skip
+  (`host-budget-implement` / `host-budget-audit` /
+  `audit-host-saturated`), never a prompt and never a `no-candidate`
+  cooldown; an unreadable ledger **fails closed** there
+  (`host-budget-unknown`, self-healing rewrite from the live pane list).
+  User-fired `/skill:implement` / `/skill:audit` shortcuts (pane **and**
+  headless `open_pane: false`) instead open a bottom-anchored dialog when the
+  tier is at cap — `Enter`/`y` proceeds, `Esc`/`n` cancels;
+  cancel is the state on open; a proceed records `override: { by: "user" }`
+  on the ledger entry so a deliberate human override is distinguishable from
+  drift; that path **fails open with a visible notice** if the ledger is corrupt.
+  The budget only ever reduces concurrency below the free-slot/prefill gates
+  (the WL-0MU2EP6JL006A1U3 "no client-side pane cap" boundary is preserved —
+  the inner limiter is unchanged), and it is not capacity starvation. The
+  retired `active-audit` marker is read for exactly one release of
+  compatibility. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -507,7 +537,7 @@ visible (non-focus-stealing) pi agent pane. **Ranking contract (WL-0MTK1ILM2009Q
 (`fetchNextItems` → `selectWorkItems` → `regroupWorkItems`) is the sole ranking path;
 the dispatcher derives its candidate from the Herdr list head and applies safety gates as
 sequential filters (scheduled-prompt → code-freeze → producer-review gate → dispatched-marker
-→ free-slot minimums → active-audit single-flight → freshness/recency → CAS claim → spawn).
+→ free-slot minimums → host-wide dispatch budget → freshness/recency → CAS claim → spawn).
 The filters walk the Herdr sequence in LIST ORDER — a filtered head simply moves the pick
 to the first dispatchable item deeper in the same sequence (never a re-ranking). The same
 selection feeds the coordination check-in offer (`computeMostImportantItem`), so the
@@ -636,9 +666,9 @@ pacing* below).
   audit) is at or above `browseItemCount`, one continuous idle window may
   issue this many **sequential** audits because the dispatcher's own
   post-dispatch reset is deferred between them (a busy poll still requires a
-  fresh idle run). At most **one audit is active at a time** host-wide (see
-  *Single-active-audit guarantee* below); the cap only drains a deep queue
-  faster. `1` disables batching and restores the legacy
+  fresh idle run). At most **`maxAudit`** audits are active at a time host-wide
+  (default `1`, see *Single-active-audit guarantee* below); the cap only drains
+  a deep queue faster. `1` disables batching and restores the legacy
   single-dispatch-per-idle-window behaviour (default: `2`, clamped to 1 – 5)
 - `downtimeStallScanEnabled` — Enable the pre-dispatch stalled-work scan
   (default: `true`). When on, the dispatcher prefers resuming an existing
@@ -680,7 +710,7 @@ pacing* below).
   audit's first call falls back to the remote model. Only the wait is
   removed: unusable per-slot detail (`slots: []` / `slots_stale`), a
   `saturated` pool, live contention, the prefill gate, owned slots, the
-  active-audit single flight and a parent (or unclassifiable) candidate all
+  host-wide audit budget and a parent (or unclassifiable) candidate all
   still refuse, and the relaxed slot stays pinned to that one leaf audit.
   Boolean; absent/malformed → `false`; re-read live on every tick, and the
   decision log records `leafAuditImmediate` on the `leaf-audit-admission`
@@ -998,11 +1028,18 @@ so the worker never consumes local slots on items awaiting a human decision.
 Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
 makes the item dispatchable again on the next idle poll.
 
-> **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV):** exactly one
-> audit is dispatched at a time during downtime dispatch — strictly
-> sequential, never fan-out across candidates. Before the audit tier
-> selects a candidate, the worker runs the active-audit check
-> (`getActiveAudit`): it reads the shared `.worklog/downtime-dispatches.log`
+> **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV; host-wide cap
+> generalised by WL-0MVXY0XPF006YUHA F2):** exactly one
+> audit is dispatched at a time during downtime dispatch by **default** —
+> strictly sequential, never fan-out across candidates. The host-wide
+> **dispatch budget** is the outermost audit-concurrency gate
+> (`maxAudit`, default `1`; see *Host-wide dispatch budget* above), counted
+> by the machine-scoped ledger with the retired `active-audit` marker read as
+> one synthetic entry for a release of compatibility. Beneath it, before the
+> audit tier selects a candidate, the worker runs the host-wide audit-budget
+> check (`getActiveAudit`, which reads the machine-scoped ledger first and the
+> per-worklog dispatch log beneath it): it reads the shared
+> `.worklog/downtime-dispatches.log`
 > (the cross-instance source of truth — an audit dispatched by ANY
 > instance, leader or not, is seen here) and keeps only `kind:audit`
 > markers dispatched within the last **2 hours**
@@ -1039,13 +1076,14 @@ makes the item dispatchable again on the next idle poll.
 > is at/above `browseItemCount` and `downtimeAuditBatchMax > 1`, the worker
 > defers only its *own* post-dispatch idle reset and re-checks every gate
 > (idle duration, ≥ 2 free slots, slot ownership, contention, code freeze,
-> active-audit markers, single-flight) before the next continuation. Each
+> active-audit budget gate, single-flight) before the next continuation. Each
 > continuation selects a **distinct** item (dispatched-marker + batch-local
 > exclusion) and any non-`dispatched` outcome ends the batch. A busy poll
 > (including the audit pane's own proxy activity) resets the idle run and ends
 > the batch window, so the batch never relaxes the idle-duration gate. The
-> guarantee above is unchanged: exactly one audit runs at a time, and batching
-> is not concurrency relaxation. In coordination mode the leader continues
+> guarantee above is unchanged: with the default `maxAudit: 1`, exactly one
+> audit runs at a time, and batching is not concurrency relaxation. In
+> coordination mode the leader continues
 > from its own Herdr head and defers its own-backlog leadership hand-off to
 > batch end. Set `downtimeAuditBatchMax` to `1` to restore
 > single-dispatch-per-window behaviour. See `docs/dev/downtime-dispatcher.md`

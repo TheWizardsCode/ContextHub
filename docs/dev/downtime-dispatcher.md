@@ -49,6 +49,11 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
+| `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota` |
+| `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `readAuditBudgetState`, `confirmHostDispatch`, `releaseHostDispatch` |
+| `host-dispatch-budget.interactive.ts` | User-fired over-quota gate half: tier detection and prompt-then-claim (F4) | `budgetKindForAgentCommand`, `prepareInteractiveAgentDispatch` |
+| `host-budget-dialog.ts` | Pure bottom-anchored over-quota dialog + the renderer↔awaiter prompt host (F4) | `formatHostBudgetDialog`, `overlayHostBudgetDialog`, `createHostBudgetPromptHost` |
+| `host-budget-status.ts` | Read-only host-budget status for the worklist `n/max` counter and the stderr skip line (F5) | `readHostBudgetStatus`, `hostBudgetStatusText`, `hostBudgetSkipLine` |
 
 Layering: extracted modules import concrete siblings — never the barrel — so
 the import graph stays acyclic (enforced by
@@ -88,7 +93,7 @@ and the coordination leader path `dispatchFromCoordination`) derives
 its candidate from the **Herdr list head** (first ordered item) and applies every remaining
 safety gate as a **sequential filter** on that ordered sequence (scheduled-prompt → code-freeze
 → producer-review gate (WL-0MTIAL65N004T22F) → dispatched-marker → free-slot minimums →
-active-audit single-flight → freshness/recency → CAS claim → spawn). **Critical escalation
+host-wide dispatch budget → freshness/recency → CAS claim → spawn). **Critical escalation
 (WL-0MU6UL3XY001M3VT):** before the normal sequence walk, open critical items in the head are
 escalated by `selectCriticalFirstCandidates` — a blocked critical item bypasses the NON-safety
 filters (dispatched-marker, review-queue hold) while the safety gates above still apply — so
@@ -1912,6 +1917,142 @@ the worklog still holds dispatchable work. Therefore:
   2 × checkInIntervalMs)` (60 min) whenever the worklog holds dispatchable
   work — never once per full cooldown.
 
+### Host-wide dispatch budget — gate table, defaults and scope
+### (F6 WL-0MVXY10QH0020V7S, parent WL-0MVXWQFGV000D2AB)
+
+This section is the consolidated reference for the machine-scoped dispatch
+budget that F1–F5 built. The per-feature contracts stay with their feature
+sections below (*Host-wide audit admission*, *Interactive over-quota
+confirmation*, *Unified budget observability*); this one records the gate
+table, the fail-direction rationale, the default figures and what v1
+deliberately does not cover.
+
+**Why machine-scoped.** The budget is one record per **host**, not per herdr
+instance and not per project: `~/.herdr/downtime/dispatch-budget.json` (or
+`HERDR_COORDINATION_DIR`). One elected leader already dispatches for every
+root, so a machine file is both cheap and authoritative — and adding
+instances or projects can never multiply the recorded in-flight work. A
+per-instance `settings.json` key (the shape `downtimeRequiredFreeSlots` has)
+was rejected deliberately: a "host" cap that each instance stores itself
+drifts by construction, which is exactly why the existing free-slot setting
+cannot express this ask. See *Configuration* in F1's module contract
+(`host-dispatch-budget.ts`) and the machine-dir file table under *Files &
+runtime artifacts*.
+
+**Gate table (both tiers, one reader).** Admission is consulted exactly once
+per dispatch, in the claim→marker→spawn choke point, so both dispatcher paths
+(`dispatchDowntimeWork` and `dispatchFromCoordination`) and every tier share
+the same decision. All budget refusals are **neutral skips** — never a CLI
+error strike, never `no-candidate`, so the no-candidate cooldown is not
+entered and the next idle tick re-checks (as with `audit-host-saturated`).
+
+| Tier | Condition (evaluated at admission) | Decision | Decision-log reason | Header token |
+|---|---|---|---|---|
+| implement | fresh entries whose pane is in the live pane list **<** `maxImplement` | admit + reserve | — | — |
+| implement | at/over `maxImplement` (including `maxImplement: 0`) | skip the tick — no claim, no pane | `host-budget-implement` | `budget-implement` |
+| audit | fresh entries (no live-pane requirement) **<** `maxAudit` | admit + reserve | — | — |
+| audit | at cap with `maxAudit: 1` (default) | skip the tick | `audit-host-saturated` (byte-identical to the retired marker) | `budget-audit` |
+| audit | at cap with any other `maxAudit` (including `0`) | skip the tick | `host-budget-audit` | `budget-audit` |
+| either | ledger exists but cannot be trusted (corrupt/unreadable bytes, or the reservation lock/I/O failed) | **fail closed** — skip the tick, then rewrite the ledger from the live pane list so the next tick can decide again | `host-budget-unknown` | `budget-unknown` |
+| either | coordination dir unresolvable | admit — no ledger, no new failure mode (degrades exactly as before the budget existed) | — | — |
+
+Beneath the table, existing capacity gates remain the inner limiter: free-slot
+minimums, the local reservation/prefill pacing, contention and the host-CPU
+gate all still apply, in their existing order.
+
+**Fail directions are deliberately different per path.** This is a design
+decision, not an inconsistency:
+
+| Path | Unreadable/corrupt ledger | Rationale |
+|---|---|---|
+| Dispatcher (admission) | **fail closed** — reason `host-budget-unknown`, plus a self-healing rewrite from the live pane list | nobody is watching an automated tick; a dropped/ignored unknown read would under-count and admit work the operator capped, and over-admitting is unbounded |
+| Interactive (`/skill:implement` / `/skill:audit` fired by a human) | **fail open with a visible notice** — `Host dispatch budget ledger unreadable — proceeding without the quota check.` (the corrupt bytes are never rewritten here) | a human is present and owns the decision; a corrupt ledger must not block their shortcut |
+
+The fail-closed arm is deliberately self-healing rather than sticky: the
+rewrite rebuilds the ledger from the leader's live pane list, so one corrupt
+read costs at most one tick — a crashed leader cannot wedge the host.
+
+**Why `maxImplement` defaults to 2.** The default is **conservative** and it
+bounds **host work-in-flight**, not LLM capacity: it is a statement of
+operator intent ("at most this much agent work on this box at once"), which
+is a different question from "how many proxy slots are free". Two concurrent
+implements leave a slot for the operator's own interactive session and for
+one audit. `maxAudit: 1` is the other half of the default and preserves
+today's single-flight audit behaviour exactly (same `audit-host-saturated`
+token, same release points).
+
+**Boundary statement (WL-0MU2EP6JL006A1U3).** That item removed the
+client-side *running-pane* cap in favour of LLM-idle gating, and this budget
+deliberately reintroduces a host-scoped, **operator-owned** limit — a
+different thing. It must never resurrect the "7 panes queued on 1 slot"
+behaviour: the free-slot/reservation and prefill gates remain the inner
+limiter, and the budget can only ever *reduce* concurrency below what those
+gates would admit. A budget refusal is also not capacity starvation
+(`capacity-starvation.ts` stays untouched), because an operator-imposed stop
+is not a saturated model.
+
+**Audit-cap unification (the choice, recorded).** The hard-coded host-wide
+audit cap of 1 — the `active-audit` marker in `machine-coordination.ts` — is
+**retired in favour of the ledger** with `maxAudit` as its cap. The marker was
+single-flight by construction; the ledger is count-aware, so one mechanism now
+serves `maxAudit: 1` (identical behaviour) and `maxAudit: 2…N`.
+
+- **One release of read-compatibility.** A non-stale `active-audit` file
+  written by an OLDER herdr instance is read as **one synthetic audit entry**
+  by `freshCount('audit')`. This version **never creates and never removes**
+  the file — its writers were deleted with the change, so no code path can
+  resurrect the marker or mask a ledger bug.
+- **Mixed-version safety argument.** During a rolling upgrade some instances
+  on the host still run the marker-based version. Without the legacy read, an
+  old instance's live audit would be invisible to a new instance's ledger
+  count, and the host could run two audits against a `maxAudit: 1`
+  configuration — the duplicate-dispatch failure the original marker existed
+  to prevent. Counting the marker as one entry keeps the union of both
+  mechanisms conservative (at most `maxAudit`), at the cost of an old-instance
+  audit being counted but never ledger-released (bounded by the 2 h staleness
+  window, the same lease the marker always had).
+- **Removal schedule.** The legacy readers (`readActiveAuditMarker`,
+  `isHostAuditActive`) and the synthetic-entry count are removed in the
+  release **after** the host-wide budget generalisation ships — once every
+  instance on the host is expected to run a budget-aware version. The
+  authoritative wording lives in the `machine-coordination.ts` module comment;
+  this schedule is the operator-facing record.
+
+**Out of scope for v1 — the future `window` field.** A total cap over a
+rolling window ("≤ 20 dispatches per 24 h") is explicitly **not** implemented.
+The ledger shape was chosen to make it additive: every entry already carries
+`startedAt`/`heartbeatAt`, so a future `window` field would slot into the same
+`{ version: 1, entries: [...] }` document (a config-side `window` alongside
+`maxImplement`/`maxAudit`, plus a time-filtered reduction beside
+`reduceLedgerCounts`) without a new file, a new lock or a second counting
+path. Capping the `plan` / `intake` / `risk-effort` tiers is likewise out of
+scope (`kind` is recorded, so extending is trivial), as is multi-machine or
+networked coordination — the single-machine v1 contract of
+`machine-coordination.ts` is unchanged.
+
+### Unified budget observability (F5 WL-0MVXY0ZYW009NEJD)
+
+The budget's numbers are surfaced through the existing observability tools —
+no new log sink, no poller, and **one reader** so the surfaces cannot
+disagree:
+
+| Surface | What it shows | Source |
+|---|---|---|
+| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement`, `host-budget-audit`, `host-budget-unknown`, or `audit-host-saturated` at `maxAudit: 1`) plus a `budget` evidence figure (`live`/`max` for the tier) | `downtime-log.ts` vocabulary, written by the tick |
+| Herdr header token | `budget-implement` / `budget-audit` / `budget-unknown`, from the shared `decisionHeaderToken` mapping, so the header says *why* the tick stopped — consistent with `contention` / `slot-owner` / `saturated` | `downtime-worker.constants.ts` |
+| stderr skip line | `[worklog-plugin] Downtime <tier> tier skipped: <reason> (live=n, max=m)` (`tier` is `budget` for `host-budget-unknown`, which can come from either tier) | `hostBudgetSkipLine` (`host-budget-status.ts`) |
+| Worklist header counter | read-only `[budget: implement n/max · audit n/max]`, rendered from already-available state; it never spawns `wl`, never mutates and never changes a dispatch decision, and renders nothing when the budget is unavailable (no chrome in the common case) | `readHostBudgetStatus` (`host-budget-status.ts`) |
+
+`readHostBudgetStatus` counts with the **same pure reductions admission
+uses** (`reduceLedgerCounts` for the implement live-pane rule,
+`reduceMarkerCounts` + `legacyActiveAuditCount` for the audit rule), so the
+counter, the header token, the stderr line and the decision entry quote the
+same ledger and the same caps. The display read is deliberately non-mutating
+(it excludes stale entries without reaping them — a TUI render must never
+write machine state). A budget refusal is an **operator-imposed** stop, so it
+never starts or extends a capacity-starvation episode
+(`capacity-starvation.ts` is untouched).
+
 ### Host-wide audit admission — budget ledger, `active-audit` marker retired
 ### (WL-0MUIVE0YG000UVIA → WL-0MVXY0XPF006YUHA F2)
 
@@ -1957,8 +2098,10 @@ reason token is:
 synthetic audit entry, so a mixed-version host can never double-dispatch.
 This version never creates and never removes the file. The decision, the
 mixed-version rationale and the removal schedule are recorded in the
-`machine-coordination.ts` module comment; the full gate-table / machine-dir
-file-table rewrite is tracked by **F6 (WL-0MVXY10QH0020V7S)**.
+`machine-coordination.ts` module comment; the consolidated gate table,
+machine-dir file table, default rationale, fail directions and removal
+schedule live in *Host-wide dispatch budget — gate table, defaults and scope*
+above (**F6**, WL-0MVXY10QH0020V7S).
 - **Staleness:** an entry whose `heartbeatAt` is at/older than
 `DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS` (default **2 h**, the same constant) is
 reaped on read, so a crashed audit pane can never block the host indefinitely.
@@ -2120,7 +2263,7 @@ the **only** deferral is the dispatcher's own post-dispatch idle reset:
 - `DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2` (the audit tier's per-tier minimum),
 - per-slot ownership (`slotOwned`) and proxy contention
   (`contention_queue_depth == 0`),
-- code freeze, the host-wide `active-audit` marker and the per-worklog
+- code freeze, the host-wide dispatch-budget gate and the per-worklog
   `audit-in-flight` single-flight marker,
 - the dispatch-pipeline single-flight and the dispatched-marker exclusion —
   each continuation must select a **distinct** item, enforced by the existing
@@ -2283,8 +2426,8 @@ leader dispatches from the shared coordination offer file, so its relaxed
 slot must be pinned to an item that is actually **offered**
 (WL-0MVV1F130009VZ1P). `probeCoordinationLeafAuditAdmission` scans the
 offers in file order with the leader's own dispatch-time re-validation
-seams (`fetchItem` → `classifyItemForDispatchDetail` → active-audit
-single-flight → `getAuditCandidateScope` → `classifyAuditScope`) and
+seams (`fetchItem` → `classifyItemForDispatchDetail` → host-budget audit
+admission (`getActiveAudit`) → `getAuditCandidateScope` → `classifyAuditScope`) and
 admits the first offer that is an eligible root audit candidate with a
 trusted `'leaf'` scope. No new ranking, no second eligibility definition.
 **Parity requirement:** for an identical payload/candidate set the direct
@@ -2412,7 +2555,8 @@ Every refusal still applies on both settings: unusable per-slot detail
 `capacity_hint: "saturated"` (→ `capacity-saturated`), live contention
 (`contention_queue_depth > 0` / `prefill_gate_waiters > 0`), the prefill
 serialisation gate (`evaluatePrefillPacing`), owned slots
-(`countFreeUnownedSlots` excludes them), the active-audit single flight and a
+(`countFreeUnownedSlots` excludes them), the host-wide audit budget
+(`maxAudit`, default `1`) and a
 `parent`/unclassifiable candidate. The relaxed slot stays **pinned** to that
 one leaf audit (`ctx.leafAuditAdmission`, the C4 single-tier pin), so no
 implement/plan/intake pane can consume it.
@@ -2561,10 +2705,10 @@ What the contract now guarantees:
    ambiguous split-by-skill rule pauses audit/implement-kind candidates
    while plan/intake/risk-effort prep still dispatches (Q1); per-tier
    free-slot minimums gate the dispatch path; the CAS claim and
-   per-process single-flight guards are unchanged. The active-audit
-   single-flight gate remains audit-tier scoped (an open critical item is
-   never audit-kind, so matching the legacy tier ordering it escalates even
-   while an audit is in flight).
+   per-process single-flight guards are unchanged. The host-wide audit
+   budget gate (`maxAudit`, default `1`) remains audit-tier scoped (an open
+   critical item is never audit-kind, so matching the legacy tier ordering
+   it escalates even while an audit is in flight).
 3. **No second ranking is introduced (AC3).** Scanning never re-ranks
    against a separate `wl list` lookup — candidates come only from the
    Herdr head, and only the critical group is re-ordered (by `sortIndex`).
@@ -2573,7 +2717,7 @@ What the contract now guarantees:
    dispatch-time without a marker check) dispatches it.
 4. **A critical `completed`/`in_review` (audit-kind) item is out of the
    scan's scope** — it is handled by the normal audit tier, so the
-   audit-freshness and active-audit gates keep acting on it unchanged.
+   audit-freshness and host-wide audit-budget gates keep acting on it unchanged.
 
 **In-flight guard — the marker bypass is bounded, not unconditional
 (WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO).** The unconditional bypass

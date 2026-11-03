@@ -141,6 +141,54 @@ pi extension sends as the `X-Priority` provider request header (fail-open:
 unset/invalid → no header, the proxy applies its own `medium` default). This
 is an environment variable, not a Worklog config key.
 
+## Host-wide dispatch budget (herdr downtime worker)
+
+The herdr downtime worker limits how many `implement` and `audit` panes one
+**machine** runs at once, across every herdr instance and project
+(WL-0MVXWQFGV000D2AB). The budget is machine-scoped — **not** a per-instance
+`~/.config/herdr/worklog-plugin.json` key — so it cannot drift per instance.
+The authoritative record is the ledger
+`~/.herdr/downtime/dispatch-budget.json` (one entry per in-flight dispatch);
+the caps are configured beside it.
+
+| Setting | Default | Range / meaning |
+|---|---|---|
+| `budget.json` → `maxImplement` | `2` | clamp `0`–`32`; `0` disables the implement tier host-wide |
+| `budget.json` → `maxAudit` | `1` | clamp `0`–`32`; `0` disables the audit tier host-wide; `1` reproduces the previous single-flight audit behaviour exactly |
+| `HERDR_HOST_MAX_IMPLEMENT` | unset | Overrides `maxImplement`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning) |
+| `HERDR_HOST_MAX_AUDIT` | unset | Overrides `maxAudit`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning) |
+| `HERDR_COORDINATION_DIR` | `~/.herdr/downtime` | Machine coordination directory holding the ledger and `budget.json` |
+
+`budget.json` shape (both keys optional; an absent file yields the defaults
+above):
+
+```json
+{ "maxImplement": 2, "maxAudit": 1 }
+```
+
+Resolution order: `budget.json` → the built-in defaults → the env override →
+the `0..32` clamp. **`0` is a per-tier kill switch**, not "unlimited": that
+tier never dispatches on this host. A malformed `budget.json` (not an object,
+non-numeric, negative) falls back to the defaults for the invalid field and
+records a warning rather than throwing; an unresolvable coordination
+directory degrades to "no ledger" (dispatch behaves exactly as before the
+budget existed).
+
+The default `maxImplement: 2` is deliberately conservative: it bounds
+**in-flight agent work per machine** (operator intent), not LLM capacity — the
+proxy free-slot and prefill gates remain the inner limiter, and the budget can
+only reduce concurrency below them.
+
+Fail directions differ by path by design: dispatcher-fired work **fails
+closed** on an unreadable ledger (`host-budget-unknown`, then a self-healing
+rewrite from the live pane list), while a hand-fired `/skill:implement` /
+`/skill:audit` shortcut **fails open with a visible notice** (a human owns the
+decision). Hand-fired over-quota dispatches open the confirmation dialog; a
+proceed records `override: { "by": "user" }` on the ledger entry. See
+[`docs/dev/downtime-dispatcher.md`](docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope)
+for the gate table, reason tokens, audit-cap unification and the rolling-window
+out-of-scope note.
+
 ## Configuration Override System
 
 The system loads configuration in this order:
