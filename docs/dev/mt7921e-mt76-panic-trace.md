@@ -146,3 +146,44 @@ before `mt76_connac_mcu_uni_add_dev` runs.
 79610010; `disable_aspm=1` (ASPM L1 off); in-tree driver stack (mt76,
 mt76_connac_lib, mt7921_common); kernel taint `G O` from unrelated out-of-tree
 NVIDIA modules.
+
+---
+
+## 6. Mitigation and 24 h durability check — **PASS** (WL-0MVYEQKAM003THSP)
+
+The mitigation under test is the `mt7921e` blacklist applied 2026-11-01 20:55
+(`/etc/modprobe.d/blacklist-mt7921e.conf` → `blacklist mt7921e`, then
+`update-initramfs -u`), with `wifi-watchdog.timer` disabled and the host running on
+`enp2s0` Ethernet + tailscale. The host rebooted at **2026-11-01 21:07:01**
+(`boot_id e11d0dbe-1b4b-47c5-988a-b0142a3ad15e`) and a detached watcher sampled
+the boot until uptime crossed 86 460 s (24 h + 1 min).
+
+**Verdict: `VERIFY-COMPLETE verdict=PASS` at 2026-11-02T21:08:21+00:00**
+(`uptime_at_check: 86481s`). Evidence, kept in `/var/tmp` (survives reboots):
+
+| Artefact | Content |
+|---|---|
+| `/var/tmp/mt7921-verify-24h.txt` | baseline line, 141 `progress:` heartbeats, `---- CHECKS ----`, `VERDICT: PASS`, `VERIFY-COMPLETE` |
+| `/var/tmp/mt7921-verify-24h-console.log` | `tee` copy of the same run |
+| `/var/tmp/mt7921-verify-24h.json` | machine-readable result (`"verdict": "PASS"`) |
+| `/var/tmp/mt7921-verify-24h.done` | completion marker |
+| `/var/tmp/verify-mt7921.sh` | the check script (`TARGET_UPTIME=86460` for this run) |
+
+Independently re-verified on the host on 2026-11-03 (not read from the JSON):
+no `mt79*`/`mt76*` modules loaded, no `wlp*` interface, `0000:03:00.0`
+**UNBOUND** with no `Kernel driver in use`, `journalctl -k -b 0` hits for
+`mt7921|mt76|Oops:|BUG:|Kernel panic|unable to handle page fault` = **0**,
+`/var/crash` still exactly `202611011959 202611012042 202611012106`, boot 0 still
+started 2026-11-01 21:07:01 with the same boot id, uptime 162 169 s (45 h),
+kdump `loaded=1 size=1342177280`, `wifi-watchdog.timer` `disabled/inactive`,
+default route via `enp2s0`, `tailscale0` connected.
+
+Coverage: heartbeats span `uptime=4204s → 86418s` (141 samples, 10 min cadence,
+largest inter-sample gap **10.5 min**), and `rebooted_during_window: 0` — the
+24 h window is continuously covered, so "no crash" is measured, not assumed.
+
+**What this does and does not prove.** The blacklist prevents the fault by never
+loading the faulting driver, so a PASS proves the *mitigation* holds, not that
+the `mt76_dma_add_buf` bug is fixed. Re-enabling `mt7921e` (or a kernel/driver
+update that loads it) re-exposes the fault described above; track the upstream
+report in §5 before allowing the driver back.

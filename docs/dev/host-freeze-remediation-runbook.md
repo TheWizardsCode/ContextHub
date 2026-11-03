@@ -14,6 +14,12 @@
 > it addresses degraded cooling, an outdated BIOS and a weak battery, but **none of it is the fix for
 > the freezes**. Do not act on these steps until (a) the 24 h durability check (WL-0MVYEQKAM003THSP)
 > has passed and (b) a real panic trace has been read, as instructed by the parent epic.
+>
+> **Gate (a) is now satisfied.** The 24 h durability check reported
+> `VERIFY-COMPLETE verdict=PASS` at 2026-11-02T21:08:21Z (uptime 86 481 s, unchanged boot id, no new
+> vmcore) — evidence in `/var/tmp/mt7921-verify-24h.*`, recorded in §6 of
+> [`mt7921e-mt76-panic-trace.md`](./mt7921e-mt76-panic-trace.md). Steps 4–7 below are therefore
+> unblocked.
 
 ---
 
@@ -110,7 +116,8 @@ host and is the number any service must improve (target: < 60 °C idle).
 
 ## 5. Step 3 — Hold thermal/BIOS/battery work during the blacklist window
 
-**Pre-condition:** the 24 h durability check (WL-0MVYEQKAM003THSP) has **not yet passed**.
+**Pre-condition:** the 24 h durability check (WL-0MVYEQKAM003THSP) has **not yet passed** —
+*resolved: it passed at 2026-11-02 21:08 (`VERDICT: PASS`), so this hold no longer applies*.
 
 **Action:** explicitly do **not** reboot, do **not** flash BIOS, do **not** open the chassis,
 do **not** run memtest until the check completes at **2026-11-02 21:08** and the migration is
