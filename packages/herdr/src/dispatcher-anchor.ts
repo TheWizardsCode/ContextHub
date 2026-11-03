@@ -34,7 +34,6 @@
  * Validation: pane RPC aliveness check detects closed anchor; re-provisions.
  */
 
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   getMachineCoordinationDir,
@@ -43,15 +42,12 @@ import {
 import { tryAcquireCoordLock } from './coordination.js';
 import { resolveHerdrBin } from './herdr-bin.js';
 import {
-  DISPATCHER_ANCHOR_FILE,
   DISPATCHER_WORKSPACE_LABEL,
   PLUGIN_PANE_LABEL,
   DISPATCHER_ROOT_TAB_LABEL,
-  DISPATCHER_TAB_ANCHORS_FILE,
 } from './dispatcher-anchor.contract.js';
 import type {
   DispatcherAnchor,
-  DispatcherTabAnchors,
   DispatcherPrefixTabAnchor,
   DispatcherAnchorDeps,
   DispatcherTabInfo,
@@ -69,6 +65,13 @@ import {
   parsePaneProcessInfoOutput,
   parseProcEnviron,
 } from './dispatcher-anchor.cli-parsers.js';
+import {
+  readAnchor,
+  writeAnchor,
+  readTabAnchors,
+  readDispatcherWorkspaceId,
+  persistPrefixTab,
+} from './dispatcher-anchor.persistence.js';
 
 import {
   createTabInWorkspace,
@@ -140,109 +143,12 @@ export {
 } from './dispatcher-anchor.herdr-cli.js';
 
 // ── Persistence helpers ────────────────────────────────────────────────
-
-function anchorFilePath(dir: string): string {
-  return path.join(dir, DISPATCHER_ANCHOR_FILE);
-}
-
-function readAnchor(dir: string): DispatcherAnchor | null {
-  try {
-    const raw = fs.readFileSync(anchorFilePath(dir), 'utf-8');
-    if (!raw.trim()) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const o = parsed as Record<string, unknown>;
-    const paneId = o.paneId ?? o.pane_id;
-    const workspaceId = o.workspaceId ?? o.workspace_id;
-    if (typeof paneId !== 'string' || !paneId || typeof workspaceId !== 'string' || !workspaceId) return null;
-    return { paneId, workspaceId };
-  } catch {
-    return null;
-  }
-}
-
-function writeAnchor(dir: string, anchor: DispatcherAnchor): boolean {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const fp = anchorFilePath(dir);
-    const tmp = `${fp}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(anchor), 'utf-8');
-    fs.renameSync(tmp, fp);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ── Per-prefix tab-anchor persistence (C1) ─────────────────────────────
-
-/** Path to the per-prefix tab-anchors persistence file. */
-function tabAnchorsFilePath(dir: string): string {
-  return path.join(dir, DISPATCHER_TAB_ANCHORS_FILE);
-}
-
-/**
- * Read the per-prefix tab-anchors map. Returns `null` when absent, empty, or
- * structurally invalid (caller treats as "no anchors yet").
- */
-function readTabAnchors(dir: string): DispatcherTabAnchors | null {
-  try {
-    const raw = fs.readFileSync(tabAnchorsFilePath(dir), 'utf-8');
-    if (!raw.trim()) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const o = parsed as Record<string, unknown>;
-    const workspaceId = o.workspaceId ?? o.workspace_id;
-    const byPrefix = o.byPrefix;
-    if (typeof workspaceId !== 'string' || !workspaceId) return null;
-    if (
-      byPrefix === undefined ||
-      byPrefix === null ||
-      typeof byPrefix !== 'object' ||
-      Array.isArray(byPrefix)
-    ) {
-      return null;
-    }
-    const out: DispatcherTabAnchors = { workspaceId, byPrefix: {} };
-    for (const [prefix, entry] of Object.entries(byPrefix as Record<string, unknown>)) {
-      if (entry === null || typeof entry !== 'object') continue;
-      const rec = entry as Record<string, unknown>;
-      const tabId = rec.tabId ?? rec.tab_id;
-      const paneId = rec.paneId ?? rec.pane_id;
-      if (typeof tabId === 'string' && tabId !== '' && typeof paneId === 'string' && paneId !== '') {
-        out.byPrefix[prefix] = { tabId, paneId };
-      }
-    }
-    return out;
-  } catch {
-    return null;
-  }
-}
-
-/** Atomically persist the per-prefix tab-anchors map (tmp + rename). */
-function writeTabAnchors(dir: string, anchors: DispatcherTabAnchors): boolean {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const fp = tabAnchorsFilePath(dir);
-    const tmp = `${fp}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(anchors), 'utf-8');
-    fs.renameSync(tmp, fp);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Synchronously read the legacy single-anchor file to obtain the Dispatcher
- * workspace id without launching the herdr CLI. Returns `null` when absent.
- */
-function readDispatcherWorkspaceId(): string | null {
-  const dir = getMachineCoordinationDir();
-  if (dir === null) return null;
-  const existing = readAnchor(dir);
-  return existing === null ? null : existing.workspaceId;
-}
+//
+// Moved verbatim to `dispatcher-anchor.persistence.ts`
+// (WL-0MW0JHBFX006GMBQ, parent WL-0MVGKHCP9005SJPZ) — the file-I/O layer,
+// separate from the anchor provisioning policy in this module. Imported (not
+// re-exported): these helpers stay internal to the dispatcher-anchor family,
+// so the public barrel surface is unchanged.
 
 /**
  * Ensure the Dispatcher workspace exists and return its workspace id: reuse
@@ -583,31 +489,6 @@ export async function getDispatcherTabAnchor(
   } finally {
     release();
   }
-}
-
-/**
- * Upsert one prefix → { tabId, paneId } entry in the persisted per-prefix
- * map, keeping the Dispatcher `workspaceId` current. Returns `true` when the
- * map was written.
- *
- * Always writes (even when the entry is unchanged) so a stale entry whose
- * pane was superseded in herdr is corrected rather than left to be
- * re-resolved on every dispatch.
- */
-function persistPrefixTab(
-  dir: string,
-  workspaceId: string,
-  prefix: string,
-  tabId: string,
-  paneId: string,
-): boolean {
-  const current = readTabAnchors(dir);
-  const anchors: DispatcherTabAnchors = {
-    workspaceId,
-    byPrefix: { ...(current?.byPrefix ?? {}) },
-  };
-  anchors.byPrefix[prefix] = { tabId, paneId };
-  return writeTabAnchors(dir, anchors);
 }
 
 // ── Project workspace resolution (AC1/AC3) ─────────────────────────────
