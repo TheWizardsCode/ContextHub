@@ -95,10 +95,34 @@ suite. `--type full` still resolves from `suiteCommands`, so a bare
 
 Only a `--type full` run at `scope=full` counts as full-suite evidence for the
 audit skill. `--type herdr` and `--group herdr` runs use independent cache
-keys (`herdr`, `group:herdr`): they are recorded and queryable, but they
-**never satisfy a "full test suite passes" AC**. Auditing a herdr-only change
-still needs operator attestation (`--green-run HEAD`) or a herdr-aware audit
-follow-up (not implemented).
+keys (`herdr`, `group:herdr`) and **never satisfy a "full test suite passes"
+AC** — that contract is unchanged.
+
+Since **WL-0MVHP5NTU009PA3I** the audit is herdr-aware for the herdr package
+suite itself. When a work item's resolved touched files include a
+`packages/herdr/**` path (committed paths plus Key Files), the audit (F3)
+consults both herdr cache keys, read-only, within the same 24h acceptance
+window it uses for full-suite evidence. When a green full-scope herdr run
+exists at the audited git state it injects a **HERDR SUITE GREEN RUN** evidence
+block (parent Phase-1 screen, both child Phase-1 screens, every Phase 2
+prompt) and records `Herdr suite evidence: <sha> (cached herdr package-suite
+run)` in the report. The block may satisfy a criterion **explicitly about the
+herdr package suite**, and states explicitly that it does not satisfy the
+full-suite AC. The `Herdr suite passes` AC on a herdr-touching item therefore
+no longer needs operator attestation (`--green-run HEAD`); populating the
+cache with one sanctioned run is enough:
+
+```bash
+python3 <test-skill>/scripts/run_tests.py --type herdr --json
+# or
+python3 <test-skill>/scripts/run_tests.py --group herdr --json
+```
+
+A herdr cache miss/red/changed-scope entry yields no evidence (fail-open
+partial, with a diagnostic), and a work item that does not touch
+`packages/herdr/**` never queries the herdr keys. The audit never executes the
+herdr suite itself; the change is the audit runner's (tracked as the
+SorraAgents cross-repo companion SA-0MW133H3P008TNPQ).
 
 ### Full `tests/` coverage (WL-0MVG4FF9200346NR)
 
