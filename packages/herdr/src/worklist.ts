@@ -74,6 +74,11 @@ import {
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
+import {
+  HostBudgetDialogState,
+  overlayHostBudgetDialog,
+  type HostBudgetPromptHost,
+} from './host-budget-dialog.js';
 import { KeypressDecoder } from './key-input.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown } from './md-viewer.js';
@@ -3596,7 +3601,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; hostBudgetPrompt?: HostBudgetPromptHost; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3619,6 +3624,7 @@ export async function runWorklistTui(
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
     shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd),
+    hostBudgetPrompt: options?.hostBudgetPrompt,
     dbWatch: options?.dbWatch ?? watchDbChanges,
     dbWatchOptions: options?.dbWatchOptions,
   };
@@ -3794,6 +3800,13 @@ export async function runWorklistTui(
    * dialog is bottom-anchored — the selection list stays visible above it.
    */
   let shipItDialog: ShipItDialogState | null = null;
+  /**
+   * Host-budget over-quota confirmation dialog (WL-0MVXY0Z93002HKCZ F4).
+   * Non-null while the user-fired dispatch gate is awaiting an answer. The
+   * dialog is bottom-anchored (the selection list stays visible) and cancel is
+   * the safe default — a stray keypress never dispatches over quota.
+   */
+  let hostBudgetDialog: HostBudgetDialogState | null = null;
 
   let totalActionableCount: number | undefined;
 
@@ -3833,7 +3846,11 @@ export async function runWorklistTui(
    * command-completion hook). See {@link isInputActive}.
    */
   const inputActive = (): boolean =>
-    isInputActive(formState, shipItDialog, blockedNotice !== null || podcastNotice !== null);
+    isInputActive(
+      formState,
+      shipItDialog,
+      blockedNotice !== null || podcastNotice !== null || hostBudgetDialog !== null,
+    );
 
   /**
    * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
@@ -4700,6 +4717,21 @@ export async function runWorklistTui(
       const result = shipItDialog.handleInput(key);
       if (result === 'submitted' || result === 'cancelled') {
         shipItDialog = null;
+      }
+      render();
+      return;
+    }
+
+    // ── Host-budget over-quota confirmation (WL-0MVXY0Z93002HKCZ) ────
+    // While the dialog is open every key is consumed: Enter/y proceeds over
+    // quota, Esc/n cancels (cancel is the state on open). The dispatch path
+    // (`index.ts`'s agent route) is awaiting the answer, so resolving here is
+    // what lets a cancelled dispatch return without a claim, a pane or a
+    // ledger entry.
+    if (hostBudgetDialog !== null) {
+      const result = hostBudgetDialog.handleInput(key);
+      if (result !== null) {
+        hostBudgetDialog = null;
       }
       render();
       return;
@@ -5589,14 +5621,23 @@ export async function runWorklistTui(
     // bottom line — the pane output must stay within the terminal budget.
     const rendered = output;
 
-    // ── Ship It confirmation dialog overlay (WL-0MSGG5N5Z0074TLY) ─────
-    // Bottom-anchored: the selection list is rendered normally and the
-    // dialog replaces only the lower rows, so the list stays visible above
+    // ── Ship It / Host-budget confirmation dialog overlays ─────────────
+    // Both are bottom-anchored: the selection list is rendered normally and
+    // the dialog replaces only the lower rows, so the list stays visible above
     // it (contrast: FormState full-screen, Code Freeze notice centered
     // full-pane box). The overlay never exceeds the `rows - 1` budget.
+    // The host-budget prompt (WL-0MVXY0Z93002HKCZ F4) uses the same
+    // composition, so the operator keeps seeing the queue while deciding.
     const finalOutput = shipItDialog !== null
       ? overlayShipItDialog(rendered, termSize.cols, termSize.rows, shipItDialog.buffer)
-      : rendered;
+      : hostBudgetDialog !== null
+        ? overlayHostBudgetDialog(
+            rendered,
+            termSize.cols,
+            termSize.rows,
+            hostBudgetDialog.request,
+          )
+        : rendered;
 
     // Clear from cursor to end of screen to remove leftover content
     // from previous renders of different heights
@@ -5932,8 +5973,25 @@ export async function runWorklistTui(
 
   scheduler.start();
 
+  // ── Host-budget prompt renderer (WL-0MVXY0Z93002HKCZ F4) ──────────
+  // The dispatch path (`index.ts`) awaits `hostBudgetPromptHost.ask()`; this
+  // registration is what paints the dialog and collects the keys. Unregistering
+  // on teardown settles any still-pending prompt as `cancel`, so a dispatch
+  // awaiting an answer can never hang across a pane exit.
+  const unregisterHostBudgetPrompt = opts.hostBudgetPrompt?.register({
+    open: (request, resolveChoice) => {
+      hostBudgetDialog = new HostBudgetDialogState(
+        request,
+        () => resolveChoice('proceed'),
+        () => resolveChoice('cancel'),
+      );
+      render();
+    },
+  });
+
   // Cleanup on promise resolution
   promise.finally(() => {
+    unregisterHostBudgetPrompt?.();
     scheduler.stop();
     dbChangeWatch?.dispose();
     closeEventSubscriber();

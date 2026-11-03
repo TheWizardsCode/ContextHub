@@ -2000,6 +2000,76 @@ releases the audit reservation); `downtime-worker.dispatch.test.ts` pins the
 claim-pipeline admission and its release paths; `machine-coordination.test.ts`
 pins the retired marker's read-only compatibility surface.
 
+### Interactive over-quota confirmation — user-fired dispatches
+### (WL-0MVXY0Z93002HKCZ F4, parent WL-0MVXWQFGV000D2AB)
+
+**Problem.** The budget refused *dispatcher-fired* work at admission, but an
+operator firing `/skill:implement` or `/skill:audit` by hand walked straight
+past it — the pane opened and the ledger was never consulted, so hand-fired
+work could take the host over the cap the operator had configured.
+
+**Contract.** A hand-fired `/skill:implement` / `/skill:audit` dispatch consults
+the SAME machine-scoped ledger and caps as the dispatcher, and — when the tier
+is at or over its cap — asks first, in the worklist pane, before anything
+observable happens. The gate lives in `index.ts`'s `route === 'agent'` block,
+BEFORE the claim and before any spawn, so it covers **both** branches of that
+route with one enforcement point: the interactive pane and the headless
+`open_pane: false` background dispatch. Dispatcher-fired work never prompts —
+it refuses the tick and logs the reason (above).
+
+| State | Behaviour |
+|---|---|
+| **below cap** | No dialog, no extra keypress (the common path is unchanged). The ledger entry is reserved best-effort, so hand-fired work counts against the budget like dispatcher-fired work. |
+| **at / over cap** | The bottom-anchored dialog opens over the still-visible selection list. `Enter`/`y` = proceed anyway, `Esc`/`n` = cancel; **cancel is the state on open**, and every other key leaves it there (a stray keypress can never dispatch over quota). |
+| **cancel** | Nothing happens: no claim, no pane/background spawn, **no ledger entry**. The work item is untouched. |
+| **proceed** | Dispatch continues exactly as before and the ledger entry is reserved with `override: { by: "user" }`, so the decision log and the hold/counter surfaces can distinguish a deliberate human override from drift. |
+| **ledger unreadable** | **Fails OPEN** with a visible notice on stderr — `Host dispatch budget ledger unreadable — proceeding without the quota check.` — and the dispatch proceeds without a reservation. The corrupt bytes are never rewritten from this path (the dispatcher's repair owns that). |
+| **coordination dir unresolvable** | Proceeds silently: no machine dir means no ledger and no new failure mode (parent AC11). |
+
+**Copy (AC3/AC4).** The dialog names the tier, the live count, the cap and the
+overshoot, e.g. `Implement dispatch would exceed the host quota (2 running, max 2) — over by 1.`
+The overshoot is the shared `computeOverQuota` figure — at cap ⇒ over by 1;
+already `n` over cap ⇒ over by `n + 1`; a disabled tier (`max 0`) quotes the
+documented `0/0` evidence and is over by 1 — so the dialog and the
+dispatcher's log can never disagree.
+
+**Fail directions are deliberately different** (parent design):
+
+| Path | Unreadable ledger | Rationale |
+|---|---|---|
+| Dispatcher (admission) | **fail closed** — skip the tick, reason `host-budget-unknown`, self-healing rewrite from the live pane list | nobody is watching; over-admitting is unbounded |
+| Interactive (this gate) | **fail open + visible notice** | a human is present and owns the decision; a corrupt ledger must never block their shortcut |
+
+**Modules.** `host-budget-dialog.ts` is the pure dialog half — the copy helper,
+`HostBudgetDialogState` key handling (cancel-first), the bordered box and the
+bottom-anchored overlay (same composition rules as `ship-it-dialog.ts`), plus
+`createHostBudgetPromptHost()`, the renderer↔awaiter bridge: the worklist
+registers the renderer, the dispatch path awaits `ask()`. With no renderer
+registered — or a TUI torn down while a prompt is pending — an `ask()` resolves
+`cancel`, so a dispatch can never silently proceed over quota and can never
+hang. `host-dispatch-budget.interactive.ts` is the decision half:
+`budgetKindForAgentCommand()` (implement family / audit; everything else is
+outside the budget) and `prepareInteractiveAgentDispatch()`, which reads the
+cap, counts with the ledger's own per-tier semantics (`liveCount` for implement,
+`freshCount` for audit), prompts only at/over cap, then claims.
+
+**Known limitation.** The implement tier counts an entry only while its
+`paneId` is in the machine-wide live pane list (the F1 liveness table). The
+pane branch confirms the reservation with the captured pane id once
+`send-to-pi.sh` reports the split; a headless `open_pane: false` dispatch never
+gains a pane, so its entry is recorded (and carries the override) but never
+counts toward the implement cap. The audit tier is unaffected (marker
+semantics — no pane required).
+
+**Tests.** `host-budget-dialog.test.ts` pins the copy/overshoot arithmetic and
+every key path; `host-dispatch-budget.interactive.test.ts` pins the gate
+against the isolated machine-dir fixture (under-quota no-op, cancel with no
+claim/ledger entry, proceed with `override: { by: 'user' }`, the audit counting
+asymmetry, the fail-open notice, and both agent branches);
+`host-budget-dialog-tui.test.ts` drives the REAL worklist with the REAL
+shortcut registry and prompt host, proving the dialog renders over the list and
+that `y`/`Enter`/`Esc` resolve the dispatch path.
+
 ### Depth-aware audit batching (parent WL-0MVEDM8OT007WDRS)
 
 **Problem.** The audit tier resets the idle tracker after every successful

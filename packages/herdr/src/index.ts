@@ -70,6 +70,17 @@ import {
   releaseHostDispatch as releaseHostBudgetDispatch,
   type HostBudgetLivePane,
 } from './host-dispatch-budget.admission.js';
+// User-fired (interactive) host-budget gate (WL-0MVXY0Z93002HKCZ F4): the
+// counterpart of the dispatcher's admission. At/over cap it asks first — with
+// the bottom-anchored dialog the worklist renders — and only a deliberate
+// proceed records `override: { by: 'user' }`. Below quota it is a silent
+// no-op, and an unreadable ledger fails OPEN with a visible notice (a human
+// is present and owns the decision).
+import { createHostBudgetPromptHost } from './host-budget-dialog.js';
+import {
+  prepareInteractiveAgentDispatch,
+  type InteractiveAgentDispatchPreparation,
+} from './host-dispatch-budget.interactive.js';
 import {
   countSpawnedChildProcesses,
   createHerdrReaperDeps,
@@ -1480,6 +1491,14 @@ export async function main(): Promise<void> {
     stateFile: wlRoot ? join(wlRoot, '.worklog', AGENT_PANES_FILE) : undefined,
   });
 
+  /**
+   * Host-budget prompt bridge (WL-0MVXY0Z93002HKCZ F4): the worklist registers
+   * the renderer that paints the over-quota dialog; the agent-dispatch path in
+   * `onCommand` awaits `ask()`. With no renderer registered (no TUI) an ask
+   * resolves `cancel`, so a dispatch can never silently proceed over quota.
+   */
+  const hostBudgetPrompt = createHostBudgetPromptHost();
+
   // Production deps for the selection list's tab-based active marker
   // (WL-0MV1BWETT005GSUJ): an item with an exact-match tab in this workspace
   // is rendered as in-progress even when its worklog status is still `open`.
@@ -1682,6 +1701,7 @@ export async function main(): Promise<void> {
         applyActivePaneMarkers(items, hydratorDeps.listActivePanes, hydratorWorkspaceId),
       subscriber: eventSubscriber,
       agentTracker,
+      hostBudgetPrompt,
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
       onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
@@ -1753,14 +1773,40 @@ export async function main(): Promise<void> {
               )
             : Promise.resolve();
         if (route === 'agent') {
-          // Claim the referenced work-item BEFORE dispatching so it appears
-          // in_progress immediately — for both the pane and the headless
-          // (no-pane) path. Non-blocking: failures are logged to stderr and
-          // never prevent the dispatch (AC2).
-          try {
-            await claimItemForAgentCommand(command);
-          } catch {
-            // Belt-and-suspenders: a claim failure must never block the pane.
+          // Host-wide budget gate for USER-FIRED dispatches
+          // (WL-0MVXY0Z93002HKCZ F4). Runs BEFORE the claim and before any
+          // pane/background spawn, for BOTH branches of this route:
+          //  - below quota  → silent no-op (reserve the ledger entry, claim as
+          //                   before): the common path gains no keypress;
+          //  - at/over cap  → the worklist shows the bottom-anchored dialog;
+          //                   cancel returns here with NO claim, NO pane and
+          //                   NO ledger entry; proceed reserves the entry with
+          //                   `override: { by: 'user' }`;
+          //  - unreadable ledger → fails OPEN with a visible stderr notice.
+          // Dispatcher-fired work never reaches this path (its admission
+          // refuses the tick instead of prompting).
+          // Fail-open: a gate/claim failure must never prevent the dispatch
+          // (the pre-F4 claim path had the same guarantee).
+          const budgetPreparation = await prepareInteractiveAgentDispatch(command, {
+            confirm: (request) => hostBudgetPrompt.ask(request),
+            notify: (message) => process.stderr.write(`[worklog-plugin] ${message}\n`),
+            // The SAME machine-wide pane read the dispatcher's admission uses
+            // (`herdr pane list` for the whole host, not this instance's panes).
+            readLivePanes: () => hostBudgetLivePanes(defaultRunningDowntimePanesResolver, targetCwd),
+            claim: (agentCommand) => claimItemForAgentCommand(agentCommand),
+            root: targetCwd,
+          }).catch((error: unknown) => {
+            process.stderr.write(
+              `[worklog-plugin] Host budget gate failed (proceeding): ${
+                error instanceof Error ? error.message : String(error)
+              }\n`,
+            );
+            return { proceed: true, reserved: false } satisfies InteractiveAgentDispatchPreparation;
+          });
+          if (!budgetPreparation.proceed) {
+            // Cancel: no claim, no pane, no background dispatch, no ledger
+            // entry. The item stays exactly as it was.
+            return;
           }
           // Request priority (WL-0MVE1NZ4J000H5NH AC2): resolve the
           // dispatched work item's priority and map it through the
@@ -1850,7 +1896,27 @@ export async function main(): Promise<void> {
             void capturePaneIdFromFile(itemId, paneIdFile, (wid, pid) =>
               agentTracker.recordAgentForWorkItem(wid, pid, command),
             ).then((capturedPaneId) => {
-              if (capturedPaneId !== undefined) return runInteractiveRootPaneCleanup();
+              if (capturedPaneId !== undefined) {
+                // Confirm the reservation with the live pane id so the
+                // implement tier counts this user-fired dispatch (its
+                // liveness rule needs a pane in the machine-wide pane list).
+                // Best-effort: a failing seam never affects the dispatch.
+                if (budgetPreparation.reserved && budgetPreparation.kind !== undefined) {
+                  try {
+                    confirmHostBudgetDispatch({
+                      kind: budgetPreparation.kind,
+                      itemId,
+                      instanceId: `herdr:${process.pid}`,
+                      root: targetCwd,
+                      paneId: capturedPaneId,
+                    });
+                  } catch {
+                    // Best-effort — the entry stays reserved without a pane.
+                  }
+                }
+                return runInteractiveRootPaneCleanup();
+              }
+              return undefined;
             });
           }
         } else if (route === 'pane') {
