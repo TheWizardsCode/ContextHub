@@ -3,29 +3,28 @@
  *
  * Concern: the family's public surface. The implementation lives in the
  * `./github/*` modules (transport, types, repo-slug, markers, labels,
- * hierarchy) and this barrel re-exports the names consumers import from
- * `'./github.js'` unchanged, alongside the issue and comment flows that are
- * still being extracted (WL-0MVGKGR2H006MNVG). It imports the family modules;
- * no family module imports it, so the family's import graph stays acyclic.
+ * hierarchy, comments) and this barrel re-exports the names consumers import
+ * from `'./github.js'` unchanged, alongside the issue flows that are still
+ * being extracted (WL-0MVGKGR2H006MNVG). It imports the family modules; no
+ * family module imports it, so the family's import graph stays acyclic.
  *
  * Issue-hierarchy plumbing lives in `./github/hierarchy.ts`
  * (WL-0MVVLXYRO006WP2I); its eight public functions are re-exported below.
+ * Issue-comment CRUD lives in `./github/comments.ts` (WL-0MVVLXZFN00994LW); the
+ * eight public comment functions are re-exported below.
  */
 
 import throttler from './github-throttler.js';
 import { WorkItem, Comment, WorkItemStatus, WorkItemPriority } from './types.js';
 import {
   ghApiAsyncScheduled,
-  ghApiJsonScheduled,
   quoteShellValue,
   runGh,
   runGhAsync,
   runGhDetailed,
   runGhDetailedAsync,
-  runGhJson,
   runGhJsonAsync,
   runGhSafe,
-  runGhSafeJson,
 } from './github/transport.js';
 
 // The `gh` CLI transport moved to `./github/transport.ts` (WL-0MVVLXWRQ000IFET).
@@ -93,10 +92,23 @@ export {
   listParentIssueNumbersFromTimeline,
 } from './github/hierarchy.js';
 
+// Issue-comment CRUD moved to `./github/comments.ts` (WL-0MVVLXZFN00994LW); the
+// eight public functions keep their names, signatures and barrel path. The
+// response normaliser `normalizeGithubIssueComment` stays private to that module.
+export {
+  listGithubIssueComments,
+  listGithubIssueCommentsAsync,
+  createGithubIssueComment,
+  createGithubIssueCommentAsync,
+  updateGithubIssueComment,
+  updateGithubIssueCommentAsync,
+  getGithubIssueComment,
+  getGithubIssueCommentAsync,
+} from './github/comments.js';
+
 import type {
   AssignGithubIssueResult,
   GithubConfig,
-  GithubIssueComment,
   GithubIssueRecord,
 } from './github/types.js';
 import { parseRepoSlug } from './github/repo-slug.js';
@@ -151,106 +163,6 @@ export function workItemToIssuePayload(
     labels: Array.from(labels),
     state,
   };
-}
-
-function normalizeGithubIssueComment(comment: any): GithubIssueComment {
-  return {
-    id: comment.id,
-    body: comment.body ?? null,
-    updatedAt: comment.updated_at || comment.updatedAt || new Date().toISOString(),
-    author: comment.user?.login || comment.author?.login,
-  };
-}
-
-/**
- * @deprecated Use `listGithubIssueCommentsAsync` instead. This function blocks the event loop.
- * Migration: Replace `listGithubIssueComments(config, issueNumber)` with `await listGithubIssueCommentsAsync(config, issueNumber)`.
- */
-export function listGithubIssueComments(config: GithubConfig, issueNumber: number): GithubIssueComment[] {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/comments --paginate`;
-  const data = runGhSafeJson(command);
-  if (!data) {
-    return [];
-  }
-  const raw = Array.isArray(data) ? data : [];
-  return raw.map(comment => normalizeGithubIssueComment(comment));
-}
-
-// Async variants -----------------------------------------------------------
-export async function listGithubIssueCommentsAsync(config: GithubConfig, issueNumber: number): Promise<GithubIssueComment[]> {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api repos/${owner}/${name}/issues/${issueNumber}/comments --paginate`;
-  try {
-    const data = await ghApiJsonScheduled(command);
-    if (!data) return [];
-    const raw = Array.isArray(data) ? data : [];
-    return raw.map(comment => normalizeGithubIssueComment(comment));
-  } catch {
-    return [];
-  }
-}
-
-/**
- * @deprecated Use `createGithubIssueCommentAsync` instead. This function blocks the event loop.
- * Migration: Replace `createGithubIssueComment(config, issueNumber, body)` with `await createGithubIssueCommentAsync(config, issueNumber, body)`.
- */
-export function createGithubIssueComment(config: GithubConfig, issueNumber: number, body: string): GithubIssueComment {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -F body=@-`;
-  const data = runGhJson(command, body);
-  return normalizeGithubIssueComment(data);
-}
-
-export async function createGithubIssueCommentAsync(config: GithubConfig, issueNumber: number, body: string): Promise<GithubIssueComment> {
-  // Ensure comment creation is scheduled through the central throttler.
-  return await throttler.schedule(async () => {
-    const { owner, name } = parseRepoSlug(config.repo);
-    const command = `gh api -X POST repos/${owner}/${name}/issues/${issueNumber}/comments -F body=@-`;
-    const data = await runGhJsonAsync(command, body);
-    return normalizeGithubIssueComment(data);
-  });
-}
-
-/**
- * @deprecated Use `updateGithubIssueCommentAsync` instead. This function blocks the event loop.
- * Migration: Replace `updateGithubIssueComment(config, commentId, body)` with `await updateGithubIssueCommentAsync(config, commentId, body)`.
- */
-export function updateGithubIssueComment(config: GithubConfig, commentId: number, body: string): GithubIssueComment {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -F body=@-`;
-  const data = runGhJson(command, body);
-  return normalizeGithubIssueComment(data);
-}
-
-export async function updateGithubIssueCommentAsync(config: GithubConfig, commentId: number, body: string): Promise<GithubIssueComment> {
-  // Ensure comment updates are scheduled through the central throttler.
-  return await throttler.schedule(async () => {
-    const { owner, name } = parseRepoSlug(config.repo);
-    const command = `gh api -X PATCH repos/${owner}/${name}/issues/comments/${commentId} -F body=@-`;
-    const data = await runGhJsonAsync(command, body);
-    return normalizeGithubIssueComment(data);
-  });
-}
-
-/**
- * @deprecated Use `getGithubIssueCommentAsync` instead. This function blocks the event loop.
- * Migration: Replace `getGithubIssueComment(config, commentId)` with `await getGithubIssueCommentAsync(config, commentId)`.
- */
-export function getGithubIssueComment(config: GithubConfig, commentId: number): GithubIssueComment {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api repos/${owner}/${name}/issues/comments/${commentId} --json id,body,updatedAt,user`;
-  const data = runGhJson(command);
-  return normalizeGithubIssueComment(data);
-}
-
-export async function getGithubIssueCommentAsync(config: GithubConfig, commentId: number): Promise<GithubIssueComment> {
-  const { owner, name } = parseRepoSlug(config.repo);
-  const command = `gh api repos/${owner}/${name}/issues/comments/${commentId} --json id,body,updatedAt,user`;
-  const data = await throttler.schedule(async () => {
-    return await runGhJsonAsync(command);
-  });
-  return normalizeGithubIssueComment(data);
 }
 
 // ---------------------------------------------------------------------------
