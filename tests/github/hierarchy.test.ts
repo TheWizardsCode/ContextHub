@@ -9,10 +9,12 @@
  *
  * The extraction is move-only, so the family's existing suites (which mock the
  * barrel wholesale) prove the *wiring* but never the hierarchy functions
- * themselves. These tests exercise the eight public hierarchy functions through
- * the barrel — the path consumers actually use — with the `gh` transport
- * replaced by spies, and assert the observable contract the move must not
- * change:
+ * themselves. These tests exercise the eight public hierarchy functions on the
+ * extracted module with the `gh` transport replaced by spies, and assert the
+ * observable contract the move must not change. The barrel re-export itself is
+ * covered by `github-split-guard.test.ts` (frozen public surface, resolved at
+ * runtime), so the module under test is imported directly here — mocking the
+ * transport through the barrel's re-export chain is not needed for that.
  *
  * | Concern | Assertion |
  * |---|---|
@@ -27,10 +29,12 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../src/github/transport.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/github/transport.js')>();
+vi.mock('../../src/github/transport.js', async () => {
+  // Only the real shell-quoting helper is reused: the assertions about the
+  // emitted `-f`/`-F` flags must follow production quoting, not a local copy.
+  const { quoteShellValue } = await import('../../src/shell-escape.js');
   return {
-    ...actual,
+    quoteShellValue,
     runGhJsonDetailed: vi.fn(),
     runGhJsonDetailedAsync: vi.fn(),
     ghApiJsonScheduled: vi.fn(),
@@ -54,7 +58,7 @@ import {
   getIssueHierarchyAsync,
   getIssueNodeIdAsync,
   listParentIssueNumbersFromTimeline,
-} from '../../src/github.js';
+} from '../../src/github/hierarchy.js';
 
 const config = { repo: 'acme/widgets', labelPrefix: 'wl:' };
 
