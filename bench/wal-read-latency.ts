@@ -28,7 +28,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 import Database from 'better-sqlite3';
-import { SqlitePersistentStore } from '../src/persistent-store.js';
+import { SqlitePersistentStore } from '@worklog/shared/persistent-store';
 import type { WorkItem } from '../src/types.js';
 
 interface Options {

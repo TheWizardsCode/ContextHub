@@ -113,7 +113,7 @@ describe('wl create dedup guard', () => {
 
   // AC7: --dedup-window 10s with match after 11s → normal create (window expired)
   // Implemented with a 1s window + 1.2s wait — the same expiry code path
-  // (createdAt > now - windowMs cutoff in persistent-store.ts) 10x faster.
+  // (createdAt > now - windowMs cutoff in the shared store's dedup query) 10x faster.
   it('AC7: does not reuse a match older than --dedup-window (window expiry)', async () => {
     const first = await createJson('Same Title');
     await new Promise((resolve) => setTimeout(resolve, 1200));

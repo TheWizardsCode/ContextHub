@@ -14,7 +14,6 @@ import {
   type GitTarget,
   type JsonlImportResult,
 } from '@worklog/shared';
-import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
 import { importFromJsonl, importFromJsonlContent, exportToJsonlAsync, getDefaultDataPath } from './jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults, getRemoteDataFileContent } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from './file-lock.js';

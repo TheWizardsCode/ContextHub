@@ -20,7 +20,8 @@ WAL-aware invalidation), [read-cache `src/read-cache.ts`](../../src/read-cache.t
 Worklog runs SQLite in **WAL journal mode** with **no explicit checkpoint
 logic**. All checkpointing is left to SQLite defaults:
 
-- `PRAGMA journal_mode = WAL` — set explicitly at open (`src/persistent-store.ts`).
+- `PRAGMA journal_mode = WAL` — set explicitly at open
+  (`packages/shared/src/persistent-store.ts`).
 - `PRAGMA wal_autocheckpoint` — **not set**, so SQLite's default of **1000
   pages** applies (~4MB at the 4096-byte page size).
 - No `PRAGMA wal_checkpoint(...)` call exists anywhere in the codebase.
@@ -37,14 +38,14 @@ last connection exits.
 
 ### 2.1 Pragmas set by Worklog
 
-Both the root CLI store (`src/persistent-store.ts`) and the shared TUI store
-(`packages/shared/src/persistent-store.ts`) apply identical pragmas at open:
+The shared store (`packages/shared/src/persistent-store.ts`) is the one store
+the CLI and the TUI both construct; it applies these pragmas at open:
 
 | Pragma | Value | Where set | Notes |
 |--------|-------|-----------|-------|
-| `journal_mode` | `WAL` | both, constructor | Enables concurrent readers + single writer; writes go to `worklog.db-wal` first |
-| `foreign_keys` | `ON` | both, constructor | Referential integrity; unrelated to WAL |
-| `busy_timeout` | 5000 (CLI) / 250 (TUI) ms | both, constructor | Writer contention backoff; overridable via `WL_SQLITE_BUSY_TIMEOUT_MS` |
+| `journal_mode` | `WAL` | constructor | Enables concurrent readers + single writer; writes go to `worklog.db-wal` first |
+| `foreign_keys` | `ON` | constructor | Referential integrity; unrelated to WAL |
+| `busy_timeout` | 5000 (CLI) / 250 (TUI) ms | constructor | Writer contention backoff; overridable via `WL_SQLITE_BUSY_TIMEOUT_MS` |
 
 ### 2.2 SQLite defaults left in effect (verified live)
 
@@ -172,7 +173,7 @@ concurrent `wl` processes** each opening its own SQLite connection to the same
 **Decision: add an explicit `PRAGMA wal_checkpoint(PASSIVE)` after
 `importData()` (the `wl sync` / doctor / init bulk-import path) and keep the
 SQLite-default auto-checkpoint threshold (1000 pages ≈ 4MB).** Implemented in
-`src/persistent-store.ts` and `packages/shared/src/persistent-store.ts`.
+`packages/shared/src/persistent-store.ts`.
 
 ### Rationale
 

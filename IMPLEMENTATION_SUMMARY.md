@@ -72,7 +72,6 @@ Worklog/
 │   ├── commands/         # CLI command implementations
 │   ├── types.ts          # Type definitions
 │   ├── database.ts       # Worklog database facade
-│   ├── persistent-store.ts # SQLite persistence
 │   ├── jsonl.ts          # Import/export functions
 │   ├── sync.ts           # JSONL merge/sync helpers
 │   ├── config.ts         # Configuration management
@@ -82,6 +81,7 @@ Worklog/
 │   ├── index.ts          # Server entry point
 │   └── cli.ts            # CLI tool entry
 ├── dist/                 # Compiled JavaScript
+├── packages/shared/      # Canonical store + shared types (`@worklog/shared`)
 ├── docs/                 # Internal/development docs
 ├── examples/             # Example plugins
 ├── tests/                # Test suite

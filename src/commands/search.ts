@@ -8,7 +8,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { SearchOptions } from '../cli-types.js';
-import type { FtsSearchResult } from '../persistent-store.js';
+import type { FtsSearchResult } from '@worklog/shared/persistent-store';
 import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
 import { formatTitleAndId } from './helpers.js';
 import { theme } from '../theme.js';

@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { normalizeSqliteValue, normalizeSqliteBindings, unescapeText } from '../src/persistent-store.js';
+import { normalizeSqliteValue, normalizeSqliteBindings, unescapeText } from '@worklog/shared/persistent-store';
 import { WorklogDatabase } from '../src/database.js';
 import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } from './test-utils.js';
 
