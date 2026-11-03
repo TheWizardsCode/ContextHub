@@ -2238,6 +2238,23 @@ decision-log excerpts reported on the parent work item:
 npx tsx packages/herdr/scripts/leaf-audit-decision-log-scenario.ts
 ```
 
+**Waiting for the fire-and-forget log is event-driven, never a fixed sleep
+(WL-0MW0YD2T6004FRDJ).** The worker writes decision entries with
+`void recordDecision(...)`, so `tick()` can resolve before an append lands.
+The scenario used to read the log back after a fixed 25 ms sleep; on a
+saturated host (load avg 14–23 from a concurrent full suite) the append
+sometimes landed later, the captures came back empty, and the suite went red
+on the same tree that passed on `--rerun-failures`. The scenario now injects
+`deps.recordDecision` — delegating to the same production
+`appendCoordinationLogEntry` path, only with an optional simulated delay —
+tracks every append the tick starts and awaits them all
+(`settleDecisionWrites`, re-checking for appends queued behind an in-flight
+write) before reading the log back. A slow append only makes the run slower.
+`downtime-worker.leaf-audit.test.ts` pins it with a scenario run under a
+150 ms per-append delay: the same three reason tokens (`leaf-audit-admission`,
+`audit-tier-budget-skipped`, `slots-unavailable`) are still captured with the
+same dispatch outcomes.
+
 **AC traceability (parent WL-0MSORQ8Y4004YT63).**
 
 | AC | Implementation | Pinned by |
