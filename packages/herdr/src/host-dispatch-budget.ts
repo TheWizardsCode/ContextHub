@@ -9,9 +9,12 @@
  * One machine-scoped record of every in-flight `implement` and `audit`
  * dispatch, plus a configurable per-tier cap, so a host budget is
  * authoritative across every herdr instance and project on the machine.
- * This module is the vertical slice only: F2–F5 wire enforcement (dispatcher
- * admission, interactive dialog, observability). Until they do, nothing here
- * changes dispatch behaviour.
+ *
+ * Enforcement lives elsewhere: the dispatcher's admission read and both tiers'
+ * wiring are in `host-dispatch-budget.admission.ts` (implement tier F3, audit
+ * tier F2 — which also replaces the retired host-wide `active-audit` marker),
+ * consumable per-tier caps come from `readBudgetConfig`, and the interactive
+ * over-quota dialog / observability surfaces are F4/F5.
  *
  * ## Files (machine coordination dir — `~/.herdr/downtime` or
  * ## `HERDR_COORDINATION_DIR`, see `machine-coordination.ts`)
@@ -65,6 +68,15 @@
  *    list, and reaps stale, pane-less entries on read so a crashed leader
  *    cannot wedge the host. A reap write is best-effort: the count already
  *    excludes those entries, so lock contention only defers the cleanup.
+ *  - `freshCount(kind)` — the AUDIT tier's admission read: counts every entry
+ *    of that kind whose heartbeat is fresh, with no live-pane requirement, and
+ *    reaps every stale entry. This is the semantics of the retired host-wide
+ *    `active-audit` marker (WL-0MVXY0XPF006YUHA F2): an audit slot is held from
+ *    the dispatch until a release point fires (pane close, dispatch failure,
+ *    claim rollback) and is released by staleness after the 2 h window — the
+ *    pane list is not a release point for the audit tier. It also counts a
+ *    non-stale legacy `active-audit` marker file as ONE synthetic audit entry
+ *    (retirement read-compatibility) and never writes or removes that file.
  *
  * The composite liveness rules are deliberately explicit, because the
  * in-between states matter and are pinned by tests:
@@ -108,6 +120,7 @@ import {
   DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS,
   ensureMachineCoordinationDir,
   getMachineCoordinationDir,
+  readActiveAuditMarker,
 } from './machine-coordination.js';
 
 // ── Contract constants ─────────────────────────────────────────────────
@@ -439,6 +452,39 @@ export function reduceLedgerCounts(
     }
     retained.push(entry);
     if (!stale && hasLivePane) counts[entry.kind] += 1;
+  }
+  return { counts, retained, reaped };
+}
+
+/**
+ * Reduce a ledger with the RETIRED host-wide audit marker's semantics.
+ *
+ * The marker held a host-wide audit slot from dispatch until a release point
+ * fired (audit pane close, dispatch/spawn failure, claim rollback) and was
+ * ignored once older than the 2 h stale window — the live pane list was never
+ * consulted. Reusing that rule for the audit tier is what makes `maxAudit: 1`
+ * indistinguishable from the marker (WL-0MVXY0XPF006YUHA F2 AC1): a fresh
+ * entry counts even in the reserve→spawn window, and staleness is the only
+ * time-based release.
+ *
+ * Pure — the sibling of {@link reduceLedgerCounts}, which keeps the
+ * pane-liveness rule for the implement tier.
+ */
+export function reduceMarkerCounts(
+  entries: readonly HostBudgetEntry[],
+  now: number,
+  staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
+): HostBudgetReduction {
+  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const retained: HostBudgetEntry[] = [];
+  const reaped: HostBudgetEntry[] = [];
+  for (const entry of entries) {
+    if (isEntryStale(entry, now, staleWindowMs)) {
+      reaped.push(entry);
+      continue;
+    }
+    retained.push(entry);
+    counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }
@@ -787,6 +833,70 @@ export function liveCount(
     const reaped = reap(livePanes, { ...opts, dir, now, staleWindowMs: windowMs });
     if (reaped.ok) counts = reaped.counts;
   }
+  return { ok: true, kind, count: counts[kind], counts };
+}
+
+/**
+ * Count the non-stale legacy `active-audit` marker file as ONE synthetic audit
+ * entry (WL-0MVXY0XPF006YUHA F2 AC2 — retirement read-compatibility).
+ *
+ * A marker written by an older instance (one still running the marker-based
+ * single-flight) must keep blocking this instance, otherwise a mixed-version
+ * host could double-dispatch audits. The file is read only: this module never
+ * creates or removes it. A missing, unreadable or malformed marker counts 0
+ * (the reader is fail-safe), and a marker at/older than the stale window counts
+ * 0 — the same release rule the marker itself had.
+ */
+export function legacyActiveAuditCount(
+  dir: string | null,
+  now: number = Date.now(),
+  staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
+): number {
+  if (dir === null) return 0;
+  const marker = readActiveAuditMarker(dir);
+  if (marker === null) return 0;
+  return isEntryStale({ heartbeatAt: marker.dispatchedAt }, now, staleWindowMs) ? 0 : 1;
+}
+
+/**
+ * Count a tier's FRESH entries without requiring a live pane, and reap every
+ * stale entry (see {@link reduceMarkerCounts} for the semantics and why the
+ * audit tier uses them).
+ *
+ * For the audit tier the result additionally includes a non-stale legacy
+ * `active-audit` marker as one synthetic entry ({@link legacyActiveAuditCount}),
+ * so `count` and `counts.audit` are exactly what admission must compare with
+ * `maxAudit`. The reap write is best-effort, like `liveCount`: the returned
+ * count already excludes reaped entries, so lock contention only defers the
+ * cleanup.
+ */
+export function freshCount(
+  kind: HostBudgetKind,
+  opts: HostBudgetOptions = {},
+): LiveCountResult {
+  const dir = resolveBudgetDir(opts);
+  if (dir === null) return noDir();
+  const now = opts.now ?? Date.now();
+  const windowMs = staleWindowOf(opts);
+  const read = readBudgetAt(dir);
+  if (!read.ok) return read;
+  const reduction = reduceMarkerCounts(read.ledger.entries, now, windowMs);
+  let counts = reduction.counts;
+  if (reduction.reaped.length > 0) {
+    const reaped = withLedgerLock(dir, (ledger) => {
+      const again = reduceMarkerCounts(ledger.entries, now, windowMs);
+      if (
+        again.reaped.length > 0 &&
+        !writeBudgetAt(dir, { version: DISPATCH_BUDGET_VERSION, entries: again.retained })
+      ) {
+        return ioError();
+      }
+      return { ok: true as const, counts: again.counts };
+    });
+    if (reaped !== null && reaped.ok) counts = reaped.counts;
+  }
+  const legacy = kind === 'audit' ? legacyActiveAuditCount(dir, now, windowMs) : 0;
+  if (legacy > 0) counts = { ...counts, audit: counts.audit + legacy };
   return { ok: true, kind, count: counts[kind], counts };
 }
 

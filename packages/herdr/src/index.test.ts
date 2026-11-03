@@ -28,13 +28,14 @@ import {
   setHostCpuSamplerForTests,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
+import { readActiveAuditMarker, isHostAuditActive } from './machine-coordination.js';
 import {
-  writeActiveAuditMarker,
-  removeActiveAuditMarker,
-  readActiveAuditMarker,
-  isHostAuditActive,
-} from './machine-coordination.js';
-import { liveCount, reserve, type HostBudgetLivePane } from './host-dispatch-budget.js';
+  freshCount,
+  HOST_BUDGET_CONFIG_FILE,
+  liveCount,
+  reserve,
+  type HostBudgetLivePane,
+} from './host-dispatch-budget.js';
 import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type HerdrPaneRecord, type ScheduledPrompt } from './downtime-worker.js';
 import { classifyAuditScope } from './downtime-worker.gates.js';
 import { SCHEDULED_PROMPTS_FILE, scheduledPromptsPath } from './scheduled-prompts.js';
@@ -2367,13 +2368,14 @@ describe('createDowntimeDeps', () => {
   it('end-to-end: two consecutive idle windows dispatch a single unaudited candidate exactly once', async () => {
     // AC5 (parent): with one unaudited completed/in_review candidate and two
     // consecutive idle windows (no audit recorded between), the worker
-    // dispatches exactly once. The first dispatch writes BOTH the durable
-    // per-worklog marker (kind:audit) and the machine-wide active-audit
-    // marker (WL-0MUIVE0YG000UVIA). The second window's HOST-WIDE audit
-    // serialisation check sees the non-stale machine-wide marker and skips
-    // the audit tier outright — reporting reason 'audit-host-saturated'
-    // (never 'no-candidate', so the no-candidate cooldown is not entered
-    // while the audit runs) — so no second dispatch.
+    // dispatches exactly once. The first dispatch writes the durable
+    // per-worklog marker (kind:audit) AND reserves the machine-scoped audit
+    // slot (WL-0MVXY0XPF006YUHA F2, replacing the active-audit marker). The
+    // second window's HOST-WIDE audit admission check reads the ledger, finds
+    // the tier at its `maxAudit: 1` cap and skips the audit tier outright —
+    // reporting reason 'audit-host-saturated' (never 'no-candidate', so the
+    // no-candidate cooldown is not entered while the audit runs) — so no
+    // second dispatch.
     const now = Date.now();
     const candidate = {
       id: 'WL-ONCE',
@@ -2456,6 +2458,9 @@ describe('createDowntimeDeps', () => {
     // The durable marker landed in the shared log (kind:audit).
     const entries = await readDowntimeLogEntries(cwd);
     expect(entries.some((e) => e.itemId === 'WL-ONCE' && e.kind === 'audit')).toBe(true);
+    // The machine-scoped ledger holds the audit slot — the state the second
+    // tick refuses against.
+    expect(freshCount('audit')).toMatchObject({ ok: true, count: 1 });
 
     // Idle window 2: the host-wide audit serialisation check skips the audit
     // tier (audit-host-saturated); nothing else to dispatch.
@@ -2601,17 +2606,41 @@ describe('createDowntimeDeps', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Host-wide audit serialisation (WL-0MUIVE0YG000UVIA)
+// Host-wide audit admission (WL-0MUIVE0YG000UVIA marker → WL-0MVXY0XPF006YUHA F2
+// ledger)
 //
-// End-to-end coverage of the real `createDowntimeDeps` wiring: a machine-wide
-// active-audit marker at `~/.herdr/downtime/active-audit` (resolved via
-// HERDR_COORDINATION_DIR) must make `getActiveAudit` report host-wide
-// saturation for ANY project on the host, and the marker must be written on
-// an audit dispatch and released when the audit pane completes.
+// End-to-end coverage of the real `createDowntimeDeps` wiring: the
+// machine-scoped dispatch-budget ledger (machine coordination dir, resolved via
+// HERDR_COORDINATION_DIR) must make `getActiveAudit` report a host-wide skip for
+// ANY project on the host, a non-stale legacy `active-audit` marker must be
+// counted as ONE synthetic audit entry (read-compatibility), and the legacy
+// marker must never be written or removed again.
 // ---------------------------------------------------------------------------
 
-describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
+describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
   const originalCoordinationDir = process.env.HERDR_COORDINATION_DIR;
+
+  /** Write the legacy marker verbatim, as an older herdr instance would. */
+  function writeLegacyMarker(dir: string, instanceId = 'other-instance'): void {
+    writeFileSync(
+      join(dir, 'active-audit'),
+      JSON.stringify({ instanceId, dispatchedAt: new Date().toISOString() }),
+    );
+  }
+
+  /** Write `<machine dir>/budget.json` with an explicit `maxAudit`. */
+  function writeMaxAudit(dir: string, maxAudit: number): void {
+    writeFileSync(join(dir, HOST_BUDGET_CONFIG_FILE), JSON.stringify({ maxAudit }));
+  }
+
+  /**
+   * `wl` invocations of the stubbed exec. The host-wide fast path must not
+   * issue a worklog query; a `herdr pane list` (only on the unreadable-ledger
+   * repair path) is not a `wl` call.
+   */
+  function wlCalls(mockExec: ReturnType<typeof vi.fn>): unknown[][] {
+    return mockExec.mock.calls.filter(([bin]) => bin === 'wl');
+  }
 
   afterEach(() => {
     resetExecFileAsync();
@@ -2627,14 +2656,14 @@ describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
     tempDirs.length = 0;
   });
 
-  it('getActiveAudit reports host-wide saturation when the machine-wide marker is present (AC1)', async () => {
-    // Simulates a SECOND dispatcher instance on the same host: another
-    // project dispatched an audit, so the machine-wide marker is present.
-    // This project's getActiveAudit must see it WITHOUT consulting the
-    // per-worklog log or issuing any wl query.
+  it('getActiveAudit counts a non-stale LEGACY marker as one synthetic audit entry (AC2 read-compatibility)', async () => {
+    // Simulates a SECOND, older herdr instance on the same host: it still
+    // writes the retired `active-audit` marker. The marker must keep blocking
+    // this instance (mixed-version safety), i.e. it is counted as exactly one
+    // audit entry against the default `maxAudit: 1`.
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    expect(writeActiveAuditMarker(coordinationDir, 'other-instance')).toBe(true);
+    writeLegacyMarker(coordinationDir, 'older-instance');
 
     const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
     setExecFileAsync(mockExec as never);
@@ -2643,9 +2672,120 @@ describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.getActiveAudit(cwd);
 
-    expect(result).toEqual({ ok: true, active: true, source: 'host-wide' });
+    // maxAudit defaults to 1 → the legacy single-flight token is preserved.
+    expect(result).toEqual({
+      ok: true,
+      active: true,
+      source: 'host-wide',
+      reason: 'audit-host-saturated',
+      budget: { live: 1, max: 1 },
+    });
     // The host-wide fast path short-circuits before any wl query.
-    expect(mockExec).not.toHaveBeenCalled();
+    expect(wlCalls(mockExec)).toEqual([]);
+  });
+
+  it('getActiveAudit reads the ledger cap: one live audit against maxAudit=2 still admits (AC3)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    writeMaxAudit(coordinationDir, 2);
+    expect(
+      reserve({
+        kind: 'audit',
+        itemId: 'WL-RUNNING',
+        instanceId: 'other-instance',
+        root: '/repo/other',
+        paneId: 'pane-1',
+      }).ok,
+    ).toBe(true);
+
+    // No per-worklog marker → the per-worklog check runs and answers none.
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getActiveAudit(cwd);
+
+    // One of two permitted audits is running: this tick may dispatch the second.
+    expect(result).toEqual({ ok: true, active: false, source: 'per-worklog' });
+  });
+
+  it('getActiveAudit refuses the third audit with host-budget-audit at maxAudit=2 (AC3)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    writeMaxAudit(coordinationDir, 2);
+    for (const itemId of ['WL-A', 'WL-B']) {
+      expect(
+        reserve({
+          kind: 'audit',
+          itemId,
+          instanceId: 'other-instance',
+          root: '/repo/other',
+          paneId: `pane-${itemId}`,
+        }).ok,
+      ).toBe(true);
+    }
+
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getActiveAudit(cwd);
+
+    expect(result).toEqual({
+      ok: true,
+      active: true,
+      source: 'host-wide',
+      reason: 'host-budget-audit',
+      budget: { live: 2, max: 2 },
+    });
+    expect(wlCalls(mockExec)).toEqual([]);
+  });
+
+  it('getActiveAudit refuses every audit at maxAudit=0 with 0/0 evidence (AC3)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    writeMaxAudit(coordinationDir, 0);
+
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getActiveAudit(cwd);
+
+    // The kill switch reports the same token at every live count, with 0/0.
+    expect(result).toEqual({
+      ok: true,
+      active: true,
+      source: 'host-wide',
+      reason: 'host-budget-audit',
+      budget: { live: 0, max: 0 },
+    });
+  });
+
+  it('getActiveAudit fails closed on an unreadable ledger and repairs it from live panes (AC6)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    writeFileSync(join(coordinationDir, 'dispatch-budget.json'), '{ not json');
+
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getActiveAudit(cwd);
+
+    expect(result).toEqual({
+      ok: true,
+      active: true,
+      source: 'host-wide',
+      reason: 'host-budget-unknown',
+      budget: { live: 0, max: 1 },
+    });
+    // Self-healing: the unreadable document was rewritten from live state (no
+    // downtime panes here, so an empty but VALID ledger).
+    expect(freshCount('audit')).toMatchObject({ ok: true, count: 0 });
   });
 
   it('getActiveAudit falls back to the per-worklog check when the host-wide marker is absent (AC1, backward compatible)', async () => {
@@ -2711,7 +2851,7 @@ describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
     expect(isHostAuditActive(coordinationDir)).toBe(false);
   });
 
-  it('recordDispatch writes the host-wide marker for an audit dispatch (AC1)', async () => {
+  it('recordDispatch never writes the retired host-wide marker for an audit dispatch (AC2)', async () => {
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
     setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
@@ -2725,34 +2865,25 @@ describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
       cwd,
     });
 
-    const marker = readActiveAuditMarker(coordinationDir);
-    expect(marker).not.toBeNull();
-    expect(typeof marker?.instanceId).toBe('string');
-    expect((marker?.instanceId.length ?? 0) > 0).toBe(true);
-  });
-
-  it('recordDispatch does NOT write the host-wide marker for a non-audit dispatch', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    await deps.recordDispatch({
-      itemId: 'WL-PLAN',
-      kind: 'plan',
-      dispatchedAt: new Date().toISOString(),
-      cwd,
-    });
-
+    // The ledger (reserved in the claim pipeline) is the authority now; the
+    // legacy file is never created again.
     expect(readActiveAuditMarker(coordinationDir)).toBeNull();
   });
 
-  it('recordPaneClose releases the host-wide marker when an audit pane completes (AC1)', async () => {
+  it('recordPaneClose releases the audit ledger reservation (AC5)', async () => {
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    expect(writeActiveAuditMarker(coordinationDir, 'this-instance')).toBe(true);
     const cwd = makeTempDir();
+    expect(
+      reserve({
+        kind: 'audit',
+        itemId: 'WL-AUD',
+        instanceId: 'this-instance',
+        root: cwd,
+        paneId: 'w1:p2',
+      }).ok,
+    ).toBe(true);
+    expect(freshCount('audit')).toMatchObject({ ok: true, count: 1 });
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     await deps.recordPaneClose(
@@ -2770,7 +2901,38 @@ describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
       cwd,
     );
 
-    expect(isHostAuditActive(coordinationDir)).toBe(false);
+    // The host-wide audit slot is given back: the ledger no longer holds the
+    // reservation, whatever the lifecycle outcome.
+    expect(freshCount('audit')).toMatchObject({ ok: true, count: 0 });
+  });
+
+  it('recordPaneClose never removes a legacy marker file (AC2)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    writeLegacyMarker(coordinationDir, 'older-instance');
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    for (const kind of ['audit', 'plan'] as const) {
+      await deps.recordPaneClose(
+        {
+          entryType: 'pane-close',
+          timestamp: new Date().toISOString(),
+          itemId: 'WL-AUD',
+          itemTitle: 'Audited item',
+          paneId: 'w1:p2',
+          kind,
+          outcome: kind === 'audit' ? 'audit-passed' : 'closed-as-plan-complete',
+          reasonCode: 'none',
+          closed: true,
+        },
+        cwd,
+      );
+    }
+
+    // Retirement: this version does not remove the file either — read-
+    // compatibility lasts until the file goes stale.
+    expect(isHostAuditActive(coordinationDir)).toBe(true);
   });
 
   it('recordPaneClose releases the host dispatch-budget reservation (F3 AC3)', async () => {
@@ -2812,39 +2974,10 @@ describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
     expect(liveCount('implement', livePanes)).toMatchObject({ ok: true, count: 0 });
   });
 
-  it('recordPaneClose does NOT release the host-wide marker for a non-audit pane close', async () => {
+  it('recordDispatchFailure never removes a legacy marker file (AC2)', async () => {
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    expect(writeActiveAuditMarker(coordinationDir, 'this-instance')).toBe(true);
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    await deps.recordPaneClose(
-      {
-        entryType: 'pane-close',
-        timestamp: new Date().toISOString(),
-        itemId: 'WL-PLAN',
-        itemTitle: 'Planned item',
-        paneId: 'w1:p3',
-        kind: 'plan',
-        outcome: 'closed-as-plan-complete',
-        reasonCode: 'none',
-        closed: true,
-      },
-      cwd,
-    );
-
-    // The audit marker is untouched — only an audit completion releases it.
-    expect(isHostAuditActive(coordinationDir)).toBe(true);
-  });
-
-  it('recordDispatchFailure releases the host-wide marker after a failed audit spawn (AC1)', async () => {
-    // A failed audit spawn never produced a running audit; the marker must
-    // be released immediately rather than stranding the host slot for the
-    // full stale window.
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    expect(writeActiveAuditMarker(coordinationDir, 'this-instance')).toBe(true);
+    writeLegacyMarker(coordinationDir, 'older-instance');
     const cwd = makeTempDir();
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
@@ -2857,7 +2990,10 @@ describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
       exitCode: null,
     });
 
-    expect(isHostAuditActive(coordinationDir)).toBe(false);
+    // The ledger reservation is released by the claim pipeline's spawn-failure
+    // path (asserted in downtime-worker.dispatch.test.ts); the legacy file is
+    // left to go stale.
+    expect(isHostAuditActive(coordinationDir)).toBe(true);
   });
 });
 

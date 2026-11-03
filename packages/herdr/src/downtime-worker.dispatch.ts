@@ -92,13 +92,20 @@ let dispatchInFlightCount = 0;
 function logHostAuditSaturation(
   freeSlots: number | undefined,
   contentionQueueDepth: number | undefined,
+  budget?: { live: number; max: number },
 ): void {
   try {
     const slots = typeof freeSlots === 'number' ? freeSlots : 'unknown';
     const contention = typeof contentionQueueDepth === 'number' ? contentionQueueDepth : 'unknown';
+    // The audit tier now counts the machine-scoped ledger: report the observed
+    // concurrent audits and cap when the caller has them (WL-0MVXY0XPF006YUHA
+    // F2), falling back to the retired marker's single-flight figures so the
+    // line shape is unchanged for callers without ledger evidence.
+    const concurrent = budget !== undefined ? budget.live : 1;
+    const cap = budget !== undefined ? `, maxAudit=${budget.max}` : '';
     process.stderr.write(
       `[worklog-plugin] Downtime audit tier skipped: audit-host-saturated ` +
-        `(concurrentAudits=1, freeSlots=${slots}, contentionQueueDepth=${contention})\n`,
+        `(concurrentAudits=${concurrent}${cap}, freeSlots=${slots}, contentionQueueDepth=${contention})\n`,
     );
   } catch {
     // fail-closed: logging must never crash the worker
@@ -418,11 +425,18 @@ export async function dispatchDowntimeWork(
     let auditInFlight = false;
     let auditCheckFailed = false;
     let freshnessSkip = false;
-    // Host-wide audit saturation (WL-0MUIVE0YG000UVIA): true when the
-    // machine-wide active-audit marker (another project/instance on this
-    // host) caused the audit-tier skip, as opposed to a per-worklog
-    // in-flight audit. Drives the 'audit-host-saturated' reason/log token.
+    // Host-wide audit admission (WL-0MVXY0XPF006YUHA F2; formerly the marker,
+    // WL-0MUIVE0YG000UVIA): true when the machine-scoped dispatch-budget ledger
+    // (another project/instance on this host), or its disabled/unreadable
+    // state, caused the audit-tier skip — as opposed to a per-worklog
+    // in-flight audit. Drives the host-budget reason/log token.
     let auditHostSaturated = false;
+    // The host-budget refusal token and its live/max evidence, when the audit
+    // pre-check reported them: `audit-host-saturated` at maxAudit 1 (the retired
+    // marker's token), `host-budget-audit` at any other cap, and
+    // `host-budget-unknown` when an unreadable ledger was repaired.
+    let auditHostBudgetReason: string | undefined;
+    let auditHostBudget: { live: number; max: number } | undefined;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
@@ -494,7 +508,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated, hostBudgetReason: auditHostBudgetReason, hostBudget: auditHostBudget };
       const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -541,6 +555,8 @@ export async function dispatchDowntimeWork(
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
         auditHostSaturated = flags.auditHostSaturated;
+        auditHostBudgetReason = flags.hostBudgetReason;
+        auditHostBudget = flags.hostBudget;
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
@@ -560,15 +576,21 @@ export async function dispatchDowntimeWork(
         }
         if (freshnessSkip) return finalize({ dispatched: false, reason: 'fresh-audit-skip' });
         if (auditInFlight) {
-          // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
-          // distinct reason strings for observability. 'audit-host-saturated'
-          // means the machine-wide marker (another project/instance on this
-          // host) held the audit slot; 'audit-in-flight' is a per-worklog
-          // in-flight audit. auditInFlight keeps its original priority over
-          // auditCheckFailed (a mixed tick still reports the audit skip).
+          // Host-wide budget refusal (WL-0MVXY0XPF006YUHA F2; formerly the
+          // marker, WL-0MUIVE0YG000UVIA) vs per-worklog: distinct reason strings
+          // for observability. The host-wide check reports the cap decision —
+          // `audit-host-saturated` at maxAudit 1 (the legacy token), else
+          // `host-budget-audit`/`host-budget-unknown` — while 'audit-in-flight'
+          // is a per-worklog in-flight audit. auditInFlight keeps its original
+          // priority over auditCheckFailed (a mixed tick still reports the
+          // audit skip).
           if (auditHostSaturated) {
-            logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth);
-            return finalize({ dispatched: false, reason: 'audit-host-saturated' });
+            logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth, auditHostBudget);
+            return finalize({
+              dispatched: false,
+              reason: auditHostBudgetReason ?? 'audit-host-saturated',
+              ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}),
+            });
           }
           return finalize({ dispatched: false, reason: 'audit-in-flight' });
         }
@@ -602,6 +624,8 @@ export async function dispatchDowntimeWork(
       auditInFlight = flags.auditInFlight;
       auditCheckFailed = flags.auditCheckFailed;
       auditHostSaturated = flags.auditHostSaturated;
+      auditHostBudgetReason = flags.hostBudgetReason;
+      auditHostBudget = flags.hostBudget;
       freshnessSkip = flags.freshnessSkip;
     }
 
@@ -658,17 +682,21 @@ export async function dispatchDowntimeWork(
           if (activeAudit.active) {
             auditInFlight = true;
             auditHostSaturated = activeAudit.source === 'host-wide';
-            // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
-            // use distinct reason strings for observability. The `source`
-            // field is set by getActiveAudit: 'host-wide' when the machine-
-            // wide marker is active (cross-project serialisation),
-            // 'per-worklog' when a per-worklog dispatch marker maps to an
-            // in_progress item (single-project serialisation).
-            const skipReason = activeAudit.source === 'host-wide'
-              ? 'audit-host-saturated'
+            if (auditHostSaturated) {
+              auditHostBudgetReason = activeAudit.reason;
+              auditHostBudget = activeAudit.budget;
+            }
+            // Host-wide budget refusal (WL-0MVXY0XPF006YUHA F2; formerly the
+            // marker) vs per-worklog: distinct reason strings for
+            // observability. The `source` field is set by getActiveAudit:
+            // 'host-wide' when the machine-scoped ledger reports the audit tier
+            // at/over maxAudit (or disabled/unreadable), 'per-worklog' when a
+            // per-worklog dispatch marker maps to an in_progress item.
+            const skipReason = auditHostSaturated
+              ? (auditHostBudgetReason ?? 'audit-host-saturated')
               : 'audit-in-flight';
-            if (activeAudit.source === 'host-wide') {
-              logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth);
+            if (auditHostSaturated) {
+              logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth, auditHostBudget);
             } else {
               process.stderr.write(
                 `[worklog-plugin] Downtime audit tier skipped: ${skipReason}\n`,
@@ -911,7 +939,12 @@ export async function dispatchDowntimeWork(
           : auditInFlight
             ? {
                 dispatched: false,
-                reason: auditHostSaturated ? 'audit-host-saturated' : 'audit-in-flight',
+                reason: auditHostSaturated
+                  ? (auditHostBudgetReason ?? 'audit-host-saturated')
+                  : 'audit-in-flight',
+                ...(auditHostSaturated && auditHostBudget !== undefined
+                  ? { budget: auditHostBudget }
+                  : {}),
               }
             : auditCheckFailed
               ? { dispatched: false, reason: 'wl-error', error: tier2ErrorDetail }

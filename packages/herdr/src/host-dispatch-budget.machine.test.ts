@@ -1,6 +1,7 @@
 /**
  * packages/herdr/src/host-dispatch-budget.machine.test.ts — machine tests for
- * the implement-tier host-wide admission (WL-0MVXY0YG7009JMHI F3, parent
+ * the host-wide admission of BOTH budgeted tiers (implement: F3
+ * WL-0MVXY0YG7009JMHI; audit: F2 WL-0MVXY0XPF006YUHA; parent
  * WL-0MVXWQFGV000D2AB).
  *
  * These are MACHINE tests in the `slot-budget-machine.test.ts` style: two fake
@@ -19,6 +20,17 @@
  *  - AC4: `maxImplement: 0` disables the tier host-wide (refused `0/0`).
  *  - Parent AC11: an unresolvable coordination dir degrades to no ledger.
  *
+ *  - F2 AC1/AC3: the audit matrix — `maxAudit` 0/1/2, `maxAudit: 1` keeping the
+ *    retired marker's single-flight token, `maxAudit: 2` admitting two and
+ *    refusing the third with `host-budget-audit`.
+ *  - F2 AC2: a non-stale legacy `active-audit` marker counts as ONE synthetic
+ *    audit entry; a stale one is ignored and the file is never removed.
+ *  - F2 AC5: every release point (pane close / dispatch failure / claim
+ *    rollback — all `releaseHostDispatch`) frees the audit slot, and a stale
+ *    entry is reaped by the 2 h rule.
+ *  - F2 AC6: an unreadable ledger fails closed for the audit tier too and is
+ *    rewritten from the live audit panes.
+ *
  * The ledger/config contract itself (read/reserve/release/reap, clamps) is
  * covered by `host-dispatch-budget.test.ts` (F1) and is not re-tested here.
  */
@@ -30,11 +42,19 @@ import { describe, expect, it } from 'vitest';
 import {
   admitHostDispatch,
   confirmHostDispatch,
+  HOST_BUDGET_AUDIT_REFUSAL,
+  HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
+  readAuditBudgetState,
+  releaseHostDispatch,
   type HostBudgetAdmission,
 } from './host-dispatch-budget.admission.js';
 import { HOST_BUDGET_CONFIG_FILE } from './host-dispatch-budget.js';
+import {
+  DOWNTIME_HOST_AUDIT_MARKER_FILE,
+  readActiveAuditMarker,
+} from './machine-coordination.js';
 import {
   makeBudgetEntry,
   makeLivePaneList,
@@ -235,6 +255,204 @@ describe('host dispatch budget — machine admission (F3)', () => {
         live: 1,
         max: 1,
         reason: HOST_BUDGET_IMPLEMENT_REFUSAL,
+      });
+    }));
+});
+
+// ── Audit tier (WL-0MVXY0XPF006YUHA F2) ────────────────────────────────
+
+/** The dispatcher-created pane title convention for an audit pane. */
+function auditPane(paneId: string, itemId: string) {
+  return { paneId, title: `Downtime triggered audit Audit ${itemId} - ${itemId}` };
+}
+
+/** One audit asking the machine-scoped ledger for a slot. */
+function auditAdmit(
+  itemId: string,
+  livePanes: Parameters<typeof admitHostDispatch>[1]['livePanes'],
+  instanceId: string = INSTANCE_A,
+): HostBudgetAdmission {
+  return admitHostDispatch(
+    { kind: 'audit', itemId, instanceId, root: '/repo/test' },
+    { livePanes },
+  );
+}
+
+/** Write the legacy `active-audit` marker file verbatim. */
+function writeLegacyMarker(dir: string, dispatchedAt: string): void {
+  writeFileSync(
+    join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE),
+    JSON.stringify({ instanceId: 'older-instance', dispatchedAt }),
+  );
+}
+
+describe('host dispatch budget — audit tier (F2)', () => {
+  it('AC1: maxAudit=1 reproduces the single-flight exactly — second audit refused with the legacy token', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      const panes = makeLivePaneList([auditPane('pane-1', 'WL-A')]);
+
+      // The first audit reserves the slot. No pane confirmation is needed: the
+      // audit tier counts a fresh reservation immediately (marker semantics).
+      expect(auditAdmit('WL-A', panes)).toEqual({ admitted: true, live: 0, max: 1 });
+
+      // The second audit is refused at the cap, with the retired marker's reason
+      // token (existing consumers keep working) and the observed evidence.
+      expect(auditAdmit('WL-B', panes)).toEqual({
+        admitted: false,
+        live: 1,
+        max: 1,
+        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+      });
+      // A refusal never reserves.
+      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-A']);
+    }));
+
+  it('AC3: maxAudit=2 permits two concurrent audits and refuses the third with host-budget-audit', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 2 });
+      const panes = makeLivePaneList([
+        auditPane('pane-1', 'WL-A'),
+        auditPane('pane-2', 'WL-B'),
+      ]);
+
+      expect(auditAdmit('WL-A', panes)).toEqual({ admitted: true, live: 0, max: 2 });
+      expect(auditAdmit('WL-B', panes)).toEqual({ admitted: true, live: 1, max: 2 });
+      expect(auditAdmit('WL-C', panes)).toEqual({
+        admitted: false,
+        live: 2,
+        max: 2,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
+      });
+      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId).sort()).toEqual([
+        'WL-A',
+        'WL-B',
+      ]);
+    }));
+
+  it('AC3: maxAudit=0 refuses every audit with host-budget-audit and 0/0 evidence', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 0 });
+
+      expect(auditAdmit('WL-A', makeLivePaneList([]))).toEqual({
+        admitted: false,
+        live: 0,
+        max: 0,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
+      });
+      // The pre-check agrees with admission, so the dispatcher skips before any
+      // claim: live/max are the same 0/0.
+      expect(readAuditBudgetState({ livePanes: [] })).toEqual({
+        atCap: true,
+        live: 0,
+        max: 0,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
+      });
+      // A disabled tier never reserves (the ledger is not even created).
+      expect(readBudgetLedger(dir)).toBeNull();
+    }));
+
+  it('AC2: a non-stale legacy marker counts as ONE synthetic audit entry', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      writeLegacyMarker(dir, new Date().toISOString());
+
+      // A mixed-version host: an older instance still runs the marker-based
+      // single-flight, so this instance must not dispatch a second audit.
+      expect(readAuditBudgetState({ livePanes: [] })).toEqual({
+        atCap: true,
+        live: 1,
+        max: 1,
+        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+      });
+      expect(auditAdmit('WL-NEW', [])).toMatchObject({
+        admitted: false,
+        live: 1,
+        max: 1,
+        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+      });
+      // Counting a legacy marker never writes a ledger entry for it.
+      expect(readBudgetLedger(dir)).toBeNull();
+    }));
+
+  it('AC2: a stale legacy marker is ignored and the file is left in place', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      writeLegacyMarker(
+        dir,
+        new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      );
+
+      expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
+      expect(auditAdmit('WL-NEW', [])).toEqual({ admitted: true, live: 0, max: 1 });
+      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-NEW']);
+      // Retirement: the stale file is neither counted nor deleted (an operator
+      // or the older instance owns it).
+      expect(readActiveAuditMarker(dir)).not.toBeNull();
+    }));
+
+  it('AC5: every release point (pane close, dispatch failure, claim rollback) frees the slot by item id', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+
+      // All three abort paths in the claim pipeline call the same release seam
+      // (`releaseHostDispatch` / `releaseHostBudgetForFailure`), so a
+      // release-by-item-id assertion covers each of them; the per-path CALL
+      // SITES are asserted individually in `downtime-worker.dispatch.test.ts`
+      // (marker-write failure, spawn failure, admission refusal) and
+      // `index.test.ts` (pane close).
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        expect(auditAdmit('WL-AUD', [])).toEqual({ admitted: true, live: 0, max: 1 });
+        expect(releaseHostDispatch('WL-AUD')).toBe(true);
+        expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
+        // Idempotent: a second release for the same dispatch is a no-op success.
+        expect(releaseHostDispatch('WL-AUD')).toBe(true);
+      }
+    }));
+
+  it('AC1/AC5: a stale audit entry is reaped on read, releasing the slot', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-CRASHED',
+          paneId: 'pane-dead',
+          heartbeatAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+        }),
+      ]);
+
+      expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
+      // The stale entry was released from disk by the 2 h rule.
+      expect(readBudgetLedger(dir)?.entries).toEqual([]);
+    }));
+
+  it('AC6: an unreadable ledger fails closed and is repaired from the live audit panes', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      writeRawBudgetLedger(dir, '{ this is not json');
+      const livePanes = makeLivePaneList([auditPane('pane-1', 'WL-RUNNING')]);
+
+      expect(readAuditBudgetState({ livePanes })).toEqual({
+        atCap: true,
+        live: 0,
+        max: 1,
+        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+        repaired: true,
+      });
+      // Self-healing: the running audit pane is now a ledger entry (a silent
+      // zero would under-count and admit a second audit).
+      const repaired = readBudgetLedger(dir);
+      expect(repaired?.entries.map((entry) => entry.itemId)).toEqual(['WL-RUNNING']);
+      expect(repaired?.entries[0]).toMatchObject({ kind: 'audit', paneId: 'pane-1' });
+
+      // The next tick reads the healed ledger: still at cap, now with the real
+      // single-flight token.
+      expect(readAuditBudgetState({ livePanes })).toMatchObject({
+        atCap: true,
+        live: 1,
+        max: 1,
+        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
       });
     }));
 });

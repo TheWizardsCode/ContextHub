@@ -139,17 +139,38 @@ export function machineCoordinationDirExists(dir: string | null): boolean {
 }
 
 // ── Host-wide audit serialisation (WL-0MUIVE0YG000UVIA) ─────────────────
+//
+// STATUS: READ-COMPATIBILITY ONLY (WL-0MVXY0XPF006YUHA F2 AC2).
+//
+// Decision. The `active-audit` marker file is RETIRED in favour of the
+// machine-scoped dispatch-budget ledger (`host-dispatch-budget.ts`, kind
+// `audit`, cap `maxAudit`). The ledger is the single authority for in-flight
+// audits because it is count-aware (a marker is single-flight by
+// construction) and carries the same release points and 2 h staleness rule.
+//
+// Read-compatibility (exactly ONE release). A non-stale `active-audit` file
+// is still READ: `host-dispatch-budget.ts`'s `freshCount('audit')` counts it as
+// ONE synthetic audit entry, so a mixed-version host — an older herdr
+// instance still writing the marker — can never be double-dispatched against.
+// The file is NEVER created and NEVER removed by this version: the writers
+// (`writeActiveAuditMarker` / `removeActiveAuditMarker`) were deleted with this
+// change, so no code path can resurrect the marker or mask a ledger bug.
+//
+// Removal schedule. The readers below (and the synthetic-entry count) are
+// removed in the release AFTER the host-wide budget generalisation ships —
+// once every instance on the host is expected to run a budget-aware version.
+// The schedule and the mixed-version rationale are documented for operators in
+// F6 (docs: gate table, machine-dir files, fail directions).
+//
+// Everything below is read-only; nothing here writes to the coordination dir.
 
 /**
- * File name of the host-wide active-audit serialisation marker inside the
- * machine coordination directory (`~/.herdr/downtime/`).
+ * File name of the RETIRED host-wide active-audit serialisation marker inside
+ * the machine coordination directory (`~/.herdr/downtime/`).
  *
- * This file is a simple, single-writer serialisation mechanism: at most one
- * audit-tier `/skill:audit` run should be actively executing per host —
- * across herdr instances and projects. The downtime worker writes this file
- * when an audit is dispatched and removes it when the audit completes or
- * times out (staleness window). Other instances check this file before
- * dispatching an audit and defer/skip when a non-stale marker is present.
+ * Read-only since WL-0MVXY0XPF006YUHA F2: a non-stale file written by an older
+ * instance is counted as one synthetic audit entry by the dispatch-budget
+ * ledger; this version never creates or removes it.
  *
  * The file contains a JSON object with `instanceId` and `dispatchedAt` fields.
  * A marker older than `DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS` is treated as stale
@@ -169,20 +190,23 @@ export const DOWNTIME_HOST_AUDIT_MARKER_FILE = 'active-audit';
 export const DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 /**
- * Shape of the host-wide active-audit serialisation marker file.
+ * Shape of the RETIRED host-wide active-audit serialisation marker file.
  */
 export interface ActiveAuditMarker {
-  /** The instance id that holds the audit slot. */
+  /** The instance id that held the audit slot. */
   instanceId: string;
   /** ISO-8601 UTC timestamp when the audit was dispatched. */
   dispatchedAt: string;
 }
 
 /**
- * Read the host-wide active-audit serialisation marker.
+ * Read the RETIRED host-wide active-audit serialisation marker.
  *
- * Returns `null` when the file does not exist, is unreadable, or cannot be
- * parsed — the caller treats this as "no active audit" (fail-safe).
+ * Kept for one release of read-compatibility (WL-0MVXY0XPF006YUHA F2 AC2): a
+ * non-stale marker written by an older instance is counted as one synthetic
+ * audit entry by the dispatch-budget ledger. Returns `null` when the file does
+ * not exist, is unreadable, or cannot be parsed — the caller treats this as
+ * "no legacy audit" (fail-safe).
  *
  * @param dir The machine coordination directory (must be non-null).
  * @returns The parsed marker, or `null` when absent/unreadable.
@@ -210,65 +234,19 @@ export function readActiveAuditMarker(dir: string): ActiveAuditMarker | null {
 }
 
 /**
- * Write the host-wide active-audit serialisation marker.
- *
- * Creates the machine coordination directory if needed. Overwrites any
- * existing marker (single-writer: the writer is expected to be the only
- * one writing).
- *
- * @param dir The machine coordination directory (must be non-null).
- * @param instanceId The instance id claiming this audit slot.
- * @returns `true` on success, `false` on I/O failure (fail-safe).
- */
-export function writeActiveAuditMarker(
-  dir: string,
-  instanceId: string,
-): boolean {
-  if (!ensureMachineCoordinationDir(dir)) return false;
-  const filePath = path.join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE);
-  const marker: ActiveAuditMarker = {
-    instanceId,
-    dispatchedAt: new Date().toISOString(),
-  };
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(marker), 'utf8');
-    return true;
-  } catch {
-    // I/O failure → fail-safe: no marker written, caller can proceed
-    return false;
-  }
-}
-
-/**
- * Remove the host-wide active-audit serialisation marker.
- *
- * Called when an audit completes (success, failure, or abort) to release
- * the host-wide slot for other instances.
- *
- * @param dir The machine coordination directory (must be non-null).
- * @returns `true` when the marker existed and was removed, `false` otherwise.
- */
-export function removeActiveAuditMarker(dir: string): boolean {
-  const filePath = path.join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE);
-  try {
-    fs.unlinkSync(filePath);
-    return true;
-  } catch {
-    // File already gone or unreadable → marker is effectively released
-    return false;
-  }
-}
-
-/**
  * Check whether a host-wide active-audit marker is present and non-stale.
  *
+ * Kept for one release of read-compatibility (WL-0MVXY0XPF006YUHA F2 AC2).
+ * The ledger is the authority for audit admission; this reader remains only so
+ * operators/tests can inspect a legacy file, and so a mixed-version host's
+ * marker is still recognised as one synthetic audit entry.
+ *
  * Returns `true` when a valid marker exists whose age is within the stale
- * window (`DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS`), meaning an audit is
- * actively running on the host and new audits must be deferred.
+ * window (`DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS`), meaning an audit dispatched
+ * by an older instance may still be running on the host.
  *
  * A stale marker (older than the window) is treated as released — the audit
- * pane may have crashed without cleanup — and `false` is returned so new
- * audits can proceed.
+ * pane may have crashed without cleanup — and `false` is returned.
  *
  * @param dir The machine coordination directory (must be non-null).
  * @param now Optional timestamp in ms (defaults to `Date.now()`).

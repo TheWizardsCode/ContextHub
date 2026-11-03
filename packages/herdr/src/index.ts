@@ -54,21 +54,19 @@ import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import {
   getMachineCoordinationDir,
-  isHostAuditActive,
-  writeActiveAuditMarker,
-  removeActiveAuditMarker,
   readStoredModelCooldowns,
   clearStoredModelCooldown,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
-// Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3): the dispatcher's
-// machine-scoped implement-tier admission. The ledger/config module
-// (`host-dispatch-budget.ts`, F1) is consumed through this admission module so
-// the wiring reads the live pane list from the SAME machine-wide resolver the
-// rest of the dispatcher uses.
+// Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3, audit tier
+// WL-0MVXY0XPF006YUHA F2): the dispatcher's machine-scoped admission for BOTH
+// tiers. The ledger/config module (`host-dispatch-budget.ts`, F1) is consumed
+// through this admission module so the wiring reads the live pane list from the
+// SAME machine-wide resolver the rest of the dispatcher uses.
 import {
   admitHostDispatch as admitHostBudgetDispatch,
   confirmHostDispatch as confirmHostBudgetDispatch,
+  readAuditBudgetState,
   releaseHostDispatch as releaseHostBudgetDispatch,
   type HostBudgetLivePane,
 } from './host-dispatch-budget.admission.js';
@@ -653,24 +651,48 @@ export function createDowntimeDeps(
     },
     async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
       try {
-        // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): FIRST check
-        // the machine-wide active-audit marker at
-        // `~/.herdr/downtime/active-audit`. This coordinates audits ACROSS
-        // projects and herdr instances on the same host — the per-worklog
+        // Host-wide audit admission (WL-0MVXY0XPF006YUHA F2): FIRST consult the
+        // machine-scoped dispatch-budget ledger where the retired
+        // `active-audit` marker used to be read. `readAuditBudgetState` counts
+        // fresh `kind: audit` entries against `maxAudit` (plus a non-stale
+        // legacy marker as ONE synthetic entry, so a mixed-version host is still
+        // serialised) and returns the refusal token the dispatcher reports:
+        // `audit-host-saturated` at `maxAudit: 1` (the legacy token, unchanged
+        // for existing consumers), `host-budget-audit` at any other cap
+        // (including `0`, with 0/0 evidence), and `host-budget-unknown` when an
+        // unreadable ledger had to be repaired. The check coordinates audits
+        // ACROSS projects and herdr instances on the same host — the per-worklog
         // check below cannot see audits dispatched by other projects'
         // dispatchers, which is what allowed host-wide saturation
-        // (2026-09-26 incident). A non-stale marker means an audit is
-        // running somewhere on this host; defer this audit. A stale marker
-        // (older than DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS) is treated as
-        // released. Fail-open: if the coordination dir cannot be resolved
-        // the host-wide check is skipped and the per-worklog check below
-        // still runs (the legacy behaviour is preserved).
+        // (2026-09-26 incident). Fail-open: if the coordination dir cannot be
+        // resolved the host-wide check is skipped and the per-worklog check
+        // below still runs (the legacy behaviour is preserved).
         const coordinationDir = getMachineCoordinationDir();
-        if (coordinationDir !== null && isHostAuditActive(coordinationDir)) {
-          // Host-wide saturation: an audit is active on this host
-          // (dispatched by another instance/project). Report with source
-          // so the worker can log 'audit-host-saturated' specifically.
-          return { ok: true, active: true, source: 'host-wide' };
+        if (coordinationDir !== null) {
+          // Cheap read first: the ledger + cap only, NO pane-list subprocess (the
+          // dispatch loop runs this check once per audit candidate). A pane list
+          // is read only on the rare unreadable-ledger path, to self-heal.
+          let state = readAuditBudgetState({ dir: coordinationDir, root: cwd });
+          if (state.reason === 'host-budget-unknown') {
+            state = readAuditBudgetState({
+              dir: coordinationDir,
+              root: cwd,
+              livePanes: await hostBudgetLivePanes(runningPanesResolver, cwd),
+            });
+          }
+          if (state.atCap) {
+            // Host-wide budget refusal: an audit is already in flight
+            // (dispatched by this or another instance/project), or the tier is
+            // disabled/unreadable. Report with source so the worker logs the
+            // host-budget reason token specifically.
+            return {
+              ok: true,
+              active: true,
+              source: 'host-wide',
+              ...(state.reason !== undefined ? { reason: state.reason } : {}),
+              budget: { live: state.live, max: state.max },
+            };
+          }
         }
         // Active-audit single-flight (WL-0MT3PHW4I002SNOV): does any
         // non-stale kind=audit dispatch marker map to an item still
@@ -1021,27 +1043,12 @@ export function createDowntimeDeps(
         // fail-closed: the marker could not be written → abort the dispatch
         return false;
       }
-      // 3. Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): write the
-      // machine-wide active-audit marker when the durable per-worklog marker
-      // landed. This coordinates audit serialisation ACROSS projects and
-      // herdr instances on the same host. Fail-safe: the write is
-      // best-effort — a failure does NOT abort the dispatch (the per-worklog
-      // marker and stale window still protect against double-dispatch within
-      // this project). Written AFTER the marker write so a failed marker
-      // never leaves a host-wide lock behind with no corresponding dispatch;
-      // a spawn failure releases it via `recordDispatchFailure`.
-      if (event.kind === 'audit') {
-        try {
-          const coordinationDir = getMachineCoordinationDir();
-          if (coordinationDir !== null) {
-            // Identify the dispatching plugin process for diagnostics; the
-            // marker's single-flight semantics do not depend on the id.
-            writeActiveAuditMarker(coordinationDir, `herdr:${process.pid}`);
-          }
-        } catch {
-          // fail-safe: marker write failure must never abort dispatch
-        }
-      }
+      // 3. Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
+      // AC2): the machine-scoped dispatch-budget ledger is the audit-tier
+      // authority now, reserved in the claim→marker→spawn choke point. This
+      // version never writes nor removes the legacy `active-audit` file; a
+      // non-stale file written by an older instance is still counted as one
+      // synthetic audit entry on read (mixed-version safety).
       return true;
     },
     async recordError(event: DowntimeErrorEvent): Promise<void> {
@@ -1072,20 +1079,11 @@ export function createDowntimeDeps(
       } catch {
         // fail-closed: audit logging must never crash the worker
       }
-      // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): a failed audit
-      // spawn never produced a running audit, so release the machine-wide
-      // marker immediately instead of stranding the host slot for the full
-      // stale window. Best-effort — the stale window remains the backstop.
-      if (event.kind === 'audit') {
-        try {
-          const coordinationDir = getMachineCoordinationDir();
-          if (coordinationDir !== null) {
-            removeActiveAuditMarker(coordinationDir);
-          }
-        } catch {
-          // fail-safe: marker removal failure must never crash the worker
-        }
-      }
+      // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
+      // AC2): a failed audit spawn releases the machine-scoped LEDGER entry in
+      // the claim pipeline's spawn-failure path
+      // (`releaseHostBudgetForFailure`), so this version neither writes nor
+      // removes the legacy `active-audit` file.
     },
     async recordDispatchEnrichment(event: DowntimeDispatchEnrichmentEvent): Promise<void> {
       // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6): append a second
@@ -1169,24 +1167,11 @@ export function createDowntimeDeps(
     // (WL-0MU308WSF0002JWN). Fail-closed: `appendPaneCloseLogEntry` never
     // throws.
     async recordPaneClose(entry, cwd: string): Promise<void> {
-      // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): when an audit
-      // pane completes (audit-passed or audit-failed), release the
-      // machine-wide active-audit marker so other instances can dispatch.
-      // Fail-safe: best-effort only — a removal failure must never crash the
-      // worker. The stale window provides a safety net if the removal fails.
-      if (
-        entry.kind === 'audit' &&
-        (entry.outcome === 'audit-passed' || entry.outcome === 'audit-failed')
-      ) {
-        try {
-          const coordinationDir = getMachineCoordinationDir();
-          if (coordinationDir !== null) {
-            removeActiveAuditMarker(coordinationDir);
-          }
-        } catch {
-          // fail-safe: marker removal failure must never crash worker
-        }
-      }
+      // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
+      // AC2): the audit slot is released by the dispatch-budget ledger release
+      // below (keyed by item id, so it covers every kind and outcome). The
+      // legacy `active-audit` file is never removed by this version.
+      //
       // Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3 AC3): a closed pane
       // gives its machine-wide slot back immediately, whatever the lifecycle
       // outcome — the ledger entry is keyed by item id, so this release is

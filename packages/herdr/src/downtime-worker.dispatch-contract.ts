@@ -155,18 +155,22 @@ export interface DowntimeDispatchDeps {
   /** CAS claim rollback (see `DowntimeWorkerDeps.rollbackClaim`). */
   rollbackClaim(itemId: string, original: DowntimeClaimExpected, cwd: string): Promise<boolean>;
   /**
-   * Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3): the ONE
-   * machine-scoped ledger read per dispatch attempt, called in
-   * `dispatchClaimedTier` immediately before the dispatch marker is written so
-   * both dispatcher paths funnel through it (AC1). Optional — absent means no
-   * host budget (legacy/test callers stay byte-identical).
+   * Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3, audit tier
+   * WL-0MVXY0XPF006YUHA F2): the ONE machine-scoped ledger read per dispatch
+   * attempt, called in `dispatchClaimedTier` immediately before the dispatch
+   * marker is written so both dispatcher paths funnel through it (F3 AC1).
+   * Applies to the `implement` and `audit` kinds — plan/intake/risk-effort are
+   * never budgeted. Optional — absent means no host budget (legacy/test callers
+   * stay byte-identical).
    */
   admitHostDispatch?(
     input: DowntimeHostBudgetAdmissionInput,
   ): Promise<DowntimeHostBudgetAdmission>;
   /**
-   * Record the spawned pane id on a reserved budget entry (AC3 "confirm") so
-   * the entry becomes countable in the ledger's liveness rules. Best-effort.
+   * Record the spawned pane id on a reserved budget entry (AC3 "confirm").
+   * Countable in the ledger's liveness rules for the implement tier (the audit
+   * tier counts a fresh entry regardless, as the retired marker did).
+   * Best-effort.
    */
   confirmHostDispatch?(
     itemId: string,
@@ -200,7 +204,10 @@ export interface DowntimeDispatchDeps {
  */
 export interface DowntimeHostBudgetAdmissionInput {
   itemId: string;
-  /** Dispatch kind — only `implement` is admitted by this slice (audit is F2). */
+  /**
+   * Dispatch kind. The `implement` and `audit` kinds are budgeted; the pipeline
+   * only calls the seam for those two.
+   */
   kind: DowntimeDispatchKind;
   /** Worklog root the dispatch operates on. */
   cwd: string;
@@ -214,7 +221,11 @@ export interface DowntimeHostBudgetAdmission {
   admitted: boolean;
   live: number;
   max: number;
-  /** Refusal token: `host-budget-implement` | `host-budget-unknown`. */
+  /**
+   * Refusal token: `host-budget-implement` | `host-budget-audit` |
+   * `audit-host-saturated` (the audit tier at `maxAudit: 1`, preserving the
+   * retired marker's token) | `host-budget-unknown`.
+   */
   reason?: string;
   /** True when an unreadable ledger was rewritten from live panes (AC6). */
   repaired?: boolean;
@@ -415,14 +426,18 @@ export interface DowntimeDispatchOutcome {
    * reason, NEVER 'no-candidate', so the cooldown is not entered while
    * the item is already audited).
    *
-   * Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3):
+   * Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3, audit tier
+   * WL-0MVXY0XPF006YUHA F2):
    * `host-budget-implement` (the ledger reports the implement tier at or over
-   * its machine-wide cap, or the tier is disabled with `maxImplement: 0`) and
-   * `host-budget-unknown` (the ledger could not be read: the dispatcher fails
-   * closed and rewrites it from the live pane list). Both are NEUTRAL skips —
-   * no strike, no attempt budget, no no-candidate cooldown — so the next idle
-   * tick re-checks as soon as a pane frees. `budget` carries the `live`/`max`
-   * evidence.
+   * its machine-wide cap, or the tier is disabled with `maxImplement: 0`),
+   * `host-budget-audit` (the same for the audit tier at any cap other than 1,
+   * including the `maxAudit: 0` kill switch) and `host-budget-unknown` (the
+   * ledger could not be read: the dispatcher fails closed and rewrites it from
+   * the live pane list). The audit tier keeps the retired marker's token
+   * `audit-host-saturated` at its `maxAudit: 1` default, so existing consumers
+   * and logs are unchanged. All of these are NEUTRAL skips — no strike, no
+   * attempt budget, no no-candidate cooldown — so the next idle tick re-checks
+   * as soon as a slot frees. `budget` carries the `live`/`max` evidence.
    */
   reason?: string;
   /**

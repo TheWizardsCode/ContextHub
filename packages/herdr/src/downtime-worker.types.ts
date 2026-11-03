@@ -708,22 +708,37 @@ export type DowntimeClaimResult =
   | { ok: true }
   | { ok: false; reason: 'stale' | 'error'; error?: string };
 /**
- * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV).
+ * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV,
+ * generalised to the host-wide dispatch budget by WL-0MVXY0XPF006YUHA F2).
  *
- *  - `{ok:true, active:true}` — a non-stale `kind=audit` dispatch marker
- *    maps to an item still `in_progress` (dispatched but not yet
- *    completed/reviewed): an audit is running, so the audit tier must be
- *    skipped this tick (outcome reason `audit-in-flight`).
- *  - `{ok:true, active:false}` — no non-stale marker maps to an
- *    `in_progress` item: the audit tier may proceed (audits stay strictly
- *    sequential — never fan-out).
+ *  - `{ok:true, active:true}` — the audit tier must be skipped this tick. The
+ *    `source` says why: `'host-wide'` when the machine-scoped dispatch-budget
+ *    ledger reports the audit tier at/over `maxAudit` (or cannot be read —
+ *    fail-closed), `'per-worklog'` when a non-stale `kind=audit` dispatch
+ *    marker maps to an item still `in_progress` (dispatched but not yet
+ *    completed/reviewed).
+ *  - `{ok:true, active:false}` — the audit tier may proceed.
  *  - `{ok:false}` — the check could not complete (e.g. worklog query
  *    failure): fail-open — the audit tier is skipped and dispatch falls
  *    through to the next tier; all dispatch is never blocked by an
  *    unanswerable check.
+ *
+ * `reason`/`budget` (F2) carry the host-budget refusal token and its
+ * `live`/`max` evidence on a `source: 'host-wide'` skip, so the dispatcher
+ * reports the cap decision rather than inferring it: `audit-host-saturated` at
+ * `maxAudit: 1` (the retired marker's token, unchanged for existing
+ * consumers), `host-budget-audit` at any other cap (including `0`), and
+ * `host-budget-unknown` when the ledger had to be repaired. Absent on a
+ * per-worklog skip.
  */
 export type DowntimeActiveAuditResult =
-  | { ok: true; active: boolean; source?: 'host-wide' | 'per-worklog' }
+  | {
+      ok: true;
+      active: boolean;
+      source?: 'host-wide' | 'per-worklog';
+      reason?: 'audit-host-saturated' | 'host-budget-audit' | 'host-budget-unknown';
+      budget?: { live: number; max: number };
+    }
   | { ok: false; error?: string };
 /**
  * Result of the running-downtime-panes liveness query (AC1/AC3, parent

@@ -29,8 +29,10 @@ import {
   budgetLedgerPath,
   clampHostBudget,
   computeOverQuota,
+  freshCount,
   isEntryStale,
   isOverQuota,
+  legacyActiveAuditCount,
   liveCount,
   livePaneIdSet,
   parseBudgetConfig,
@@ -38,11 +40,13 @@ import {
   readBudgetConfig,
   reap,
   reduceLedgerCounts,
+  reduceMarkerCounts,
   release,
   reserve,
   resolveBudgetConfig,
   type HostBudgetEntry,
 } from './host-dispatch-budget.js';
+import { DOWNTIME_HOST_AUDIT_MARKER_FILE } from './machine-coordination.js';
 import {
   budgetLedgerPath as fixtureLedgerPath,
   makeBudgetEntry,
@@ -297,6 +301,46 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
     const entries = [entry({ itemId: 'WL-A', paneId: 'p1' })];
     reduceLedgerCounts(entries, livePaneIdSet([]), NOW);
     expect(entries).toHaveLength(1);
+  });
+});
+
+describe('reduceMarkerCounts (pure marker-semantics reduction)', () => {
+  const entry = (overrides: Partial<HostBudgetEntry>): HostBudgetEntry =>
+    makeBudgetEntry(overrides) as HostBudgetEntry;
+
+  it('counts fresh entries per kind with NO live-pane requirement (reserve→spawn window)', () => {
+    const entries = [
+      entry({ kind: 'implement', itemId: 'WL-A', paneId: 'p1' }),
+      entry({ kind: 'audit', itemId: 'WL-B' }),
+      entry({ kind: 'audit', itemId: 'WL-C', paneId: 'p3' }),
+    ];
+    const reduction = reduceMarkerCounts(entries, NOW);
+    // The retired marker counted a dispatch from the moment it was written, so
+    // an audit reservation without a confirmed pane counts immediately.
+    expect(reduction.counts).toEqual({ implement: 1, audit: 2 });
+    expect(reduction.reaped).toEqual([]);
+    expect(reduction.retained).toHaveLength(3);
+  });
+
+  it('reaps a stale entry even while its pane is still alive (staleness is the release)', () => {
+    const longRunning = entry({
+      kind: 'audit',
+      itemId: 'WL-LONG',
+      paneId: 'p1',
+      heartbeatAt: new Date(NOW - 3 * HOUR).toISOString(),
+    });
+    const reduction = reduceMarkerCounts([longRunning], NOW);
+    expect(reduction.counts).toEqual({ implement: 0, audit: 0 });
+    expect(reduction.reaped.map((e) => e.itemId)).toEqual(['WL-LONG']);
+  });
+
+  it('treats an age of exactly the stale window as stale (isHostAuditActive parity)', () => {
+    const boundary = entry({
+      kind: 'audit',
+      itemId: 'WL-BOUNDARY',
+      heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS).toISOString(),
+    });
+    expect(reduceMarkerCounts([boundary], NOW).counts.audit).toBe(0);
   });
 });
 
@@ -870,5 +914,85 @@ describe('readBudgetConfig', () => {
       expect(readBudget().ok).toBe(true);
       expect(readBudgetConfig({ env: cleanEnv }).config).toEqual({ maxImplement: 0, maxAudit: 1 });
     });
+  });
+});
+
+// ── Audit-tier counting and legacy marker read-compatibility ───────────
+
+describe('freshCount — audit-tier admission read (WL-0MVXY0XPF006YUHA F2)', () => {
+  /** Write a legacy `active-audit` marker file as an older instance would. */
+  function writeLegacyMarker(dir: string, dispatchedAt: string): void {
+    writeFileSync(
+      join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE),
+      JSON.stringify({ instanceId: 'older-instance', dispatchedAt }),
+    );
+  }
+
+  it('counts fresh audits with no live pane and reaps the stale entry from disk', () =>
+    withMachineDir((dir) => {
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-FRESH',
+          paneId: 'pane-gone',
+          heartbeatAt: new Date(NOW - HOUR).toISOString(),
+        }),
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-STALE',
+          paneId: 'pane-dead',
+          heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString(),
+        }),
+      ]);
+
+      // The audit tier ignores pane liveness entirely: the fresh entry counts
+      // even though its pane is not in any live list (the marker semantics).
+      expect(freshCount('audit', { now: NOW })).toEqual({
+        ok: true,
+        kind: 'audit',
+        count: 1,
+        counts: { implement: 0, audit: 1 },
+      });
+      // ...and the stale entry was released by the 2 h rule.
+      const read = readBudget();
+      expect(read.ok).toBe(true);
+      if (!read.ok) return;
+      expect(read.ledger.entries.map((entry) => entry.itemId)).toEqual(['WL-FRESH']);
+    }));
+
+  it('counts a non-stale legacy active-audit marker as ONE synthetic audit entry', () =>
+    withMachineDir((dir) => {
+      writeLegacyMarker(dir, new Date(NOW - HOUR).toISOString());
+
+      expect(freshCount('audit', { now: NOW })).toMatchObject({
+        ok: true,
+        count: 1,
+        counts: { implement: 0, audit: 1 },
+      });
+      // Read-only: counting a legacy marker never rewrites the ledger file.
+      expect(existsSync(budgetLedgerPath(dir))).toBe(false);
+    }));
+
+  it('ignores a stale legacy marker and never removes the file', () =>
+    withMachineDir((dir) => {
+      writeLegacyMarker(dir, new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString());
+
+      expect(freshCount('audit', { now: NOW })).toMatchObject({ ok: true, count: 0 });
+      // Retirement contract: the file is neither counted nor deleted.
+      expect(existsSync(join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE))).toBe(true);
+    }));
+
+  it('never counts the legacy marker for the implement tier', () =>
+    withMachineDir((dir) => {
+      writeLegacyMarker(dir, new Date(NOW).toISOString());
+      expect(freshCount('implement', { now: NOW })).toMatchObject({
+        ok: true,
+        count: 0,
+        counts: { implement: 0, audit: 0 },
+      });
+    }));
+
+  it('legacyActiveAuditCount is 0 for an unresolvable dir', () => {
+    expect(legacyActiveAuditCount(null)).toBe(0);
   });
 });

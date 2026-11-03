@@ -1,7 +1,7 @@
 /**
  * packages/herdr/src/host-dispatch-budget.admission.ts — the dispatcher's
- * host-wide admission read for the implement tier (WL-0MVXY0YG7009JMHI,
- * parent WL-0MVXWQFGV000D2AB).
+ * host-wide admission read for the implement and audit tiers
+ * (WL-0MVXY0YG7009JMHI F3, WL-0MVXY0XPF006YUHA F2, parent WL-0MVXWQFGV000D2AB).
  *
  * Single responsibility: turn the machine-scoped ledger (F1,
  * `host-dispatch-budget.ts`) plus the live pane list into exactly ONE
@@ -10,6 +10,19 @@
  * (fail closed + repair from live state). The ledger contract itself
  * (read/reserve/release/reap, configuration, liveness table) lives in
  * `host-dispatch-budget.ts` and is not restated here.
+ *
+ * ## Per-tier counting (deliberate asymmetry)
+ *
+ *  - **implement** counts fresh entries whose pane is in the live pane list
+ *    (`liveCount`). A reserved-but-unspawned entry is invisible until its pane
+ *    id is confirmed.
+ *  - **audit** counts fresh entries with NO live-pane requirement
+ *    (`freshCount`), which is exactly the semantics of the retired host-wide
+ *    `active-audit` marker: the slot is held from the reservation until a
+ *    release point fires (audit pane close, dispatch/spawn failure, claim
+ *    rollback) and is released by the 2 h staleness window. That is what makes
+ *    `maxAudit: 1` indistinguishable from the marker it replaces. A non-stale
+ *    legacy marker file is counted as one synthetic entry on read.
  *
  * ## Fail directions (deliberate, parent AC9)
  *
@@ -35,8 +48,11 @@
  * and released (idempotently) on every abort path and on pane close; stale
  * entries are reaped by the ledger's own `liveCount` read (AC8).
  *
- * Scope: this slice enforces the **implement** tier only (the ledger records
- * `kind`, so the audit tier joins through the same seam when F2 lands).
+ * scope: both tiers enforce here — the implement tier (F3) and the audit tier
+ * (F2). The audit tier's pre-check (`readAuditBudgetState`, consumed by
+ * `getActiveAudit`) is a READ, never a reservation: the authoritative
+ * reservation still happens once, in the claim→marker→spawn choke point, so a
+ * refusal before selection and a refusal at admission agree.
  *
  * Layering: the decision is a thin orchestration over F1's pure helpers and
  * fs-backed ledger API; all arithmetic (caps, staleness, counting) stays in
@@ -44,6 +60,7 @@
  */
 
 import {
+  freshCount,
   liveCount,
   readBudgetConfig,
   release,
@@ -64,6 +81,15 @@ export const HOST_BUDGET_IMPLEMENT_REFUSAL = 'host-budget-implement';
 /** Refusal reason: the tier is at/over its machine-wide cap (audit tier). */
 export const HOST_BUDGET_AUDIT_REFUSAL = 'host-budget-audit';
 
+/**
+ * Refusal reason: the AUDIT tier is at its cap with `maxAudit: 1`
+ * (WL-0MVXY0XPF006YUHA F2 AC1). The legacy marker produced this token, so the
+ * default single-flight case stays byte-identical in the decision log and
+ * every existing consumer of `audit-host-saturated` keeps working; the audit
+ * tier uses `host-budget-audit` at every other cap.
+ */
+export const HOST_BUDGET_AUDIT_SATURATED_REFUSAL = 'audit-host-saturated';
+
 /** Refusal reason: the ledger could not be trusted (fail closed + repair). */
 export const HOST_BUDGET_UNKNOWN_REFUSAL = 'host-budget-unknown';
 
@@ -71,6 +97,13 @@ export const HOST_BUDGET_UNKNOWN_REFUSAL = 'host-budget-unknown';
 export type HostBudgetRefusalReason =
   | typeof HOST_BUDGET_IMPLEMENT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_REFUSAL
+  | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
+  | typeof HOST_BUDGET_UNKNOWN_REFUSAL;
+
+/** The refusal tokens the AUDIT tier can report (never `host-budget-implement`). */
+export type HostBudgetAuditRefusalReason =
+  | typeof HOST_BUDGET_AUDIT_REFUSAL
+  | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL;
 
 /** One dispatch asking the host for a slot. */
@@ -89,10 +122,18 @@ export interface HostBudgetAdmissionInput {
 export interface HostBudgetAdmissionOptions extends HostBudgetOptions {
   /**
    * The caller's live pane list. Only panes whose `paneId` appears here make a
-   * reserved entry count (the F1 liveness table), so the caller must pass the
-   * machine-wide downtime pane list, not a per-root subset.
+   * reserved implement entry count (the F1 liveness table), so the caller must
+   * pass the machine-wide downtime pane list, not a per-root subset. The audit
+   * tier uses the same list only to REPAIR an unreadable ledger (AC6).
    */
   livePanes: readonly HostBudgetLivePane[];
+  /**
+   * Instance identity recorded on entries reconstructed by a repair
+   * (diagnostics only). Defaults to this plugin process.
+   */
+  instanceId?: string;
+  /** Worklog root recorded on entries reconstructed by a repair. */
+  root?: string;
 }
 
 /** The admission verdict. `live`/`max` are the evidence the caller reports. */
@@ -174,10 +215,123 @@ export function repairLedgerFromLivePanes(
 }
 
 /**
+ * Options for the audit tier's admission pre-check ({@link readAuditBudgetState}).
+ *
+ * `livePanes` is OPTIONAL and only consulted when the ledger cannot be read
+ * (AC6): the dispatch loop calls this pre-check once per audit candidate, so an
+ * eager pane-list subprocess would add a `herdr pane list` per candidate. Absent
+ * panes means "cannot repair now" — the tick still fails closed, and the next
+ * call that can supply panes repairs the ledger.
+ */
+export interface HostBudgetAuditStateOptions extends HostBudgetOptions {
+  /** Live pane list used ONLY to repair an unreadable ledger (AC6). */
+  livePanes?: readonly HostBudgetLivePane[];
+  /** Instance identity recorded on repaired entries (diagnostics only). */
+  instanceId?: string;
+  /** Worklog root recorded on repaired entries. */
+  root?: string;
+}
+
+/**
+ * The audit tier's budget state (WL-0MVXY0XPF006YUHA F2).
+ *
+ * `atCap` is the single admission answer: `true` means the audit tier admits no
+ * further dispatch this tick. `reason` is the token the dispatcher reports —
+ * `audit-host-saturated` at `maxAudit: 1` (the legacy marker token, AC1),
+ * `host-budget-audit` for every other cap (AC3) and `host-budget-unknown` for a
+ * fail-closed unreadable ledger (AC6). `live`/`max` are the reported evidence
+ * (`0/0` for a disabled tier).
+ */
+export interface HostBudgetAuditState {
+  atCap: boolean;
+  live: number;
+  max: number;
+  reason?: HostBudgetAuditRefusalReason;
+  /** True when an unreadable ledger was rewritten from live state (AC6). */
+  repaired?: boolean;
+}
+
+/**
+ * The audit tier's admission read — the pre-check the dispatcher's
+ * `getActiveAudit` consults where the retired `active-audit` marker was read.
+ *
+ * Never throws and never reserves. The order is significant:
+ *
+ *  1. resolve the effective cap (`budget.json` + env, default `maxAudit: 1`);
+ *  2. `max === 0` ⇒ at cap with `live`/`max` `0/0` and `host-budget-audit`
+ *     (AC3 — a disabled tier is refused whatever the ledger holds);
+ *  3. count fresh audit entries (no live-pane requirement, plus a non-stale
+ *     legacy marker as one synthetic entry);
+ *  4. unreadable ledger ⇒ repair from the live pane list and report
+ *     `host-budget-unknown` (AC6 — fail closed, self-heal for the next tick);
+ *  5. unresolvable coordination dir ⇒ not at cap: with no machine dir there is
+ *     no ledger and no new failure mode (parent AC11);
+ *  6. at/over cap ⇒ `audit-host-saturated` when `max === 1`, otherwise
+ *     `host-budget-audit` (AC1/AC3).
+ */
+export function readAuditBudgetState(
+  opts: HostBudgetAuditStateOptions,
+): HostBudgetAuditState {
+  const ledgerOptions: HostBudgetOptions = {
+    dir: opts.dir,
+    now: opts.now,
+    staleWindowMs: opts.staleWindowMs,
+    env: opts.env,
+  };
+  const { config } = readBudgetConfig(ledgerOptions);
+  const max = config.maxAudit;
+  if (max === 0) {
+    // AC3: disabled tier — refused host-wide with the documented 0/0 evidence.
+    return { atCap: true, live: 0, max: 0, reason: HOST_BUDGET_AUDIT_REFUSAL };
+  }
+
+  const count = freshCount('audit', ledgerOptions);
+  if (!count.ok) {
+    if (!count.unknown && count.reason === 'no-coordination-dir') {
+      // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
+      return { atCap: false, live: 0, max };
+    }
+    // Repair from observed live state only when the caller could supply a pane
+    // list; a caller that cannot (the per-candidate pre-check) still fails
+    // closed, and the next pane-carrying call self-heals the ledger.
+    const repaired =
+      opts.livePanes === undefined
+        ? false
+        : repairLedgerFromLivePanes(
+            opts.livePanes,
+            {
+              kind: 'audit',
+              // The synthetic entry key is never written by a repair:
+              // reconstructed entries take their own item ids from the pane
+              // labels.
+              itemId: '',
+              instanceId: opts.instanceId ?? `herdr:${process.pid}`,
+              root: opts.root ?? '',
+            },
+            ledgerOptions,
+          );
+    return { atCap: true, live: 0, max, reason: HOST_BUDGET_UNKNOWN_REFUSAL, repaired };
+  }
+
+  if (count.count >= max) {
+    return {
+      atCap: true,
+      live: count.count,
+      max,
+      // AC1: the single-flight default keeps the marker's reason token; any
+      // other cap reports the budget's own token (AC3).
+      reason:
+        max === 1 ? HOST_BUDGET_AUDIT_SATURATED_REFUSAL : HOST_BUDGET_AUDIT_REFUSAL,
+    };
+  }
+  return { atCap: false, live: count.count, max };
+}
+
+/**
  * One admission decision for one dispatch attempt.
  *
  * Never throws; every outcome is expressed as `admitted` plus the `live`/`max`
- * evidence. The order is significant:
+ * evidence. The implement tier follows the original order:
  *
  *  1. resolve the effective cap (config + env, defaults absent a file);
  *  2. `max === 0` ⇒ refuse immediately with `live`/`max` `0/0` (AC4 — a
@@ -186,6 +340,10 @@ export function repairLedgerFromLivePanes(
  *  4. unreadable ledger ⇒ repair from live panes and refuse (`unknown`);
  *  5. at/over cap ⇒ refuse with the observed `live`/`max` (AC2);
  *  6. otherwise reserve the slot and admit.
+ *
+ * The audit tier delegates its count/cap decision to
+ * {@link readAuditBudgetState} (so the pre-check and admission can never
+ * disagree) and reserves only when that state admits.
  */
 export function admitHostDispatch(
   input: HostBudgetAdmissionInput,
@@ -197,8 +355,42 @@ export function admitHostDispatch(
     staleWindowMs: opts.staleWindowMs,
     env: opts.env,
   };
+  if (input.kind === 'audit') {
+    const state = readAuditBudgetState(opts);
+    if (state.atCap) {
+      return {
+        admitted: false,
+        live: state.live,
+        max: state.max,
+        reason: state.reason ?? HOST_BUDGET_AUDIT_REFUSAL,
+        ...(state.repaired === true ? { repaired: true } : {}),
+      };
+    }
+    const reserved = reserve(
+      {
+        kind: input.kind,
+        itemId: input.itemId,
+        instanceId: input.instanceId,
+        root: input.root,
+        ...(input.paneId !== undefined ? { paneId: input.paneId } : {}),
+      },
+      ledgerOptions,
+    );
+    if (!reserved.ok) {
+      // The reservation could not be recorded — the host's in-flight audits can
+      // no longer be proven within budget, so fail closed.
+      return {
+        admitted: false,
+        live: state.live,
+        max: state.max,
+        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+      };
+    }
+    return { admitted: true, live: state.live, max: state.max };
+  }
+
   const { config } = readBudgetConfig(ledgerOptions);
-  const max = input.kind === 'audit' ? config.maxAudit : config.maxImplement;
+  const max = config.maxImplement;
   if (max === 0) {
     // AC4: disabled tier — refused host-wide with the documented 0/0 evidence.
     return { admitted: false, live: 0, max: 0, reason: refuseReason(input.kind) };
@@ -255,10 +447,12 @@ export function admitHostDispatch(
 /**
  * Confirm a reserved entry with the spawned pane's id.
  *
- * Counted = fresh heartbeat AND a pane id in the live pane list, so the entry
- * is invisible to admission until the pane id is known. Best-effort: an
- * unresolved pane id leaves the entry countable only once the pane close
- * releases it (never a permanent leak — the release is by item id).
+ * For the implement tier, counted = fresh heartbeat AND a pane id in the live
+ * pane list, so the entry is invisible to admission until the pane id is known.
+ * The audit tier counts a fresh entry regardless (the marker semantics), so the
+ * confirmation only records the pane id for observability. Best-effort: a
+ * failing seam never affects the dispatch, and the release-by-item-id on pane
+ * close (or the stale reap) remains the backstop.
  */
 export function confirmHostDispatch(
   input: HostBudgetAdmissionInput,

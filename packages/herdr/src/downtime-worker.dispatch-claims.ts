@@ -392,13 +392,15 @@ export async function dispatchClaimedTier(
     }
   }
 
-  // ── Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3) ──────
+  // ── Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3,
+  //    audit tier WL-0MVXY0XPF006YUHA F2) ────────────────────────────────
   //
   // ONE ledger read per dispatch attempt, placed in the claim→marker→spawn
   // pipeline IMMEDIATELY BEFORE the dispatch marker is written. Both dispatcher
   // paths (`dispatchDowntimeWork` and `dispatchFromCoordination`) reach this
   // point through `dispatchClaimedTier`, so neither can bypass the machine-wide
-  // cap (AC1).
+  // cap (F3 AC1). Both budgeted tiers are admitted here: `implement` and
+  // `audit` (F2 AC1/AC5) — plan/intake/risk-effort never reserve.
   //
   // The reservation is taken AFTER the CAS claim succeeded and BEFORE
   // `recordDispatch` (AC3), and the claim is rolled back on refusal so the item
@@ -407,7 +409,7 @@ export async function dispatchClaimedTier(
   // no-candidate cooldown — the next idle tick re-checks. `live`/`max` ride on
   // the outcome as evidence for the observability slice (F5).
   let budgetEvidence: { live: number; max: number } | undefined;
-  if (kind === 'implement' && typeof deps.admitHostDispatch === 'function') {
+  if ((kind === 'implement' || kind === 'audit') && typeof deps.admitHostDispatch === 'function') {
     let admission: Awaited<ReturnType<NonNullable<DowntimeDispatchDeps['admitHostDispatch']>>> | null =
       null;
     try {

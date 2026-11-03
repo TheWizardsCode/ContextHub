@@ -1317,3 +1317,131 @@ describe('host-wide dispatch budget (F3)', () => {
     expect(deps.confirmHostDispatch).toHaveBeenCalledWith('WL-IMP', 'implement', 'pane-9', '/repo');
   });
 });
+
+// ── Host-wide dispatch budget — audit tier (WL-0MVXY0XPF006YUHA F2) ────
+//
+// The audit tier joins the SAME claim→marker→spawn choke point as the implement
+// tier, so both dispatcher paths admit it exactly once per dispatch attempt.
+// These tests drive the direct path; the ledger/cap matrix itself (0/1/2, legacy
+// read-compatibility, stale reap, fail-closed self-heal) is asserted against the
+// real ledger file in `host-dispatch-budget.machine.test.ts`.
+describe('host-wide dispatch budget — audit tier (F2)', () => {
+  const auditCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit' as const,
+  };
+
+  it('consults the host-budget ledger exactly once per audit dispatch (AC1)', async () => {
+    const admitHostDispatch = vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 2 });
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      admitHostDispatch,
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(admitHostDispatch).toHaveBeenCalledTimes(1);
+    expect(admitHostDispatch).toHaveBeenCalledWith({
+      itemId: 'WL-AUD',
+      kind: 'audit',
+      cwd: '/repo',
+    });
+  });
+
+  it('refuses at the cap: no spawn, no marker, claim rolled back, neutral reason + evidence (AC3/AC4/AC5)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      admitHostDispatch: vi
+        .fn()
+        .mockResolvedValue({ admitted: false, live: 2, max: 2, reason: 'host-budget-audit' }),
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('host-budget-audit');
+    expect(outcome.budget).toEqual({ live: 2, max: 2 });
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalledTimes(1);
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo');
+    // AC4: a neutral skip — never a strike/cooldown token.
+    expect(outcome.reason).not.toBe('no-candidate');
+  });
+
+  it('releases the audit reservation when the dispatch marker cannot be written (AC5)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 1 }),
+      recordDispatch: vi.fn().mockResolvedValue(false),
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.reason).toBe('claim-rolled-back');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo');
+  });
+
+  it('releases the audit reservation when the pane spawn fails (AC5)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 1 }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'boom' }),
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.reason).toBe('spawn-failed');
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo');
+  });
+
+  it('reports the host-budget token the pre-check returned, with its evidence (AC1/AC3)', async () => {
+    // maxAudit > 1 (or 0) reports `host-budget-audit` rather than the legacy
+    // token; the dispatcher must report the decision, not infer it.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue({
+        ok: true,
+        active: true,
+        source: 'host-wide',
+        reason: 'host-budget-audit',
+        budget: { live: 2, max: 2 },
+      }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('host-budget-audit');
+    expect(outcome.budget).toEqual({ live: 2, max: 2 });
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+  });
+
+  it('reports host-budget-unknown when the ledger had to be repaired, never a silent fall-through (AC6)', async () => {
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue({
+        ok: true,
+        active: true,
+        source: 'host-wide',
+        reason: 'host-budget-unknown',
+        budget: { live: 0, max: 1 },
+      }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome).toMatchObject({
+      dispatched: false,
+      reason: 'host-budget-unknown',
+      budget: { live: 0, max: 1 },
+    });
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+  });
+});
