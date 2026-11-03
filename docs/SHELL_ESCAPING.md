@@ -29,6 +29,7 @@ All files in `src/` that construct shell commands have been audited for proper e
 |------|---------------|--------|
 | `src/sync.ts` | `escapeShellArg()` | Safe — applied consistently |
 | `src/github.ts` | `JSON.stringify()`, `quoteShellValue()` | Safe — both provide equivalent protection |
+| `src/github/transport.ts` | Executes `gh` commands built upstream; interpolates no user text | Safe — callers escape before building the command |
 | `src/commands/sync.ts` | No user text in shell commands | Safe — hardcoded git commands only |
 | `src/commands/init.ts` | No user text in shell commands | Safe — hardcoded git commands only |
 | `src/worklog-paths.ts` | No user text in shell commands | Safe — hardcoded git command only |
