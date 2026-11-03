@@ -33,6 +33,7 @@ import {
 import { registerCacheCommand } from './doctor/cache.js';
 import { registerAuditGapsCommand } from './doctor/audit-gaps.js';
 import { registerPrefixCommand } from './doctor/prefix.js';
+import { registerDanglingParentsCommand } from './doctor/dangling-parents.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -605,77 +606,7 @@ export default function register(ctx: PluginContext): void {
 
   registerAuditGapsCommand(doctor, { output, utils });
 
-  // ── Dangling parent references (WL-0MUJM2LV1000IHKR) ────────────────
-  doctor
-    .command('dangling-parents')
-    .description(
-      'Detect items whose parentId references a non-existent work item '
-        + '(e.g. WL-NULL artifacts from --parent null without fix) and '
-        + 'optionally fix them by setting parentId to null.',
-    )
-    .option('--dry-run', 'Show dangling references without modifying them')
-    .option('--apply', 'Fix dangling parentId by setting it to null')
-    .option('--prefix <prefix>', 'Override the default prefix')
-    .action((opts: { dryRun?: boolean; apply?: boolean; prefix?: string }) => {
-      utils.requireInitialized();
-      const db = utils.getDatabase(opts.prefix);
-      const all = db.getAll();
-      const byId = new Map(all.map(item => [item.id, item]));
-
-      const dangling = validateParentReferences(all).map(finding => ({
-        id: finding.itemId,
-        title: byId.get(finding.itemId)?.title || '',
-        parentId: String((finding.context as { parentId?: unknown }).parentId ?? ''),
-      }));
-
-      if (dangling.length === 0) {
-        if (utils.isJsonMode()) {
-          output.json({ success: true, items: [], fixed: [] });
-          return;
-        }
-        console.log('Doctor dangling-parents: no dangling parent references found.');
-        return;
-      }
-
-      // Default is dry-run; --apply is required to change anything.
-      if (opts.dryRun || !opts.apply) {
-        if (utils.isJsonMode()) {
-          const out: any = { dryRun: true, items: dangling, count: dangling.length };
-          if (!opts.dryRun) {
-            out.hint = 'Use --apply to fix by setting parentId to null';
-          }
-          output.json(out);
-          return;
-        }
-        console.log(
-          `Doctor dangling-parents: found ${dangling.length} work item(s) with dangling parent references.`,
-        );
-        for (const d of dangling) {
-          console.log(`  - ${d.id}: "${d.title}" (parentId = ${d.parentId})`);
-        }
-        if (!opts.dryRun) {
-          console.log('');
-          console.log('Use --dry-run to preview or --apply to fix by setting parentId to null.');
-        }
-        return;
-      }
-
-      // --apply: detach every dangling item.
-      const fixed: Array<{ id: string; parentId: string }> = [];
-      withStoreMutationLock(ctx.dataPath, () => {
-      for (const d of dangling) {
-        db.update(d.id, { parentId: null });
-        fixed.push({ id: d.id, parentId: d.parentId });
-      }
-      });
-      if (utils.isJsonMode()) {
-        output.json({ success: true, fixed });
-        return;
-      }
-      console.log(
-        `Doctor dangling-parents: fixed ${fixed.length} item(s) - parentId set to null.`,
-      );
-    });
+  registerDanglingParentsCommand(doctor, { output, utils, dataPath: ctx.dataPath });
 
   doctor
     .command('priority')
