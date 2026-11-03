@@ -392,6 +392,71 @@ type-only — so the barrel can never be part of a cycle.
 | change a CLI flag, the JSON shape or the prompt loop | `src/commands/interview.ts` |
 | change the shared surface consumers import | `src/commands/interview.ts` (barrel) |
 
+## GitHub Module Layout
+
+`src/github.ts` is the stable public entry point for the GitHub integration: a
+thin barrel of re-exports with no logic of its own. Every concern it used to
+contain lives in a focused module under `src/github/`, so a payload-mapping fix
+does not require reading the `gh` transport and a label fix does not require
+reading issue CRUD (WL-0MVGKGR2H006MNVG, completed by
+WL-0MVVLY034000MDVA).
+
+### Module responsibilities
+
+| Module | Responsibility | Public symbols re-exported by the barrel |
+|---|---|---|
+| `src/github.ts` | Public barrel: re-exports the frozen 58-symbol surface (52 values + 6 types) and documents where each concern lives. | all 58 |
+| `src/github/types.ts` | Shared type declarations (`GithubConfig`, `GithubIssueRecord`, `GithubIssueComment`, `IssueHierarchy`, `AssignGithubIssueResult`, `LabelEvent`). | 6 types |
+| `src/github/transport.ts` | `gh` CLI plumbing: command execution (sync/async/detailed), scheduling through the central throttler, rate-limit detection, stdout capture and shell escaping. | `setVerboseLogger`, `isSecondaryRateLimitText`, `SecondaryRateLimitError`, `ghApiAsyncScheduled`, `ghApiDetailedScheduled`, `ghApiJsonScheduled` |
+| `src/github/repo-slug.ts` | Repo-slug resolution from config or the `origin` git remote. | `parseRepoSlug`, `getRepoFromGitRemote` |
+| `src/github/markers.ts` | The worklog marker format and body parsers (item id, comment id, parent/child ids and issue numbers). | `buildWorklogMarker`, `buildWorklogCommentMarker`, `stripWorklogMarkers`, `extractWorklogId`, `extractWorklogCommentId`, `extractParentId`, `extractParentIssueNumber`, `extractChildIds`, `extractChildIssueNumbers` |
+| `src/github/labels.ts` | Label concern: prefix normalisation, deterministic colour derivation, single-value category predicates, the label-ensuring paths with their process caches, and the label-event read path. | `normalizeGithubLabelPrefix`, `isSingleValueCategoryLabel`, `ensureGithubLabelsAsync`, `LabelEventCache`, `fetchLabelEventsAsync`, `labelFieldsDiffer`, `getLatestLabelEventTimestamp` |
+| `src/github/hierarchy.ts` | Issue-hierarchy plumbing: sub-issue links, node-id lookup and parent timeline reads. | `getIssueHierarchy`, `getIssueNodeIdAsync`, `getIssueHierarchyAsync`, `addSubIssueLink`, `addSubIssueLinkResult`, `addSubIssueLinkAsync`, `addSubIssueLinkResultAsync`, `listParentIssueNumbersFromTimeline` |
+| `src/github/comments.ts` | Issue-comment CRUD in its synchronous and asynchronous forms, plus private response normalisation. | `listGithubIssueComments`, `listGithubIssueCommentsAsync`, `createGithubIssueComment`, `createGithubIssueCommentAsync`, `updateGithubIssueComment`, `updateGithubIssueCommentAsync`, `getGithubIssueComment`, `getGithubIssueCommentAsync` |
+| `src/github/issues.ts` | Issue CRUD and payload mapping: work item → issue payload, label → work-item fields (including the legacy `P0`–`P3` priority map), issue list/create/update/get (sync and async), assignment and the label-ensuring calls create/update depend on. | `workItemToIssuePayload`, `issueToWorkItemFields`, `createGithubIssue`, `createGithubIssueAsync`, `updateGithubIssue`, `updateGithubIssueAsync`, `getGithubIssue`, `getGithubIssueAsync`, `listGithubIssues`, `listGithubIssuesAsync`, `assignGithubIssue`, `assignGithubIssueAsync` |
+
+The flat siblings `src/github-sync.ts`, `src/github-throttler.ts`,
+`src/github-metrics.ts` and `src/github-pre-filter.ts` are unrelated modules
+and are deliberately **not** part of this family.
+
+### Cycle-safe layering
+
+The dependency direction is strictly bottom-up, so the import graph stays
+acyclic:
+
+```
+types (leaves)
+      ↓
+transport → repo-slug → markers
+      ↓
+labels / hierarchy / comments
+      ↓
+issues (imports transport, markers, labels)
+      ↓
+src/github.ts (barrel — re-exports the family modules; nothing imports it)
+```
+
+No module under `src/github/` imports `../github.js` — not even type-only — so
+the barrel can never be part of a cycle. `tests/github/github-split-guard.test.ts`
+enforces this statically, alongside the 1,000-line ceiling (no exemptions) and
+the frozen public surface (`tests/github/github.split-baseline.json`).
+
+### Where to find X in the github module
+
+| I want to… | Look in |
+|---|---|
+| change how a work item becomes an issue payload | `src/github/issues.ts` (`workItemToIssuePayload`) |
+| change how labels decode into work-item fields | `src/github/issues.ts` (`issueToWorkItemFields`) |
+| change issue list/create/update/get or assignment | `src/github/issues.ts` |
+| change issue-comment CRUD | `src/github/comments.ts` |
+| change sub-issue links or hierarchy reads | `src/github/hierarchy.ts` |
+| change label names, colours, ensuring or label events | `src/github/labels.ts` |
+| change the marker format or body parsers | `src/github/markers.ts` |
+| change repo-slug resolution | `src/github/repo-slug.ts` |
+| change `gh` execution, throttling or rate-limit handling | `src/github/transport.ts` |
+| change a shared type | `src/github/types.ts` |
+| change the shared surface consumers import | `src/github.ts` (barrel) |
+
 ## File Structure
 
 ```

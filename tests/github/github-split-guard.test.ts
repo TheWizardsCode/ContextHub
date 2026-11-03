@@ -20,6 +20,7 @@
  * | value exports resolvable at runtime / type exports in the declaration | AC2 |
  * | no family module imports the barrel; no static/runtime cycle | AC4 |
  * | ≤ 1,000 lines per family module, shrink-only allowlist | AC1 |
+ * | the barrel itself declares no logic (re-exports only) | AC1 |
  * | every family module documented with a JSDoc header | AC5 |
  * | guard suite documented like the modules it protects | AC5 |
  * | every gate fails on deliberately broken input | AC7 |
@@ -56,6 +57,7 @@ import {
   dynamicImportNames,
   findAbsentAllowlistedGithubBarrelImports,
   findAllowlistViolations,
+  findBarrelLocalLogic,
   findGithubBarrelImports,
   findGithubBarrelTypeOnlyImportsOutsideAllowlist,
   findMissingExports,
@@ -200,6 +202,18 @@ describe('github split guard — live tree', () => {
     if (barrel.lineCount > MAX_MODULE_LINES) {
       expect([...GITHUB_SPLIT_ALLOWLIST]).toContain('github.ts');
     }
+  });
+
+  it('contains no logic in the barrel — re-exports under a header only', () => {
+    const barrel = index.byFile.get(GITHUB_BARREL)!;
+    // The final extraction child leaves `src/github.ts` a pure façade: every
+    // declaration and every import it used to carry now lives in a module
+    // under `src/github/`. A stray helper here would regrow the monolith.
+    expect(findBarrelLocalLogic(barrel)).toEqual([]);
+    expect(barrel.reexports.length).toBeGreaterThan(0);
+    expect(hasLeadingJsDoc(fs.readFileSync(path.join(repoRoot, GITHUB_BARREL), 'utf-8'))).toBe(
+      true,
+    );
   });
 
   it('documents every github-family module with a top-level JSDoc header (AC5)', () => {
@@ -368,6 +382,41 @@ describe('github split guard — gates fail on broken input', () => {
     const kinds = collectExportKinds(split, GITHUB_BARREL);
     expect(namesOfKind(kinds, 'value')).toEqual(['createGithubIssueAsync', 'issueToWorkItemFields']);
     expect(namesOfKind(kinds, 'type')).toEqual(['GithubConfig', 'LabelEvent']);
+  });
+
+  it('reports logic left behind in the barrel and accepts a pure re-export barrel', () => {
+    const impure = indexFromSources({
+      [GITHUB_BARREL]: [
+        `import { runGh } from './github/transport.js';`,
+        `export { parseRepoSlug } from './github/repo-slug.js';`,
+        `export function leftover() { return runGh('true'); }`,
+        `const helper = 1;`,
+      ].join('\n'),
+    });
+    const violations = findBarrelLocalLogic(impure.byFile.get(GITHUB_BARREL)!);
+    expect(violations).toContainEqual({
+      file: GITHUB_BARREL,
+      kind: 'declaration',
+      name: 'leftover',
+    });
+    expect(violations).toContainEqual({
+      file: GITHUB_BARREL,
+      kind: 'declaration',
+      name: 'helper',
+    });
+    expect(violations).toContainEqual({
+      file: GITHUB_BARREL,
+      kind: 'import',
+      name: './github/transport.js',
+    });
+
+    const pure = indexFromSources({
+      [GITHUB_BARREL]: [
+        `export { runGh } from './github/transport.js';`,
+        `export type { GithubConfig } from './github/types.js';`,
+      ].join('\n'),
+    });
+    expect(findBarrelLocalLogic(pure.byFile.get(GITHUB_BARREL)!)).toEqual([]);
   });
 
   it('reports a consumer import the barrel no longer exports', () => {

@@ -26,6 +26,10 @@
  *    family are acyclic and no family module imports the barrel.
  * 4. **Documentation (AC5).** Every github-family production module opens with
  *    a top-level JSDoc header naming its concern.
+ * 5. **Barrel purity (AC1).** The barrel declares no logic of its own: it may
+ *    contain only a header JSDoc and `export … from` statements — no imports
+ *    and no local declarations — so a move that leaves a stray helper behind
+ *    in `src/github.ts` is a test failure rather than a review finding.
  *
  * The gates are **pure predicates over parsed modules** rather than assertions
  * over the live tree, so `github-split-guard.test.ts` can prove each gate
@@ -107,9 +111,9 @@ export const BASELINE_PATH = 'tests/github/github.split-baseline.json';
  *
  * A *shrink-only* allowlist: it may only ever lose entries. It started with the
  * 1,755-line monolith; the labels child (WL-0MVVLXY42003Q047) dropped
- * `src/github.ts` to 848 lines, so the entry is now stale and has been removed
- * — every family module must stay under {@link MAX_MODULE_LINES} with no
- * exemptions.
+ * `src/github.ts` to 848 lines, so its entry went stale, and the final barrel
+ * child (WL-0MVVLY034000MDVA) reduced it to a re-export façade — every family
+ * module must stay under {@link MAX_MODULE_LINES} with no exemptions.
  */
 export const GITHUB_SPLIT_ALLOWLIST: readonly string[] = [];
 
@@ -196,12 +200,10 @@ export function githubFamilyModules(index: ModuleIndex): ParsedModule[] {
 /**
  * Family modules the JSDoc-header gate (AC5) covers.
  *
- * The in-flight monolith (`src/github.ts`) has no header at plan time and this
- * guard-only item must not modify production code. It is therefore exempt
- * while it remains the *oversized allowlisted barrel*; once the barrel is
- * reduced to a façade (child 7 removes its allowlist entry), the gate covers it
- * automatically and the façade must carry a header naming its concern. Every
- * module under `src/github/` is always covered.
+ * The in-flight monolith (`src/github.ts`) was exempt while it was oversized and
+ * allowlisted; the final barrel child (WL-0MVVLY034000MDVA) reduced it to a
+ * façade, so it is now covered automatically and must carry a header naming its
+ * concern. Every module under `src/github/` is always covered.
  */
 export function githubFamilyModulesRequiringJsDoc(index: ModuleIndex): ParsedModule[] {
   const allowlisted = new Set(GITHUB_SPLIT_ALLOWLIST);
@@ -259,6 +261,35 @@ export function findUnexplainedStaticCyclesForGithub(index: ModuleIndex): string
 /** Cycles in the **runtime** github-family import graph. */
 export function findRuntimeCyclesForGithub(index: ModuleIndex): string[][] {
   return findRuntimeCycles(index, GITHUB_GRAPH_DEFAULTS);
+}
+
+/**
+ * Logic the barrel must not contain (AC1: "`src/github.ts` contains no logic").
+ *
+ * A pure barrel is a list of `export … from` statements under one header
+ * JSDoc: re-exports are parsed into {@link ParsedModule.reexports}, so any
+ * entry in {@link ParsedModule.declarations} or
+ * {@link ParsedModule.imports} is logic the curtain was supposed to keep out.
+ * Pure predicate over a parsed module, so the suite can prove it fails on a
+ * barrel that still holds an implementation.
+ */
+export function findBarrelLocalLogic(mod: ParsedModule): Array<{
+  file: string;
+  kind: 'declaration' | 'import';
+  name: string;
+}> {
+  const violations: Array<{
+    file: string;
+    kind: 'declaration' | 'import';
+    name: string;
+  }> = [];
+  for (const name of mod.declarations.keys()) {
+    violations.push({ file: mod.file, kind: 'declaration', name });
+  }
+  for (const imp of mod.imports) {
+    violations.push({ file: mod.file, kind: 'import', name: imp.specifier });
+  }
+  return violations;
 }
 
 /** Github-family modules (excluding the barrel) that import the barrel. */
