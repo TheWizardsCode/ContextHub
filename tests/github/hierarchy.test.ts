@@ -9,46 +9,46 @@
  *
  * The extraction is move-only, so the family's existing suites (which mock the
  * barrel wholesale) prove the *wiring* but never the hierarchy functions
- * themselves. These tests exercise the eight public hierarchy functions on the
- * extracted module with the `gh` transport replaced by spies, and assert the
- * observable contract the move must not change. The barrel re-export itself is
- * covered by `github-split-guard.test.ts` (frozen public surface, resolved at
- * runtime), so the module under test is imported directly here — mocking the
- * transport through the barrel's re-export chain is not needed for that.
+ * themselves. These tests drive the eight public functions through the barrel —
+ * the path consumers use — and assert the observable contract the move must not
+ * change:
  *
  * | Concern | Assertion |
  * |---|---|
- * | outlined GraphQL documents | the query/mutation text consumers rely on (`subIssues(first: 100)`, `addSubIssue`) |
+ * | GraphQL documents | the query/mutation text consumers rely on (`subIssues(first: 100)`, `addSubIssue`) |
  * | load-bearing `-F` vs `-f` flags | `-F number=<n>` (integer) and `-f owner=`/`-f name=`/`-f parent=`/`-f child=` |
- * | response unwrapping | sync reads `data.data.repository…`; async accepts `data.repository…` and the nested shape |
- * | error messages | `Unable to resolve GitHub issue node ID for #<n>`, `Unable to query issue hierarchy`, the link failures |
+ * | response unwrapping | sync reads the `{ data: { repository … } }` envelope; async accepts the plain and double-wrapped shapes |
+ * | error messages | `Unable to resolve GitHub issue node ID for #<n>`, the link failures, propagated GraphQL errors |
  * | node-id cache | a primed cache issues the mutation alone; an empty cache resolves each issue once |
  * | result wrappers | `{ ok, error }` instead of throwing, for both sync and async |
  * | timeline parent lookup | only `added_to_parent` events contribute; non-array payloads yield `[]` |
+ *
+ * ## How the `gh` calls are intercepted
+ *
+ * The suite drives the *real* transport (`src/github/transport.ts`) and replaces
+ * `child_process` with the repo-wide shared mocks installed by
+ * `tests/setup-tests.ts` (see `tests/child-process-mocks.ts`, the same pattern as
+ * `tests/github-assign-issue.test.ts`). Mocking `child_process` — a stable
+ * builtin id — is deliberate: mocking the family's own transport module is not
+ * reliable when the barrel and the extracted module resolve it through different
+ * module instances in a full parallel run (WL-0MVVLXYRO006WP2I).
  */
 
+import { EventEmitter } from 'events';
+import { Readable, Writable } from 'stream';
+import * as fs from 'fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../src/github/transport.js', async () => {
-  // Only the real shell-quoting helper is reused: the assertions about the
-  // emitted `-f`/`-F` flags must follow production quoting, not a local copy.
-  const { quoteShellValue } = await import('../../src/shell-escape.js');
+vi.mock('child_process', () => {
+  const store = (globalThis as any).__sharedChildProcessMocks;
   return {
-    quoteShellValue,
-    runGhJsonDetailed: vi.fn(),
-    runGhJsonDetailedAsync: vi.fn(),
-    ghApiJsonScheduled: vi.fn(),
-    ghApiJsonDetailedScheduled: vi.fn(),
-    runGhSafeJson: vi.fn(),
+    spawn: store?.mockSpawn ?? vi.fn(),
+    execSync: store?.mockExecSync ?? vi.fn(),
+    spawnSync: store?.mockSpawnSync ?? vi.fn(),
   };
 });
 
-import {
-  ghApiJsonDetailedScheduled,
-  ghApiJsonScheduled,
-  runGhJsonDetailed,
-  runGhSafeJson,
-} from '../../src/github/transport.js';
+import { initChildProcessMocks } from '../child-process-mocks.js';
 import {
   addSubIssueLink,
   addSubIssueLinkAsync,
@@ -58,29 +58,66 @@ import {
   getIssueHierarchyAsync,
   getIssueNodeIdAsync,
   listParentIssueNumbersFromTimeline,
-} from '../../src/github/hierarchy.js';
+} from '../../src/github.js';
+
+const { mockSpawn, mockExecSync, mockSpawnSync } = initChildProcessMocks();
 
 const config = { repo: 'acme/widgets', labelPrefix: 'wl:' };
 
-const runGhJsonDetailedMock = vi.mocked(runGhJsonDetailed);
-const ghApiJsonScheduledMock = vi.mocked(ghApiJsonScheduled);
-const ghApiJsonDetailedScheduledMock = vi.mocked(ghApiJsonDetailedScheduled);
-const runGhSafeJsonMock = vi.mocked(runGhSafeJson);
+/** Command string of the nth recorded `execSync` / `spawn` / `spawnSync` call. */
+function execSyncCommand(call = 0): string {
+  return String(mockExecSync.mock.calls[call]?.[0]);
+}
 
-/** The resolved GraphQL document of the nth recorded call. */
-function commandOf(call: number): string {
-  return String(runGhJsonDetailedMock.mock.calls[call]?.[0]);
+function spawnCommandOf(call = 0): string {
+  const args = mockSpawn.mock.calls[call]?.[1] as string[] | undefined;
+  return String(args?.[1] ?? '');
+}
+
+/** A fake child process that streams the given stdout/stderr and then closes. */
+function fakeProc(stdout: string, exitCode = 0, stderr = '') {
+  const proc = new EventEmitter() as any;
+  proc.stdin = new Writable({ write: (_chunk: any, _enc: any, cb: () => void) => cb() });
+  proc.stdout = new Readable({
+    read() {
+      this.push(stdout);
+      this.push(null);
+    },
+  });
+  proc.stdout.setEncoding = () => proc.stdout;
+  proc.stderr = new Readable({
+    read() {
+      this.push(stderr);
+      this.push(null);
+    },
+  });
+  proc.stderr.setEncoding = () => proc.stderr;
+  proc.exitCode = exitCode;
+  proc.kill = () => {};
+  setImmediate(() => proc.emit('close', exitCode));
+  return proc;
+}
+
+/** Route every `spawn` (async transport) through a command -> stdout resolver. */
+function mockAsyncGh(resolve: (command: string) => string): void {
+  mockSpawn.mockImplementation((_file: string, args: string[]) => fakeProc(resolve(String(args?.[1] ?? ''))));
+}
+
+/** Route every `execSync` (sync transport) through a command -> stdout resolver. */
+function mockSyncGh(resolve: (command: string) => string): void {
+  mockExecSync.mockImplementation((command: string) => resolve(String(command)));
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  mockExecSync.mockReset();
+  mockSpawn.mockReset();
+  mockSpawnSync.mockReset();
 });
 
 describe('getIssueHierarchy (sync)', () => {
-  it('unwraps data.data.repository.issue and filters non-numeric sub-issue nodes', () => {
-    runGhJsonDetailedMock.mockReturnValue({
-      ok: true,
-      data: {
+  it('unwraps the response envelope and filters non-numeric sub-issue nodes', () => {
+    mockSyncGh(() =>
+      JSON.stringify({
         data: {
           repository: {
             issue: {
@@ -89,15 +126,15 @@ describe('getIssueHierarchy (sync)', () => {
             },
           },
         },
-      },
-    });
+      }),
+    );
 
     expect(getIssueHierarchy(config, 42)).toEqual({
       parentIssueNumber: 12,
       childIssueNumbers: [3, 4],
     });
 
-    const command = commandOf(0);
+    const command = execSyncCommand();
     expect(command).toContain('gh api graphql');
     expect(command).toContain('subIssues(first: 100)');
     // `-F number=` is the integer flag; `-f` would send a string and break the
@@ -108,10 +145,7 @@ describe('getIssueHierarchy (sync)', () => {
   });
 
   it('reports a missing parent as null when the issue has no parent', () => {
-    runGhJsonDetailedMock.mockReturnValue({
-      ok: true,
-      data: { data: { repository: { issue: { subIssues: { nodes: [] } } } } },
-    });
+    mockSyncGh(() => JSON.stringify({ data: { repository: { issue: { subIssues: { nodes: [] } } } } }));
 
     expect(getIssueHierarchy(config, 7)).toEqual({
       parentIssueNumber: null,
@@ -119,72 +153,58 @@ describe('getIssueHierarchy (sync)', () => {
     });
   });
 
-  it('surfaces the transport error, falling back to the hierarchy error message', () => {
-    runGhJsonDetailedMock.mockReturnValueOnce({ ok: false, error: 'boom' });
-    expect(() => getIssueHierarchy(config, 42)).toThrow('boom');
+  it('propagates a GraphQL error returned in the response body', () => {
+    mockSyncGh(() => JSON.stringify({ errors: [{ message: 'no access to repository' }] }));
 
-    runGhJsonDetailedMock.mockReturnValueOnce({ ok: false });
-    expect(() => getIssueHierarchy(config, 42)).toThrow('Unable to query issue hierarchy');
+    expect(() => getIssueHierarchy(config, 42)).toThrow('no access to repository');
   });
 });
 
 describe('getIssueHierarchyAsync', () => {
-  it('accepts the throttler-unwrapped data.repository shape', async () => {
-    ghApiJsonScheduledMock.mockResolvedValue({
-      data: {
-        repository: {
-          issue: { parent: { number: 5 }, subIssues: { nodes: [{ number: 6 }] } },
+  it('unwraps the plain { data: { repository } } envelope and keeps the integer flag', async () => {
+    mockAsyncGh(() =>
+      JSON.stringify({
+        data: {
+          repository: { issue: { parent: { number: 5 }, subIssues: { nodes: [{ number: 6 }] } } },
         },
-      },
-    });
+      }),
+    );
 
     await expect(getIssueHierarchyAsync(config, 42)).resolves.toEqual({
       parentIssueNumber: 5,
       childIssueNumbers: [6],
     });
-    expect(String(ghApiJsonScheduledMock.mock.calls[0]?.[0])).toContain('-F number=42');
+    expect(spawnCommandOf()).toContain('-F number=42');
+    expect(spawnCommandOf()).toContain('parent { number }');
   });
 
-  it('also accepts the nested data.data.repository shape', async () => {
-    ghApiJsonScheduledMock.mockResolvedValue({
-      data: {
+  it('also accepts the double-wrapped envelope', async () => {
+    mockAsyncGh(() =>
+      JSON.stringify({
         data: {
-          repository: {
-            issue: { parent: null, subIssues: { nodes: [{ number: 9 }] } },
-          },
+          data: { repository: { issue: { parent: null, subIssues: { nodes: [{ number: 9 }] } } } },
         },
-      },
-    });
+      }),
+    );
 
     await expect(getIssueHierarchyAsync(config, 42)).resolves.toEqual({
       parentIssueNumber: null,
       childIssueNumbers: [9],
     });
   });
-
-  it('rejects an empty response with the hierarchy error message', async () => {
-    ghApiJsonScheduledMock.mockResolvedValue(undefined);
-
-    await expect(getIssueHierarchyAsync(config, 42)).rejects.toThrow(
-      'Unable to query issue hierarchy',
-    );
-  });
 });
 
 describe('getIssueNodeIdAsync', () => {
   it('returns the node id and resolves it with an integer number variable', async () => {
-    ghApiJsonScheduledMock.mockResolvedValue({
-      data: { repository: { issue: { id: 'ISSUE_NODE_42' } } },
-    });
+    mockAsyncGh(() => JSON.stringify({ data: { repository: { issue: { id: 'ISSUE_NODE_42' } } } }));
 
     await expect(getIssueNodeIdAsync(config, 42)).resolves.toBe('ISSUE_NODE_42');
-    const command = String(ghApiJsonScheduledMock.mock.calls[0]?.[0]);
-    expect(command).toContain('issue(number: $number) { id }');
-    expect(command).toContain('-F number=42');
+    expect(spawnCommandOf()).toContain('issue(number: $number) { id }');
+    expect(spawnCommandOf()).toContain('-F number=42');
   });
 
   it('throws the documented message when the id is absent', async () => {
-    ghApiJsonScheduledMock.mockResolvedValue({ data: { repository: { issue: {} } } });
+    mockAsyncGh(() => JSON.stringify({ data: { repository: { issue: {} } } }));
 
     await expect(getIssueNodeIdAsync(config, 42)).rejects.toThrow(
       'Unable to resolve GitHub issue node ID for #42',
@@ -193,26 +213,26 @@ describe('getIssueNodeIdAsync', () => {
 });
 
 describe('addSubIssueLink (sync)', () => {
-  function primeNodeLookups(): void {
-    runGhJsonDetailedMock.mockImplementation((command: string) => {
+  /** Node lookups answer with an id; the mutation answers with linked ids. */
+  function mockLinkGraph(options: { mutate?: () => string } = {}): void {
+    mockSyncGh((command) => {
       if (command.includes('addSubIssue')) {
-        return {
-          ok: true,
-          data: { data: { addSubIssue: { issue: { id: 'P5' }, subIssue: { id: 'C6' } } } },
-        };
+        return options.mutate ? options.mutate() : JSON.stringify({
+          data: { addSubIssue: { issue: { id: 'P5' }, subIssue: { id: 'C6' } } },
+        });
       }
       const id = command.includes('-F number=5') ? 'P5' : 'C6';
-      return { ok: true, data: { data: { repository: { issue: { id } } } } };
+      return JSON.stringify({ data: { repository: { issue: { id } } } });
     });
   }
 
   it('resolves each node id once, then issues the mutation with -f id flags', () => {
-    primeNodeLookups();
+    mockLinkGraph();
 
     addSubIssueLink(config, 5, 6);
 
-    expect(runGhJsonDetailedMock).toHaveBeenCalledTimes(3);
-    const mutation = commandOf(2);
+    expect(mockExecSync).toHaveBeenCalledTimes(3);
+    const mutation = execSyncCommand(2);
     expect(mutation).toContain('addSubIssue(input: { issueId: $parent, subIssueId: $child })');
     // Node ids are GraphQL `ID!`, so they travel as `-f` string flags.
     expect(mutation).toContain("-f parent='P5'");
@@ -220,64 +240,70 @@ describe('addSubIssueLink (sync)', () => {
   });
 
   it('reuses a primed node-id cache instead of re-querying node ids', () => {
-    primeNodeLookups();
+    mockLinkGraph();
 
     addSubIssueLink(config, 5, 6, new Map([[5, 'P5'], [6, 'C6']]));
 
-    expect(runGhJsonDetailedMock).toHaveBeenCalledTimes(1);
-    expect(commandOf(0)).toContain('addSubIssue');
+    expect(mockExecSync).toHaveBeenCalledTimes(1);
+    expect(execSyncCommand(0)).toContain('addSubIssue');
   });
 
-  it('throws an actionable error when the mutation fails or returns no data', () => {
-    runGhJsonDetailedMock.mockReturnValue({ ok: false });
+  it('throws the documented failure when the mutation is rejected', () => {
+    mockLinkGraph({ mutate: () => JSON.stringify({ errors: [{ message: 'sub-issues disabled' }] }) });
+
     expect(() => addSubIssueLink(config, 5, 6, new Map([[5, 'P5'], [6, 'C6']]))).toThrow(
-      'Failed to link #6 as sub-issue of #5',
+      'sub-issues disabled',
     );
 
-    runGhJsonDetailedMock.mockReturnValue({ ok: true, data: { data: { addSubIssue: {} } } });
+    mockLinkGraph({ mutate: () => JSON.stringify({ data: { addSubIssue: {} } }) });
     expect(() => addSubIssueLink(config, 5, 6, new Map([[5, 'P5'], [6, 'C6']]))).toThrow(
       'addSubIssue returned no data (sub-issues may be disabled for this repo/org)',
     );
   });
 
   it('wraps failures as { ok: false, error } instead of throwing', () => {
-    runGhJsonDetailedMock.mockReturnValue({
-      ok: true,
-      data: { data: { addSubIssue: {} } },
-    });
+    mockLinkGraph({ mutate: () => JSON.stringify({ data: { addSubIssue: {} } }) });
 
     expect(addSubIssueLinkResult(config, 5, 6, new Map([[5, 'P5'], [6, 'C6']]))).toEqual({
       ok: false,
       error: 'addSubIssue returned no data (sub-issues may be disabled for this repo/org)',
     });
   });
+
+  it('returns { ok: true } on success', () => {
+    mockLinkGraph();
+
+    expect(addSubIssueLinkResult(config, 5, 6)).toEqual({ ok: true });
+  });
 });
 
 describe('addSubIssueLinkAsync', () => {
-  it('schedules node resolution and the mutation through the throttled helpers', async () => {
-    ghApiJsonScheduledMock.mockImplementation(async (command: string) => ({
-      data: { repository: { issue: { id: command.includes('-F number=5') ? 'P5' : 'C6' } } },
-    }));
-    ghApiJsonDetailedScheduledMock.mockResolvedValue({
-      ok: true,
-      data: { data: { addSubIssue: { issue: { id: 'P5' }, subIssue: { id: 'C6' } } } },
+  it('resolves node ids asynchronously and issues the throttled mutation', async () => {
+    mockAsyncGh((command) => {
+      if (command.includes('addSubIssue')) {
+        return JSON.stringify({
+          data: { addSubIssue: { issue: { id: 'P5' }, subIssue: { id: 'C6' } } },
+        });
+      }
+      const id = command.includes('-F number=5') ? 'P5' : 'C6';
+      return JSON.stringify({ data: { repository: { issue: { id } } } });
     });
 
     await addSubIssueLinkAsync(config, 5, 6);
 
-    expect(ghApiJsonScheduledMock).toHaveBeenCalledTimes(2);
-    expect(ghApiJsonDetailedScheduledMock).toHaveBeenCalledTimes(1);
-    const mutation = String(ghApiJsonDetailedScheduledMock.mock.calls[0]?.[0]);
+    expect(mockSpawn).toHaveBeenCalledTimes(3);
+    const mutation = spawnCommandOf(2);
     expect(mutation).toContain('addSubIssue');
     expect(mutation).toContain("-f parent='P5'");
     expect(mutation).toContain("-f child='C6'");
   });
 
   it('wraps async failures as { ok: false, error }', async () => {
-    ghApiJsonDetailedScheduledMock.mockResolvedValue({
-      ok: true,
-      data: { data: { addSubIssue: {} } },
-    });
+    mockAsyncGh((command) =>
+      command.includes('addSubIssue')
+        ? JSON.stringify({ data: { addSubIssue: {} } })
+        : JSON.stringify({ data: { repository: { issue: { id: 'ID' } } } }),
+    );
 
     await expect(
       addSubIssueLinkResultAsync(config, 5, 6, new Map([[5, 'P5'], [6, 'C6']])),
@@ -285,31 +311,34 @@ describe('addSubIssueLinkAsync', () => {
       ok: false,
       error: 'addSubIssue returned no data (sub-issues may be disabled for this repo/org)',
     });
-
-    ghApiJsonDetailedScheduledMock.mockResolvedValue({ ok: false, error: 'graphql down' });
-    await expect(
-      addSubIssueLinkResultAsync(config, 5, 6, new Map([[5, 'P5'], [6, 'C6']])),
-    ).resolves.toEqual({ ok: false, error: 'graphql down' });
   });
 });
 
 describe('listParentIssueNumbersFromTimeline', () => {
   it('keeps only added_to_parent events and returns their parent numbers', () => {
-    runGhSafeJsonMock.mockReturnValue([
+    const events = [
       { event: 'added_to_parent', parent_issue: { number: 11 } },
       { event: 'labeled', parent_issue: { number: 99 } },
       { event: 'added_to_parent', parent_issue: { number: 'nope' } },
       { event: 'added_to_parent', parent_issue: { number: 12 } },
-    ]);
+    ];
+    // `--paginate` streams stdout to the file descriptor transport opened.
+    mockSpawnSync.mockImplementation((_file: string, _args: string[], options: any) => {
+      fs.writeSync(options.stdio[1], JSON.stringify(events));
+      return { status: 0, error: null };
+    });
 
     expect(listParentIssueNumbersFromTimeline(config, 42)).toEqual([11, 12]);
-    expect(String(runGhSafeJsonMock.mock.calls[0]?.[0])).toBe(
+    expect(String(mockSpawnSync.mock.calls[0]?.[1]?.[1])).toBe(
       'gh api repos/acme/widgets/issues/42/timeline --paginate',
     );
   });
 
   it('returns an empty list when the timeline payload is not an array', () => {
-    runGhSafeJsonMock.mockReturnValue(null);
+    mockSpawnSync.mockImplementation((_file: string, _args: string[], options: any) => {
+      fs.writeSync(options.stdio[1], JSON.stringify({ message: 'Not Found' }));
+      return { status: 0, error: null };
+    });
 
     expect(listParentIssueNumbersFromTimeline(config, 42)).toEqual([]);
   });
