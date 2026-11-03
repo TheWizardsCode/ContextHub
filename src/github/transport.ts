@@ -333,6 +333,23 @@ export async function ghApiJsonScheduled(command: string, input?: string): Promi
   });
 }
 
+/**
+ * Schedule a *detailed* JSON call (the `{ ok, data, error }` shape) through the
+ * central throttler, so a caller that must inspect the failure instead of
+ * throwing still honours concurrency and rate limits (WL-0MVVLXYRO006WP2I).
+ *
+ * Sibling of `ghApiJsonScheduled`, which unwraps to plain data and throws on
+ * failure; this variant keeps `runGhJsonDetailedAsync`'s result contract.
+ */
+export async function ghApiJsonDetailedScheduled(
+  command: string,
+  input?: string,
+): Promise<{ ok: boolean; data?: any; error?: string }> {
+  return await throttler.schedule(async () => {
+    return await runGhJsonDetailedAsync(command, input);
+  });
+}
+
 export function runGhSafe(command: string, input?: string): string | null {
   try {
     return runGh(command, input);
