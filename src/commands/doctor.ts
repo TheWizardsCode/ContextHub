@@ -34,6 +34,7 @@ import { registerCacheCommand } from './doctor/cache.js';
 import { registerAuditGapsCommand } from './doctor/audit-gaps.js';
 import { registerPrefixCommand } from './doctor/prefix.js';
 import { registerDanglingParentsCommand } from './doctor/dangling-parents.js';
+import { registerPriorityCommand } from './doctor/priority.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -608,93 +609,7 @@ export default function register(ctx: PluginContext): void {
 
   registerDanglingParentsCommand(doctor, { output, utils, dataPath: ctx.dataPath });
 
-  doctor
-    .command('priority')
-    .description('Detect and fix invalid priority values in the database')
-    .option('--dry-run', 'Show invalid priorities without modifying them')
-    .option('--apply', 'Apply priority mapping (P0-P3 -> canonical values)')
-    .option('--prefix <prefix>', 'Override the default prefix')
-    .action(async (opts: { dryRun?: boolean; apply?: boolean; prefix?: string }) => {
-      utils.requireInitialized();
-      const db = utils.getDatabase(opts.prefix);
-      const all = db.getAll();
-
-      const invalid: Array<{ id: string; current: string; mapped?: string }> = [];
-
-      for (const item of all) {
-        const p = item.priority;
-        if (p && !isValidPriority(p)) {
-          const mapped = isMappablePriority(p) ? normalizePriority(p) : undefined;
-          invalid.push({ id: item.id, current: p, mapped: mapped ?? undefined });
-        }
-      }
-
-      if (invalid.length === 0) {
-        if (utils.isJsonMode()) {
-          output.json({ success: true, invalid: [], fixed: [] });
-          return;
-        }
-        console.log('Doctor priority: no invalid priorities found.');
-        return;
-      }
-
-      if (opts.dryRun || !opts.apply) {
-        if (utils.isJsonMode()) {
-          const out: any = { dryRun: true, invalid, count: invalid.length };
-          if (!opts.dryRun) out.hint = 'Use --apply to fix invalid priorities';
-          output.json(out);
-          return;
-        }
-        console.log(`Doctor priority: found ${invalid.length} work item(s) with invalid priorities.`);
-        console.log(`Canonical priority values: ${CANONICAL_PRIORITIES.join(', ')}`);
-        console.log(`P* mapping: P0->critical, P1->high, P2->medium, P3->low`);
-        console.log('');
-        for (const entry of invalid) {
-          const hint = entry.mapped ? ` (would map to "${entry.mapped}")` : ' (no mapping available)';
-          console.log(` - ${entry.id}: current="${entry.current}"${hint}`);
-        }
-        if (!opts.dryRun) {
-          console.log('');
-          console.log('Use --dry-run to preview or --apply to apply the P* mapping.');
-        }
-        return;
-      }
-
-      // --apply: apply mapping for mappable values
-      const fixed: Array<{ id: string; from: string; to: string }> = [];
-      const unfixable: Array<{ id: string; current: string }> = [];
-
-      withStoreMutationLock(ctx.dataPath, () => {
-      for (const entry of invalid) {
-        if (entry.mapped) {
-          try {
-            db.update(entry.id, { priority: entry.mapped as any });
-            fixed.push({ id: entry.id, from: entry.current, to: entry.mapped });
-          } catch (err) {
-            unfixable.push({ id: entry.id, current: entry.current });
-          }
-        } else {
-          unfixable.push({ id: entry.id, current: entry.current });
-        }
-      }
-      });
-
-      if (utils.isJsonMode()) {
-        output.json({ fixed, unfixable, fixedCount: fixed.length, unfixableCount: unfixable.length });
-        return;
-      }
-
-      console.log(`Doctor priority: fixed ${fixed.length} item(s).`);
-      for (const f of fixed) {
-        console.log(` - ${f.id}: "${f.from}" -> "${f.to}"`);
-      }
-      if (unfixable.length > 0) {
-        console.log(`\n${unfixable.length} item(s) with unmappable priorities (requires manual fix):`);
-        for (const u of unfixable) {
-          console.log(` - ${u.id}: "${u.current}"`);
-        }
-      }
-    });
+  registerPriorityCommand(doctor, { output, utils, dataPath: ctx.dataPath });
 
   doctor
     .command('file-paths')
