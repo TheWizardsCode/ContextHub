@@ -12,6 +12,12 @@
 
 import type { HostCpuSource } from './host-cpu.js';
 import type { LlamaSlot, LlamaStatus } from './downtime-worker.types.js';
+import {
+  HOST_BUDGET_AUDIT_REASON,
+  HOST_BUDGET_IMPLEMENT_REASON,
+  HOST_BUDGET_UNKNOWN_REASON,
+  type HostBudgetEvidence,
+} from './downtime-log.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -138,6 +144,18 @@ export function decisionHeaderToken(reason: string): string {
       return 'no-slots';
     case 'capacity-saturated':
       return 'saturated';
+    // Host-wide dispatch-budget refusals (WL-0MVXY0ZYW009NEJD F5 AC2): each
+    // token gets its own header segment so the operator can tell an
+    // OPERATOR-IMPOSED machine budget stop (`budget-implement` /
+    // `budget-audit` / `budget-unknown`) from a capacity-shaped stop
+    // (`contention` / `slot-owner` / `saturated`). The tokens themselves come
+    // from the decision log's vocabulary of record, never a local copy.
+    case HOST_BUDGET_IMPLEMENT_REASON:
+      return 'budget-implement';
+    case HOST_BUDGET_AUDIT_REASON:
+      return 'budget-audit';
+    case HOST_BUDGET_UNKNOWN_REASON:
+      return 'budget-unknown';
     case 'prefill-gate':
     case 'prefill-cap':
     case 'prefill-eta':
@@ -334,6 +352,14 @@ export interface DecisionEntryFields extends CapacityEvidence {
     gate: string;
     assignee?: string;
   }>;
+  /**
+   * Host-budget evidence (WL-0MVXY0ZYW009NEJD F5 AC1/AC3): the refused tier's
+   * observed in-flight count and cap, copied verbatim from the dispatch
+   * outcome's `budget` field. Present only on a host-budget refusal, so the
+   * decision log, the stderr skip line and the worklist counter quote the same
+   * `live`/`max` figures and can never disagree.
+   */
+  budget?: HostBudgetEvidence;
 }
 export function capacityEvidence(
   status: LlamaStatus,

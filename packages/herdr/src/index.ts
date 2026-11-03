@@ -81,6 +81,11 @@ import {
   prepareInteractiveAgentDispatch,
   type InteractiveAgentDispatchPreparation,
 } from './host-dispatch-budget.interactive.js';
+// Read-only host-budget summary for the worklist header counter
+// (WL-0MVXY0ZYW009NEJD F5 AC4): the SAME ledger/rules the dispatcher admits
+// with, read without writing, reaping or reserving, so the header can never
+// disagree with the refusal the dispatcher logs.
+import { readHostBudgetStatus } from './host-budget-status.js';
 import {
   countSpawnedChildProcesses,
   createHerdrReaperDeps,
@@ -1702,6 +1707,18 @@ export async function main(): Promise<void> {
       subscriber: eventSubscriber,
       agentTracker,
       hostBudgetPrompt,
+      // Host-budget header counter (WL-0MVXY0ZYW009NEJD F5 AC4): derived on
+      // the pane-marker cadence from the machine ledger plus the SAME
+      // machine-wide pane list the dispatcher's admission uses. Read-only —
+      // no `wl` spawn, no reservation, no dispatch change — and `null` (no
+      // header segment) whenever the budget is unavailable.
+      readHostBudgetStatus: async () => {
+        const livePanes = await hostBudgetLivePanes(
+          defaultRunningDowntimePanesResolver,
+          targetCwd,
+        );
+        return readHostBudgetStatus({ livePanes });
+      },
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
       onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent

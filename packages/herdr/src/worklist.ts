@@ -60,6 +60,10 @@ import {
   type DispatchWindowHoldSummary,
 } from './dispatch-window-hold.js';
 import {
+  hostBudgetStatusText,
+  type HostBudgetStatus,
+} from './host-budget-status.js';
+import {
   createHydratorRunner,
   createProductionHydratorDeps,
   HYDRATOR_INTERVAL_MS,
@@ -2300,6 +2304,14 @@ export function createListRenderer(getShowIcons?: () => boolean): (
    * renders no banner (and consumes no chrome row).
    */
   assigneeHoldNotice?: string | null,
+  /**
+   * Header segment for the host-wide dispatch budget (AC4,
+   * WL-0MVXY0ZYW009NEJD): `[budget: implement n/max · audit n/max]`.
+   * Display-only and read-only — it never reserves, releases or reaps a ledger
+   * entry, and it never changes a dispatch decision. `null` renders no segment
+   * (and no chrome row) when the budget/ledger is unavailable.
+   */
+  hostBudgetStatus?: string | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -2349,6 +2361,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     assigneeHoldStatus?: string | null,
     /** Banner copy for an all-held dispatch window (AC2, WL-0MVR8FN1D002SCIR). */
     assigneeHoldNotice?: string | null,
+    /** Header segment for the host-wide dispatch budget (AC4, WL-0MVXY0ZYW009NEJD). */
+    hostBudgetStatus?: string | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -2421,6 +2435,16 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // when the window still has dispatchable work.
     if (assigneeHoldStatus) {
       header += ` ${ANSI.fg(220)}${assigneeHoldStatus}${ANSI.reset}`;
+    }
+    // ── Host-wide dispatch-budget counter (AC4 — WL-0MVXY0ZYW009NEJD) ──
+    // `implement n/max · audit n/max`, derived from ONE read-only reader
+    // (`host-budget-status.ts`) that pairs the ledger's own counting rules
+    // with the configured caps — the same numbers the dispatcher's refusal
+    // logs. Display-only: it never reserves/releases/reaps and never changes
+    // a dispatch decision, and it renders nothing when the budget is
+    // unavailable so the common case adds no chrome.
+    if (hostBudgetStatus) {
+      header += ` ${ANSI.fg(45)}${hostBudgetStatus}${ANSI.reset}`;
     }
     // ── Non-blocking sync notice (F3 — WL-0MVJV2O7H003HY9N) ─────
     // A tiny, render-only status notice ("⟳ syncing… Ns") while a background
@@ -3601,7 +3625,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; hostBudgetPrompt?: HostBudgetPromptHost; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; hostBudgetPrompt?: HostBudgetPromptHost; readHostBudgetStatus?: () => Promise<HostBudgetStatus | null>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3625,6 +3649,7 @@ export async function runWorklistTui(
     cwd: options?.cwd,
     shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd),
     hostBudgetPrompt: options?.hostBudgetPrompt,
+    readHostBudgetStatus: options?.readHostBudgetStatus,
     dbWatch: options?.dbWatch ?? watchDbChanges,
     dbWatchOptions: options?.dbWatchOptions,
   };
@@ -3648,6 +3673,24 @@ export async function runWorklistTui(
     }
   };
 
+  // ── Host-wide dispatch-budget counter (AC4 — WL-0MVXY0ZYW009NEJD) ──
+  // `implement n/max · audit n/max` in the header, refreshed on the SAME
+  // cadence as the pane markers (hydrate tick / focus resume / pane event)
+  // and NEVER on a bare render, so the counter costs one bounded read per
+  // cadence and no `wl` spawn. Read-only by contract: the production reader
+  // never reserves, releases or reaps a ledger entry, and the header segment
+  // is a string, never a gate. Fail-open: an unavailable budget (no
+  // coordination dir, no ledger, corrupt ledger, unwired seam) renders
+  // nothing, so the common/degraded case adds no chrome noise.
+  let hostBudgetStatus: HostBudgetStatus | null = null;
+  const refreshHostBudgetStatus = async (): Promise<void> => {
+    try {
+      hostBudgetStatus = (await opts.readHostBudgetStatus?.()) ?? null;
+    } catch {
+      hostBudgetStatus = null;
+    }
+  };
+
   // Load items
   let items: WorkItem[];
   try {
@@ -3657,8 +3700,9 @@ export async function runWorklistTui(
   }
   // Reflect open item panes on the very first render (no 30 s wait). Kicked
   // off without blocking TUI startup; the marker lands on a follow-up render
-  // once the pane lookup resolves (fail-open).
-  void applyPaneMarkers(items).then(() => render());
+  // once the pane lookup resolves (fail-open). The host-budget counter rides
+  // the same pass (AC4).
+  void Promise.all([applyPaneMarkers(items), refreshHostBudgetStatus()]).then(() => render());
 
   // Fetch total actionable count (best effort — failure is silent)
   fetchActionableCount().then((count) => {
@@ -3680,6 +3724,10 @@ export async function runWorklistTui(
    */
   const refreshPaneMarkers = async (): Promise<void> => {
     await applyPaneMarkers(state.allItems());
+    // The budget counter is refreshed with the pane list it depends on
+    // (the implement tier's live-pane rule), so the two can never be read at
+    // materially different times on the same cadence (AC4/AC5).
+    await refreshHostBudgetStatus();
     render();
   };
 
@@ -5615,6 +5663,9 @@ export async function runWorklistTui(
       // display-only, read-only — the holds are never cleared here.
       assigneeHoldStatusText(assigneeHoldSummary),
       assigneeHoldBannerText(assigneeHoldSummary),
+      // Host-budget counter (AC4, WL-0MVXY0ZYW009NEJD): read-only
+      // `implement n/max · audit n/max`, null when the budget is unavailable.
+      hostBudgetStatusText(hostBudgetStatus),
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

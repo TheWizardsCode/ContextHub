@@ -28,6 +28,7 @@ import { DEFAULT_LEASE_TTL_SECONDS } from './leader-election.js';
 import {
   appendCoordinationLogEntry,
   coordinationLogPolicyFromConfig,
+  isHostBudgetDecisionReason,
   type CoordinationLogEntry,
 } from './downtime-log.js';
 import {
@@ -48,6 +49,7 @@ import {
   writeCapacityStarvationSignal,
 } from './downtime-worker.orchestrator-signals.js';
 import type { LeafAuditAdmission } from './downtime-worker.gates.js';
+import { hostBudgetSkipLine } from './host-budget-status.js';
 import type {
   IdleTracker,
   IdleWindowLaunchFence,
@@ -234,10 +236,30 @@ export async function recordDecision(
   // an observation, not a refusal: the header blocking token and the
   // underlying reason are unchanged, it is written even when the refusal
   // itself is rate-limited, and a logging failure never affects dispatch.
+  //
+  // Host-budget refusals are NOT fed to the tracker at all
+  // (WL-0MVXY0ZYW009NEJD AC6): a machine-wide budget stop is an
+  // OPERATOR-IMPOSED pause, not capacity starvation, so it must neither start
+  // nor extend an episode — and `observe()` would RESET an active episode for
+  // a non-capacity reason, which would silently mask a genuine starvation
+  // stretch. Skipping the feed leaves the tracker state exactly unchanged;
+  // `capacity-starvation.ts` itself is untouched.
+  const budgetRefusal = isHostBudgetDecisionReason(reason);
   const starvation =
-    options.blocking !== false
+    options.blocking !== false && !budgetRefusal
       ? ctx.starvationTracker.observe(options.starvationReason ?? reason, now)
       : null;
+  // Host-budget observability (WL-0MVXY0ZYW009NEJD AC3): the existing
+  // `Downtime … tier skipped: <reason>` stderr line, now carrying the live
+  // count and the cap. Fail-closed: logging must never crash the worker.
+  if (budgetRefusal) {
+    try {
+      const line = hostBudgetSkipLine(reason, fields.budget);
+      if (line !== null) process.stderr.write(`${line}\n`);
+    } catch {
+      // fail-closed: the skip line must never crash the worker
+    }
+  }
   if (
     ctx.lastDecisionReason === reason &&
     now - ctx.lastDecisionAt < DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS
@@ -655,6 +677,12 @@ export async function performDispatch(
           // for diagnosis alongside the grouped entry reason.
           ...(reservationRefused ? { reservationReason: outcome.reason } : {}),
           ...(outcome.offerRejections !== undefined ? { offerRejections: outcome.offerRejections } : {}),
+          // Host-budget evidence (WL-0MVXY0ZYW009NEJD F5 AC1): the SAME
+          // `{ live, max }` figure the refusal quotes on the stderr skip line
+          // and the worklist counter shows, copied straight from the dispatch
+          // outcome — one set of numbers for every surface. Absent on every
+          // non-budget outcome, so existing entry shapes are unchanged.
+          ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
           // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
           // slice C2): a refusal carries its reason as the decision reason
           // (distinct header token) plus `admit: false`, `retryAfterS` and

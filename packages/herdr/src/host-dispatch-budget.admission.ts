@@ -72,14 +72,26 @@ import {
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
 import { DOWNTIME_PANE_LABEL_PREFIX, paneLabelItemId } from './downtime-worker.pane.js';
+import {
+  HOST_BUDGET_AUDIT_REASON,
+  HOST_BUDGET_IMPLEMENT_REASON,
+  HOST_BUDGET_UNKNOWN_REASON,
+} from './downtime-log.js';
 
 export type { HostBudgetLivePane } from './host-dispatch-budget.js';
 
-/** Refusal reason: the tier is at/over its machine-wide cap. */
-export const HOST_BUDGET_IMPLEMENT_REFUSAL = 'host-budget-implement';
+/**
+ * Refusal reason: the tier is at/over its machine-wide cap.
+ *
+ * The three budget tokens are defined by the decision log's vocabulary of
+ * record (`downtime-log.ts`, WL-0MVXY0ZYW009NEJD F5) and re-exported here under
+ * the names admission has always used — one spelling, so the decision entry,
+ * the header token and the stderr skip line can never drift.
+ */
+export const HOST_BUDGET_IMPLEMENT_REFUSAL = HOST_BUDGET_IMPLEMENT_REASON;
 
 /** Refusal reason: the tier is at/over its machine-wide cap (audit tier). */
-export const HOST_BUDGET_AUDIT_REFUSAL = 'host-budget-audit';
+export const HOST_BUDGET_AUDIT_REFUSAL = HOST_BUDGET_AUDIT_REASON;
 
 /**
  * Refusal reason: the AUDIT tier is at its cap with `maxAudit: 1`
@@ -91,7 +103,7 @@ export const HOST_BUDGET_AUDIT_REFUSAL = 'host-budget-audit';
 export const HOST_BUDGET_AUDIT_SATURATED_REFUSAL = 'audit-host-saturated';
 
 /** Refusal reason: the ledger could not be trusted (fail closed + repair). */
-export const HOST_BUDGET_UNKNOWN_REFUSAL = 'host-budget-unknown';
+export const HOST_BUDGET_UNKNOWN_REFUSAL = HOST_BUDGET_UNKNOWN_REASON;
 
 /** The refusal tokens this module can return. */
 export type HostBudgetRefusalReason =

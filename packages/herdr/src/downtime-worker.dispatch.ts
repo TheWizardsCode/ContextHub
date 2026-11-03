@@ -93,6 +93,7 @@ function logHostAuditSaturation(
   freeSlots: number | undefined,
   contentionQueueDepth: number | undefined,
   budget?: { live: number; max: number },
+  reason: string = 'audit-host-saturated',
 ): void {
   try {
     const slots = typeof freeSlots === 'number' ? freeSlots : 'unknown';
@@ -100,11 +101,13 @@ function logHostAuditSaturation(
     // The audit tier now counts the machine-scoped ledger: report the observed
     // concurrent audits and cap when the caller has them (WL-0MVXY0XPF006YUHA
     // F2), falling back to the retired marker's single-flight figures so the
-    // line shape is unchanged for callers without ledger evidence.
+    // line shape is unchanged for callers without ledger evidence. `reason` is
+    // the token the caller actually refused with (WL-0MVXY0ZYW009NEJD F5), so
+    // the line never quotes the retired marker's token for a budget stop.
     const concurrent = budget !== undefined ? budget.live : 1;
     const cap = budget !== undefined ? `, maxAudit=${budget.max}` : '';
     process.stderr.write(
-      `[worklog-plugin] Downtime audit tier skipped: audit-host-saturated ` +
+      `[worklog-plugin] Downtime audit tier skipped: ${reason} ` +
         `(concurrentAudits=${concurrent}${cap}, freeSlots=${slots}, contentionQueueDepth=${contention})\n`,
     );
   } catch {
@@ -585,7 +588,12 @@ export async function dispatchDowntimeWork(
           // priority over auditCheckFailed (a mixed tick still reports the
           // audit skip).
           if (auditHostSaturated) {
-            logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth, auditHostBudget);
+            logHostAuditSaturation(
+              opts.freeSlots,
+              opts.contentionQueueDepth,
+              auditHostBudget,
+              auditHostBudgetReason ?? 'audit-host-saturated',
+            );
             return finalize({
               dispatched: false,
               reason: auditHostBudgetReason ?? 'audit-host-saturated',
@@ -696,7 +704,12 @@ export async function dispatchDowntimeWork(
               ? (auditHostBudgetReason ?? 'audit-host-saturated')
               : 'audit-in-flight';
             if (auditHostSaturated) {
-              logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth, auditHostBudget);
+              logHostAuditSaturation(
+                opts.freeSlots,
+                opts.contentionQueueDepth,
+                auditHostBudget,
+                skipReason,
+              );
             } else {
               process.stderr.write(
                 `[worklog-plugin] Downtime audit tier skipped: ${skipReason}\n`,
