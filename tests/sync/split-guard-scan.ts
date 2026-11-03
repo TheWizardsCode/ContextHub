@@ -40,6 +40,18 @@
  * `export *` re-export chains and read multi-line import/export clauses. Text
  * matching cannot do that reliably.
  *
+ * ## Reuse by other split guards
+ *
+ * The family predicate and the barrel path are parameters, not hardcoded
+ * constants: {@link splitFamilyModules}, {@link buildImportGraph} (via
+ * {@link GraphOptions.family}/{@link GraphOptions.barrel}),
+ * {@link findStaticCycles}, {@link findRuntimeCycles} and
+ * {@link findBarrelImports} accept them and default to the sync values, so the
+ * `src/github.ts` guard (WL-0MVVLXSQX0031IB3) reuses these scanners instead of
+ * copying them. Every parser remains a pure function of its input, so the
+ * negative-case tests stay expressible for any family. Defaults preserve the
+ * sync gates byte-for-byte.
+ *
  * ## Baseline generation (AC2 provenance)
  *
  *   npx tsx tests/sync/split-guard-scan.ts --write-baseline
@@ -444,10 +456,18 @@ export function isSyncFamilyFile(file: string): boolean {
   return dir === SYNC_SPLIT_DIR || dir.startsWith(`${SYNC_SPLIT_DIR}/`);
 }
 
-/** Production modules of the sync family (the modules the size gate covers). */
-export function splitFamilyModules(index: ModuleIndex): ParsedModule[] {
+/**
+ * Production modules of a split family (the modules the size gate covers).
+ *
+ * `isFamily` defaults to {@link isSyncFamilyFile}; other split guards pass
+ * their own predicate (e.g. `src/github.ts` + `src/github/**`).
+ */
+export function splitFamilyModules(
+  index: ModuleIndex,
+  isFamily: (file: string) => boolean = isSyncFamilyFile,
+): ParsedModule[] {
   return [...index.byFile.values()]
-    .filter((m) => isSyncFamilyFile(m.file) && !isTestOrFixture(m.file))
+    .filter((m) => isFamily(m.file) && !isTestOrFixture(m.file))
     .sort((a, b) => a.file.localeCompare(b.file));
 }
 
@@ -605,10 +625,14 @@ export function dynamicImportNames(
   const add = (name: string): void => {
     usage.set(name, { value: true, typeOnly: false });
   };
+  // Cheap pre-filter: a dynamic import of the barrel must mention the barrel's
+  // basename without its extension (`sync` today, `github` for the github
+  // guard). Derived from `barrel` so a differently-named barrel is never
+  // silently skipped.
+  const barrelToken = path.posix.basename(barrel).replace(/\.ts$/, '');
 
   for (const [file, source] of entries) {
-    // Cheap pre-filter: a dynamic import of the barrel must mention `sync`.
-    if (!source.includes('sync')) continue;
+    if (!source.includes(barrelToken)) continue;
     const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
     const targetsBarrel = (call: ts.CallExpression): boolean => {
       const specifier = dynamicImportSpecifierFromCall(call);
@@ -701,6 +725,16 @@ export interface GraphOptions {
   dropAllowlistedTypeOnlyBarrelEdges?: boolean;
   /** Keep only runtime (value) edges. */
   runtimeOnly?: boolean;
+  /** Family predicate; defaults to {@link isSyncFamilyFile}. */
+  family?: (file: string) => boolean;
+  /** Barrel module the allowlisted type-only edge exemption is anchored on. */
+  barrel?: string;
+  /**
+   * Barrel-import allowlist for {@link dropAllowlistedTypeOnlyBarrelEdges};
+   * defaults to {@link TYPE_ONLY_BARREL_ALLOWLIST}. Other split families pass
+   * their own (usually empty) list.
+   */
+  allowlist?: readonly string[];
 }
 
 /**
@@ -711,8 +745,10 @@ export function buildImportGraph(
   index: ModuleIndex,
   options: GraphOptions = {},
 ): Map<string, GraphEdge[]> {
-  const family = new Set(splitFamilyModules(index).map((m) => m.file));
-  const allowlisted = new Set(TYPE_ONLY_BARREL_ALLOWLIST);
+  const isFamily = options.family ?? isSyncFamilyFile;
+  const barrel = options.barrel ?? SYNC_BARREL;
+  const family = new Set(splitFamilyModules(index, isFamily).map((m) => m.file));
+  const allowlisted = new Set(options.allowlist ?? TYPE_ONLY_BARREL_ALLOWLIST);
   const graph = new Map<string, GraphEdge[]>();
 
   for (const file of family) {
@@ -724,7 +760,7 @@ export function buildImportGraph(
       if (
         options.dropAllowlistedTypeOnlyBarrelEdges &&
         typeOnly &&
-        to === SYNC_BARREL &&
+        to === barrel &&
         allowlisted.has(file)
       ) {
         return;
@@ -805,9 +841,12 @@ function cyclesOf(graph: Map<string, GraphEdge[]>): string[][] {
     .sort((a, b) => a.join('\n').localeCompare(b.join('\n')));
 }
 
-/** Cycles in the full (value + type) sync-family import graph. */
-export function findStaticCycles(index: ModuleIndex): string[][] {
-  return cyclesOf(buildImportGraph(index));
+/** Cycles in the full (value + type) family import graph. */
+export function findStaticCycles(
+  index: ModuleIndex,
+  options: GraphOptions = {},
+): string[][] {
+  return cyclesOf(buildImportGraph(index, options));
 }
 
 /**
@@ -815,31 +854,46 @@ export function findStaticCycles(index: ModuleIndex): string[][] {
  * edges. This is the gate's acyclicity check: the only tolerated cycle is the
  * one recorded in {@link TYPE_ONLY_BARREL_ALLOWLIST}.
  */
-export function findUnexplainedStaticCycles(index: ModuleIndex): string[][] {
-  return cyclesOf(buildImportGraph(index, { dropAllowlistedTypeOnlyBarrelEdges: true }));
+export function findUnexplainedStaticCycles(
+  index: ModuleIndex,
+  options: GraphOptions = {},
+): string[][] {
+  return cyclesOf(
+    buildImportGraph(index, { ...options, dropAllowlistedTypeOnlyBarrelEdges: true }),
+  );
 }
 
 /** Cycles in the **runtime** import graph (type-only edges removed). */
-export function findRuntimeCycles(index: ModuleIndex): string[][] {
-  return cyclesOf(buildImportGraph(index, { runtimeOnly: true }));
+export function findRuntimeCycles(
+  index: ModuleIndex,
+  options: GraphOptions = {},
+): string[][] {
+  return cyclesOf(buildImportGraph(index, { ...options, runtimeOnly: true }));
 }
 
-/** Family modules (excluding the barrel) that import the barrel. */
+/**
+ * Family modules (excluding the barrel) that import the barrel.
+ *
+ * `isFamily` and `barrel` default to the sync family/barrel so other split
+ * guards reuse the scan with their own family predicate and barrel path.
+ */
 export function findBarrelImports(
   index: ModuleIndex,
   runtimeOnly: boolean = false,
+  isFamily: (file: string) => boolean = isSyncFamilyFile,
+  barrel: string = SYNC_BARREL,
 ): BarrelImport[] {
   const found: BarrelImport[] = [];
-  for (const mod of splitFamilyModules(index)) {
-    if (mod.file === SYNC_BARREL) continue;
+  for (const mod of splitFamilyModules(index, isFamily)) {
+    if (mod.file === barrel) continue;
     for (const imp of mod.imports) {
-      if (imp.target !== SYNC_BARREL) continue;
+      if (imp.target !== barrel) continue;
       const typeOnly = isTypeOnlyImport(imp);
       if (runtimeOnly && typeOnly) continue;
       found.push({ file: mod.file, specifier: imp.specifier, typeOnly });
     }
     for (const re of mod.reexports) {
-      if (re.target !== SYNC_BARREL) continue;
+      if (re.target !== barrel) continue;
       if (runtimeOnly && re.typeOnly) continue;
       found.push({ file: mod.file, specifier: re.specifier, typeOnly: re.typeOnly });
     }
