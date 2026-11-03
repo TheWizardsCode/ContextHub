@@ -1,0 +1,438 @@
+/**
+ * Tests for interview clarifying-section extraction, Q/A parsing and lossless
+ * re-serialisation (WL-0MU55UDBJ008DJ67).
+ *
+ * Split verbatim from tests/cli/interview.test.ts (WL-0MVXY35EN004KL85);
+ * assertions, fixtures and describe titles are unchanged.
+ */
+
+import { describe, it, expect } from 'vitest';
+import {
+  extractClarifyingSection,
+  parseQAPairs,
+  rebuildQAPairs,
+  rebuildDescription,
+} from '../../../src/commands/interview.js';
+
+describe('extractClarifyingSection', () => {
+  it('returns null when section is absent', () => {
+    expect(extractClarifyingSection('Some description')).toBeNull();
+    expect(extractClarifyingSection('## Other Section')).toBeNull();
+  });
+
+  it('extracts the canonical "Clarifying Questions & Answers" heading', () => {
+    const desc = 'Intro\n\n## Clarifying Questions & Answers\n\n## Risks';
+    const result = extractClarifyingSection(desc);
+    expect(result).not.toBeNull();
+    expect(result!.header).toBe('## Clarifying Questions & Answers');
+    expect(result!.content).toBe('');
+    expect(result!.start).toBe(2);
+    expect(result!.end).toBe(4);
+  });
+
+  it('recognises the intake-skill appendix heading variants', () => {
+    const variants = [
+      '## Appendix: Clarifying questions',
+      '## Appendix: Clarifying Questions',
+      '# Appendix: Clarifying questions',
+      '## Clarifying questions',
+      '### Appendix: Clarifying questions',
+      '## Appendix: Clarifying questions & answers',
+    ];
+    for (const heading of variants) {
+      const desc = `Intro\n\n${heading}\n\n- Q: "Q?" — Answer: "A".\n\n## Next`;
+      const result = extractClarifyingSection(desc);
+      expect(result, heading).not.toBeNull();
+      expect(result!.header, heading).toBe(heading);
+      expect(result!.content, heading).toContain('Answer: "A"');
+    }
+  });
+
+  it('extracts section with content before the next section', () => {
+    const desc = `
+Title here
+
+Some description text
+
+## Clarifying Questions & Answers
+
+1. **Q: What format should the replay output be in?**
+   **A: The replay outputs to stdout as markdown.**
+
+2. **Q: Should partial interviews be resumable?**
+   **A: Yes, by tracking answered question indices.**
+
+## Risks & Assumptions
+
+Some risk text here.
+`.trim();
+    const result = extractClarifyingSection(desc);
+    expect(result).not.toBeNull();
+    expect(result!.header).toBe('## Clarifying Questions & Answers');
+    expect(result!.content).toContain('What format should the replay output be in?');
+    expect(result!.content).toContain('Should partial interviews be resumable?');
+    expect(result!.start).toBeGreaterThan(0);
+    expect(result!.end).toBeLessThan(result!.start + 10);
+  });
+});
+
+// ── Q/A pair parsing: numbered format ────────────────────────────────────
+
+describe('parseQAPairs (numbered format)', () => {
+  it('returns empty array for empty content', () => {
+    expect(parseQAPairs('')).toEqual([]);
+    expect(parseQAPairs('Some prose text.')).toEqual([]);
+  });
+
+  it('parses a single unanswered question', () => {
+    const content = '1. **Q: What is the question?**\n  **A:**';
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].number).toBe(1);
+    expect(pairs[0].question).toBe('What is the question?');
+    expect(pairs[0].answer).toBe('');
+    expect(pairs[0].unanswered).toBe(true);
+    expect(pairs[0].startLine).toBe(0);
+    expect(pairs[0].endLine).toBe(1);
+  });
+
+  it('parses a single answered question', () => {
+    const content = '1. **Q: What is the question?**\n  **A: The answer goes here.**';
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe('What is the question?');
+    expect(pairs[0].answer).toBe('The answer goes here.');
+    expect(pairs[0].unanswered).toBe(false);
+  });
+
+  it('parses multiple mixed Q/A pairs', () => {
+    const content = `1. **Q: Unanswered question?**
+  **A:**
+
+2. **Q: Already answered?**
+  **A: Yes, this was answered.**
+
+3. **Q: Another unanswered?**
+  **A:**`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(3);
+    expect(pairs[0].question).toBe('Unanswered question?');
+    expect(pairs[0].unanswered).toBe(true);
+    expect(pairs[1].question).toBe('Already answered?');
+    expect(pairs[1].answer).toBe('Yes, this was answered.');
+    expect(pairs[1].unanswered).toBe(false);
+    expect(pairs[2].question).toBe('Another unanswered?');
+    expect(pairs[2].unanswered).toBe(true);
+  });
+
+  it('parses bold "A (user):" attribution on the answer line', () => {
+    const content = `1. **Q:** SA-123 proposes a per-project file. What is the relationship?
+   **A (user):** Sibling / related but separate.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].answer).toBe('Sibling / related but separate.');
+    expect(pairs[0].unanswered).toBe(false);
+  });
+});
+
+// ── Q/A pair parsing: canonical bullet format ────────────────────────────
+
+describe('parseQAPairs (canonical bullet appendix)', () => {
+  it('parses an inline quoted Q/A pair with a Source trailer', () => {
+    const content =
+      '- Q: "Who is the primary user?" — Answer (user): "Internal support engineers". Source: interactive reply.';
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe('Who is the primary user?');
+    expect(pairs[0].answer).toBe('Internal support engineers');
+    expect(pairs[0].unanswered).toBe(false);
+  });
+
+  it('detects an inline "*(awaiting producer)*" placeholder as unanswered', () => {
+    const content =
+      '- **Q (OPEN QUESTION):** Should this be migrated? — **Answer:** *(awaiting producer)*. Context: awaiting reply.';
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toContain('Should this be migrated?');
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('does not eat a placeholder asterisk when the marker has no bold closer', () => {
+    const content =
+      '- Q: "Who is the primary user?" — Answer (user): *(awaiting producer)*. Source: interactive reply.';
+    const pairs = parseQAPairs(content);
+    expect(pairs[0].answer).toBe('*(awaiting producer)*');
+    expect(pairs[0].unanswered).toBe(true);
+    expect(rebuildQAPairs(pairs)).toBe(content);
+
+    pairs[0].answer = 'Internal engineers';
+    pairs[0].unanswered = false;
+    const answered = rebuildQAPairs(pairs);
+    expect(answered).toContain(
+      'Answer (user): Internal engineers. Source: interactive reply.',
+    );
+    expect(answered).not.toContain('*Internal');
+  });
+
+  it('parses a bold multiline Q/A pair with a Source line', () => {
+    const content = `- **Q:** "Where should the new repository be hosted?"
+  **Answer (user):** "Same GitHub organization as OpenCode"
+  **Source:** Interactive reply. Final: yes.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe('Where should the new repository be hosted?');
+    expect(pairs[0].answer).toBe('Same GitHub organization as OpenCode');
+    expect(pairs[0].unanswered).toBe(false);
+  });
+
+  it('parses a multiline question with the answer on a later continuation line', () => {
+    const content = `- **Q (OPEN QUESTION):** The start-work code now lives in the ampa repository,
+  and the fix is already committed there on origin/dev.
+  — **Answer:** *(awaiting producer)*. Context: awaiting reply.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toContain('The start-work code now lives');
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('parses several bullet pairs and skips prose-only questions', () => {
+    const content = `- Q: "Scope?" — Answer (user): "Repo-wide". Source: reply.
+- Q: "Duplicate?" — Answer (user): "No". Source: reply.
+- No clarifying questions were required for the third area.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(2);
+    expect(pairs[0].question).toBe('Scope?');
+    expect(pairs[1].question).toBe('Duplicate?');
+  });
+
+  it('treats a TBD answer as outstanding', () => {
+    const content = '- Q: "Threshold?" — Answer: TBD pending confirmation. Source: inference.';
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('does not truncate question text containing em dashes (WL-0MUKCGV3X0030W6K)', () => {
+    // Question text with em dashes that are part of the content, not qualifiers
+    const content =
+      '- **Q:** 4. Crash behaviour — destroyed and respawn (like enemy) — **Answer:** *(awaiting producer)*.';
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      '4. Crash behaviour — destroyed and respawn (like enemy)',
+    );
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('captures the full multi-line question ending in an OPEN QUESTION marker (WL-0MUKCGV3X0030W6K)', () => {
+    // Reproduces the intake appendix from AH-0MUAYB2XR007N10W, where the
+    // answer placeholder sits on a continuation line and the question spans
+    // two lines. Previously only the first line was surfaced.
+    const content = `- **Q (round 1 follow-up):** Crash behaviour — destroyed and respawn (like enemy
+  collisions) or something else? — **OPEN QUESTION**, context: not yet answered.
+  Interim assumption: destroy + reuse the shared player-hit lifecycle (see
+  Assumptions). Source: wl comment \`AH-C0MUB8JD13004UD9E\`.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      'Crash behaviour — destroyed and respawn (like enemy collisions) or something else?',
+    );
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('round-trips a multi-line OPEN QUESTION appendix losslessly', () => {
+    const content = `- **Q (round 1 follow-up):** Crash behaviour — destroyed and respawn (like enemy
+  collisions) or something else? — **OPEN QUESTION**, context: not yet answered.
+  Interim assumption: destroy + reuse the shared player-hit lifecycle. Source: reply.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(rebuildQAPairs(pairs)).toBe(content);
+  });
+
+  it('captures a multi-line question with no answer marker at all', () => {
+    const content = `- **Q:** A question that spans
+  several lines with no marker?`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      'A question that spans several lines with no marker?',
+    );
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('parses inline-numbered Q markers with bold answer attribution', () => {
+    const content = `- **Q1**: "What is the timeout?" — **Answer** (user): "120s". Source: reply.
+- **Q2:** "And the scope?"`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(2);
+    expect(pairs[0].number).toBe(1);
+    expect(pairs[0].question).toBe('What is the timeout?');
+    expect(pairs[0].answer).toBe('120s');
+    expect(pairs[0].unanswered).toBe(false);
+    expect(pairs[1].number).toBe(2);
+    expect(pairs[1].question).toBe('And the scope?');
+    expect(pairs[1].unanswered).toBe(true);
+  });
+
+  it('parses bare (unbulleted) bold Q markers', () => {
+    const content = `**Q**: "Which header marker?"
+
+**Q**: "Second question?" — **Answer (user):** "Yes".`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(2);
+    expect(pairs[0].question).toBe('Which header marker?');
+    expect(pairs[0].unanswered).toBe(true);
+    expect(pairs[1].question).toBe('Second question?');
+    expect(pairs[1].answer).toBe('Yes');
+  });
+
+  it('parses parenthesised and dash qualifiers in Q markers', () => {
+    const content = `- **Q1 (scope):** Should it be split?
+  **Answer (operator):** "all recommended" → keep.
+- **Q2 — Delete vs close:** Should agents delete?
+  **Answer (user):** "close".`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(2);
+    expect(pairs[0].question).toBe('Should it be split?');
+    expect(pairs[0].answer).toBe('all recommended');
+    expect(pairs[1].question).toBe('Should agents delete?');
+    expect(pairs[1].answer).toBe('close');
+  });
+
+  it('detects an inline answer on a continuation line', () => {
+    const content = `- **Q1 (scope):** Should the item cover hermetic tests +
+  cleanup, or split? — **Answer (operator):** "all recommended" → keep.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      'Should the item cover hermetic tests + cleanup, or split?',
+    );
+    expect(pairs[0].answer).toBe('all recommended');
+    expect(pairs[0].unanswered).toBe(false);
+  });
+
+  it('round-trips a mixed-format appendix losslessly', () => {
+    const content = `Here are the questions.
+
+- **Q1 (scope):** Should it be split?
+  **Answer (operator):** "all recommended" → keep.
+- Q: "Who is the user?" — Answer (user): *(awaiting producer)*. Source: reply.
+
+**Q3**: "Bare marker?"
+  — **Answer:** "Answered". Source: reply.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(3);
+    expect(rebuildQAPairs(pairs)).toBe(content);
+  });
+});
+
+// ── Q/A pair rebuilding ──────────────────────────────────────────────────
+
+describe('rebuildQAPairs', () => {
+  it('round-trips numbered Q/A pairs', () => {
+    const content = `1. **Q: Question one?**
+  **A: Answer one.**
+
+2. **Q: Question two?**
+  **A:**`;
+    const pairs = parseQAPairs(content);
+    expect(rebuildQAPairs(pairs)).toBe(content);
+  });
+
+  it('round-trips the canonical bullet format losslessly', () => {
+    const content =
+      '- Q: "Primary user?" — Answer (user): "Support". Source: interactive reply.\n' +
+      '- Q: "Scope?" — Answer (user): "Repo-wide". Source: reply.';
+    const pairs = parseQAPairs(content);
+    expect(rebuildQAPairs(pairs)).toBe(content);
+  });
+
+  it('preserves Source metadata when an answer is replaced', () => {
+    const content =
+      '- Q: "Primary user?" — Answer (user): "Support". Source: interactive reply.';
+    const pairs = parseQAPairs(content);
+    pairs[0].answer = 'Internal engineers';
+    pairs[0].unanswered = false;
+    const rebuilt = rebuildQAPairs(pairs);
+    expect(rebuilt).toContain('Internal engineers');
+    expect(rebuilt).toContain('Source: interactive reply.');
+    expect(rebuilt).not.toContain('"Support"');
+  });
+
+  it('preserves the multiline Source line when a placeholder is replaced', () => {
+    const content = `- **Q:** "Where?"
+  **Answer:** *(awaiting producer)*
+  **Source:** interactive reply.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs[0].unanswered).toBe(true);
+    pairs[0].answer = 'Acme org';
+    pairs[0].unanswered = false;
+    const rebuilt = rebuildQAPairs(pairs);
+    expect(rebuilt).toContain('Acme org');
+    expect(rebuilt).toContain('**Source:** interactive reply.');
+    expect(rebuilt).not.toContain('awaiting producer');
+  });
+
+  it('preserves answer content including punctuation', () => {
+    const pairs = parseQAPairs(`1. **Q: Question?**\n  **A: It costs £5.00.**`);
+    const rebuilt = rebuildQAPairs(pairs);
+    const reparsed = parseQAPairs(rebuilt);
+    expect(reparsed[0].answer).toBe('It costs £5.00.');
+  });
+});
+
+describe('rebuildDescription', () => {
+  it('rebuilds the full description with updated content', () => {
+    const original = `# Title
+
+Some description.
+
+## Clarifying Questions & Answers
+
+1. **Q: Old question?**
+  **A: Old answer.**
+
+## Risks
+
+Some risk text.
+`.trim();
+
+    const section = extractClarifyingSection(original);
+    const newPairs = parseQAPairs(section!.content);
+    newPairs[0].answer = 'New answer!';
+    newPairs[0].unanswered = false;
+    const updatedContent = rebuildQAPairs(newPairs);
+    const rebuilt = rebuildDescription(original, section, updatedContent);
+
+    expect(rebuilt).toContain('New answer!');
+    expect(rebuilt).toContain('Old question');
+    expect(rebuilt).toContain('Some risk text');
+  });
+
+  it('handles a section at the end of the description', () => {
+    const original = `# Title
+
+Some description.
+
+## Clarifying Questions & Answers
+
+1. **Q: Last question?**
+  **A:**`.trim();
+
+    const section = extractClarifyingSection(original);
+    expect(section).not.toBeNull();
+    expect(section!.end).toBe(original.split('\n').length);
+
+    const newPairs = parseQAPairs(section!.content);
+    newPairs[0].answer = 'Done!';
+    newPairs[0].unanswered = false;
+    const updatedContent = rebuildQAPairs(newPairs);
+    const rebuilt = rebuildDescription(original, section, updatedContent);
+
+    expect(rebuilt).toContain('Done!');
+  });
+
+  it('returns original when section is null', () => {
+    expect(rebuildDescription('No section', null, 'new content')).toBe('No section');
+  });
+});
