@@ -389,6 +389,13 @@ export function admitHostDispatch(
       ledgerOptions,
     );
     if (!reserved.ok) {
+      if (!reserved.unknown && reserved.reason === 'no-coordination-dir') {
+        // Parent AC11 (WL-0MVXY11IL0032S07): an unresolvable machine dir means
+        // there is no ledger and no new failure mode — exactly as before the
+        // budget existed. The audit tier must therefore admit without a
+        // reservation (mirroring the implement tier's early no-dir return).
+        return { admitted: true, live: state.live, max: state.max };
+      }
       // The reservation could not be recorded — the host's in-flight audits can
       // no longer be proven within budget, so fail closed.
       return {
