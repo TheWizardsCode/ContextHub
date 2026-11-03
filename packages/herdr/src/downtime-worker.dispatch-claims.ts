@@ -72,6 +72,33 @@ export async function rollbackClaimForFailure(
 }
 
 /**
+ * Release a dispatch's host-budget reservation (WL-0MVXY0YG7009JMHI F3 AC3).
+ *
+ * Called on every abort path of the claim pipeline — admission refusal (the
+ * claim is rolled back), marker-write failure and spawn failure — so a
+ * reservation can never outlive a dispatch that never produced an agent. The
+ * release is idempotent and best-effort: a missing entry, an unwired seam or a
+ * throwing stub is a non-event (a stale entry is still reaped by the ledger's
+ * own staleness rule, so this can never wedge the host).
+ */
+async function releaseHostBudgetForFailure(
+  deps: DowntimeDispatchDeps,
+  kind: DowntimeSkillKind,
+  itemId: string,
+  cwd: string,
+): Promise<void> {
+  // The ledger records only implement/audit entries; plan/intake/scheduled
+  // dispatches never reserve, so there is nothing to release.
+  if (kind !== 'implement' && kind !== 'audit') return;
+  if (typeof deps.releaseHostDispatch !== 'function') return;
+  try {
+    await deps.releaseHostDispatch(itemId, cwd);
+  } catch {
+    // best-effort: a release failure must never mask the dispatch outcome
+  }
+}
+
+/**
  * Dispatch one already-selected candidate through the fixed pipeline:
  * project-workspace anchor resolution → CAS claim → marker write (before
  * spawn) → spawn.
@@ -365,6 +392,63 @@ export async function dispatchClaimedTier(
     }
   }
 
+  // ── Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3) ──────
+  //
+  // ONE ledger read per dispatch attempt, placed in the claim→marker→spawn
+  // pipeline IMMEDIATELY BEFORE the dispatch marker is written. Both dispatcher
+  // paths (`dispatchDowntimeWork` and `dispatchFromCoordination`) reach this
+  // point through `dispatchClaimedTier`, so neither can bypass the machine-wide
+  // cap (AC1).
+  //
+  // The reservation is taken AFTER the CAS claim succeeded and BEFORE
+  // `recordDispatch` (AC3), and the claim is rolled back on refusal so the item
+  // is never left stranded `in_progress` (AC2). A refusal is a NEUTRAL skip
+  // (AC5): no marker, no spawn, no strike, no attempt budget and no
+  // no-candidate cooldown — the next idle tick re-checks. `live`/`max` ride on
+  // the outcome as evidence for the observability slice (F5).
+  let budgetEvidence: { live: number; max: number } | undefined;
+  if (kind === 'implement' && typeof deps.admitHostDispatch === 'function') {
+    let admission: Awaited<ReturnType<NonNullable<DowntimeDispatchDeps['admitHostDispatch']>>> | null =
+      null;
+    try {
+      admission = await deps.admitHostDispatch({
+        itemId: candidate.id,
+        kind,
+        cwd: opts.cwd,
+      });
+    } catch {
+      // Fail closed: an admission reader that throws cannot prove the host is
+      // within budget, so the dispatch is refused (never admitted by default).
+      admission = null;
+    }
+    if (admission === null) {
+      admission = { admitted: false, live: 0, max: 0, reason: 'host-budget-unknown' };
+    }
+    budgetEvidence = { live: admission.live, max: admission.max };
+    if (!admission.admitted) {
+      // Round trip: a granted local-capacity ticket can no longer reach a pane
+      // (single-use — recorded released/expired, never reused or leaked), the
+      // host-budget entry is released, and the claim is rolled back to its
+      // pre-claim status+stage so the item is re-selectable the moment the host
+      // frees a slot (AC2/AC3).
+      const releasedReservation: DowntimeReservationEvidence | undefined =
+        reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
+      await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
+      const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
+      return {
+        dispatched: false,
+        // Never a bare `undefined` reason: an admission seam that refuses
+        // without a token still has to report why the tick stopped.
+        reason: admission.reason ?? 'host-budget-unknown',
+        budget: budgetEvidence,
+        ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
+        // A failed rollback leaves the item claimed (no worse than the
+        // pre-fix state) — it is still not a spawn.
+        ...(rollbackOk ? {} : { error: 'claim rollback failed after host-budget refusal' }),
+      };
+    }
+  }
+
   let marked = false;
   // Capture ONE timestamp shared by the success marker and its post-spawn
   // enrichment entry (WL-0MUBVL251006JAQ0 / F6 AC6.2) so the marker readers
@@ -424,6 +508,9 @@ export async function dispatchClaimedTier(
     marked = false;
   }
   if (!marked) {
+    // Host-budget release (F3 AC3): a claimed-but-unmarked dispatch never
+    // spawns, so its reservation must not outlive it.
+    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
     // Marker-write recovery (WL-0MT32F908002YFFA AC1): the CAS claim
     // succeeded but the marker write failed — the item is stranded in
     // `in_progress` with no marker, invisible to all future tiers.
@@ -482,6 +569,9 @@ export async function dispatchClaimedTier(
     },
   );
   if (!spawn.ok) {
+    // Host-budget release (F3 AC3): the pane never appeared, so the reserved
+    // slot is given back before the (long) failure-trace path below.
+    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
     // The granted ticket could not be forwarded to a pane: it is single-use,
     // so it is DROPPED here (the next idle period asks for a fresh one) and
     // recorded as released/expired — never leaked or reused.
@@ -659,6 +749,19 @@ export async function recordDispatchEnrichmentBestEffort(
     }
   } catch {
     paneId = null; // fail-open — never block the dispatch on a pane lookup
+  }
+  // Host-budget confirm (WL-0MVXY0YG7009JMHI F3 AC3): a reserved entry only
+  // counts toward the machine-wide cap once its pane id is known (the ledger's
+  // fresh-pane liveness rule), so the resolved id is written back before the
+  // enrichment entry. Best-effort — an unresolved pane id (null) or a failing
+  // seam never affects the dispatch, and the pane-close release remains the
+  // backstop so no entry leaks permanently.
+  if (paneId !== null && typeof deps.confirmHostDispatch === 'function') {
+    try {
+      await deps.confirmHostDispatch(base.itemId, base.kind, paneId, base.cwd);
+    } catch {
+      // fail-open: the reservation is still released when the pane closes
+    }
   }
   try {
     await deps.recordDispatchEnrichment({

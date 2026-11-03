@@ -242,6 +242,9 @@ export type ReserveResult = { ok: true; entry: HostBudgetEntry } | HostBudgetFai
 /** Result of {@link release}. */
 export type ReleaseResult = { ok: true; removed: boolean } | HostBudgetFailure;
 
+/** Result of {@link replaceBudget} (`count` = entries written). */
+export type ReplaceBudgetResult = { ok: true; count: number } | HostBudgetFailure;
+
 /** Live counts per tier. */
 export interface HostBudgetCounts {
   implement: number;
@@ -685,6 +688,45 @@ export function release(itemId: string, opts: HostBudgetOptions = {}): ReleaseRe
     }
     return { ok: true as const, removed: true };
   });
+}
+
+/**
+ * Replace the WHOLE ledger with `entries` (WL-0MVXY0YG7009JMHI F3 AC6).
+ *
+ * The deliberate repair path: unlike `reserve`/`release`/`reap` — which refuse
+ * (`unknown`) to touch a ledger they cannot trust — this WRITES over the
+ * document, because rewriting an unreadable ledger from observed live state is
+ * the point. It is the one caller-side recovery the dispatcher's fail-closed
+ * `host-budget-unknown` branch performs before it skips an idle tick.
+ *
+ * Same safety envelope as every other write: the existing coordination lock
+ * (contention is `lock-contention`, never a clobber) and an atomic
+ * tmp+rename. Entries are validated with the same normaliser the reader uses;
+ * an invalid input entry is `invalid-input` rather than silently dropped (a
+ * dropped entry would under-count and admit too much work).
+ */
+export function replaceBudget(
+  entries: readonly HostBudgetEntry[],
+  opts: HostBudgetOptions = {},
+): ReplaceBudgetResult {
+  const dir = resolveBudgetDir(opts);
+  if (dir === null) return noDir();
+  const normalized: HostBudgetEntry[] = [];
+  for (const candidate of entries) {
+    const entry = normalizeLedgerEntry(candidate);
+    if (entry === null) return { ok: false, unknown: false, reason: 'invalid-input' };
+    normalized.push(entry);
+  }
+  if (!ensureMachineCoordinationDir(dir)) return ioError();
+  const outcome = withCoordLock(dir, (): ReplaceBudgetResult => {
+    const written = writeBudgetAt(dir, {
+      version: DISPATCH_BUDGET_VERSION,
+      entries: normalized,
+    });
+    return written ? { ok: true as const, count: normalized.length } : ioError();
+  });
+  if (outcome === null) return { ok: false, unknown: false, reason: 'lock-contention' };
+  return outcome;
 }
 
 /**

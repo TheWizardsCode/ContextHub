@@ -34,6 +34,7 @@ import {
   readActiveAuditMarker,
   isHostAuditActive,
 } from './machine-coordination.js';
+import { liveCount, reserve, type HostBudgetLivePane } from './host-dispatch-budget.js';
 import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type HerdrPaneRecord, type ScheduledPrompt } from './downtime-worker.js';
 import { classifyAuditScope } from './downtime-worker.gates.js';
 import { SCHEDULED_PROMPTS_FILE, scheduledPromptsPath } from './scheduled-prompts.js';
@@ -2770,6 +2771,45 @@ describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
     );
 
     expect(isHostAuditActive(coordinationDir)).toBe(false);
+  });
+
+  it('recordPaneClose releases the host dispatch-budget reservation (F3 AC3)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    const cwd = makeTempDir();
+    // An in-flight implement reserved on the machine-scoped ledger.
+    const reserved = reserve({
+      kind: 'implement',
+      itemId: 'WL-IMP',
+      instanceId: 'this-instance',
+      root: cwd,
+      paneId: 'w1:p9',
+    });
+    expect(reserved.ok).toBe(true);
+    const livePanes: HostBudgetLivePane[] = [
+      { paneId: 'w1:p9', title: 'Downtime triggered implement Do it - WL-IMP' },
+    ];
+    expect(liveCount('implement', livePanes)).toMatchObject({ ok: true, count: 1 });
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordPaneClose(
+      {
+        entryType: 'pane-close',
+        timestamp: new Date().toISOString(),
+        itemId: 'WL-IMP',
+        itemTitle: 'Do it',
+        paneId: 'w1:p9',
+        kind: 'implement',
+        outcome: 'closed-as-implemented',
+        reasonCode: 'none',
+        closed: true,
+      },
+      cwd,
+    );
+
+    // The machine-wide slot is given back: the pane is still live but the
+    // ledger no longer holds the reservation.
+    expect(liveCount('implement', livePanes)).toMatchObject({ ok: true, count: 0 });
   });
 
   it('recordPaneClose does NOT release the host-wide marker for a non-audit pane close', async () => {

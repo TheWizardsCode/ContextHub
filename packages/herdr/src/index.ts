@@ -61,6 +61,17 @@ import {
   clearStoredModelCooldown,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
+// Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3): the dispatcher's
+// machine-scoped implement-tier admission. The ledger/config module
+// (`host-dispatch-budget.ts`, F1) is consumed through this admission module so
+// the wiring reads the live pane list from the SAME machine-wide resolver the
+// rest of the dispatcher uses.
+import {
+  admitHostDispatch as admitHostBudgetDispatch,
+  confirmHostDispatch as confirmHostBudgetDispatch,
+  releaseHostDispatch as releaseHostBudgetDispatch,
+  type HostBudgetLivePane,
+} from './host-dispatch-budget.admission.js';
 import {
   countSpawnedChildProcesses,
   createHerdrReaperDeps,
@@ -332,6 +343,40 @@ import {
 } from './index.settings.js';
 
 export { configureWorklogTarget, uninitializedReport };
+
+/**
+ * Live pane list for the host dispatch budget (WL-0MVXY0YG7009JMHI F3).
+ *
+ * Built from the SAME machine-wide `herdr pane list` read the rest of the
+ * dispatcher uses, so the ledger's liveness rule never sees a second pane
+ * inventory. `records` (with labels) are preferred because the ledger's repair
+ * path needs the work-item id suffix to reconstruct entries; a `paneIds`-only
+ * payload still counts reserved entries, it just cannot repair a corrupt
+ * ledger. Fail-open: a failed/unwired pane query yields an empty list, which
+ * degrades admission to "no observed pane" exactly like today's liveness
+ * philosophy (a herdr hiccup never silently wedges dispatch).
+ */
+async function hostBudgetLivePanes(
+  readRunningPanes: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']>,
+  cwd: string,
+): Promise<HostBudgetLivePane[]> {
+  try {
+    const running = await readRunningPanes(cwd);
+    if (!running.ok) return [];
+    if (Array.isArray(running.records)) {
+      return running.records.map((record) => ({
+        paneId: record.paneId,
+        ...(typeof record.label === 'string' ? { title: record.label } : {}),
+      }));
+    }
+    if (Array.isArray(running.paneIds)) {
+      return running.paneIds.map((paneId) => ({ paneId }));
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
@@ -1142,6 +1187,17 @@ export function createDowntimeDeps(
           // fail-safe: marker removal failure must never crash worker
         }
       }
+      // Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3 AC3): a closed pane
+      // gives its machine-wide slot back immediately, whatever the lifecycle
+      // outcome — the ledger entry is keyed by item id, so this release is
+      // idempotent and safe for every kind/outcome. Best-effort: a failed
+      // release never blocks the pane-close record, and the ledger's stale
+      // reap remains the backstop.
+      try {
+        releaseHostBudgetDispatch(entry.itemId);
+      } catch {
+        // fail-safe: a release failure must never crash worker
+      }
       await appendPaneCloseLogEntry(cwd, entry);
     },
     // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): classify and close
@@ -1273,6 +1329,42 @@ export function createDowntimeDeps(
         { ...original, assignee },
         cwd,
       );
+    },
+    // ── Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3) ─────────────
+    // Machine-scoped ledger admission for the implement tier (F1's
+    // `host-dispatch-budget.ts`, consumed through the admission module). The
+    // live pane list comes from the machine-wide `herdr pane list` resolver;
+    // `instanceId` is a per-process diagnostic label only (the ledger's
+    // single-flight semantics never depend on it). Every seam is best-effort
+    // and must never throw into the claim pipeline.
+    async admitHostDispatch(input) {
+      const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
+      return admitHostBudgetDispatch(
+        {
+          kind: input.kind === 'audit' ? 'audit' : 'implement',
+          itemId: input.itemId,
+          instanceId: `herdr:${process.pid}`,
+          root: input.cwd,
+        },
+        { livePanes },
+      );
+    },
+    async confirmHostDispatch(itemId, kind, paneId, cwd): Promise<void> {
+      if (kind !== 'implement' && kind !== 'audit') return;
+      try {
+        confirmHostBudgetDispatch({
+          kind,
+          itemId,
+          instanceId: `herdr:${process.pid}`,
+          root: cwd,
+          paneId,
+        });
+      } catch {
+        // best-effort: the pane-close release remains the backstop
+      }
+    },
+    async releaseHostDispatch(itemId): Promise<void> {
+      releaseHostBudgetDispatch(itemId);
     },
     // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
     // `needsProducerReview = true` when an item exhausts its automatic

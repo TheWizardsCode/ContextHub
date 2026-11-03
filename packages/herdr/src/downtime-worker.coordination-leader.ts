@@ -566,6 +566,11 @@ async function dispatchFromCoordinationGated(
   // A relaxed leaf-audit pin held at least one offer (C4/C5): the reserved
   // slot, not an empty backlog, is why nothing dispatched.
   let pinHeld = false;
+  // Host-budget hold (WL-0MVXY0YG7009JMHI F3 AC5): the first offer refused by
+  // the machine-wide implement cap. The offer is KEPT (valid work — only the
+  // host is full) and the tick ends on the refusal, never 'no-candidate', so
+  // no cooldown/strike is recorded and the next idle tick re-checks.
+  let hostBudgetHold: DowntimeDispatchOutcome | undefined;
   const flaggedForBudget = new Set<string>();
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
@@ -819,6 +824,13 @@ async function dispatchFromCoordinationGated(
       // the item is back in the backlog — try the next offer.
       continue;
     }
+    if (outcome.reason === 'host-budget-implement' || outcome.reason === 'host-budget-unknown') {
+      // Machine-wide host budget (F3 AC5): NEUTRAL hold — keep the offer, no
+      // strike, no attempt budget, no cooldown. Other offers are still tried;
+      // if none dispatches the tick ends on this refusal.
+      hostBudgetHold ??= outcome;
+      continue;
+    }
     if (outcome.reason === 'wl-error') {
       // A wl failure is a strike — stop the cycle (three-strike rule
       // decides when to pause). Carry the entry's workItemId for logging.
@@ -973,6 +985,11 @@ async function dispatchFromCoordinationGated(
             // the reason (parity with the direct path, C4/C5). Neutral, so no
             // no-candidate cooldown and no strike.
             ? { dispatched: false, reason: LEAF_AUDIT_PIN_HOLD_REASON }
-            : { dispatched: false, reason: 'no-candidate' };
+            // Host-budget refusal (F3 AC5): a machine-wide cap, not an empty
+            // backlog, stopped the implement tier. Neutral — no cooldown, no
+            // strike; the next idle tick re-checks the ledger.
+            : hostBudgetHold !== undefined
+              ? hostBudgetHold
+              : { dispatched: false, reason: 'no-candidate' };
   return withOfferRejections(terminal, offerRejections);
 }

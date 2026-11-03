@@ -1185,3 +1185,135 @@ describe('audit-batch: shallow depth keeps single-dispatch (parent AC6a)', () =>
     }
   });
 });
+
+// ── Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3) ────────────────
+//
+// The machine-scoped ledger is consulted exactly once per implement dispatch
+// in the claim→marker→spawn choke point (`dispatchClaimedTier`), so BOTH
+// dispatcher paths funnel through it. These tests drive the direct path
+// (`dispatchDowntimeWork`); the coordination path is asserted in
+// `coordination-dispatch.test.ts`, and the ledger/config semantics in
+// `host-dispatch-budget.machine.test.ts`.
+describe('host-wide dispatch budget (F3)', () => {
+  const implementCandidate = {
+    id: 'WL-IMP',
+    title: 'Implement me',
+    stage: 'plan_complete' as const,
+    status: 'open',
+  };
+
+  it('consults the host-budget ledger exactly once per implement dispatch', async () => {
+    const admitHostDispatch = vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 2 });
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      admitHostDispatch,
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(admitHostDispatch).toHaveBeenCalledTimes(1);
+    expect(admitHostDispatch).toHaveBeenCalledWith({
+      itemId: 'WL-IMP',
+      kind: 'implement',
+      cwd: '/repo',
+    });
+  });
+
+  it('refuses at the cap: no spawn, no marker, claim rolled back, neutral reason + evidence', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      admitHostDispatch: vi
+        .fn()
+        .mockResolvedValue({ admitted: false, live: 2, max: 2, reason: 'host-budget-implement' }),
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // AC2: refusal carries the reason and {live, max} evidence; nothing spawns
+    // and no marker is written.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('host-budget-implement');
+    expect(outcome.budget).toEqual({ live: 2, max: 2 });
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    // AC2/AC3: the successful CAS claim is rolled back (never stuck
+    // in_progress) and the reservation is released on that abort path.
+    expect(deps.claimItem).toHaveBeenCalledTimes(1);
+    expect(deps.rollbackClaim).toHaveBeenCalledTimes(1);
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo');
+    // AC5: the tick ends on the neutral refusal — never 'no-candidate' — so the
+    // worker enters no cooldown and no strike.
+    expect(outcome.reason).not.toBe('no-candidate');
+  });
+
+  it('fails closed to host-budget-unknown when the admission reader throws', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      admitHostDispatch: vi.fn().mockRejectedValue(new Error('ledger exploded')),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome).toMatchObject({
+      dispatched: false,
+      reason: 'host-budget-unknown',
+      budget: { live: 0, max: 0 },
+    });
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the reservation when the dispatch marker cannot be written', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 2 }),
+      recordDispatch: vi.fn().mockResolvedValue(false),
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.reason).toBe('claim-rolled-back');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // AC3: marker-write failure is an abort path — no leaked reservation.
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo');
+  });
+
+  it('releases the reservation when the pane spawn fails', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 2 }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'boom' }),
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.reason).toBe('spawn-failed');
+    // AC3: spawn failure is an abort path — no leaked reservation.
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo');
+  });
+
+  it('confirms the reservation with the spawned pane id', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 2 }),
+      recordDispatchEnrichment: vi.fn().mockResolvedValue(undefined),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 1,
+        paneIds: ['pane-9'],
+        records: [{ paneId: 'pane-9', label: 'Downtime triggered implement Implement me - WL-IMP' }],
+      }),
+      confirmHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    // AC3: the entry only counts once its pane id is known.
+    expect(deps.confirmHostDispatch).toHaveBeenCalledWith('WL-IMP', 'implement', 'pane-9', '/repo');
+  });
+});

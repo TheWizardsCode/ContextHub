@@ -3760,3 +3760,53 @@ describe('leaf-aware audit gate on the coordination leader path (WL-0MVV1F130009
     });
   });
 });
+
+// ── Host-wide dispatch budget on the coordination path (F3) ────────────
+//
+// WL-0MVXY0YG7009JMHI AC1: both dispatcher paths funnel through ONE admission
+// read in `dispatchClaimedTier`, so the machine-wide implement cap cannot be
+// bypassed by the leader's offer path. The direct path is asserted in
+// `downtime-worker.dispatch.test.ts`; the ledger itself in
+// `host-dispatch-budget.machine.test.ts`.
+describe('host-wide dispatch budget (F3)', () => {
+  it('consults the ledger exactly once and reports the neutral refusal', async () => {
+    const admitHostDispatch = vi
+      .fn()
+      .mockResolvedValue({ admitted: false, live: 2, max: 2, reason: 'host-budget-implement' });
+    const deps = makeCoordinationDeps({
+      admitHostDispatch,
+      // The claim succeeded, so the refusal path rolls it back.
+      rollbackClaim: vi.fn().mockResolvedValue(true),
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }),
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [makeEntry('inst-1', 'WL-IMP')], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+    });
+
+    // AC1: exactly one admission read per dispatch attempt.
+    expect(admitHostDispatch).toHaveBeenCalledTimes(1);
+    expect(admitHostDispatch).toHaveBeenCalledWith({
+      itemId: 'WL-IMP',
+      kind: 'implement',
+      // The offer's OWN worklog root — the cross-root claim invariant.
+      cwd: '/worklog/root',
+    });
+    // AC2: refusal evidence, no lane, no marker.
+    expect(outcome).toMatchObject({
+      dispatched: false,
+      reason: 'host-budget-implement',
+      budget: { live: 2, max: 2 },
+    });
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    // AC5: neutral — the tick never reports 'no-candidate', so the worker
+    // enters neither the cooldown nor a strike.
+    expect(outcome.reason).not.toBe('no-candidate');
+  });
+});
