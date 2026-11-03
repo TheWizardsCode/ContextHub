@@ -21,7 +21,7 @@ import { fileURLToPath } from 'url';
 import { theme } from '../theme.js';
 import * as os from 'os';
 
-const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v2';
+const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v3';
 const WORKLOG_POST_PULL_HOOK_MARKER = 'worklog:post-pull-hook:v1';
 const WORKLOG_POST_CHECKOUT_HOOK_MARKER = 'worklog:post-checkout-hook:v1';
 const WORKLOG_GITIGNORE_SECTION_START = 'Worklog Specific Ignores';
@@ -216,9 +216,10 @@ function installPrePushHook(options: { silent: boolean }): { installed: boolean;
   const hooksDir = path.isAbsolute(hooksPath) ? hooksPath : path.join(repoRoot, hooksPath);
   const hookFile = path.join(hooksDir, 'pre-push');
 
-  // Canonical v2 pre-push hook (branch policy + context-budget gate + sync),
-  // shared with hook-upgrade.ts and matching the committed `.githooks/pre-push`
-  // template (WL-0MT33QNTL006LHQA).
+  // Canonical v3 pre-push hook (branch policy + context-budget gate +
+  // full-suite gate on dev/main pushes + sync), shared with hook-upgrade.ts
+  // and matching the committed `.githooks/pre-push` template
+  // (WL-0MT33QNTL006LHQA, WL-0MVHP5S01006GDDV).
   const hookScript = PRE_PUSH_HOOK_CONTENT;
 
   try {

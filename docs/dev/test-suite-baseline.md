@@ -25,7 +25,7 @@ replaced by the `tests/` umbrella.
 | Gate | Where it runs | Scope | Suites |
 |---|---|---|---|
 | Implement finish | `implement.py finish` (development time) | changed | Named group selected from the changed files (`groups` in `.pi/test-config.json`); otherwise the affected test files; falls back to the full canonical suite when nothing narrower is selectable |
-| Dev-push | `pre-push` hook (when installed) | full | The full canonical suite (`suiteCommands`) |
+| Dev-push | `pre-push` hook, on `refs/heads/dev` / `refs/heads/main` pushes | full | The full canonical suite (`suiteCommands`) |
 | Ship release | `dev` → `main` promotion | full | The full canonical suite, re-run on the merged tree |
 | Audit (F3) | audit skill, on a cache miss | full | The full canonical suite, read from the per-repo test cache |
 
@@ -48,13 +48,24 @@ own file set (the shared-basename unit-vs-CLI variants — e.g.
 `tests/audit.test.ts` + `tests/cli/audit.test.ts` — each execute exactly
 once).
 
-> **This repository's `pre-push` hook does not run the test suite today** — it
-> enforces branch policy, the context budget and `wl sync` only. Until it
-> does, the canonical suite is enforced at development time by
-> `implement.py finish` (which falls back to full scope for `.pi/`-only
-> changes) and by the `ship` release gate at release time. This is a
-> pre-existing gap tracked separately; do not treat a successful push as
-> full-suite evidence.
+> **The `pre-push` hook enforces the full canonical suite on a `dev`/`main`
+> push** (WL-0MVHP5S01006GDDV). When a pushed remote ref is `refs/heads/dev`
+> or `refs/heads/main`, the hook runs
+> `python3 <run_tests.py> --scope full --strict-git-env` — the same invocation
+> as the `ship` release gate — after branch policy and the context-budget
+> gate. A red suite blocks the push (exit 1), and the run is recorded in the
+> per-repo test cache that audits consume. Feature-branch, tag and
+> `refs/worklog/data` pushes run no tests. The suite is therefore enforced at
+> development time by `implement.py finish` (changed scope, falling back to
+> full scope for `.pi/`-only changes) **and** at dev-push time (full scope).
+>
+> **Bypass and residual risk.** `TEST_SCOPE_SKIP=1` bypasses the gate (not
+> recommended). A missing `run_tests.py` hard-fails the push rather than
+> silently skipping, so a plain contributor checkout cannot push to
+> `dev`/`main` without the gate (parity with the `ship` release gate). If the
+> bypass is used, the pushed tree carries no full-suite assertion until the
+> `ship` release gate re-runs the suite on the merged `dev`→`main` tree — do
+> not treat a bypassed push as full-suite evidence.
 
 ### The herdr package suite is a separate, opt-in gate
 

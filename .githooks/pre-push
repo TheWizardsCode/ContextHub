@@ -1,14 +1,30 @@
 #!/bin/sh
-# worklog:pre-push-hook:v2
+# worklog:pre-push-hook:v3
 # 1. Auto-sync Worklog data before pushing (committed hooks).
 # 2. Enforce branch naming policy: block pushes to protected branches.
 # 3. Context-budget regression gate (F6, SA-0MSLK7XNZ00366YY): fail the push
 #    when the startup context surface exceeds committed thresholds.
+# 4. Full-suite gate (SA-0MVECQUGF0064U81): run the canonical suite when a
+#    pushed remote ref is refs/heads/dev or refs/heads/main.
 #
 # Set WORKLOG_SKIP_PRE_PUSH=1 to bypass worklog sync.
 # Set BRANCH_POLICY_SKIP=1 to bypass branch policy check (not recommended).
 # Set CONTEXT_BUDGET_SKIP=1 to bypass the context-budget gate (not recommended).
+# Set TEST_SCOPE_SKIP=1 to bypass the full-suite gate on a dev/main push (not recommended).
 set -e
+
+# ── Pushed refs ──────────────────────────────────────────────────────────────
+# Read the pre-push stdin once: it lists the refs being pushed and is needed by
+# both the full-suite gate and the worklog-sync skip below. A second read would
+# see EOF, so capture flags here and reuse them.
+push_dev_main=0
+push_worklog_data=0
+while read local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/dev|refs/heads/main) push_dev_main=1 ;;
+    refs/worklog/data) push_worklog_data=1 ;;
+  esac
+done
 
 # ── Branch policy enforcement ────────────────────────────────────────────────
 # Check that the current branch is not a protected branch.
@@ -58,6 +74,41 @@ if [ "$CONTEXT_BUDGET_SKIP" != "1" ]; then
   fi
 fi
 
+# ── Full-suite gate (dev/main pushes) ────────────────────────────────────────
+# Enforce the full canonical suite whenever a pushed remote ref is refs/heads/dev
+# or refs/heads/main (SA-0MVECQUGF0064U81). Feature-branch, tag and
+# refs/worklog/data pushes run no tests. The invocation mirrors the ship
+# release gate (`--scope full --strict-git-env`) and records the run in the
+# per-repo test cache consumed by audits. run_tests.py is resolved first from
+# the local skill/test/ path, then from the installed global symlink
+# (~/.pi/agent/skills/test/scripts/run_tests.py) installed by install_pi.sh.
+# A missing runner hard-fails (parity with the ship release gate): silently
+# skipping would reproduce the unenforced-gate gap this hook closes.
+if [ "$TEST_SCOPE_SKIP" != "1" ] && [ "$push_dev_main" = "1" ]; then
+  test_repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -f "$test_repo_root/skill/test/scripts/run_tests.py" ]; then
+    test_runner="$test_repo_root/skill/test/scripts/run_tests.py"
+  elif [ -f "$HOME/.pi/agent/skills/test/scripts/run_tests.py" ]; then
+    test_runner="$HOME/.pi/agent/skills/test/scripts/run_tests.py"
+  else
+    test_runner=""
+  fi
+  if [ -z "$test_runner" ]; then
+    echo "ERROR: Full-suite gate cannot run - run_tests.py not found." >&2
+    echo "  Refusing to push to dev/main without a full-suite assertion." >&2
+    echo "  Install the framework skills (install_pi.sh) or set TEST_SCOPE_SKIP=1 to bypass." >&2
+    exit 1
+  fi
+  echo "push gate: running the full canonical suite (--scope full --strict-git-env)..." >&2
+  if python3 "$test_runner" --scope full --strict-git-env 2>&1; then
+    echo "push gate: full suite green." >&2
+  else
+    echo "ERROR: Full test suite failed - the push to dev/main is blocked." >&2
+    echo "  Fix the failures and retry. Set TEST_SCOPE_SKIP=1 to bypass (not recommended)." >&2
+    exit 1
+  fi
+fi
+
 # ── Worklog sync ─────────────────────────────────────────────────────────────
 if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then
   echo "worklog: pre-push sync skipped (WORKLOG_SKIP_PRE_PUSH=1)"
@@ -80,16 +131,8 @@ if [ "$(git rev-parse --git-dir 2>/dev/null)" != "$(git rev-parse --git-common-d
   exit 0
 fi
 
-# Read stdin to check which refs are being pushed.
-# If pushing to refs/worklog/data, skip the sync to avoid infinite loops.
-skip=0
-while read local_ref local_sha remote_ref remote_sha; do
-  if [ "$remote_ref" = "refs/worklog/data" ]; then
-    skip=1
-  fi
-done
-
-if [ "$skip" = "1" ]; then
+# Skip the sync when pushing to refs/worklog/data to avoid infinite loops.
+if [ "$push_worklog_data" = "1" ]; then
   exit 0
 fi
 
