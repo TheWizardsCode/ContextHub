@@ -418,10 +418,13 @@ describe('dispatcher-anchor split guard — gates fail on broken input', () => {
     const oversized = indexFromSources({
       [DISPATCHER_ANCHOR_BARREL]: lines(MAX_MODULE_LINES * 2),
     });
+    // The live allowlist is empty now that the split is complete
+    // (WL-0MW0JHE110048RKZ), so this negative case supplies its own fixture.
+    const allowlistFixture = [basename(DISPATCHER_ANCHOR_BARREL)];
     expect(
       findOversizedModules(
         splitFamilyModules(oversized, DISPATCHER_ANCHOR_CONFIG),
-        DISPATCHER_ANCHOR_SPLIT_ALLOWLIST,
+        allowlistFixture,
         MAX_MODULE_LINES,
       ),
     ).toEqual([]);

@@ -84,10 +84,11 @@ export { MAX_MODULE_LINES };
  * Files currently exempt from the size gate.
  *
  * This is a *shrink-only* allowlist: it may only ever lose entries, never gain
- * them. `dispatcher-anchor.ts` is the not-yet-split monolith (1,333 lines); the
- * final barrel child empties the list once the split is complete.
+ * them. The final barrel child (WL-0MW0JHE110048RKZ) emptied it once the split
+ * was complete, so every `dispatcher-anchor*.ts` production module — the
+ * barrel included — is now held to {@link MAX_MODULE_LINES}.
  */
-export const DISPATCHER_ANCHOR_SPLIT_ALLOWLIST: readonly string[] = ['dispatcher-anchor.ts'];
+export const DISPATCHER_ANCHOR_SPLIT_ALLOWLIST: readonly string[] = [];
 
 /**
  * The allowlist as it stood at plan time. {@link

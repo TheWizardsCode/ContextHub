@@ -55,6 +55,28 @@ the import graph stays acyclic (enforced by
 `packages/herdr/test/split-guard/scan.ts`, suite
 `downtime-worker.split-guard.test.ts`).
 
+### dispatcher-anchor module layout (WL-0MVGKHCP9005SJPZ)
+
+`packages/herdr/src/dispatcher-anchor.ts` is likewise a **thin barrel** — a
+module-level doc comment plus re-export statements only, re-exporting exactly
+the 32 symbols consumers import from `./dispatcher-anchor.js`. Every behaviour
+lives in the sibling modules below; each carries a doc comment stating its
+single responsibility, and no family module exceeds 1,000 lines (enforced by
+`dispatcher-anchor.split-guard.test.ts`).
+
+| Module | Single responsibility | Key exports (consumer-facing) |
+|---|---|---|
+| `dispatcher-anchor.contract.ts` | Constants and shared type declarations; a pure leaf with no imports | `DISPATCHER_ANCHOR_FILE`, `DISPATCHER_WORKSPACE_LABEL`, `PLUGIN_PANE_LABEL`, `DispatcherAnchor`, `DispatcherAnchorDeps`, … |
+| `dispatcher-anchor.cli-parsers.ts` | Decode raw `herdr` JSON envelopes and `/proc/<pid>/environ` blobs into the contract types | `parseTabListOutput`, `parseTabCreateOutput`, `parsePaneListOutput`, `parseMachinePaneListOutput`, `parsePaneProcessInfoOutput`, `parseProcEnviron` |
+| `dispatcher-anchor.herdr-cli.ts` | Run the `herdr` binary, read pane process environments, and build the production deps object | `createDispatcherAnchorDeps`, `listMachinePanes`, `getPaneProcessInfo`, `readProcEnvironFile`, `listTabsInWorkspace`, `listPanesInWorkspace`, `createTabInWorkspace` |
+| `dispatcher-anchor.persistence.ts` | Atomic anchor and per-prefix tab-anchor file persistence (fail-closed reads) | *(internal to the family — not re-exported by the barrel)* |
+| `dispatcher-anchor.tab-anchors.ts` | Strategies 2 and 3: per-prefix tabs and the machine-wide Dispatcher anchor, including the coordination lock and stale-pane re-provision | `getDispatcherAnchor`, `getDispatcherTabAnchor` |
+| `dispatcher-anchor.placement.ts` | Strategy 1: project-workspace resolution and the item-ID tab anchor (ambiguity rules, create-vs-reuse) | `resolveProjectWorkspace`, `getItemTabAnchor` |
+
+Layering: extracted modules import concrete siblings (and the coordination
+primitives), never the `dispatcher-anchor.js` barrel at runtime, so the import
+graph stays acyclic.
+
 ## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
 
 The downtime dispatcher does **not** maintain its own ranking. The Herdr selection list
@@ -1418,7 +1440,9 @@ the authority for reuse and has the shape:
   `result` envelope; an unparseable response is **fail-closed** (`null`) and
   logs the raw output (never silently treated as "no tab" → duplicate).
 
-Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`):
+Lifecycle (project workspace and item-ID tab:
+`packages/herdr/src/dispatcher-anchor.placement.ts`; per-prefix tab and
+fallback anchor: `packages/herdr/src/dispatcher-anchor.tab-anchors.ts`):
 
 - **Project workspace + item-ID tab (primary):** `resolveProjectWorkspace`
   resolves the plugin pane for the item's root; `getItemTabAnchor` returns the
@@ -1507,7 +1531,7 @@ WL-0MUKZGEQ2007FECS).
 | Failure | **fail-closed** — `anchor-unavailable`, no pane | **fail-open** — falls back to the current-pane split, never dropped |
 
 Lifecycle (`packages/herdr/src/index.ts`; shared anchor helper in
-`packages/herdr/src/dispatcher-anchor.ts`):
+`packages/herdr/src/dispatcher-anchor.placement.ts`):
 
 1. **Workspace resolution** — `resolveInteractiveWorkspaceId(env)` reads
    `HERDR_WORKSPACE_ID` (present in the plugin pane environment); when it is
@@ -2879,7 +2903,7 @@ likewise re-read live every tick and clamped on load
 
 | Path | Purpose |
 |---|---|
-| `packages/herdr/src/dispatcher-anchor.ts` | Project-workspace resolver (`resolveProjectWorkspace`) + item-ID tab anchor (`getItemTabAnchor`) + retained Dispatcher fallback (`getDispatcherAnchor`): CLI parsers, coordination lock, aliveness |
+| `packages/herdr/src/dispatcher-anchor*.ts` | The dispatcher-anchor module family: the barrel (`dispatcher-anchor.ts`, re-exports only) over the sibling modules — constants/types (`contract.ts`), `herdr` output parsers (`cli-parsers.ts`), subprocess helpers + deps factory (`herdr-cli.ts`), anchor/tab-anchor persistence (`persistence.ts`), Dispatcher provisioning and per-prefix tab anchors (`tab-anchors.ts`), project workspace + item-ID placement (`placement.ts`) (full layout: [dispatcher-anchor module layout](#dispatcher-anchor-module-layout-wl-0mvghcp9005sjpz)) |
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
