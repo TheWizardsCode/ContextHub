@@ -1437,10 +1437,10 @@ describe('recentDispatchedItems (log projection, WL-0MUL2IX6H001YHDO)', () => {
 // ── 4-hour time-block grouping (WL-0MUMM9NED009TLL3) ───────────────────
 //
 // The recent-dispatches view groups its semantically newest-first rows into
-// 4-hour UTC blocks per day, ordered chronologically (oldest block first) with
-// a trailing "Unknown time" block for rows with no parseable timestamp. These
-// helpers are pure so the boundary/wrap/ordering rules are unit-testable
-// without touching the filesystem or the renderer.
+// 4-hour UTC blocks per day, ordered newest-first (most recent block first)
+// with a trailing "Unknown time" block for rows with no parseable timestamp
+// (WL-0MVLEM606008UAL1). These helpers are pure so the boundary/wrap/ordering
+// rules are unit-testable without touching the filesystem or the renderer.
 describe('groupRecentDispatchesByTimeBlock (4-hour UTC blocks, WL-0MUMM9NED009TLL3)', () => {
   function row(id: string, latestTimestamp?: string): RecentDispatchRow {
     return { itemId: id, title: id, latestTimestamp };
@@ -1477,13 +1477,14 @@ describe('groupRecentDispatchesByTimeBlock (4-hour UTC blocks, WL-0MUMM9NED009TL
       row('WL-A', '2026-09-29T04:15:00.000Z'),
     ]);
     expect(blocks).toHaveLength(2);
-    expect(blocks[0].label).toBe('29 Sep 2026, 00:00–04:00');
-    expect(blocks[0].rows.map((r) => r.itemId)).toEqual(['WL-D', 'WL-C']);
-    expect(blocks[1].label).toBe('29 Sep 2026, 04:00–08:00');
-    expect(blocks[1].rows.map((r) => r.itemId)).toEqual(['WL-B', 'WL-A']);
+    // Newest block first (WL-0MVLEM606008UAL1).
+    expect(blocks[0].label).toBe('29 Sep 2026, 04:00–08:00');
+    expect(blocks[0].rows.map((r) => r.itemId)).toEqual(['WL-B', 'WL-A']);
+    expect(blocks[1].label).toBe('29 Sep 2026, 00:00–04:00');
+    expect(blocks[1].rows.map((r) => r.itemId)).toEqual(['WL-D', 'WL-C']);
   });
 
-  it('orders blocks chronologically oldest-first regardless of input order', () => {
+  it('orders blocks newest-first regardless of input order (WL-0MVLEM606008UAL1)', () => {
     // Input is newest-first (as the projection returns it).
     const blocks = groupRecentDispatchesByTimeBlock([
       row('WL-NEW', '2026-09-29T18:00:00.000Z'),
@@ -1491,12 +1492,14 @@ describe('groupRecentDispatchesByTimeBlock (4-hour UTC blocks, WL-0MUMM9NED009TL
       row('WL-OLD', '2026-09-29T01:00:00.000Z'),
     ]);
     expect(blocks.map((b) => b.label)).toEqual([
-      '29 Sep 2026, 00:00–04:00',
-      '29 Sep 2026, 08:00–12:00',
       '29 Sep 2026, 16:00–20:00',
+      '29 Sep 2026, 08:00–12:00',
+      '29 Sep 2026, 00:00–04:00',
     ]);
-    expect(blocks[0].startMs).toBeLessThan(blocks[1].startMs);
-    expect(blocks[1].startMs).toBeLessThan(blocks[2].startMs);
+    // Regression assertion: the OLDEST block is no longer first.
+    expect(blocks[0].label).not.toBe('29 Sep 2026, 00:00–04:00');
+    expect(blocks[0].startMs).toBeGreaterThan(blocks[1].startMs);
+    expect(blocks[1].startMs).toBeGreaterThan(blocks[2].startMs);
   });
 
   it('preserves the per-block newest-first item order', () => {
@@ -1515,9 +1518,9 @@ describe('groupRecentDispatchesByTimeBlock (4-hour UTC blocks, WL-0MUMM9NED009TL
       row('WL-LATE', '2026-09-29T21:00:00.000Z'),
     ]);
     expect(blocks).toHaveLength(2);
-    // Oldest first: the previous day's 20:00 block precedes the new day's 00:00.
-    expect(blocks[0].label).toBe('29 Sep 2026, 20:00–24:00');
-    expect(blocks[1].label).toBe('30 Sep 2026, 00:00–04:00');
+    // Newest first: the new day's 00:00 block precedes the previous day's 20:00.
+    expect(blocks[0].label).toBe('30 Sep 2026, 00:00–04:00');
+    expect(blocks[1].label).toBe('29 Sep 2026, 20:00–24:00');
   });
 
   it('does not merge the same hour on different days', () => {
@@ -1526,8 +1529,8 @@ describe('groupRecentDispatchesByTimeBlock (4-hour UTC blocks, WL-0MUMM9NED009TL
       row('WL-D1', '2026-09-29T08:30:00.000Z'),
     ]);
     expect(blocks.map((b) => b.label)).toEqual([
-      '29 Sep 2026, 08:00–12:00',
       '30 Sep 2026, 08:00–12:00',
+      '29 Sep 2026, 08:00–12:00',
     ]);
   });
 

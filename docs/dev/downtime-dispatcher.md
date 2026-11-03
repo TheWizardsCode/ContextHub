@@ -3283,7 +3283,8 @@ trace.
 - **Projection semantics.** Rows are deduplicated by work item id (one row
   per id) and grouped into 4-hour **UTC** time blocks by each item's most
   recent log timestamp (e.g. `00:00–04:00`, `04:00–08:00`, …,
-  `20:00–24:00`). Blocks are ordered **oldest first**, and within each block
+  `20:00–24:00`). Blocks are ordered **newest first** (the most recent
+  activity at the top, WL-0MVLEM606008UAL1), and within each block
   items stay **newest-first**; a heading (`29 Sep 2026, 00:00–04:00`) is
   rendered before each block through the existing group-heading path. Rows
   whose timestamp is missing or unparseable collect into a trailing

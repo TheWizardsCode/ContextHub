@@ -801,14 +801,16 @@ export async function recentDispatchedItems(cwd: string): Promise<RecentDispatch
 /**
  * One 4-hour UTC time block of recent-dispatch rows
  * (WL-0MUMM9NED009TLL3). Blocks are produced by
- * `groupRecentDispatchesByTimeBlock`, ordered chronologically (oldest first)
- * with the synthetic "Unknown time" block always last.
+ * `groupRecentDispatchesByTimeBlock`, ordered newest-first (most recent block
+ * first) with the synthetic "Unknown time" block always last
+ * (WL-0MVLEM606008UAL1).
  */
 export interface DispatchTimeBlock {
   /**
    * UTC start of the block as ms since epoch (e.g. 00:00/04:00/…/20:00 UTC),
-   * used for chronological ordering. `Number.NEGATIVE_INFINITY` for the
-   * unknown-time block so it never sorts ahead of a real block.
+   * used for newest-first ordering (WL-0MVLEM606008UAL1).
+   * `Number.NEGATIVE_INFINITY` for the unknown-time block so it never sorts
+   * ahead of a real block.
    */
   startMs: number;
   /** True for the trailing block holding rows without a parseable timestamp. */
@@ -855,9 +857,10 @@ export function dispatchTimeBlockLabel(ts: string | undefined): string {
  * (WL-0MUMM9NED009TLL3). Each row is classified by its `latestTimestamp`
  * into the block that starts on the hour boundary (`00:00`, `04:00`, …,
  * `20:00` UTC) on the row's UTC calendar day, so blocks never merge across
- * midnight. Blocks are returned oldest-first; rows within a block keep the
- * projection's newest-first order. Rows with a missing or unparseable
- * timestamp are collected into a single trailing `Unknown time` block.
+ * midnight. Blocks are returned newest-first (most recent block first,
+ * WL-0MVLEM606008UAL1); rows within a block keep the projection's
+ * newest-first order. Rows with a missing or unparseable timestamp are
+ * collected into a single trailing `Unknown time` block.
  *
  * Pure and total: an empty input yields `[]` and the function never throws.
  */
@@ -894,7 +897,10 @@ export function groupRecentDispatchesByTimeBlock(rows: RecentDispatchRow[]): Dis
     block.rows.push(row);
   }
 
-  const blocks = [...known.values()].sort((a, b) => a.startMs - b.startMs);
+  // Newest block first (WL-0MVLEM606008UAL1): a "recent dispatches" view must
+  // show the most recent activity at the top. The synthetic unknown-time block
+  // has no date to sort by, so it stays last regardless of this sort.
+  const blocks = [...known.values()].sort((a, b) => b.startMs - a.startMs);
   if (unknown.rows.length > 0) blocks.push(unknown);
   return blocks;
 }

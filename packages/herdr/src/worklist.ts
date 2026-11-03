@@ -3107,12 +3107,13 @@ export function fetchItemsForView(
     ])
       .then(([rows, liveItems]) => {
         const liveById = new Map(liveItems.map((item) => [item.id, item]));
-        // Group the log rows into 4-hour UTC time blocks, oldest block first
-        // (WL-0MUMM9NED009TLL3). Each block becomes a numbered group so the
+        // Group the log rows into 4-hour UTC time blocks, newest block first
+        // (WL-0MVLEM606008UAL1). Each block becomes a numbered group so the
         // existing display-rows model interleaves a heading row before the
         // block's items; within a block the projection's newest-first order
-        // is preserved. Group numbers are assigned in block order so no
-        // duplicate headings render.
+        // is preserved. The synthetic "Unknown time" block stays last.
+        // Group numbers are assigned in block order so no duplicate headings
+        // render.
         const projected: WorkItem[] = [];
         groupRecentDispatchesByTimeBlock(rows).forEach((block, index) => {
           for (const row of block.rows) {

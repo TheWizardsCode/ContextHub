@@ -172,12 +172,13 @@ Semantics:
   since been **closed or deleted** still appears. The view never mutates the
   log or any work item; it is display-only and spawns no `wl` processes
   beyond the existing refresh (and the detail fetch below).
-- **4-hour time blocks, oldest first** — rows are deduplicated by work item id
+- **4-hour time blocks, newest first** — rows are deduplicated by work item id
   (one row per id), then grouped into 4-hour **UTC** time blocks by each item's
   most recent log timestamp (e.g. `00:00–04:00`, `04:00–08:00`, …,
   `20:00–24:00`). Each block renders a heading (`29 Sep 2026, 00:00–04:00`)
-  through the existing group-heading path; blocks are ordered **oldest first**
-  while items inside a block stay **newest-first**. There is no result cap —
+  through the existing group-heading path; blocks are ordered **newest first**
+  (the most recent activity at the top) while items inside a block stay
+  **newest-first**. There is no result cap —
   every item still retained in the log is shown. A row whose timestamp is
   missing or unparseable is collected into a trailing **`Unknown time`** block.
   The log itself is bounded to the most recent 100 entries
@@ -2068,10 +2069,10 @@ only one axis is ever active; the header shows which one
 The **dispatches** view (press `f` + `d`, or `/wl dispatches`) is the third
 filter axis. It uses the local rolling dispatch log to choose read-only rows
 (deduplicated by work item id, grouped into 4-hour UTC time blocks ordered
-oldest-first) and renders each surviving item from the live work item so its
+newest-first) and renders each surviving item from the live work item so its
 icons match the other views; an item no longer in `wl` falls back to the
 log-derived id/title so closed/deleted items still appear
-(WL-0MUGLL9SS002E1D2, WL-0MUMM9NED009TLL3). It is
+(WL-0MUGLL9SS002E1D2, WL-0MUMM9NED009TLL3, WL-0MVLEM606008UAL1). It is
 mutually exclusive with the stage and priority filters (the header shows
 `(filtered: dispatches)`), and a missing/malformed log renders an empty list
 rather than an error. See [Recent dispatches view](#recent-dispatches-view).
