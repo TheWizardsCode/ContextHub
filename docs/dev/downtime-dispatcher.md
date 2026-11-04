@@ -311,7 +311,8 @@ reports explicitly when a filter moves the pick deeper in the SAME sequence).
   machine-wide leader (one election, one lease — `leader-election.ts`,
   WL-0MTF0KLO10043YAN F3 + F6 migration authoritative). Per-worklog
   `<worklog-root>/.worklog/downtime-leader.lock` is retired — stale files
-  are ignored (no double-election, stable instanceId → single machine entry).
+  are ignored (no double-election; a stable instanceId keeps at most one
+  `entries` offer in the machine file).
 - The leader holds a **5-minute lease**
   (`DEFAULT_LEASE_TTL_SECONDS = 300`) written to
   `~/.herdr/downtime/downtime-leader-lease.json` (same machine dir), refreshed on every proxy-poll cycle
@@ -334,8 +335,9 @@ reports explicitly when a filter moves the pick deeper in the SAME sequence).
 ### Shared coordination file (machine-wide)
 
 `~/.herdr/downtime/downtime-coordination.json` (or `HERDR_COORDINATION_DIR`,
-WL-0MTF0KLO10043YAN) stores one entry per herdr instance — `directory` + `worklogRoot`
-(the worklog root the item belongs to, so the single leader dispatches across roots):
+WL-0MTF0KLO10043YAN) stores one offer per herdr instance — `directory` + `worklogRoot`
+(the worklog root the item belongs to, so the single leader dispatches across roots),
+and no offer at all for an instance whose window is empty:
 
 ```json
 {"version":1,"entries":[
@@ -380,9 +382,15 @@ a malformed block is dropped rather than costing the reader its offer list.
 
 Legacy per-worklog `<worklog-root>/.worklog/downtime-coordination.json` is retired
 (F6 WL-0MTII4CWT00452HU): once the machine dir is authoritative, stale per-worklog
-files are orphaned and ignored — the same instanceId writes exactly one machine
-entry (no double-join) and the leader never double-dispatches from legacy data.
-Unreadable/missing machine files degrade to "no dispatch this cycle" (fail-safe).
+files are orphaned and ignored, so the leader never double-dispatches from legacy
+data and a stale legacy file can never resurrect an offer.
+
+The machine file does **not** carry "exactly one entry per instance": `entries`
+is an OFFER list, so an `instanceId` holds **at most one** offer (upsert, never a
+duplicate) and **no** entry at all while its window is empty or its offer was just
+dispatched — the top-level `leader` block, not an entry, is what records the lease
+holder's liveness. Unreadable/missing machine files degrade to "no dispatch this
+cycle" (fail-safe).
 
 Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expiring contract):
 
@@ -3140,8 +3148,10 @@ The machine dir `~/.herdr/downtime/` (or `HERDR_COORDINATION_DIR`) is
 `downtime-leader-lease.json` files are no longer written and are not read
 as fallback — they are orphaned and ignored. Guarantees:
 
-- No double-dispatch or double-join: stable `instanceId` writes exactly
-  one machine entry regardless of stale legacy file presence.
+- No double-dispatch or double-join: a stable `instanceId` writes at most
+  one `entries` offer regardless of stale legacy file presence — and none at
+  all while its window is empty, in which case the top-level `leader` block
+  (above) is what records it.
 - Fail-safe: unreadable/missing machine coordination or lease files
   degrade to "no dispatch this cycle" — never crash, never drop another
   entry.
