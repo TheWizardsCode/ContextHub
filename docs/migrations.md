@@ -178,7 +178,16 @@ Examples:
   `wl doctor upgrade`
 
 The committed hook scripts live in `.githooks/` and include:
-- `pre-push` — auto-syncs Worklog data before pushing, uses `--git-branch refs/worklog/data`
+- `pre-push` — auto-syncs Worklog data before pushing, uses `--git-branch refs/worklog/data`,
+  and on a `dev`/`main` push runs the full canonical suite and **mirrors the gate run's
+  test-cache entries into the main checkout's `.worklog/cache`** (`mirror_suite_cache`).
+  A worktree push (the `implement.py finish` path) caches under
+  `<worktree git dir>/test-cache` because a worktree has no `.worklog/`; mirroring keeps the
+  pushed commit's green full-suite entry visible to post-push verification and to audits.
+  Cache keys are content-addressed, so only entries the main cache lacks are copied, and the
+  copy is fail-soft (a copy failure warns and never blocks the push). This behaviour is part
+  of the embedded canonical template (`PRE_PUSH_HOOK_CONTENT`), so `wl doctor upgrade` never
+  reports a repository that carries it as divergent (WL-0MVHP5S01006GDDV).
 - `post-checkout` — auto-syncs after branch checkout; skips worktrees/temp worktrees
 - `post-merge` — wrapper that delegates to `worklog-post-pull`
 - `post-rewrite` — wrapper that delegates to `worklog-post-pull`
