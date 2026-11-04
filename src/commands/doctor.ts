@@ -12,8 +12,7 @@ import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validatePodcastScripts } from '../doctor/podcast-scripts-check.js';
 import { probeAuditFingerprintSkewFinding } from '../doctor/audit-fingerprint-skew-check.js';
-import { importFromJsonl } from '../jsonl.js';
-import { mergeWorkItems, mergeComments, mergeAuditResults, rewriteAndForcePushDataFile } from '../sync.js';
+import { rewriteAndForcePushDataFile } from '../sync.js';
 import { getSyncDefaults } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
@@ -36,6 +35,7 @@ import { registerDanglingParentsCommand } from './doctor/dangling-parents.js';
 import { registerPriorityCommand } from './doctor/priority.js';
 import { registerPruneCommand } from './doctor/prune.js';
 import { registerFilePathsCommand } from './doctor/file-paths.js';
+import { registerMigrateCommand } from './doctor/migrate.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -516,127 +516,7 @@ export default function register(ctx: PluginContext): void {
 
   registerFilePathsCommand(doctor, { output, utils, dataPath: ctx.dataPath });
 
-  doctor
-    .command('migrate')
-    .description('Migrate from persistent JSONL to SQLite-only architecture (ephemeral JSONL pattern)')
-    .option('-f, --file <filepath>', 'JSONL file path to migrate (default: .worklog/worklog-data.jsonl)')
-    .option('--prefix <prefix>', 'Override the default prefix')
-    .option('--delete', 'Delete JSONL file after successful migration')
-    .action(async (opts: { file?: string; prefix?: string; delete?: boolean }) => {
-      utils.requireInitialized();
-      const filePath = opts.file || path.join('.worklog', 'worklog-data.jsonl');
-      
-      // Check if JSONL file exists
-      if (!fs.existsSync(filePath)) {
-        if (utils.isJsonMode()) {
-          output.json({ success: true, message: 'No JSONL file found. Your data is already in SQLite format.', migrated: false });
-        } else {
-          console.log('Doctor: No JSONL file found at ' + filePath);
-          console.log('Your data is already in SQLite format. No migration needed.');
-        }
-        return;
-      }
-
-      const db = utils.getDatabase(opts.prefix);
-      
-      try {
-        // Get counts before migration
-        const itemsBefore = db.getAll().length;
-        const commentsBefore = db.getAllComments().length;
-        
-        // Import JSONL data
-        const { items, comments, dependencyEdges, auditResults } = importFromJsonl(filePath);
-        
-        // Check if SQLite already has data
-        if (itemsBefore > 0 || commentsBefore > 0) {
-          // Merge instead of replace to preserve existing data
-          const localItems = db.getAll();
-          const localComments = db.getAllComments();
-          const localAudits = db.getAllAuditResults();
-          
-          const itemMergeResult = mergeWorkItems(localItems, items);
-          const commentMergeResult = mergeComments(localComments, comments);
-          const auditMergeResult = mergeAuditResults(localAudits, auditResults);
-          
-          withStoreMutationLock(ctx.dataPath, () => {
-            db.import(itemMergeResult.merged, dependencyEdges, auditMergeResult.merged);
-            db.importComments(commentMergeResult.merged);
-          });
-          
-          if (utils.isJsonMode()) {
-            output.json({
-              success: true,
-              message: `Merged ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from JSONL`,
-              itemsImported: items.length,
-              commentsImported: comments.length,
-              auditImported: auditResults.length,
-              itemsMerged: itemMergeResult.conflicts.length,
-              file: filePath,
-              itemsBefore,
-              itemsAfter: db.getAll().length,
-              commentsBefore,
-              commentsAfter: db.getAllComments().length,
-              migrated: true
-            });
-          } else {
-            console.log(`Doctor: Merged ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from ${filePath}`);
-            if (itemMergeResult.conflicts.length > 0) {
-              console.log(`Note: ${itemMergeResult.conflicts.length} items had conflicting updates and were merged.`);
-            }
-            console.log(`Database now contains ${db.getAll().length} work items, ${db.getAllComments().length} comments, and ${db.getAllAuditResults().length} audit results.`);
-          }
-        } else {
-          // SQLite is empty, just import
-          withStoreMutationLock(ctx.dataPath, () => {
-            db.import(items, dependencyEdges, auditResults);
-            db.importComments(comments);
-          });
-          
-          if (utils.isJsonMode()) {
-            output.json({
-              success: true,
-              message: `Imported ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from JSONL`,
-              itemsImported: items.length,
-              commentsImported: comments.length,
-              auditImported: auditResults.length,
-              file: filePath,
-              itemsBefore: 0,
-              itemsAfter: items.length,
-              commentsBefore: 0,
-              commentsAfter: comments.length,
-              migrated: true
-            });
-          } else {
-            console.log(`Doctor: Imported ${items.length} work items, ${comments.length} comments, and ${auditResults.length} audit results from ${filePath}`);
-          }
-        }
-        
-        // Optionally delete the JSONL file
-        if (opts.delete) {
-          fs.unlinkSync(filePath);
-          if (!utils.isJsonMode()) {
-            console.log(`\nDeleted JSONL file: ${filePath}`);
-            console.log('\nMigration complete! Your data is now in SQLite format.');
-            console.log('JSONL files will only be created temporarily during sync operations.');
-          }
-        } else {
-          if (!utils.isJsonMode()) {
-            console.log('\nMigration complete! Your data is now in SQLite format.');
-            console.log('The JSONL file has been preserved.');
-            console.log('To delete it and complete the migration, run:');
-            console.log(`  wl doctor migrate --delete`);
-          }
-        }
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (utils.isJsonMode()) {
-          output.json({ success: false, error: errorMessage, migrated: false });
-        } else {
-          console.error(`Doctor migrate failed: ${errorMessage}`);
-        }
-        process.exit(1);
-      }
-    });
+  registerMigrateCommand(doctor, { output, utils, dataPath: ctx.dataPath });
 
   doctor.action(async (options: DoctorOptions & { fix?: boolean }) => {
       utils.requireInitialized();
