@@ -34,8 +34,48 @@
  */
 
 import { randomBytes } from 'crypto';
-import { WorkItem, DependencyEdge } from '../types.js';
+import { WorkItem, DependencyEdge, ForeignDependencyState } from '../types.js';
 import { SqlitePersistentStore } from '../persistent-store.js';
+
+// ── Foreign (cross-project) dependency resolution ──────────────────────
+
+/**
+ * Result of resolving one foreign (cross-project) dependency target against
+ * the sibling projects discovered on this machine.
+ *
+ * The shared package must not import the CLI's filesystem discovery, so the
+ * resolver is **injected** through `WorklogDatabaseServices.foreign` (the CLI
+ * wires `src/cross-repo/foreign-store.ts`). The interface lives here, in the
+ * acyclic root of the extracted-module graph, so `dependencies.ts` and the
+ * façade can both name it without importing the CLI.
+ */
+export interface ForeignDependencyResolution {
+  /** The normalised (upper-cased) foreign id that was resolved. */
+  id: string;
+  /** Tri-state resolution result. */
+  state: ForeignDependencyState;
+  /**
+   * `true` when a project owning the id's prefix was discovered — even when
+   * its store could not be read or the prefix is ambiguous. The gating
+   * fail-safe only blocks on an `unavailable` target when this is `true`: an
+   * undiscoverable prefix is a coordination note, never a block (D3).
+   */
+  discoveredProject: boolean;
+  /** The foreign item — present only when `state` is `resolved`. */
+  item?: WorkItem;
+  /** Why the target could not be resolved; present when not `resolved`. */
+  reason?: string;
+}
+
+/**
+ * Injected read-only resolver for foreign dependency targets.
+ *
+ * Implementations must never throw and must never mutate the sibling store;
+ * a failure is reported as an `unavailable` resolution carrying a `reason`.
+ */
+export interface ForeignDependencyResolver {
+  resolve(id: string): ForeignDependencyResolution;
+}
 
 // ── Context shape ─────────────────────────────────────────────────────
 
@@ -58,6 +98,8 @@ export interface WorklogDatabaseContext {
     jsonl?: {
       getDefaultDataPath?: () => string;
     };
+    /** Read-only foreign dependency resolver (cross-project gating). */
+    foreign?: ForeignDependencyResolver;
     persistentStoreServices?: any;
     cacheOptions?: any;
   };
@@ -181,6 +223,12 @@ export interface SelectionHooks {
   isInProgressSubtree(item: WorkItem, allItems: WorkItem[]): boolean;
   /** True when a dependency target is not closed/done and therefore blocks. */
   isDependencyActive(target: WorkItem | null): boolean;
+  /**
+   * True when `itemId` exists in this store. Used to keep a resolved foreign
+   * dependency target out of `wl next` blocker surfacing: a foreign item is
+   * not a local work item and must never be promoted as a result.
+   */
+  isLocalWorkItem(id: string): boolean;
   /** Every descendant (children, grandchildren, …) of `parentId`. */
   getDescendants(parentId: string): WorkItem[];
   /** Order items by the hierarchy sort-index (createdAt/id fallback). */

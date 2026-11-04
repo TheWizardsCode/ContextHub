@@ -25,7 +25,12 @@
 
 import { resolveSprintViewWindow } from './browse-window.js';
 import { DEFAULT_LEASE_TTL_SECONDS } from './leader-election.js';
-import { appendCoordinationLogEntry, type CoordinationLogEntry } from './downtime-log.js';
+import {
+  appendCoordinationLogEntry,
+  coordinationLogPolicyFromConfig,
+  isHostBudgetDecisionReason,
+  type CoordinationLogEntry,
+} from './downtime-log.js';
 import {
   DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS,
   DOWNTIME_ERROR_STRIKE_LIMIT,
@@ -36,7 +41,7 @@ import {
 } from './downtime-worker.constants.js';
 import { dispatchFromCoordination } from './downtime-worker.coordination-leader.js';
 import { computeMostImportantItem } from './downtime-worker.coordination.js';
-import { hasPeerOffer, readCoordinationFile } from './coordination.js';
+import { hasPeerOffer, readCoordinationFile, upsertLeader } from './coordination.js';
 import { countFreeUnownedSlots, evaluatePrefillPacing } from './downtime-worker.idle.js';
 import { dispatchDowntimeWork } from './downtime-worker.dispatch.js';
 import {
@@ -44,6 +49,7 @@ import {
   writeCapacityStarvationSignal,
 } from './downtime-worker.orchestrator-signals.js';
 import type { LeafAuditAdmission } from './downtime-worker.gates.js';
+import { hostBudgetSkipLine } from './host-budget-status.js';
 import type {
   IdleTracker,
   IdleWindowLaunchFence,
@@ -230,10 +236,30 @@ export async function recordDecision(
   // an observation, not a refusal: the header blocking token and the
   // underlying reason are unchanged, it is written even when the refusal
   // itself is rate-limited, and a logging failure never affects dispatch.
+  //
+  // Host-budget refusals are NOT fed to the tracker at all
+  // (WL-0MVXY0ZYW009NEJD AC6): a machine-wide budget stop is an
+  // OPERATOR-IMPOSED pause, not capacity starvation, so it must neither start
+  // nor extend an episode — and `observe()` would RESET an active episode for
+  // a non-capacity reason, which would silently mask a genuine starvation
+  // stretch. Skipping the feed leaves the tracker state exactly unchanged;
+  // `capacity-starvation.ts` itself is untouched.
+  const budgetRefusal = isHostBudgetDecisionReason(reason);
   const starvation =
-    options.blocking !== false
+    options.blocking !== false && !budgetRefusal
       ? ctx.starvationTracker.observe(options.starvationReason ?? reason, now)
       : null;
+  // Host-budget observability (WL-0MVXY0ZYW009NEJD AC3): the existing
+  // `Downtime … tier skipped: <reason>` stderr line, now carrying the live
+  // count and the cap. Fail-closed: logging must never crash the worker.
+  if (budgetRefusal) {
+    try {
+      const line = hostBudgetSkipLine(reason, fields.budget);
+      if (line !== null) process.stderr.write(`${line}\n`);
+    } catch {
+      // fail-closed: the skip line must never crash the worker
+    }
+  }
   if (
     ctx.lastDecisionReason === reason &&
     now - ctx.lastDecisionAt < DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS
@@ -246,6 +272,22 @@ export async function recordDecision(
   }
   ctx.lastDecisionReason = reason;
   ctx.lastDecisionAt = now;
+  // Leader-block outcome refresh (WL-0MW1VINII003IL7R): keep the shared
+  // coordination state's `leader.lastDecisionReason`/`lastDecisionAt` in step
+  // with the standing refusal, so "why is nothing being dispatched?" is
+  // answerable from the machine file alone. Written here (not on the
+  // rate-limited repeat path) so an unchanged reason costs no extra write —
+  // the leader's 4-minute check-in refreshes the block's heartbeat.
+  // Observational only: never an offer, never a gate. Fail-safe by itself.
+  if (ctx.leaderState && ctx.opts.coordinationDir !== undefined) {
+    upsertLeader(ctx.opts.coordinationDir, {
+      instanceId: ctx.instanceId,
+      worklogRoot: cwd,
+      lastDecisionReason: reason,
+      lastDecisionAt: new Date(now).toISOString(),
+      lastUpdated: new Date(now).toISOString(),
+    });
+  }
   const entry: CoordinationLogEntry = {
     kind: 'decision',
     operation: 'no-dispatch',
@@ -258,7 +300,11 @@ export async function recordDecision(
     if (typeof ctx.opts.deps.recordDecision === 'function') {
       await ctx.opts.deps.recordDecision(entry, cwd);
     } else {
-      await appendCoordinationLogEntry(cwd, entry);
+      await appendCoordinationLogEntry(
+        cwd,
+        entry,
+        coordinationLogPolicyFromConfig(ctx.opts.config()),
+      );
     }
   } catch {
     // fail-closed: decision logging must never crash the worker
@@ -647,6 +693,12 @@ export async function performDispatch(
           // for diagnosis alongside the grouped entry reason.
           ...(reservationRefused ? { reservationReason: outcome.reason } : {}),
           ...(outcome.offerRejections !== undefined ? { offerRejections: outcome.offerRejections } : {}),
+          // Host-budget evidence (WL-0MVXY0ZYW009NEJD F5 AC1): the SAME
+          // `{ live, max }` figure the refusal quotes on the stderr skip line
+          // and the worklist counter shows, copied straight from the dispatch
+          // outcome — one set of numbers for every surface. Absent on every
+          // non-budget outcome, so existing entry shapes are unchanged.
+          ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
           // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
           // slice C2): a refusal carries its reason as the decision reason
           // (distinct header token) plus `admit: false`, `retryAfterS` and

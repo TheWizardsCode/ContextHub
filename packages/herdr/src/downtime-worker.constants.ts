@@ -12,6 +12,12 @@
 
 import type { HostCpuSource } from './host-cpu.js';
 import type { LlamaSlot, LlamaStatus } from './downtime-worker.types.js';
+import {
+  HOST_BUDGET_AUDIT_REASON,
+  HOST_BUDGET_IMPLEMENT_REASON,
+  HOST_BUDGET_UNKNOWN_REASON,
+  type HostBudgetEvidence,
+} from './downtime-log.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -135,9 +141,41 @@ export function decisionHeaderToken(reason: string): string {
     case 'review-queue-hold':
       return 'review-queue';
     case 'slots-unavailable':
+      // ONE token for every unusable per-slot detail, deliberately
+      // (WL-0MW1VITA8009RLHQ AC4, recorded in follow-up WL-0MW2F2B5W004V57W).
+      // A stale-detail snapshot (`slots_detail_stale` / `slot_counts_stale`)
+      // is NOT split into its own header token, because:
+      //  - the header blocking token answers one question — "can this worker
+      //    dispatch right now?" — and the answer, and the operator's action
+      //    (fix or wait out the proxy's `/slots` path), are identical whether
+      //    the detail is stale or plainly unusable;
+      //  - the *why* is per-tick, multi-valued evidence (three independent
+      //    staleness flags plus the proxy's abandoned-slot count) that a short,
+      //    stable header segment cannot carry without overflowing the
+      //    worklist's `[downtime held: …]` label or drifting from the decision
+      //    log's vocabulary of record.
+      // The distinction that AC4 asks for IS recorded, on the very same
+      // `slots-unavailable` decision entry, as `slotsStale`,
+      // `slotsDetailStale`, `slotCountsStale` and `localAbandonedSlots`
+      // (see `capacityEvidence` below), so a refusal caused by a frozen
+      // snapshot is attributable from the decision log alone. Documented in
+      // docs/dev/downtime-dispatcher.md → "Why the header keeps a single
+      // `no-slots` token" and pinned by downtime-worker.stale-detail.test.ts.
       return 'no-slots';
     case 'capacity-saturated':
       return 'saturated';
+    // Host-wide dispatch-budget refusals (WL-0MVXY0ZYW009NEJD F5 AC2): each
+    // token gets its own header segment so the operator can tell an
+    // OPERATOR-IMPOSED machine budget stop (`budget-implement` /
+    // `budget-audit` / `budget-unknown`) from a capacity-shaped stop
+    // (`contention` / `slot-owner` / `saturated`). The tokens themselves come
+    // from the decision log's vocabulary of record, never a local copy.
+    case HOST_BUDGET_IMPLEMENT_REASON:
+      return 'budget-implement';
+    case HOST_BUDGET_AUDIT_REASON:
+      return 'budget-audit';
+    case HOST_BUDGET_UNKNOWN_REASON:
+      return 'budget-unknown';
     case 'prefill-gate':
     case 'prefill-cap':
     case 'prefill-eta':
@@ -223,6 +261,20 @@ interface CapacityEvidence {
    * operator see WHY a tick was admitted or deferred without reading the
    * proxy. Absent on pre-feature proxies (and when malformed).
    */
+  /**
+   * Slot-snapshot staleness evidence (WL-0MW1VITA8009RLHQ): which part of the
+   * proxy payload is last-known (`slots_stale`, `slots_detail_stale`,
+   * `slot_counts_stale`) plus the proxy's abandoned-slot count. Recorded on
+   * every polled decision when served, so a refusal caused by a frozen snapshot
+   * is attributable from the decision log alone — the 2026-11-04 outage served
+   * detail-stale/counts-fresh for eight hours and the distinction never reached
+   * the log. Absent on pre-feature proxies (log shape unchanged). EVIDENCE
+   * ONLY: these never admit or refuse a dispatch.
+   */
+  slotsStale?: boolean;
+  slotsDetailStale?: boolean;
+  slotCountsStale?: boolean;
+  localAbandonedSlots?: number;
   localIdleSeconds?: number;
   localLastActivitySource?: string;
 }
@@ -334,12 +386,33 @@ export interface DecisionEntryFields extends CapacityEvidence {
     gate: string;
     assignee?: string;
   }>;
+  /**
+   * Host-budget evidence (WL-0MVXY0ZYW009NEJD F5 AC1/AC3): the refused tier's
+   * observed in-flight count and cap, copied verbatim from the dispatch
+   * outcome's `budget` field. Present only on a host-budget refusal, so the
+   * decision log, the stderr skip line and the worklist counter quote the same
+   * `live`/`max` figures and can never disagree.
+   */
+  budget?: HostBudgetEvidence;
 }
 export function capacityEvidence(
   status: LlamaStatus,
   slots: LlamaSlot[] | null,
 ): CapacityEvidence {
   const evidence: CapacityEvidence = {};
+  // Snapshot-staleness evidence (WL-0MW1VITA8009RLHQ): attached BEFORE the
+  // `slots === null` early return below, because the unusable-detail case is
+  // exactly when an operator needs to know which signal was stale.
+  if (typeof status.slots_stale === 'boolean') evidence.slotsStale = status.slots_stale;
+  if (typeof status.slots_detail_stale === 'boolean') {
+    evidence.slotsDetailStale = status.slots_detail_stale;
+  }
+  if (typeof status.slot_counts_stale === 'boolean') {
+    evidence.slotCountsStale = status.slot_counts_stale;
+  }
+  if (typeof status.local_abandoned_slots === 'number') {
+    evidence.localAbandonedSlots = status.local_abandoned_slots;
+  }
   if (status.capacity_hint !== undefined) evidence.capacityHint = status.capacity_hint;
   if (status.status_schema_version !== undefined) {
     evidence.statusSchemaVersion = status.status_schema_version;

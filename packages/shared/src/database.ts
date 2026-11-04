@@ -5,7 +5,7 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, AuditWaiver, DemotedParent, RevertedItem } from './types.js';
+import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, ForeignDependencyView, AuditResult, AuditWaiver, DemotedParent, RevertedItem } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
 // Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
 // relative `icons.js` import; `@worklog/shared/icons` is the canonical path
@@ -13,6 +13,7 @@ import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, Persis
 import type { AuditInvalidationVerdict } from '@worklog/shared/icons';
 import {
   EdgeCache,
+  ForeignDependencyResolver,
   generateId,
   generateCommentId,
   getPrefix,
@@ -145,6 +146,16 @@ export interface WorklogDatabaseServices {
   /** Persistent store services (migration list, etc.) */
   persistentStoreServices?: PersistentStoreServices;
 
+  /**
+   * Read-only resolver for foreign (cross-project) dependency targets.
+   *
+   * Injected by the CLI (`src/cross-repo/foreign-store.ts`); when omitted, an
+   * edge whose target is not in this store is treated exactly as before —
+   * local-only gating. The shared package never imports the CLI's filesystem
+   * discovery, so the dependency direction stays one-way.
+   */
+  foreign?: ForeignDependencyResolver;
+
   /** Optional cache configuration for SqlitePersistentStore (Phase 5) */
   cacheOptions?: PersistentStoreCacheOptions;
 }
@@ -212,6 +223,7 @@ export class WorklogDatabase {
         getActiveDependencyBlockers: (itemId, edgeCache) => this.getActiveDependencyBlockers(itemId, edgeCache),
         isInProgressSubtree: (item, allItems) => this.isInProgressSubtree(item, allItems),
         isDependencyActive: (target) => this.isDependencyActive(target),
+        isLocalWorkItem: (id) => this.get(id) !== null,
         getDescendants: (parentId) => this.getDescendants(parentId),
         orderBySortIndex: (items, sortOrderCache) => this.orderBySortIndex(items, sortOrderCache),
         selectBySortIndex: (items, effectivePriorityCache, sortOrderCache, edgeCache, allItems) =>
@@ -1869,10 +1881,18 @@ export class WorklogDatabase {
   /**
    * Add a dependency edge (fromId depends on toId)
    *
+   * `toId` may reference a foreign (cross-project) item when the caller passes
+   * `allowForeignTarget` after validating it read-only against the sibling
+   * store (D2 — WL-0MVWABT2Z001XMSD).
+   *
    * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
    */
-  addDependencyEdge(fromId: string, toId: string): DependencyEdge | null {
-    return dependenciesModule.addDependencyEdge(this.ctx, fromId, toId);
+  addDependencyEdge(
+    fromId: string,
+    toId: string,
+    options: dependenciesModule.AddDependencyEdgeOptions = {},
+  ): DependencyEdge | null {
+    return dependenciesModule.addDependencyEdge(this.ctx, fromId, toId, options);
   }
 
   /**
@@ -1942,12 +1962,27 @@ export class WorklogDatabase {
   }
 
   /**
-   * True when `itemId` depends on at least one still-active item.
+   * The foreign (cross-project) dependency edges of `itemId`, resolved from
+   * their own stores and reported in the shared view every gating surface
+   * emits. Empty when the item has no foreign edges or no resolver is
+   * injected.
    *
    * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
    */
-  hasActiveBlockers(itemId: string): boolean {
-    return dependenciesModule.hasActiveBlockers(this.ctx, itemId);
+  getForeignDependencyViews(itemId: string, edgeCache?: EdgeCache): ForeignDependencyView[] {
+    return dependenciesModule.getForeignDependencyViews(this.ctx, itemId, edgeCache);
+  }
+
+  /**
+   * True when `itemId` depends on at least one still-active item.
+   *
+   * Foreign (cross-project) targets are resolved from their own store; an
+   * unresolved target keeps the dependent blocked (D3 fail-safe).
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
+   */
+  hasActiveBlockers(itemId: string, edgeCache?: EdgeCache): boolean {
+    return dependenciesModule.hasActiveBlockers(this.ctx, itemId, edgeCache);
   }
 
   /**

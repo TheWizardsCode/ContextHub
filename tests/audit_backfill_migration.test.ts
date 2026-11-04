@@ -5,8 +5,12 @@
  * objects and inserts rows into audit_results.
  *
  * Acceptance Criteria:
- * 1. Valid {time, author, text, status} JSON is parsed and inserted
- * 2. Null/missing/invalid entries are silently skipped
+ * 1. Valid {time, author, text, status} JSON is parsed and inserted, with the
+ *    verbatim source text kept in `raw_output` as provenance
+ * 2. Null/missing entries produce no row; UNMAPPABLE entries (invalid JSON, a
+ *    bare string, an object without `.text`) are preserved verbatim in
+ *    `legacy_audit_preserved` so the later column drop cannot destroy them
+ *    (WL-0MW1W61CG005K893)
  * 3. Data integrity: all fields round-trip correctly
  * 4. Idempotency: re-running migration doesn't duplicate rows
  */
@@ -129,10 +133,10 @@ describe('Backfill migration: valid audit data', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 2: Null/missing/invalid entries are silently skipped
+// Test 2: Null/missing entries produce no row; unmappable entries are preserved
 // ---------------------------------------------------------------------------
 
-describe('Backfill migration: invalid entries', () => {
+describe('Backfill migration: unmappable entries', () => {
   it('skips null audit entries', () => {
     const tmp = createTempDir();
     try {
@@ -179,7 +183,7 @@ describe('Backfill migration: invalid entries', () => {
     }
   });
 
-  it('skips invalid JSON entries', () => {
+  it('preserves invalid JSON entries verbatim instead of losing them', () => {
     const tmp = createTempDir();
     try {
       const dbPath = path.join(tmp, 'worklog.db');
@@ -216,11 +220,21 @@ describe('Backfill migration: invalid entries', () => {
 
       runMigrations({ confirm: true }, dbPath);
 
-      // Verify the invalid audit didn't create an audit_result row
+      // Verify the invalid audit didn't create an audit_result row (it is not a
+      // usable verdict) ...
       const db2 = new Database(dbPath, { readonly: true });
       try {
         const rows = db2.prepare('SELECT * FROM audit_results').all() as any[];
         expect(rows.length).toBe(0);
+
+        // ... but its text survived the column drop (WL-0MW1W61CG005K893)
+        const preserved = db2
+          .prepare('SELECT * FROM legacy_audit_preserved WHERE work_item_id = ?')
+          .get('SA-004') as any;
+        expect(preserved).toBeDefined();
+        expect(preserved.audit_text).toBe('not valid json {');
+        const cols = db2.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+        expect(cols.some(c => String(c.name) === 'audit')).toBe(false);
       } finally {
         db2.close();
       }
@@ -254,7 +268,10 @@ describe('Backfill migration: data integrity', () => {
         expect(row.audited_at).toBe('2026-05-15T14:30:00.000Z');
         expect(row.summary).toBe('Ready to close: Yes\nFull review done');
         expect(row.author).toBe('bob');
-        expect(row.raw_output).toBeNull();
+        // Verbatim legacy text is kept as provenance (WL-0MW1W61CG005K893)
+        expect(row.raw_output).not.toBeNull();
+        expect(JSON.parse(row.raw_output).author).toBe('bob');
+        expect(JSON.parse(row.raw_output).text).toBe('Ready to close: Yes\nFull review done');
       } finally {
         db.close();
       }

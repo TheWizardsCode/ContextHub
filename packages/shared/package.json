@@ -33,6 +33,10 @@
     "./fields": {
       "types": "./dist/fields.d.ts",
       "import": "./dist/fields.js"
+    },
+    "./persistent-store": {
+      "types": "./dist/persistent-store.d.ts",
+      "import": "./dist/persistent-store.js"
     }
   },
   "files": [

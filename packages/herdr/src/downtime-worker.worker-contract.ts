@@ -42,12 +42,15 @@ import type {
   DowntimeDispatchFailureEvent,
   DowntimeDispatchEvent,
   DowntimeErrorEvent,
+  DowntimeHostBudgetAdmission,
+  DowntimeHostBudgetAdmissionInput,
 } from './downtime-worker.dispatch-contract.js';
 import type {
   DowntimeActiveAuditResult,
   DowntimeCandidate,
   DowntimeClaimExpected,
   DowntimeClaimResult,
+  DowntimeDispatchKind,
   DowntimeHerdrListResult,
   DowntimeItemResult,
   DowntimeNextResult,
@@ -515,6 +518,44 @@ export interface DowntimeWorkerDeps {
     cwd: string,
   ): Promise<boolean>;
   /**
+   * Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3): the ONE
+   * machine-scoped ledger read per dispatch attempt. Called in
+   * `dispatchClaimedTier` after the CAS claim and immediately before the
+   * dispatch marker is written, so both dispatcher paths share one choke point
+   * and neither can bypass the machine cap. Resolves `admitted: false` with a
+   * neutral refusal token (`host-budget-implement` at/over cap or a disabled
+   * tier, `host-budget-unknown` when the ledger cannot be trusted) plus the
+   * `live`/`max` evidence. OPTIONAL — absent means no host budget and legacy
+   * behaviour is byte-identical. Production wiring (`index.ts`) always
+   * provides it. Must never throw; a throwing seam is treated as
+   * `host-budget-unknown` (fail closed).
+   */
+  admitHostDispatch?(
+    input: DowntimeHostBudgetAdmissionInput,
+  ): Promise<DowntimeHostBudgetAdmission>;
+  /**
+   * Confirm a reserved host-budget entry with the spawned pane's id
+   * (WL-0MVXY0YG7009JMHI F3): the ledger only counts a reservation whose
+   * `paneId` is in the live pane list, so the id is written back after the
+   * post-spawn pane lookup. Best-effort — never throws, never affects the
+   * dispatch outcome (the pane-close release is the backstop).
+   */
+  confirmHostDispatch?(
+    itemId: string,
+    kind: DowntimeDispatchKind,
+    paneId: string,
+    cwd: string,
+  ): Promise<void>;
+  /**
+   * Release a host-budget reservation (WL-0MVXY0YG7009JMHI F3 AC3): called on
+   * every abort path of the claim pipeline (admission refusal / failed claim
+   * rollback, marker-write failure, spawn failure) and when a dispatched pane
+   * closes. Must be idempotent and never throw — a missing entry is a
+   * successful no-op, and stale entries are additionally reaped by the ledger's
+   * own staleness rule.
+   */
+  releaseHostDispatch?(itemId: string, cwd: string): Promise<void>;
+  /**
    * Flag an item for producer review (`needsProducerReview = true`) after its
    * automatic dispatch budget is exhausted (WL-0MUKYEXMK0033MFK AC3). Called
    * once when the per-item/per-kind attempt count reaches `maxAttempts`, so a
@@ -699,6 +740,25 @@ export interface DowntimeWorkerConfig {
      * `DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS` (2 h).
      */
     capacityStarvationAlertMs?: number;
+    /**
+     * Coordination-log retention policy (WL-0MVKNC28B003UOLX AC2): per-file
+     * entry cap for `.worklog/downtime-coordination.log` before it rotates
+     * to a numbered sibling, and how many rotated siblings are kept.
+     * Size-based rotation with N kept: the retained window is BOUNDED by
+     * `coordinationLogMaxEntries × (1 + coordinationLogMaxRotatedFiles)`
+     * entries and never falls below
+     * `coordinationLogMaxEntries × coordinationLogMaxRotatedFiles + 1`.
+     * Defaults (500/file, 3 rotated: always 1,501–2,000 entries ≈ ≥ 25 h at
+     * the observed ≥ 60 decisions/hour) come from
+     * `COORDINATION_LOG_MAX_ENTRIES` / `COORDINATION_LOG_MAX_ROTATED_FILES`
+     * in `downtime-log.ts`, and values are clamped by
+     * `resolveCoordinationLogPolicy` (10–10,000 entries, 0–20 siblings;
+     * 0 siblings = no rotation, single-file trim). Read live on every tick.
+     * The dispatch log is NOT affected (its 100-entry bound keeps the
+     * dispatched-marker readers' contract).
+     */
+    coordinationLogMaxEntries?: number;
+    coordinationLogMaxRotatedFiles?: number;
     /**
      * Progress window before a live-agent pane is reported as long-running on
      * a starvation signal (WL-0MVKNC2N50025HXE AC2). Read live on every tick.

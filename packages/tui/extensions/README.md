@@ -13,6 +13,7 @@ registers the agent-side plugin modules that complement the Herdr plugin
 - [Guardrails](#guardrails)
 - [Skill-path Tool](#skill-path-tool)
 - [Error Recovery Module](#error-recovery-module) (`/retry`)
+  - [Leaked tool-call recovery](#leaked-tool-call-recovery)
 - [Lease Release](#lease-release)
 - [Per-turn Local Preference and Route Log](#per-turn-local-preference-and-route-log)
 
@@ -277,13 +278,20 @@ configuration.
 
 | Category | Default Action | Description |
 |----------|---------------|-------------|
-| `rateLimit` (429) | NOT retried | Informative error shown to the user || `serverError` (5xx) | Retried | Exponential backoff with configurable delay |
+| `rateLimit` (429) | NOT retried | Informative error shown to the user |
+| `serverError` (5xx) | Retried | Exponential backoff with configurable delay |
 | `authError` (401/403) | NOT retried | Checkpoint saved + terminal error displayed |
 | `contextLength` | Compact + Continue | `/compact` triggered, then auto-continue |
 | `quotaExhausted` | NOT retried | Checkpoint saved + terminal error displayed |
 | `timeout` | Retried | Exponential backoff with configurable delay |
 | `terminated` | NOT retried | Checkpoint saved + terminal error displayed |
 | `parseError` (JSON) | Single-shot continue | One plain "continue" prompt, no backoff loop |
+| `leakedToolCall` | Repair, else one corrective continue | Leaked Hermes/Qwen XML tool call repaired in place at `message_end`, else one bounded corrective continuation (see [Leaked tool-call recovery](#leaked-tool-call-recovery)) |
+
+The `leakedToolCall` row is a recovery *capability*, not a classified error: it
+is not part of `DEFAULT_RECOVERY_CONFIG`, has no backoff and no `/retry`
+action. It runs from its own module pair, documented in
+[Leaked tool-call recovery](#leaked-tool-call-recovery).
 
 ### Configuration
 
@@ -472,17 +480,155 @@ the invisible-continue loop (`agent.prompt([])`) — no manual "continue" needed
 The classification lives in `shouldAutoContinueAfterCompaction()` in
 `recovery.ts`; the `session_compact` handler is wired in `register-recovery.ts`.
 
+### Leaked tool-call recovery
+
+Some models served through the Local Proxy emit a tool call as **plain text**
+instead of a structured `toolCall` block:
+
+```text
+<response>
+ <tool_call>
+ <function=read>
+ <parameter=path>
+ /home/rgardler/.pi/agent/skills/implement/SKILL.md
+ </parameter>
+ </function>
+ </tool_call>
+</response>
+```
+
+Pi renders that markup as assistant text and executes nothing, so an
+unattended agent (audit, implement, downtime-dispatch panes) stalls mid-workflow.
+The extension repairs the message at the `message_end` boundary so the intended
+call runs **in the same turn**, and falls back to exactly one bounded
+corrective continuation when the call cannot be reconstructed safely
+(WL-0MW109HU60042BVW; fallback WL-0MW109J84000QJOJ).
+
+**Detection.** The `message_end` handler (`register-leaked-tool-call.ts`) parses
+the assistant message's `text` blocks with the Hermes/Qwen XML dialect in
+`leaked-tool-call.ts`: `<response>`, `<tool_call>`, `<function=NAME>`,
+`<parameter=KEY>`. Detection is tolerant of a **missing `<tool_call>` opener**
+and of **missing `</function>` / `</tool_call>` closers** — both shapes occur
+live. Markup-free messages are left byte-for-byte untouched.
+
+**Repair.** For each complete call the pure transformer
+`repairAssistantMessage()` appends a structured
+`{ type: 'toolCall', id, name, arguments }` block (id from `node:crypto`), sets
+`stopReason: 'toolUse'`, preserves every other message field, and replaces the
+leaked markup with a one-line note:
+
+```text
+[recovered tool call: read(path=/home/rgardler/.pi/agent/skills/implement/SKILL.md)]
+```
+
+**Safety guards (never execute a half-streamed call).** No `toolCall` is
+synthesised — and the call is reported as skipped — when:
+
+| Guard | Reason |
+|-------|--------|
+| a `<parameter=KEY>` value is not terminated by `</parameter>` | `unterminated-parameter` |
+| a `<function=NAME>` block has no parameters | `missing-parameter` |
+| the tool name is not in `pi.getActiveTools()` | `inactive-tool` |
+| the message already carries an identical structured `toolCall` | `duplicate` |
+| `stopReason` is `length` / `error` / `aborted` | `unrepairable-stop-reason` |
+
+An aborted run (`interruptibleState.userAborted`) is skipped entirely, as is a
+context without `ui` (deprecated/headless modes); notification and idempotence
+behaviour is described below.
+
+**Bounded corrective-continue fallback.** When every call in the markup is
+refused for safety (or none could be parsed), nothing executes and the turn
+would simply end — the stall this capability exists to prevent. The
+`message_end` handler therefore records the *missed* call(s) against the
+assistant message, and the `turn_end` handler in
+`register-leaked-tool-call.ts` issues **one** corrective continuation naming
+them and asking the model to re-issue the call through the structured
+tool-call interface (`LEAKED_TOOL_CALL_CONFIG.correctiveContinuationPrompt`).
+
+Bounds and guards (all module state, reset on `session_start`):
+
+- **One per assistant message**, keyed by a content fingerprint — a replayed
+  `turn_end` boundary cannot fire a second continuation.
+- **Never when the message already produced tool results** — a partial repair
+  executed its call and the agent loop continues on its own.
+- **Never for non-misses**: quoted prose (`quoted`) and an already-executing
+  structured duplicate (`duplicate`) are not worth continuing for, and a
+  `length` / `error` / `aborted` stop reason belongs to the compaction and
+  checkpoint machinery (`unrepairable-stop-reason`).
+- **Never on an aborted run** (`interruptibleState.userAborted`); the deferred
+  continuation re-checks the abort flag, the session generation and whether the
+  leaked message is still the agent's last message before prompting.
+- **Session cap:** at most `LEAKED_TOOL_CALL_CONFIG.sessionCap` corrective
+  continuations per session (default `5`); the next miss shows one final
+  warning explaining the cap and stops.
+
+**The continuation transport is capability-detected, not version-detected.**
+Pi ≥ 1.5 exposes the `turn_end` boundary-result API, so the handler returns
+`{ entries: [{ type: 'custom_message', customType:
+'leaked-tool-call-corrective', content, display: false }], continue: true }`.
+The pinned `pi-coding-agent@0.79.10` types no result for `turn_end`, so on that
+runtime the same corrective text is delivered through the established
+invisible-continue path (`agent.prompt([...])`, the WL-0MSNKWLER003EGE0
+precedent) once the run settles. `detectBoundaryResultSupport()` probes the
+event shape (`entries` plus `context.canContinue`) and caches the answer for
+the session, so one build is correct on both runtimes.
+
+**Notifications and idempotence.** Each event emits **exactly one**
+`ctx.ui.notify(..., 'warning')`: one per repair naming the recovered call(s),
+one per corrective continuation naming the missed call(s), and one final
+warning when the session cap is reached. Markup-free messages produce no action
+and no notification, and a stale `ctx` that throws on notify never blocks the
+recovery. Repair is idempotent — a repaired message contains no markup, so
+replaying the handler is a no-op — and the fallback's one-shot and cap bounds
+make a repair/continue ping-pong impossible.
+
+**The Pi contract this depends on.** The repair works because Pi stores the
+finalised assistant message in agent state before emitting `message_end` and
+then `AgentSession._replaceMessageInPlace()` (in `agent-session`) copies the
+handler's returned message onto that object, *before* `agent-loop` filters
+`toolCall` blocks (`message.content.filter(c => c.type === 'toolCall')`). This
+is read from Pi's source, not its docs. It was verified on the repo's pinned
+`pi-coding-agent@0.79.10` and on the installed `1.5.0`.
+`leaked-tool-call.execution.test.ts` is the early-warning tripwire for a future
+Pi upgrade: it drives `runAgentLoop` from the repo's pinned
+`@earendil-works/pi-agent-core` with a scripted fake stream and asserts the
+recovered tool executes exactly once; it fails if the repair is bypassed **or**
+if a future Pi applies the replacement to a copy instead of in place.
+
+**Settings.** `LEAKED_TOOL_CALL_CONFIG` in `leaked-tool-call.ts` is the single
+source of truth for the capability (repair and fallback alike); these are its
+defaults:
+
+```json
+{
+  "enabled": true,
+  "sessionCap": 5,
+  "noteTemplate": "[recovered tool call: {name}({arguments})]",
+  "correctiveContinuationPrompt": "Your previous message contained a tool call written as plain text, so it never ran. Re-issue that tool call through the structured tool-call interface instead of writing the markup as text."
+}
+```
+
+The remaining extension points are module-scope constants in the same file:
+
+| Constant | Purpose |
+|----------|---------|
+| `LEAKED_TOOL_CALL_DIALECTS` | Dialect table — a new dialect (e.g. `<\|tool_call\|>`, fenced JSON) is an additive entry |
+| `REPAIRABLE_STOP_REASONS` | `stop` / `toolUse` — the only stop reasons a call may be recovered from |
+| `RECOVERY_NOTE_PREFIX`, `MAX_NOTE_ARG_LENGTH` | One-line note format and per-value truncation |
+
 ### Architecture
 
 The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
 
 | File | Purpose |
 |------|---------|
-| `error-patterns.ts` | Error classification patterns for all 8 categories |
+| `error-patterns.ts` | Error classification patterns for the 8 classified error categories |
 | `retry-logic.ts` | Exponential backoff, `Retry-After` header/`retry_after` parsing (plus a `fetch` capture wrapper) and jitter, the `serverHintMaxDelayMs` server-hint ceiling, state managers, interruptible sleep |
 | `recovery.ts` | Compact-and-continue, checkpoint-and-terminate, and single-shot parse-error continue handlers |
 | `retry-command.ts` | `/retry` command interface (status, reset, manual-trigger) |
 | `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start, session_compact) |
+| `leaked-tool-call.ts` | Pure leaked tool-call dialects, parser, `repairAssistantMessage()` transformer and `LEAKED_TOOL_CALL_CONFIG` (no Pi imports) |
+| `register-leaked-tool-call.ts` | `message_end` repair in place, `turn_end` bounded corrective-continue fallback, `session_start` state reset |
 
 ### Notify/ctx safety (WL-0MUIV50EJ007VH9B, WL-0MUL1BG09005VRBO)
 

@@ -1003,17 +1003,17 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
 
     // The log still decides which items appear (WL-OLD/WL-NEW are absent from
     // the live list, so they stay log-derived). Each lands in its own 4-hour
-    // time block, and blocks render oldest-first (WL-0MUMM9NED009TLL3), so
-    // WL-OLD (1 Jan) precedes WL-NEW (2 Jan).
-    expect(items.map((i) => i.id)).toEqual(['WL-OLD', 'WL-NEW']);
-    expect(items[1].title).toBe('Newer dispatch');
-    expect(items[1].isLogDerived).toBe(true);
-    expect(items[1].isLogOnly).toBe(true);
-    expect(items[1].dispatchKind).toBe('implement');
+    // time block, and blocks render newest-first (WL-0MVLEM606008UAL1), so
+    // WL-NEW (2 Jan) precedes WL-OLD (1 Jan).
+    expect(items.map((i) => i.id)).toEqual(['WL-NEW', 'WL-OLD']);
+    expect(items[0].title).toBe('Newer dispatch');
+    expect(items[0].isLogDerived).toBe(true);
+    expect(items[0].isLogOnly).toBe(true);
+    expect(items[0].dispatchKind).toBe('implement');
     // Every row carries its time-block group so the display model emits a
     // heading before each block.
-    expect(items[0].groupLabel).toBe('01 Jan 2026, 00:00–04:00');
-    expect(items[1].groupLabel).toBe('02 Jan 2026, 00:00–04:00');
+    expect(items[0].groupLabel).toBe('02 Jan 2026, 00:00–04:00');
+    expect(items[1].groupLabel).toBe('01 Jan 2026, 00:00–04:00');
     // The live fetcher (the same one other views use) IS consulted so
     // surviving items can be rendered with identical icons
     // (WL-0MUGLL9SS002E1D2 audit fix).
@@ -1085,7 +1085,7 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     expect(dispatchLine).toContain('[audit]');
   });
 
-  it('groups rows into 4-hour time blocks, oldest block first, newest item first within a block (WL-0MUMM9NED009TLL3)', async () => {
+  it('groups rows into 4-hour time blocks, newest block first, newest item first within a block (WL-0MVLEM606008UAL1)', async () => {
     const root = makeTempRoot();
     // Two 4-hour blocks on the same day; within each block rows arrive
     // newest-first.
@@ -1100,21 +1100,23 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     }
     const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
 
-    // Oldest block first, and within each block newest item first.
+    // Newest block first, and within each block newest item first.
     expect(items.map((i) => i.id)).toEqual([
-      'WL-EARLY-2', 'WL-EARLY-1',
       'WL-LATE-2', 'WL-LATE-1',
+      'WL-EARLY-2', 'WL-EARLY-1',
     ]);
     expect(items.map((i) => i.groupLabel)).toEqual([
-      '01 Jan 2026, 00:00–04:00',
-      '01 Jan 2026, 00:00–04:00',
       '01 Jan 2026, 04:00–08:00',
       '01 Jan 2026, 04:00–08:00',
+      '01 Jan 2026, 00:00–04:00',
+      '01 Jan 2026, 00:00–04:00',
     ]);
     expect(items.map((i) => i.group)).toEqual([1, 1, 2, 2]);
+    // Regression assertion: the oldest block is no longer first.
+    expect(items[0].groupLabel).not.toBe('01 Jan 2026, 00:00–04:00');
   });
 
-  it('assigns a distinct group number per chronological block and an Unknown time block last (WL-0MUMM9NED009TLL3)', async () => {
+  it('assigns a distinct group number per time block (newest first) and an Unknown time block last (WL-0MVLEM606008UAL1)', async () => {
     const root = makeTempRoot();
     await writeDispatch(root, { itemId: 'WL-DAY2', kind: 'plan', title: 'Day 2', dispatchedAt: '2026-01-02T09:00:00.000Z' });
     await writeDispatch(root, { itemId: 'WL-DAY1', kind: 'plan', title: 'Day 1', dispatchedAt: '2026-01-01T09:00:00.000Z' });
@@ -1123,10 +1125,10 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
 
     const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
 
-    expect(items.map((i) => i.id)).toEqual(['WL-DAY1', 'WL-DAY2', 'WL-NO-TS']);
+    expect(items.map((i) => i.id)).toEqual(['WL-DAY2', 'WL-DAY1', 'WL-NO-TS']);
     expect(items.map((i) => i.groupLabel)).toEqual([
-      '01 Jan 2026, 08:00–12:00',
       '02 Jan 2026, 08:00–12:00',
+      '01 Jan 2026, 08:00–12:00',
       'Unknown time',
     ]);
     // Blocks are numbered sequentially 1..N in render order.
@@ -1145,15 +1147,15 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
 
     expect(headings).toHaveLength(2);
     expect(headings.map((h) => h.groupLabel)).toEqual([
-      '01 Jan 2026, 00:00–04:00',
       '01 Jan 2026, 04:00–08:00',
+      '01 Jan 2026, 00:00–04:00',
     ]);
     // Each heading is immediately followed by its single item row.
     expect(rows.map((r) => (isHeadingRow(r) ? `H:${r.groupLabel}` : (r as WorkItem).id))).toEqual([
-      'H:01 Jan 2026, 00:00–04:00',
-      'WL-A',
       'H:01 Jan 2026, 04:00–08:00',
       'WL-B',
+      'H:01 Jan 2026, 00:00–04:00',
+      'WL-A',
     ]);
   });
 

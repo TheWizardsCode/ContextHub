@@ -19,7 +19,7 @@ Use `escapeShellArg` when constructing command strings passed to `execSync`, `ex
 
 ### `quoteShellValue(value: string): string`
 
-POSIX‑only single‑quote wrapping (same as the POSIX branch of `escapeShellArg`). Provided for backward compatibility with existing `src/github.ts` usage.
+POSIX‑only single‑quote wrapping (same as the POSIX branch of `escapeShellArg`). Re-exported by `src/github/transport.ts` for the GitHub integration, whose command builders (`src/github/issues.ts`, `src/github/hierarchy.ts`) call it.
 
 ## Audited Files
 
@@ -28,7 +28,10 @@ All files in `src/` that construct shell commands have been audited for proper e
 | File | Escaping Used | Status |
 |------|---------------|--------|
 | `src/sync.ts` | `escapeShellArg()` | Safe — applied consistently |
-| `src/github.ts` | `JSON.stringify()`, `quoteShellValue()` | Safe — both provide equivalent protection |
+| `src/github/issues.ts` | `quoteShellValue()` | Safe — every user‑provided value (title, assignee, label list) is single‑quote wrapped |
+| `src/github/labels.ts` | `quoteShellValue()` | Safe — label names are single‑quote wrapped; colours are generated hex values |
+| `src/github/hierarchy.ts` | `quoteShellValue()` | Safe — every interpolated value is single‑quote wrapped |
+| `src/github/transport.ts` | Executes `gh` commands built upstream; interpolates no user text; re-exports `quoteShellValue()` | Safe — callers escape before building the command |
 | `src/commands/sync.ts` | No user text in shell commands | Safe — hardcoded git commands only |
 | `src/commands/init.ts` | No user text in shell commands | Safe — hardcoded git commands only |
 | `src/worklog-paths.ts` | No user text in shell commands | Safe — hardcoded git command only |
@@ -44,4 +47,18 @@ All files in `src/` that construct shell commands have been audited for proper e
 
 ## Exceptions
 
-`JSON.stringify()` is used in `src/github.ts` for shell escaping in gh CLI commands. This is safe because `JSON.stringify()` produces a properly quoted and escaped string that is valid in a shell context. However, `escapeShellArg()` is recommended for new code to maintain consistency.
+None for the GitHub integration. Every module that interpolates user text into a
+`gh` command string (`src/github/issues.ts`, `src/github/labels.ts`,
+`src/github/hierarchy.ts`) uses `quoteShellValue()`.
+
+> **Do not use `JSON.stringify()` for shell escaping.** It escapes only the
+> characters special inside a JSON/JavaScript double‑quoted string (`"`, `\`,
+> control characters). It does **not** escape `$`, backticks or `!`, so when the
+> result is embedded in a shell double‑quoted context, `$(…)`, backticks and
+> `${…}` are still substituted by `/bin/bash` — a command‑injection vector. The
+> GitHub integration previously used `JSON.stringify()` for issue titles,
+> assignees and label names; that was incorrect and has been replaced with
+> `quoteShellValue()` (WL-0MW0QXTYD0065ZW7). The regression pinned in
+> `tests/github-shell-escaping.test.ts` runs the built commands against a stub
+> `gh` and asserts that `$(…)`, backtick and `!` payloads arrive literally and
+> are never executed.

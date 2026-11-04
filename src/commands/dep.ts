@@ -1,23 +1,91 @@
 /**
  * Dependency commands - Manage dependency edges
+ *
+ * A dependency target may live in a **discovered sibling project's** store
+ * (parent WL-0MVWABT2Z001XMSD, D2): `add` / `rm` / `list` resolve such an id
+ * read-only through `src/cross-repo/foreign-store.ts` and record the edge in
+ * the local store. Same-project behaviour is untouched.
  */
 
 import chalk from 'chalk';
 import type { PluginContext } from '../plugin-types.js';
 import type { DepOptions } from '../cli-types.js';
 import { normalizeActionArgs } from './cli-utils.js';
+import { classifyWorkItemId } from '../cli-utils.js';
+import { resolveForeignItem, prefixOfWorkItemId, type ForeignItemResolution } from '../cross-repo/foreign-store.js';
+import { unknownProjectResult } from '../cross-repo/project-registry.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
 
+  /**
+   * Refuse an ambiguous foreign prefix: two discovered projects declare it, so
+   * no single store owns the endpoint. Both candidate paths are reported and
+   * the edge is never recorded against a guessed owner (D1/D2).
+   */
+  const refuseAmbiguousForeignPrefix = (resolution: ForeignItemResolution): void => {
+    const candidates = resolution.candidates ?? [];
+    const message =
+      `Ambiguous project prefix '${resolution.prefix}': declared by ${candidates.length} ` +
+      'projects, so the foreign endpoint cannot be resolved to a single store. ' +
+      'Refusing to guess an owner.';
+    if (utils.isJsonMode()) {
+      output.json({
+        success: false,
+        error: message,
+        error_code: 'ambiguous_prefix',
+        prefix: resolution.prefix,
+        projects_root: resolution.projectsRoot,
+        candidates,
+        errors: candidates.map((candidate) => `Candidate project: ${candidate}`),
+      });
+    } else {
+      console.error(chalk.red(`Error: ${message}`));
+      candidates.forEach((candidate) => console.error(`  - ${candidate}`));
+    }
+    process.exitCode = 1;
+  };
+
+  /**
+   * Refuse an unknown foreign prefix with the actionable `unknown_project`
+   * payload (parent D4): the projects root that was scanned plus the exact
+   * `wl project add <PREFIX> --git-url <url>` remediation, instead of a bare
+   * `Work item not found`.
+   */
+  const refuseUnknownProject = (prefix: string, extraErrors: string[] = []): void => {
+    const payload = unknownProjectResult(prefix);
+    const message = `No discovered project declares the prefix '${prefix}'. ${payload.remediation}`;
+    if (utils.isJsonMode()) {
+      output.error(message, {
+        ...payload,
+        error: message,
+        ...(extraErrors.length > 0 ? { errors: extraErrors } : {}),
+      });
+    } else {
+      console.error(chalk.red(`Error: ${message}`));
+      extraErrors.forEach((error) => console.error(chalk.red(`Error: ${error}`)));
+    }
+    process.exitCode = 1;
+  };
+
+  /** True when `classification` is a foreign prefix no discovered project owns. */
+  const isUnknownProject = (classification: ReturnType<typeof classifyWorkItemId>): boolean =>
+    classification.origin === 'unknown' &&
+    classification.foreign !== undefined &&
+    classification.foreign.discoveredProject === false;
+
   const depCommand = program
     .command('dep')
-    .description('Manage dependency edges');
+    .description(
+      'Manage dependency edges (foreign cross-project ids from discovered sibling projects are supported)',
+    );
 
   depCommand
     .command('add <itemId> <dependsOnId>')
-    .description('Add a dependency edge (item depends on dependsOn)')
+    .description(
+      'Add a dependency edge (item depends on dependsOn); dependsOn may be a foreign cross-project id',
+    )
     .option('--prefix <prefix>', 'Override the default prefix')
     .action((itemId: string, dependsOnId: string, ...rawArgs: any[]) =>
       withStoreMutationLock(ctx.dataPath, () => {
@@ -32,7 +100,33 @@ export default function register(ctx: PluginContext): void {
 
       const warnings: string[] = [];
       const item = db.get(itemIdLookup);
-      const dependsOn = db.get(dependsOnIdLookup);
+      let dependsOn = db.get(dependsOnIdLookup);
+      let foreignTarget: ForeignItemResolution | undefined;
+
+      // A target that is not local may live in a discovered sibling project's
+      // store (D2). Its existence is validated there, read-only.
+      if (!dependsOn) {
+        const classification = classifyWorkItemId(db, dependsOnIdLookup);
+        if (classification.origin === 'foreign') {
+          foreignTarget = classification.foreign;
+          if (foreignTarget?.ambiguous) {
+            refuseAmbiguousForeignPrefix(foreignTarget);
+            return;
+          }
+          if (foreignTarget?.state === 'resolved') {
+            dependsOn = foreignTarget.item ?? null;
+          }
+        } else if (isUnknownProject(classification)) {
+          // The prefix belongs to no discovered project: emit the clone
+          // remediation instead of a bare not-found (D4).
+          refuseUnknownProject(
+            classification.foreign?.prefix ?? prefixOfWorkItemId(dependsOnIdLookup),
+            item ? [] : [`Work item not found: ${normalizedItemId}`],
+          );
+          return;
+        }
+      }
+
       if (!item) warnings.push(`Work item not found: ${normalizedItemId}`);
       if (!dependsOn) warnings.push(`Work item not found: ${normalizedDependsOnId}`);
 
@@ -55,10 +149,15 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
-      const edge = db.addDependencyEdge(itemIdLookup, dependsOnIdLookup);
+      const edge = db.addDependencyEdge(itemIdLookup, dependsOnIdLookup, {
+        allowForeignTarget: foreignTarget !== undefined,
+      });
       if (dependsOn && !['in_review', 'done'].includes(dependsOn.stage)) {
         if (item && !['completed', 'deleted'].includes(item.status)) {
-          db.update(itemIdLookup, { status: 'blocked' });
+          // The caller decided the status from the target's own (possibly
+          // foreign) record, so the derived blocked/open reconciliation must
+          // not override it.
+          db.update(itemIdLookup, { status: 'blocked' }, { reconcileSelf: false });
         }
       }
       if (utils.isJsonMode()) {
@@ -75,7 +174,9 @@ export default function register(ctx: PluginContext): void {
 
   depCommand
     .command('rm <itemId> <dependsOnId>')
-    .description('Remove a dependency edge (item depends on dependsOn)')
+    .description(
+      'Remove a dependency edge (item depends on dependsOn); dependsOn may be a foreign cross-project id',
+    )
     .option('--prefix <prefix>', 'Override the default prefix')
     .action((itemId: string, dependsOnId: string, ...rawArgs: any[]) =>
       withStoreMutationLock(ctx.dataPath, () => {
@@ -91,8 +192,19 @@ export default function register(ctx: PluginContext): void {
       const warnings: string[] = [];
       const item = db.get(itemIdLookup);
       const dependsOn = db.get(dependsOnIdLookup);
+      const edgeExists = db
+        .listDependencyEdgesFrom(itemIdLookup)
+        .some(edge => edge.toId === dependsOnIdLookup);
+      // Removing a foreign edge needs no existence proof from the sibling
+      // store (the edge is local data); its record is read read-only purely to
+      // label the human output.
+      const foreignTarget =
+        !dependsOn && edgeExists ? resolveForeignItem(dependsOnIdLookup) : undefined;
+
       if (!item) warnings.push(`Work item not found: ${normalizedItemId}`);
-      if (!dependsOn) warnings.push(`Work item not found: ${normalizedDependsOnId}`);
+      if (!dependsOn && !edgeExists) {
+        warnings.push(`Work item not found: ${normalizedDependsOnId}`);
+      }
 
       if (warnings.length > 0) {
         if (utils.isJsonMode()) {
@@ -112,7 +224,7 @@ export default function register(ctx: PluginContext): void {
       } else if (removed) {
         console.log(chalk.green('Successfully removed dependency between'));
         const itemLabel = `${item?.title || itemIdLookup} ${chalk.gray(`(${itemIdLookup})`)}`;
-        const dependsOnLabel = `${dependsOn?.title || dependsOnIdLookup} ${chalk.gray(`(${dependsOnIdLookup})`)}`;
+        const dependsOnLabel = `${dependsOn?.title || foreignTarget?.item?.title || dependsOnIdLookup} ${chalk.gray(`(${dependsOnIdLookup})`)}`;
         console.log(`${itemLabel} ${chalk.green('no longer depends on')}`);
         console.log(`${dependsOnLabel}.`);
       } else {
@@ -127,7 +239,9 @@ export default function register(ctx: PluginContext): void {
 
   depCommand
     .command('list <itemId>')
-    .description('List inbound and outbound dependency edges for a work item')
+    .description(
+      'List inbound and outbound dependency edges for a work item (foreign cross-project targets included)',
+    )
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--outgoing', 'Only show outbound dependencies')
     .option('--incoming', 'Only show inbound dependencies')
@@ -151,7 +265,16 @@ export default function register(ctx: PluginContext): void {
 
       const warnings: string[] = [];
       const item = db.get(itemIdLookup);
-      if (!item) warnings.push(`Work item not found: ${normalizedItemId}`);
+      if (!item) {
+        const classification = classifyWorkItemId(db, itemIdLookup);
+        if (isUnknownProject(classification)) {
+          // Listing an id whose prefix no discovered project owns: emit the
+          // clone remediation rather than a bare not-found (D4).
+          refuseUnknownProject(classification.foreign?.prefix ?? prefixOfWorkItemId(itemIdLookup));
+          return;
+        }
+        warnings.push(`Work item not found: ${normalizedItemId}`);
+      }
 
       if (warnings.length > 0) {
         if (utils.isJsonMode()) {
@@ -167,12 +290,28 @@ export default function register(ctx: PluginContext): void {
 
       const outbound = outboundEdges.map(edge => {
         const dep = db.get(edge.toId);
+        if (dep) {
+          return {
+            id: edge.toId,
+            title: dep.title || '(missing)',
+            status: dep.status || 'deleted',
+            priority: dep.priority || 'medium',
+            direction: 'depends-on',
+          };
+        }
+        // Not in the local store: resolve it read-only against the discovered
+        // sibling project and carry the tri-state outcome (D2/D3).
+        const foreign = resolveForeignItem(edge.toId);
+        const foreignItem = foreign.state === 'resolved' ? foreign.item : undefined;
         return {
           id: edge.toId,
-          title: dep?.title || '(missing)',
-          status: dep?.status || 'deleted',
-          priority: dep?.priority || 'medium',
+          title: foreignItem?.title || '(missing)',
+          status: foreignItem?.status || 'deleted',
+          stage: foreignItem?.stage || '',
+          priority: foreignItem?.priority || 'medium',
           direction: 'depends-on',
+          foreign: true,
+          foreign_dependency: foreign.state,
         };
       });
 

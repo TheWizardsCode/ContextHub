@@ -54,13 +54,38 @@ import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import {
   getMachineCoordinationDir,
-  isHostAuditActive,
-  writeActiveAuditMarker,
-  removeActiveAuditMarker,
   readStoredModelCooldowns,
   clearStoredModelCooldown,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
+// Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3, audit tier
+// WL-0MVXY0XPF006YUHA F2): the dispatcher's machine-scoped admission for BOTH
+// tiers. The ledger/config module (`host-dispatch-budget.ts`, F1) is consumed
+// through this admission module so the wiring reads the live pane list from the
+// SAME machine-wide resolver the rest of the dispatcher uses.
+import {
+  admitHostDispatch as admitHostBudgetDispatch,
+  confirmHostDispatch as confirmHostBudgetDispatch,
+  readAuditBudgetState,
+  releaseHostDispatch as releaseHostBudgetDispatch,
+  type HostBudgetLivePane,
+} from './host-dispatch-budget.admission.js';
+// User-fired (interactive) host-budget gate (WL-0MVXY0Z93002HKCZ F4): the
+// counterpart of the dispatcher's admission. At/over cap it asks first — with
+// the bottom-anchored dialog the worklist renders — and only a deliberate
+// proceed records `override: { by: 'user' }`. Below quota it is a silent
+// no-op, and an unreadable ledger fails OPEN with a visible notice (a human
+// is present and owns the decision).
+import { createHostBudgetPromptHost } from './host-budget-dialog.js';
+import {
+  prepareInteractiveAgentDispatch,
+  type InteractiveAgentDispatchPreparation,
+} from './host-dispatch-budget.interactive.js';
+// Read-only host-budget summary for the worklist header counter
+// (WL-0MVXY0ZYW009NEJD F5 AC4): the SAME ledger/rules the dispatcher admits
+// with, read without writing, reaping or reserving, so the header can never
+// disagree with the refusal the dispatcher logs.
+import { readHostBudgetStatus } from './host-budget-status.js';
 import {
   countSpawnedChildProcesses,
   createHerdrReaperDeps,
@@ -332,6 +357,40 @@ import {
 } from './index.settings.js';
 
 export { configureWorklogTarget, uninitializedReport };
+
+/**
+ * Live pane list for the host dispatch budget (WL-0MVXY0YG7009JMHI F3).
+ *
+ * Built from the SAME machine-wide `herdr pane list` read the rest of the
+ * dispatcher uses, so the ledger's liveness rule never sees a second pane
+ * inventory. `records` (with labels) are preferred because the ledger's repair
+ * path needs the work-item id suffix to reconstruct entries; a `paneIds`-only
+ * payload still counts reserved entries, it just cannot repair a corrupt
+ * ledger. Fail-open: a failed/unwired pane query yields an empty list, which
+ * degrades admission to "no observed pane" exactly like today's liveness
+ * philosophy (a herdr hiccup never silently wedges dispatch).
+ */
+async function hostBudgetLivePanes(
+  readRunningPanes: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']>,
+  cwd: string,
+): Promise<HostBudgetLivePane[]> {
+  try {
+    const running = await readRunningPanes(cwd);
+    if (!running.ok) return [];
+    if (Array.isArray(running.records)) {
+      return running.records.map((record) => ({
+        paneId: record.paneId,
+        ...(typeof record.label === 'string' ? { title: record.label } : {}),
+      }));
+    }
+    if (Array.isArray(running.paneIds)) {
+      return running.paneIds.map((paneId) => ({ paneId }));
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
@@ -608,24 +667,48 @@ export function createDowntimeDeps(
     },
     async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
       try {
-        // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): FIRST check
-        // the machine-wide active-audit marker at
-        // `~/.herdr/downtime/active-audit`. This coordinates audits ACROSS
-        // projects and herdr instances on the same host — the per-worklog
+        // Host-wide audit admission (WL-0MVXY0XPF006YUHA F2): FIRST consult the
+        // machine-scoped dispatch-budget ledger where the retired
+        // `active-audit` marker used to be read. `readAuditBudgetState` counts
+        // fresh `kind: audit` entries against `maxAudit` (plus a non-stale
+        // legacy marker as ONE synthetic entry, so a mixed-version host is still
+        // serialised) and returns the refusal token the dispatcher reports:
+        // `audit-host-saturated` at `maxAudit: 1` (the legacy token, unchanged
+        // for existing consumers), `host-budget-audit` at any other cap
+        // (including `0`, with 0/0 evidence), and `host-budget-unknown` when an
+        // unreadable ledger had to be repaired. The check coordinates audits
+        // ACROSS projects and herdr instances on the same host — the per-worklog
         // check below cannot see audits dispatched by other projects'
         // dispatchers, which is what allowed host-wide saturation
-        // (2026-09-26 incident). A non-stale marker means an audit is
-        // running somewhere on this host; defer this audit. A stale marker
-        // (older than DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS) is treated as
-        // released. Fail-open: if the coordination dir cannot be resolved
-        // the host-wide check is skipped and the per-worklog check below
-        // still runs (the legacy behaviour is preserved).
+        // (2026-09-26 incident). Fail-open: if the coordination dir cannot be
+        // resolved the host-wide check is skipped and the per-worklog check
+        // below still runs (the legacy behaviour is preserved).
         const coordinationDir = getMachineCoordinationDir();
-        if (coordinationDir !== null && isHostAuditActive(coordinationDir)) {
-          // Host-wide saturation: an audit is active on this host
-          // (dispatched by another instance/project). Report with source
-          // so the worker can log 'audit-host-saturated' specifically.
-          return { ok: true, active: true, source: 'host-wide' };
+        if (coordinationDir !== null) {
+          // Cheap read first: the ledger + cap only, NO pane-list subprocess (the
+          // dispatch loop runs this check once per audit candidate). A pane list
+          // is read only on the rare unreadable-ledger path, to self-heal.
+          let state = readAuditBudgetState({ dir: coordinationDir, root: cwd });
+          if (state.reason === 'host-budget-unknown') {
+            state = readAuditBudgetState({
+              dir: coordinationDir,
+              root: cwd,
+              livePanes: await hostBudgetLivePanes(runningPanesResolver, cwd),
+            });
+          }
+          if (state.atCap) {
+            // Host-wide budget refusal: an audit is already in flight
+            // (dispatched by this or another instance/project), or the tier is
+            // disabled/unreadable. Report with source so the worker logs the
+            // host-budget reason token specifically.
+            return {
+              ok: true,
+              active: true,
+              source: 'host-wide',
+              ...(state.reason !== undefined ? { reason: state.reason } : {}),
+              budget: { live: state.live, max: state.max },
+            };
+          }
         }
         // Active-audit single-flight (WL-0MT3PHW4I002SNOV): does any
         // non-stale kind=audit dispatch marker map to an item still
@@ -976,27 +1059,12 @@ export function createDowntimeDeps(
         // fail-closed: the marker could not be written → abort the dispatch
         return false;
       }
-      // 3. Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): write the
-      // machine-wide active-audit marker when the durable per-worklog marker
-      // landed. This coordinates audit serialisation ACROSS projects and
-      // herdr instances on the same host. Fail-safe: the write is
-      // best-effort — a failure does NOT abort the dispatch (the per-worklog
-      // marker and stale window still protect against double-dispatch within
-      // this project). Written AFTER the marker write so a failed marker
-      // never leaves a host-wide lock behind with no corresponding dispatch;
-      // a spawn failure releases it via `recordDispatchFailure`.
-      if (event.kind === 'audit') {
-        try {
-          const coordinationDir = getMachineCoordinationDir();
-          if (coordinationDir !== null) {
-            // Identify the dispatching plugin process for diagnostics; the
-            // marker's single-flight semantics do not depend on the id.
-            writeActiveAuditMarker(coordinationDir, `herdr:${process.pid}`);
-          }
-        } catch {
-          // fail-safe: marker write failure must never abort dispatch
-        }
-      }
+      // 3. Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
+      // AC2): the machine-scoped dispatch-budget ledger is the audit-tier
+      // authority now, reserved in the claim→marker→spawn choke point. This
+      // version never writes nor removes the legacy `active-audit` file; a
+      // non-stale file written by an older instance is still counted as one
+      // synthetic audit entry on read (mixed-version safety).
       return true;
     },
     async recordError(event: DowntimeErrorEvent): Promise<void> {
@@ -1027,20 +1095,11 @@ export function createDowntimeDeps(
       } catch {
         // fail-closed: audit logging must never crash the worker
       }
-      // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): a failed audit
-      // spawn never produced a running audit, so release the machine-wide
-      // marker immediately instead of stranding the host slot for the full
-      // stale window. Best-effort — the stale window remains the backstop.
-      if (event.kind === 'audit') {
-        try {
-          const coordinationDir = getMachineCoordinationDir();
-          if (coordinationDir !== null) {
-            removeActiveAuditMarker(coordinationDir);
-          }
-        } catch {
-          // fail-safe: marker removal failure must never crash the worker
-        }
-      }
+      // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
+      // AC2): a failed audit spawn releases the machine-scoped LEDGER entry in
+      // the claim pipeline's spawn-failure path
+      // (`releaseHostBudgetForFailure`), so this version neither writes nor
+      // removes the legacy `active-audit` file.
     },
     async recordDispatchEnrichment(event: DowntimeDispatchEnrichmentEvent): Promise<void> {
       // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6): append a second
@@ -1124,23 +1183,21 @@ export function createDowntimeDeps(
     // (WL-0MU308WSF0002JWN). Fail-closed: `appendPaneCloseLogEntry` never
     // throws.
     async recordPaneClose(entry, cwd: string): Promise<void> {
-      // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): when an audit
-      // pane completes (audit-passed or audit-failed), release the
-      // machine-wide active-audit marker so other instances can dispatch.
-      // Fail-safe: best-effort only — a removal failure must never crash the
-      // worker. The stale window provides a safety net if the removal fails.
-      if (
-        entry.kind === 'audit' &&
-        (entry.outcome === 'audit-passed' || entry.outcome === 'audit-failed')
-      ) {
-        try {
-          const coordinationDir = getMachineCoordinationDir();
-          if (coordinationDir !== null) {
-            removeActiveAuditMarker(coordinationDir);
-          }
-        } catch {
-          // fail-safe: marker removal failure must never crash worker
-        }
+      // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
+      // AC2): the audit slot is released by the dispatch-budget ledger release
+      // below (keyed by item id, so it covers every kind and outcome). The
+      // legacy `active-audit` file is never removed by this version.
+      //
+      // Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3 AC3): a closed pane
+      // gives its machine-wide slot back immediately, whatever the lifecycle
+      // outcome — the ledger entry is keyed by item id, so this release is
+      // idempotent and safe for every kind/outcome. Best-effort: a failed
+      // release never blocks the pane-close record, and the ledger's stale
+      // reap remains the backstop.
+      try {
+        releaseHostBudgetDispatch(entry.itemId);
+      } catch {
+        // fail-safe: a release failure must never crash worker
       }
       await appendPaneCloseLogEntry(cwd, entry);
     },
@@ -1274,6 +1331,42 @@ export function createDowntimeDeps(
         cwd,
       );
     },
+    // ── Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3) ─────────────
+    // Machine-scoped ledger admission for the implement tier (F1's
+    // `host-dispatch-budget.ts`, consumed through the admission module). The
+    // live pane list comes from the machine-wide `herdr pane list` resolver;
+    // `instanceId` is a per-process diagnostic label only (the ledger's
+    // single-flight semantics never depend on it). Every seam is best-effort
+    // and must never throw into the claim pipeline.
+    async admitHostDispatch(input) {
+      const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
+      return admitHostBudgetDispatch(
+        {
+          kind: input.kind === 'audit' ? 'audit' : 'implement',
+          itemId: input.itemId,
+          instanceId: `herdr:${process.pid}`,
+          root: input.cwd,
+        },
+        { livePanes },
+      );
+    },
+    async confirmHostDispatch(itemId, kind, paneId, cwd): Promise<void> {
+      if (kind !== 'implement' && kind !== 'audit') return;
+      try {
+        confirmHostBudgetDispatch({
+          kind,
+          itemId,
+          instanceId: `herdr:${process.pid}`,
+          root: cwd,
+          paneId,
+        });
+      } catch {
+        // best-effort: the pane-close release remains the backstop
+      }
+    },
+    async releaseHostDispatch(itemId): Promise<void> {
+      releaseHostBudgetDispatch(itemId);
+    },
     // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
     // `needsProducerReview = true` when an item exhausts its automatic
     // dispatch-attempt budget so it surfaces for human triage. Cross-root
@@ -1402,6 +1495,14 @@ export async function main(): Promise<void> {
   const agentTracker = new AgentTracker({
     stateFile: wlRoot ? join(wlRoot, '.worklog', AGENT_PANES_FILE) : undefined,
   });
+
+  /**
+   * Host-budget prompt bridge (WL-0MVXY0Z93002HKCZ F4): the worklist registers
+   * the renderer that paints the over-quota dialog; the agent-dispatch path in
+   * `onCommand` awaits `ask()`. With no renderer registered (no TUI) an ask
+   * resolves `cancel`, so a dispatch can never silently proceed over quota.
+   */
+  const hostBudgetPrompt = createHostBudgetPromptHost();
 
   // Production deps for the selection list's tab-based active marker
   // (WL-0MV1BWETT005GSUJ): an item with an exact-match tab in this workspace
@@ -1605,6 +1706,19 @@ export async function main(): Promise<void> {
         applyActivePaneMarkers(items, hydratorDeps.listActivePanes, hydratorWorkspaceId),
       subscriber: eventSubscriber,
       agentTracker,
+      hostBudgetPrompt,
+      // Host-budget header counter (WL-0MVXY0ZYW009NEJD F5 AC4): derived on
+      // the pane-marker cadence from the machine ledger plus the SAME
+      // machine-wide pane list the dispatcher's admission uses. Read-only —
+      // no `wl` spawn, no reservation, no dispatch change — and `null` (no
+      // header segment) whenever the budget is unavailable.
+      readHostBudgetStatus: async () => {
+        const livePanes = await hostBudgetLivePanes(
+          defaultRunningDowntimePanesResolver,
+          targetCwd,
+        );
+        return readHostBudgetStatus({ livePanes });
+      },
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
       onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
@@ -1676,14 +1790,40 @@ export async function main(): Promise<void> {
               )
             : Promise.resolve();
         if (route === 'agent') {
-          // Claim the referenced work-item BEFORE dispatching so it appears
-          // in_progress immediately — for both the pane and the headless
-          // (no-pane) path. Non-blocking: failures are logged to stderr and
-          // never prevent the dispatch (AC2).
-          try {
-            await claimItemForAgentCommand(command);
-          } catch {
-            // Belt-and-suspenders: a claim failure must never block the pane.
+          // Host-wide budget gate for USER-FIRED dispatches
+          // (WL-0MVXY0Z93002HKCZ F4). Runs BEFORE the claim and before any
+          // pane/background spawn, for BOTH branches of this route:
+          //  - below quota  → silent no-op (reserve the ledger entry, claim as
+          //                   before): the common path gains no keypress;
+          //  - at/over cap  → the worklist shows the bottom-anchored dialog;
+          //                   cancel returns here with NO claim, NO pane and
+          //                   NO ledger entry; proceed reserves the entry with
+          //                   `override: { by: 'user' }`;
+          //  - unreadable ledger → fails OPEN with a visible stderr notice.
+          // Dispatcher-fired work never reaches this path (its admission
+          // refuses the tick instead of prompting).
+          // Fail-open: a gate/claim failure must never prevent the dispatch
+          // (the pre-F4 claim path had the same guarantee).
+          const budgetPreparation = await prepareInteractiveAgentDispatch(command, {
+            confirm: (request) => hostBudgetPrompt.ask(request),
+            notify: (message) => process.stderr.write(`[worklog-plugin] ${message}\n`),
+            // The SAME machine-wide pane read the dispatcher's admission uses
+            // (`herdr pane list` for the whole host, not this instance's panes).
+            readLivePanes: () => hostBudgetLivePanes(defaultRunningDowntimePanesResolver, targetCwd),
+            claim: (agentCommand) => claimItemForAgentCommand(agentCommand),
+            root: targetCwd,
+          }).catch((error: unknown) => {
+            process.stderr.write(
+              `[worklog-plugin] Host budget gate failed (proceeding): ${
+                error instanceof Error ? error.message : String(error)
+              }\n`,
+            );
+            return { proceed: true, reserved: false } satisfies InteractiveAgentDispatchPreparation;
+          });
+          if (!budgetPreparation.proceed) {
+            // Cancel: no claim, no pane, no background dispatch, no ledger
+            // entry. The item stays exactly as it was.
+            return;
           }
           // Request priority (WL-0MVE1NZ4J000H5NH AC2): resolve the
           // dispatched work item's priority and map it through the
@@ -1773,7 +1913,27 @@ export async function main(): Promise<void> {
             void capturePaneIdFromFile(itemId, paneIdFile, (wid, pid) =>
               agentTracker.recordAgentForWorkItem(wid, pid, command),
             ).then((capturedPaneId) => {
-              if (capturedPaneId !== undefined) return runInteractiveRootPaneCleanup();
+              if (capturedPaneId !== undefined) {
+                // Confirm the reservation with the live pane id so the
+                // implement tier counts this user-fired dispatch (its
+                // liveness rule needs a pane in the machine-wide pane list).
+                // Best-effort: a failing seam never affects the dispatch.
+                if (budgetPreparation.reserved && budgetPreparation.kind !== undefined) {
+                  try {
+                    confirmHostBudgetDispatch({
+                      kind: budgetPreparation.kind,
+                      itemId,
+                      instanceId: `herdr:${process.pid}`,
+                      root: targetCwd,
+                      paneId: capturedPaneId,
+                    });
+                  } catch {
+                    // Best-effort — the entry stays reserved without a pane.
+                  }
+                }
+                return runInteractiveRootPaneCleanup();
+              }
+              return undefined;
             });
           }
         } else if (route === 'pane') {

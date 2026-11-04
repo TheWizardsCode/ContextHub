@@ -99,6 +99,88 @@ suite ran"). Two layers keep this from happening:
    enforced by `tests/cli/fixture-git-env.test.ts`. Mirrors
    `skill/shared/git_sandbox.py::fixture_git_env()`.
 
+## Module resolution in a worktree
+
+A worktree has no dependency tree of its own: `implement.py start` symlinks the
+**main checkout's** `node_modules` into it (and the nested workspace ones).
+Everything a worktree test resolves therefore comes from the main checkout's
+tree — including `@worklog/shared`, a workspace package whose entry points are
+*gitignored build output* rather than source.
+
+### Resolution order
+
+Resolving `@worklog/shared/<entry>` from inside a worktree walks these steps,
+in this order:
+
+| # | Step | Resolves into |
+|---|---|---|
+| 1 | `node_modules` lookup — `<worktree>/node_modules`, a symlink to `<main>/node_modules` | **main checkout** |
+| 2 | `node_modules/@worklog/shared` — the workspace link `-> ../../packages/shared` (a plain symlink today; the link farm in `SA-0MVMZBJGT00718ZO` will replace it) | **main checkout** |
+| 3 | `packages/shared` — the package directory that link points at | **main checkout** |
+| 4 | `packages/shared/package.json` `main` / `exports` (`./dist/*.js`) | **main checkout** |
+| 5 | `packages/shared/dist/<entry>.js` — the `tsc` build output | **main checkout** |
+
+Not one step resolves into the worktree. A worktree's `packages/shared` source
+is only read by tests that import it by relative path
+(`../../packages/shared/src/…`).
+
+Confirm which tree a resolution lands in, from inside the worktree:
+
+```bash
+readlink -f node_modules/@worklog/shared
+# → /home/…/ContextHub/packages/shared            (the main checkout)
+node --input-type=module -e \
+  "console.log(import.meta.resolve('@worklog/shared/worklog-paths'))"
+# → file:///home/…/ContextHub/packages/shared/dist/worklog-paths.js
+```
+
+### The stale-`dist` failure signature
+
+A `packages/shared` edit in the worktree — and a build run in the worktree,
+which writes `<worktree>/packages/shared/dist` — is **invisible** to every
+consumer of `@worklog/shared`: steps 2–5 above resolve the main checkout's
+package and the main checkout's build. The test therefore exercises code that
+does not contain the change, and goes red in a way that looks like a behaviour
+regression but is a resolution artefact. The canonical instance is the persist
+write-detection tests (`tests/unit/persist-write-detection.test.ts`,
+WL-0MVK6S4HM005GBCO): the change-detection spies are "never called" because
+the CLI wrapper resolved a `dist/` built before the differential-persist change
+(WL-0MVM9E3SV003III0).
+
+- **Correct diagnosis:** the resolved `dist` is the main checkout's build.
+  Confirm it with the two commands above, then import the worktree source by
+  relative path in the test (what the persist tests do), or treat the red as
+  unattributable to your change rather than as a code regression.
+- **Wrong diagnosis:** weakening, skipping or "fixing" the test. A red caused
+  by stale build output says nothing about the assertion, so editing the test
+  removes the signal without the change ever being verified.
+
+See [`wl-shared-dist-diagnostic.md`](./wl-shared-dist-diagnostic.md) for the
+`wl` startup preflight that names the same missing-`dist` state, and
+[`implement-worktree-node-modules-verification.md`](./implement-worktree-node-modules-verification.md)
+for the end-to-end verification of the `node_modules` symlink.
+
+### Current vs pending: there is no link farm yet
+
+Today a worktree resolves the **main checkout's** `packages/shared/dist`; no
+mechanism makes the worktree's own `packages/shared` the resolution target. The
+link-farm setup that will do so is tracked in SorraAgents
+`SA-0MVMZBJGT00718ZO` and has not shipped — do not look for a link-farm command,
+and do not hand-roll one. Until it lands, a `packages/shared` change is only
+testable by importing the worktree source directly.
+
+### Constraints
+
+- **Never run `npm install` in a worktree.** `<worktree>/node_modules` is a
+  symlink to the main checkout's tree, so an install writes the dependency tree
+  every other tree on the host resolves. The live statement of the rule is in
+  [§1 Implementation worktrees](#1-implementation-worktrees-agent-side).
+- **Never write through `node_modules`.** `node_modules/@worklog/shared` is a
+  symlink into the main checkout's `packages/shared`, so a write through that
+  path edits the main checkout — not your worktree — and corrupts the package
+  every other session builds against. Same live statement:
+  [§1 Implementation worktrees](#1-implementation-worktrees-agent-side).
+
 ## Guards that depend on isolation
 
 Both hooks below no-op inside an isolated tree, because syncing from a tree

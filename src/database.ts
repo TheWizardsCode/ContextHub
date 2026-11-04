@@ -10,10 +10,10 @@
 import {
   WorklogDatabase as SharedWorklogDatabase,
   type WorklogDatabaseServices,
+  type WorklogDatabaseOptions,
   type GitTarget,
   type JsonlImportResult,
 } from '@worklog/shared';
-import { SqlitePersistentStore, FtsSearchResult } from './persistent-store.js';
 import { importFromJsonl, importFromJsonlContent, exportToJsonlAsync, getDefaultDataPath } from './jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults, getRemoteDataFileContent } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from './file-lock.js';
@@ -27,6 +27,7 @@ import {
   getEmbeddingStorePath,
   WorklogSearch,
 } from './lib/search.js';
+import { resolveForeignItem } from './cross-repo/foreign-store.js';
 
 // ── Build default CLI services ─────────────────────────────────────────
 
@@ -61,6 +62,12 @@ function createDefaultServices(): WorklogDatabaseServices {
       createSearch,
       WorklogSearch,
     },
+    // Cross-project dependency gating (parent WL-0MVWABT2Z001XMSD): the
+    // shared blocker queries resolve a foreign target from its own store
+    // through this injected read-only resolver.
+    foreign: {
+      resolve: (id: string) => resolveForeignItem(id),
+    },
   };
 }
 
@@ -76,7 +83,8 @@ export type { WorklogDatabaseServices, GitTarget, JsonlImportResult };
  *
  * Backward-compatible constructor signature — existing callers like
  * `new WorklogDatabase(prefix, dbPath, jsonlPath, silent, autoSync, syncProvider)`
- * continue to work identically.
+ * continue to work identically; the trailing `options` argument forwards
+ * `readOnly` (and any future open option) to the shared class.
  */
 export class WorklogDatabase extends SharedWorklogDatabase {
   constructor(
@@ -86,8 +94,9 @@ export class WorklogDatabase extends SharedWorklogDatabase {
     silent: boolean = false,
     autoSync: boolean = false,
     syncProvider?: () => Promise<void>,
+    options: WorklogDatabaseOptions = {},
   ) {
     const services = createDefaultServices();
-    super(prefix, dbPath, jsonlPath, silent, autoSync, syncProvider, services);
+    super(prefix, dbPath, jsonlPath, silent, autoSync, syncProvider, services, options);
   }
 }

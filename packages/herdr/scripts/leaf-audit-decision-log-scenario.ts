@@ -27,6 +27,15 @@
  * written to a throwaway temp directory (the production
  * `appendCoordinationLogEntry` path, not a mock), then read back.
  *
+ * Waiting for the log is event-driven, never a fixed sleep. The worker
+ * writes decisions fire-and-forget (`void recordDecision(...)`), so `tick()`
+ * can resolve before the append lands. A fixed "give it 25 ms" sleep lost
+ * that race on a saturated host (load avg 14–23: the same tree that was red
+ * passed on `--rerun-failures`, WL-0MW0YD2T6004FRDJ). The scenario therefore
+ * tracks every append the worker starts and AWAITS the in-flight writes
+ * before reading the log back, so a slow append only makes the run slower —
+ * every scenario still has a green tree of decisions at any host load.
+ *
  * The same `runLeafAuditDecisionLogScenario()` is asserted by
  * `src/downtime-worker.leaf-audit.test.ts` (the "scripted decision-log
  * scenario" group), so the evidence in the parent work item is pinned by the
@@ -38,7 +47,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { readCoordinationLogEntries, type CoordinationLogEntry } from '../src/downtime-log.js';
+import {
+  appendCoordinationLogEntry,
+  readCoordinationLogEntries,
+  type CoordinationLogEntry,
+} from '../src/downtime-log.js';
 import type { AuditCandidateScopeResult } from '../src/downtime-worker.gates.js';
 import {
   createDowntimePoller,
@@ -93,11 +106,33 @@ function threeSlotPool(freeSlots: 1 | 2 | 3): LlamaStatus {
   } as LlamaStatus;
 }
 
-/** The stub `wl`/pane seams the scenario needs; nothing hits a real backend. */
+/**
+ * Options for {@link runLeafAuditDecisionLogScenario}.
+ */
+export interface ScenarioOptions {
+  /**
+   * Test seam (WL-0MW0YD2T6004FRDJ): delay every decision-log append by this
+   * many milliseconds to simulate a saturated host. The scenario must still
+   * capture every decision, because it awaits the in-flight appends instead
+   * of sleeping a fixed amount before reading the log.
+   */
+  decisionLogDelayMs?: number;
+}
+
+/**
+ * The stub `wl`/pane seams the scenario needs; nothing hits a real backend.
+ *
+ * `recordDecision` is injected so the scenario can observe the worker's
+ * fire-and-forget appends (see `settleDecisionWrites`). It delegates to the
+ * SAME production append the worker's default path uses — only the optional
+ * `decisionLogDelayMs` simulation differs.
+ */
 function scenarioDeps(opts: {
   auditCandidate: { id: string } | null;
   scope: AuditCandidateScopeResult;
   spawned: string[];
+  decisionLogDelayMs: number;
+  decisionWrites: Array<Promise<void>>;
 }): DowntimeWorkerDeps {
   const planCandidate = { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete', status: 'open' };
   return {
@@ -115,6 +150,19 @@ function scenarioDeps(opts: {
     hasFreshAudit: async () => false,
     readCodeFreezeStatus: () => 'not-frozen',
     claimItem: async () => ({ ok: true }),
+    recordDecision: async (entry, dir) => {
+      const write = (async () => {
+        if (opts.decisionLogDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, opts.decisionLogDelayMs));
+        }
+        // No policy argument: the scenario config sets no retention override,
+        // so the documented default policy the worker's own fallback resolves
+        // to is exactly what this append uses.
+        await appendCoordinationLogEntry(dir, entry);
+      })();
+      opts.decisionWrites.push(write);
+      await write;
+    },
     spawnAgentPane: async (prompt) => {
       opts.spawned.push(prompt);
       return { ok: true };
@@ -156,16 +204,39 @@ const SCENARIOS = [
 const PROMPT_ITEM_RE = /\/skill:(audit|plan|implement)\s+(\S+)/;
 
 /**
+ * Await every decision-log append the worker started, including writes queued
+ * while an earlier write was still in flight (the worker fires them with
+ * `void recordDecision(...)`, so they are not part of the `tick()` promise).
+ *
+ * Re-checking the backlog after each settle is what makes this deterministic:
+ * once no new append appears, the log is complete. A fixed sleep cannot give
+ * that guarantee and loses the race on a saturated host
+ * (WL-0MW0YD2T6004FRDJ).
+ */
+async function settleDecisionWrites(writes: Array<Promise<void>>): Promise<void> {
+  let settled = 0;
+  while (settled < writes.length) {
+    const pending = writes.slice(settled);
+    settled = writes.length;
+    await Promise.allSettled(pending);
+  }
+}
+
+/**
  * Run all three scenarios and return the captured decision-log excerpts. Each
  * scenario gets its own throwaway worklog root so its log is exactly the
  * entries that scenario produced.
  */
-export async function runLeafAuditDecisionLogScenario(): Promise<ScenarioCapture[]> {
+export async function runLeafAuditDecisionLogScenario(
+  options: ScenarioOptions = {},
+): Promise<ScenarioCapture[]> {
+  const decisionLogDelayMs = options.decisionLogDelayMs ?? 0;
   const captures: ScenarioCapture[] = [];
   for (const scenario of SCENARIOS) {
     const cwd = mkdtempSync(join(tmpdir(), 'leaf-audit-scenario-'));
     try {
       const spawned: string[] = [];
+      const decisionWrites: Array<Promise<void>> = [];
       const fetcher = async () => ({ ok: true, status: 200, json: async () => scenario.status() });
       const poller = createDowntimePoller('http://proxy.invalid:8000', fetcher);
       const worker = createDowntimeWorker({
@@ -174,6 +245,8 @@ export async function runLeafAuditDecisionLogScenario(): Promise<ScenarioCapture
           auditCandidate: scenario.auditCandidate,
           scope: scenario.scope,
           spawned,
+          decisionLogDelayMs,
+          decisionWrites,
         }),
         config: () => ({
           enabled: true,
@@ -191,9 +264,10 @@ export async function runLeafAuditDecisionLogScenario(): Promise<ScenarioCapture
       });
 
       const tick = await worker.tick();
-      // Decision entries are written fire-and-forget (`void recordDecision`),
-      // so give the append one macrotask to land before reading the log back.
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      // Decision entries are written fire-and-forget (`void recordDecision`):
+      // await the appends the tick started instead of sleeping a fixed 25 ms
+      // (a fixed sleep is the race that produced WL-0MW0YD2T6004FRDJ).
+      await settleDecisionWrites(decisionWrites);
       const prompt = spawned[0];
       const match = prompt === undefined ? null : PROMPT_ITEM_RE.exec(prompt);
 

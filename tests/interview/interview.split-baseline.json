@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "provenance": {
+    "generatedBy": "npx tsx tests/interview/split-guard-scan.ts --write-baseline",
+    "sourceCommit": "d3fcfab0a0169d960234dd8c7e4f9cedeee8eb0f",
+    "generatedAt": "2026-11-03T04:19:24.297Z",
+    "barrel": "src/commands/interview.ts",
+    "consumerGlobs": [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "scripts/**/*.ts"
+    ]
+  },
+  "symbols": {
+    "value": [
+      "EXPLANATION_TIMEOUT_MS",
+      "EXTRACTED_SECTION_HEADER",
+      "EXTRACTION_INSTRUCTION",
+      "EXTRACTION_TIMEOUT_MS",
+      "MAX_AUDIT_RAW_OUTPUT_BYTES",
+      "MAX_AUDIT_SUMMARY_BYTES",
+      "MAX_EXPLANATION_LENGTH",
+      "MAX_EXPLANATION_LINES",
+      "MAX_EXTRACTION_DESCRIPTION_BYTES",
+      "MAX_PROMPT_CONTEXT_BYTES",
+      "PRODUCER_REVIEW_INSTRUCTION",
+      "buildExplanationPrompt",
+      "buildExtractedPairs",
+      "buildExtractionPrompt",
+      "buildFallbackExplanation",
+      "buildProducerReviewExplanation",
+      "buildProducerReviewExplanationResult",
+      "defaultClearPrompt",
+      "extractClarifyingSection",
+      "extractQuestionsWithLlm",
+      "insertClarifyingSection",
+      "parseExtractedQuestions",
+      "parseQAPairs",
+      "rebuildDescription",
+      "rebuildQAPairs",
+      "renderExplanation",
+      "runInterview",
+      "tryExtractQuestionsWithLlm"
+    ],
+    "type": [
+      "ClarifyingQAPair",
+      "ClarifyingSection",
+      "InterviewCommandDeps",
+      "InterviewIO",
+      "InterviewOutcome",
+      "InterviewPromptLoop",
+      "InterviewRunOptions",
+      "InterviewStore",
+      "LlmExtractionResult",
+      "ProducerReviewAuditContext",
+      "ProducerReviewExplanationDeps",
+      "ProducerReviewExplanationResult"
+    ]
+  }
+}

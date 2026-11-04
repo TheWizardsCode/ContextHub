@@ -60,6 +60,10 @@ import {
   type DispatchWindowHoldSummary,
 } from './dispatch-window-hold.js';
 import {
+  hostBudgetStatusText,
+  type HostBudgetStatus,
+} from './host-budget-status.js';
+import {
   createHydratorRunner,
   createProductionHydratorDeps,
   HYDRATOR_INTERVAL_MS,
@@ -74,6 +78,11 @@ import {
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
+import {
+  HostBudgetDialogState,
+  overlayHostBudgetDialog,
+  type HostBudgetPromptHost,
+} from './host-budget-dialog.js';
 import { KeypressDecoder } from './key-input.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown } from './md-viewer.js';
@@ -2295,6 +2304,14 @@ export function createListRenderer(getShowIcons?: () => boolean): (
    * renders no banner (and consumes no chrome row).
    */
   assigneeHoldNotice?: string | null,
+  /**
+   * Header segment for the host-wide dispatch budget (AC4,
+   * WL-0MVXY0ZYW009NEJD): `[budget: implement n/max · audit n/max]`.
+   * Display-only and read-only — it never reserves, releases or reaps a ledger
+   * entry, and it never changes a dispatch decision. `null` renders no segment
+   * (and no chrome row) when the budget/ledger is unavailable.
+   */
+  hostBudgetStatus?: string | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -2344,6 +2361,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     assigneeHoldStatus?: string | null,
     /** Banner copy for an all-held dispatch window (AC2, WL-0MVR8FN1D002SCIR). */
     assigneeHoldNotice?: string | null,
+    /** Header segment for the host-wide dispatch budget (AC4, WL-0MVXY0ZYW009NEJD). */
+    hostBudgetStatus?: string | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -2416,6 +2435,16 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // when the window still has dispatchable work.
     if (assigneeHoldStatus) {
       header += ` ${ANSI.fg(220)}${assigneeHoldStatus}${ANSI.reset}`;
+    }
+    // ── Host-wide dispatch-budget counter (AC4 — WL-0MVXY0ZYW009NEJD) ──
+    // `implement n/max · audit n/max`, derived from ONE read-only reader
+    // (`host-budget-status.ts`) that pairs the ledger's own counting rules
+    // with the configured caps — the same numbers the dispatcher's refusal
+    // logs. Display-only: it never reserves/releases/reaps and never changes
+    // a dispatch decision, and it renders nothing when the budget is
+    // unavailable so the common case adds no chrome.
+    if (hostBudgetStatus) {
+      header += ` ${ANSI.fg(45)}${hostBudgetStatus}${ANSI.reset}`;
     }
     // ── Non-blocking sync notice (F3 — WL-0MVJV2O7H003HY9N) ─────
     // A tiny, render-only status notice ("⟳ syncing… Ns") while a background
@@ -3107,12 +3136,13 @@ export function fetchItemsForView(
     ])
       .then(([rows, liveItems]) => {
         const liveById = new Map(liveItems.map((item) => [item.id, item]));
-        // Group the log rows into 4-hour UTC time blocks, oldest block first
-        // (WL-0MUMM9NED009TLL3). Each block becomes a numbered group so the
+        // Group the log rows into 4-hour UTC time blocks, newest block first
+        // (WL-0MVLEM606008UAL1). Each block becomes a numbered group so the
         // existing display-rows model interleaves a heading row before the
         // block's items; within a block the projection's newest-first order
-        // is preserved. Group numbers are assigned in block order so no
-        // duplicate headings render.
+        // is preserved. The synthetic "Unknown time" block stays last.
+        // Group numbers are assigned in block order so no duplicate headings
+        // render.
         const projected: WorkItem[] = [];
         groupRecentDispatchesByTimeBlock(rows).forEach((block, index) => {
           for (const row of block.rows) {
@@ -3595,7 +3625,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; hostBudgetPrompt?: HostBudgetPromptHost; readHostBudgetStatus?: () => Promise<HostBudgetStatus | null>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3618,6 +3648,8 @@ export async function runWorklistTui(
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
     shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd),
+    hostBudgetPrompt: options?.hostBudgetPrompt,
+    readHostBudgetStatus: options?.readHostBudgetStatus,
     dbWatch: options?.dbWatch ?? watchDbChanges,
     dbWatchOptions: options?.dbWatchOptions,
   };
@@ -3641,6 +3673,24 @@ export async function runWorklistTui(
     }
   };
 
+  // ── Host-wide dispatch-budget counter (AC4 — WL-0MVXY0ZYW009NEJD) ──
+  // `implement n/max · audit n/max` in the header, refreshed on the SAME
+  // cadence as the pane markers (hydrate tick / focus resume / pane event)
+  // and NEVER on a bare render, so the counter costs one bounded read per
+  // cadence and no `wl` spawn. Read-only by contract: the production reader
+  // never reserves, releases or reaps a ledger entry, and the header segment
+  // is a string, never a gate. Fail-open: an unavailable budget (no
+  // coordination dir, no ledger, corrupt ledger, unwired seam) renders
+  // nothing, so the common/degraded case adds no chrome noise.
+  let hostBudgetStatus: HostBudgetStatus | null = null;
+  const refreshHostBudgetStatus = async (): Promise<void> => {
+    try {
+      hostBudgetStatus = (await opts.readHostBudgetStatus?.()) ?? null;
+    } catch {
+      hostBudgetStatus = null;
+    }
+  };
+
   // Load items
   let items: WorkItem[];
   try {
@@ -3650,8 +3700,9 @@ export async function runWorklistTui(
   }
   // Reflect open item panes on the very first render (no 30 s wait). Kicked
   // off without blocking TUI startup; the marker lands on a follow-up render
-  // once the pane lookup resolves (fail-open).
-  void applyPaneMarkers(items).then(() => render());
+  // once the pane lookup resolves (fail-open). The host-budget counter rides
+  // the same pass (AC4).
+  void Promise.all([applyPaneMarkers(items), refreshHostBudgetStatus()]).then(() => render());
 
   // Fetch total actionable count (best effort — failure is silent)
   fetchActionableCount().then((count) => {
@@ -3673,6 +3724,10 @@ export async function runWorklistTui(
    */
   const refreshPaneMarkers = async (): Promise<void> => {
     await applyPaneMarkers(state.allItems());
+    // The budget counter is refreshed with the pane list it depends on
+    // (the implement tier's live-pane rule), so the two can never be read at
+    // materially different times on the same cadence (AC4/AC5).
+    await refreshHostBudgetStatus();
     render();
   };
 
@@ -3793,6 +3848,13 @@ export async function runWorklistTui(
    * dialog is bottom-anchored — the selection list stays visible above it.
    */
   let shipItDialog: ShipItDialogState | null = null;
+  /**
+   * Host-budget over-quota confirmation dialog (WL-0MVXY0Z93002HKCZ F4).
+   * Non-null while the user-fired dispatch gate is awaiting an answer. The
+   * dialog is bottom-anchored (the selection list stays visible) and cancel is
+   * the safe default — a stray keypress never dispatches over quota.
+   */
+  let hostBudgetDialog: HostBudgetDialogState | null = null;
 
   let totalActionableCount: number | undefined;
 
@@ -3832,7 +3894,11 @@ export async function runWorklistTui(
    * command-completion hook). See {@link isInputActive}.
    */
   const inputActive = (): boolean =>
-    isInputActive(formState, shipItDialog, blockedNotice !== null || podcastNotice !== null);
+    isInputActive(
+      formState,
+      shipItDialog,
+      blockedNotice !== null || podcastNotice !== null || hostBudgetDialog !== null,
+    );
 
   /**
    * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
@@ -4699,6 +4765,21 @@ export async function runWorklistTui(
       const result = shipItDialog.handleInput(key);
       if (result === 'submitted' || result === 'cancelled') {
         shipItDialog = null;
+      }
+      render();
+      return;
+    }
+
+    // ── Host-budget over-quota confirmation (WL-0MVXY0Z93002HKCZ) ────
+    // While the dialog is open every key is consumed: Enter/y proceeds over
+    // quota, Esc/n cancels (cancel is the state on open). The dispatch path
+    // (`index.ts`'s agent route) is awaiting the answer, so resolving here is
+    // what lets a cancelled dispatch return without a claim, a pane or a
+    // ledger entry.
+    if (hostBudgetDialog !== null) {
+      const result = hostBudgetDialog.handleInput(key);
+      if (result !== null) {
+        hostBudgetDialog = null;
       }
       render();
       return;
@@ -5582,20 +5663,32 @@ export async function runWorklistTui(
       // display-only, read-only — the holds are never cleared here.
       assigneeHoldStatusText(assigneeHoldSummary),
       assigneeHoldBannerText(assigneeHoldSummary),
+      // Host-budget counter (AC4, WL-0MVXY0ZYW009NEJD): read-only
+      // `implement n/max · audit n/max`, null when the budget is unavailable.
+      hostBudgetStatusText(hostBudgetStatus),
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
     // bottom line — the pane output must stay within the terminal budget.
     const rendered = output;
 
-    // ── Ship It confirmation dialog overlay (WL-0MSGG5N5Z0074TLY) ─────
-    // Bottom-anchored: the selection list is rendered normally and the
-    // dialog replaces only the lower rows, so the list stays visible above
+    // ── Ship It / Host-budget confirmation dialog overlays ─────────────
+    // Both are bottom-anchored: the selection list is rendered normally and
+    // the dialog replaces only the lower rows, so the list stays visible above
     // it (contrast: FormState full-screen, Code Freeze notice centered
     // full-pane box). The overlay never exceeds the `rows - 1` budget.
+    // The host-budget prompt (WL-0MVXY0Z93002HKCZ F4) uses the same
+    // composition, so the operator keeps seeing the queue while deciding.
     const finalOutput = shipItDialog !== null
       ? overlayShipItDialog(rendered, termSize.cols, termSize.rows, shipItDialog.buffer)
-      : rendered;
+      : hostBudgetDialog !== null
+        ? overlayHostBudgetDialog(
+            rendered,
+            termSize.cols,
+            termSize.rows,
+            hostBudgetDialog.request,
+          )
+        : rendered;
 
     // Clear from cursor to end of screen to remove leftover content
     // from previous renders of different heights
@@ -5931,8 +6024,25 @@ export async function runWorklistTui(
 
   scheduler.start();
 
+  // ── Host-budget prompt renderer (WL-0MVXY0Z93002HKCZ F4) ──────────
+  // The dispatch path (`index.ts`) awaits `hostBudgetPromptHost.ask()`; this
+  // registration is what paints the dialog and collects the keys. Unregistering
+  // on teardown settles any still-pending prompt as `cancel`, so a dispatch
+  // awaiting an answer can never hang across a pane exit.
+  const unregisterHostBudgetPrompt = opts.hostBudgetPrompt?.register({
+    open: (request, resolveChoice) => {
+      hostBudgetDialog = new HostBudgetDialogState(
+        request,
+        () => resolveChoice('proceed'),
+        () => resolveChoice('cancel'),
+      );
+      render();
+    },
+  });
+
   // Cleanup on promise resolution
   promise.finally(() => {
+    unregisterHostBudgetPrompt?.();
     scheduler.stop();
     dbChangeWatch?.dispose();
     closeEventSubscriber();

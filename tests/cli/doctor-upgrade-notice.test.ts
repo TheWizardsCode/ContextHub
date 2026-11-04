@@ -83,7 +83,7 @@ exit 0
 `;
 
 const CURRENT_PRE_PUSH = `#!/bin/sh
-# worklog:pre-push-hook:v2
+# worklog:pre-push-hook:v3
 # Auto-sync Worklog data before pushing (current copy).
 set -e
 if [ "$WORKLOG_SKIP_PRE_PUSH" = "1" ]; then

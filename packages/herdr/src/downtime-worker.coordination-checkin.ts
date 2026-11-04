@@ -19,7 +19,10 @@
  */
 
 import { getEntry, removeEntry, upsertEntry, type CoordinationEntry } from './coordination.js';
-import { appendCoordinationLogEntry } from './downtime-log.js';
+import {
+  appendCoordinationLogEntry,
+  type CoordinationLogPolicy,
+} from './downtime-log.js';
 import {
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -86,6 +89,11 @@ export async function runCoordinationCheckIn(
     nonTerminalCooldownMs?: number;
     /** Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK); defaults to DEFAULT_DOWNTIME_MAX_ATTEMPTS. */
     maxAttempts?: number;
+    /**
+     * Coordination-log retention/rotation policy (WL-0MVKNC28B003UOLX AC2);
+     * defaults to the documented constants in `downtime-log.ts`.
+     */
+    coordinationLogPolicy?: CoordinationLogPolicy;
   },
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
@@ -111,15 +119,19 @@ export async function runCoordinationCheckIn(
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     // The emptied-offer reason is `wl-error` (AC1): the entry was RETAINED,
     // not emptied, so `workItemId` stays the kept offer.
-    void appendCoordinationLogEntry(coordinator.cwd, {
-      kind: 'coordination',
-      operation: 'checkin',
-      instanceId: coordinator.instanceId,
-      workItemId: current?.workItemId ?? null,
-      reason: 'wl-error',
-      ...(result.error !== undefined ? { error: result.error } : {}),
-      at: new Date(now).toISOString(),
-    });
+    void appendCoordinationLogEntry(
+      coordinator.cwd,
+      {
+        kind: 'coordination',
+        operation: 'checkin',
+        instanceId: coordinator.instanceId,
+        workItemId: current?.workItemId ?? null,
+        reason: 'wl-error',
+        ...(result.error !== undefined ? { error: result.error } : {}),
+        at: new Date(now).toISOString(),
+      },
+      coordinator.coordinationLogPolicy,
+    );
     return { offered: current?.workItemId ?? null, updated: false };
   }
   if (!('candidate' in result)) {
@@ -133,14 +145,18 @@ export async function runCoordinationCheckIn(
     const removed = removeEntry(coordinator.coordinationDir, coordinator.instanceId) !== null;
     // Audit trail (WL-0MSXHAE290067VAL): log the emptied check-in, now with
     // the machine-readable empty-offer reason (WL-0MVR8FKMU009XTED AC1).
-    void appendCoordinationLogEntry(coordinator.cwd, {
-      kind: 'coordination',
-      operation: 'checkin',
-      instanceId: coordinator.instanceId,
-      workItemId: null,
-      ...emptyOfferLogFields(result.attribution),
-      at: new Date(now).toISOString(),
-    });
+    void appendCoordinationLogEntry(
+      coordinator.cwd,
+      {
+        kind: 'coordination',
+        operation: 'checkin',
+        instanceId: coordinator.instanceId,
+        workItemId: null,
+        ...emptyOfferLogFields(result.attribution),
+        at: new Date(now).toISOString(),
+      },
+      coordinator.coordinationLogPolicy,
+    );
     return { offered: null, updated: removed };
   }
   if (!('candidate' in result) || result.candidate === undefined) {
@@ -158,13 +174,17 @@ export async function runCoordinationCheckIn(
   // Audit trail (WL-0MSXHAE290067VAL): log the offered item on every
   // successful check-in write.
   if (updated) {
-    void appendCoordinationLogEntry(coordinator.cwd, {
-      kind: 'coordination',
-      operation: 'checkin',
-      instanceId: coordinator.instanceId,
-      workItemId: entry.workItemId,
-      at: new Date(now).toISOString(),
-    });
+    void appendCoordinationLogEntry(
+      coordinator.cwd,
+      {
+        kind: 'coordination',
+        operation: 'checkin',
+        instanceId: coordinator.instanceId,
+        workItemId: entry.workItemId,
+        at: new Date(now).toISOString(),
+      },
+      coordinator.coordinationLogPolicy,
+    );
   }
   return { offered: entry.workItemId, updated };
 }

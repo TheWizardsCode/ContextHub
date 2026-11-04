@@ -13,6 +13,12 @@ import { createRequire } from 'module';
 const _cliUtilsRequire = createRequire(import.meta.url);
 
 import { WORKLOG_VERSION } from './version.js';
+import {
+  prefixOfWorkItemId,
+  resolveForeignItem,
+  type ForeignItemResolution,
+  type ResolveForeignItemOptions,
+} from './cross-repo/foreign-store.js';
 
 /**
  * `normalizeFieldsArgv` lives in its own dependency-free module so the thin
@@ -213,6 +219,58 @@ export function normalizeParentId(id?: string, overridePrefix?: string): string 
   if (trimmed === '') return null;
   if (PARENT_DETACH_SENTINELS.has(trimmed.toLowerCase())) return null;
   return normalizeCliId(trimmed, overridePrefix) ?? null;
+}
+
+/**
+ * Where an id supplied on the CLI belongs: this project's store, a discovered
+ * sibling project's store, or neither.
+ */
+export type WorkItemIdOrigin = 'local' | 'foreign' | 'unknown';
+
+/** Result of {@link classifyWorkItemId}. */
+export interface WorkItemIdClassification {
+  /** The normalised (upper-cased) id that was classified. */
+  id: string;
+  origin: WorkItemIdOrigin;
+  /**
+   * The foreign resolution, when the id's prefix belongs to a discovered
+   * sibling project. `state` distinguishes a resolved target, an item missing
+   * from a readable store, and an unusable store (D3 tri-state).
+   */
+  foreign?: ForeignItemResolution;
+}
+
+/**
+ * Decide whether `id` is a local item, a foreign (cross-project) id, or
+ * unknown to every discovered project.
+ *
+ * The local store is consulted first so same-project behaviour is untouched.
+ * An id carrying this project's own prefix that the local store does not hold
+ * is reported as `unknown` (never as a foreign lookup, which would scan for a
+ * sibling that cannot exist). Any other prefix is resolved through the
+ * read-only foreign resolver (`src/cross-repo/foreign-store.ts`).
+ */
+export function classifyWorkItemId(
+  db: WorklogDatabase,
+  id: string,
+  options: ResolveForeignItemOptions = {},
+): WorkItemIdClassification {
+  const lookup = id.trim().toUpperCase();
+  if (db.get(lookup)) {
+    return { id: lookup, origin: 'local' };
+  }
+
+  const localPrefix = (db.getPrefix() || '').toUpperCase();
+  const prefix = prefixOfWorkItemId(lookup);
+  if (prefix === '' || prefix === localPrefix) {
+    return { id: lookup, origin: 'unknown' };
+  }
+
+  const foreign = resolveForeignItem(lookup, options);
+  if (foreign.projectPath !== undefined || foreign.ambiguous === true) {
+    return { id: lookup, origin: 'foreign', foreign };
+  }
+  return { id: lookup, origin: 'unknown', foreign };
 }
 
 /**

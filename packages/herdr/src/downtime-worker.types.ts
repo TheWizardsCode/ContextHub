@@ -77,6 +77,30 @@ export interface LlamaStatus {
    */
   slots_stale?: boolean;
   /**
+   * Proxy degradation flag (WL-0MW1VITA8009RLHQ): `true` when the per-slot
+   * `slots` DETAIL itself is a last-known snapshot, independent of whether the
+   * COUNTS are fresh. Served alongside `slots_stale`; ABSENT on pre-feature
+   * proxies. EVIDENCE ONLY — availability continues to be governed solely by
+   * `slots_stale` + the per-slot detail (WL-0MUXVPXAZ005RESW). Its purpose is
+   * attribution: a refusal caused by a frozen snapshot must be distinguishable
+   * from one caused by an unreadable payload.
+   */
+  slots_detail_stale?: boolean;
+  /**
+   * Proxy degradation flag (WL-0MW1VITA8009RLHQ): `true` when the served slot
+   * COUNTS (`available_slots`/`total_slots`) are last-known. Absent on
+   * pre-feature proxies. EVIDENCE ONLY — `available_slots` is never a dispatch
+   * budget (WL-0MUXVPXAZ005RESW removed the count-based fallback).
+   */
+  slot_counts_stale?: boolean;
+  /**
+   * Proxy-reported count of abandoned local slots (WL-0MW1VITA8009RLHQ).
+   * Advisory EVIDENCE ONLY: it exposes a self-contradictory snapshot (counts say
+   * capacity is free while the cached per-slot detail says every slot is busy)
+   * in the decision record. Absent on pre-feature proxies.
+   */
+  local_abandoned_slots?: number;
+  /**
    * Per-slot identity (LP-0MSG5TA7Y002GN39): served by proxies that expose
    * slot-level detail, and the ONLY trusted availability source
    * (WL-0MUXVPXAZ005RESW). When present and non-stale, the downtime worker
@@ -708,22 +732,37 @@ export type DowntimeClaimResult =
   | { ok: true }
   | { ok: false; reason: 'stale' | 'error'; error?: string };
 /**
- * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV).
+ * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV,
+ * generalised to the host-wide dispatch budget by WL-0MVXY0XPF006YUHA F2).
  *
- *  - `{ok:true, active:true}` — a non-stale `kind=audit` dispatch marker
- *    maps to an item still `in_progress` (dispatched but not yet
- *    completed/reviewed): an audit is running, so the audit tier must be
- *    skipped this tick (outcome reason `audit-in-flight`).
- *  - `{ok:true, active:false}` — no non-stale marker maps to an
- *    `in_progress` item: the audit tier may proceed (audits stay strictly
- *    sequential — never fan-out).
+ *  - `{ok:true, active:true}` — the audit tier must be skipped this tick. The
+ *    `source` says why: `'host-wide'` when the machine-scoped dispatch-budget
+ *    ledger reports the audit tier at/over `maxAudit` (or cannot be read —
+ *    fail-closed), `'per-worklog'` when a non-stale `kind=audit` dispatch
+ *    marker maps to an item still `in_progress` (dispatched but not yet
+ *    completed/reviewed).
+ *  - `{ok:true, active:false}` — the audit tier may proceed.
  *  - `{ok:false}` — the check could not complete (e.g. worklog query
  *    failure): fail-open — the audit tier is skipped and dispatch falls
  *    through to the next tier; all dispatch is never blocked by an
  *    unanswerable check.
+ *
+ * `reason`/`budget` (F2) carry the host-budget refusal token and its
+ * `live`/`max` evidence on a `source: 'host-wide'` skip, so the dispatcher
+ * reports the cap decision rather than inferring it: `audit-host-saturated` at
+ * `maxAudit: 1` (the retired marker's token, unchanged for existing
+ * consumers), `host-budget-audit` at any other cap (including `0`), and
+ * `host-budget-unknown` when the ledger had to be repaired. Absent on a
+ * per-worklog skip.
  */
 export type DowntimeActiveAuditResult =
-  | { ok: true; active: boolean; source?: 'host-wide' | 'per-worklog' }
+  | {
+      ok: true;
+      active: boolean;
+      source?: 'host-wide' | 'per-worklog';
+      reason?: 'audit-host-saturated' | 'host-budget-audit' | 'host-budget-unknown';
+      budget?: { live: number; max: number };
+    }
   | { ok: false; error?: string };
 /**
  * Result of the running-downtime-panes liveness query (AC1/AC3, parent

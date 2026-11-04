@@ -19,7 +19,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import Database from 'better-sqlite3';
-import { SqlitePersistentStore } from '../../src/persistent-store.js';
+import { SqlitePersistentStore } from '@worklog/shared/persistent-store';
 import type { WorkItem } from '../../src/types.js';
 import { createTempDir, cleanupTempDir, createTempDbPath } from '../test-utils.js';
 
