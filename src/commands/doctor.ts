@@ -8,8 +8,6 @@ import { validateStatusStageItems } from '../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../doctor/dependency-check.js';
 import { resolveForeignItem, prefixOfWorkItemId } from '../cross-repo/foreign-store.js';
 import { validateParentReferences } from '../doctor/parent-check.js';
-import { listPendingMigrations, runMigrations } from '../migrations/index.js';
-import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validatePodcastScripts } from '../doctor/podcast-scripts-check.js';
 import { probeAuditFingerprintSkewFinding } from '../doctor/audit-fingerprint-skew-check.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
@@ -34,6 +32,7 @@ import { registerFilePathsCommand } from './doctor/file-paths.js';
 import { registerMigrateCommand } from './doctor/migrate.js';
 import { registerForeignItemsCommand } from './doctor/foreign-items.js';
 import { registerStageSyncCommand } from './doctor/stage-sync.js';
+import { registerUpgradeCommand } from './doctor/upgrade.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -44,207 +43,7 @@ export default function register(ctx: PluginContext): void {
     .option('--fix', 'Apply safe fixes and prompt for non-safe findings')
     .option('--prefix <prefix>', 'Override the default prefix');
 
-  doctor
-    .command('upgrade')
-    .description('Preview or apply pending database schema migrations and outdated git hooks')
-    .option('--dry-run', 'Preview pending migrations and outdated hooks without applying them')
-    .option('--confirm', 'Apply pending migrations and outdated hooks (non-interactive)')
-    .option('--prefix <prefix>', 'Override the default prefix')
-    .action(async (opts: { dryRun?: boolean; confirm?: boolean; prefix?: string }) => {
-      // Migration + hook upgrade subcommand
-      utils.requireInitialized();
-      try {
-        const pending = listPendingMigrations();
-        const hooksTargetDir = detectHooksTargetDir();
-        const hooksResult = dryRunHooks('.githooks', hooksTargetDir);
-
-        const hasPendingMigrations = pending && pending.length > 0;
-        const hasOutdatedHooks = hooksResult.outdatedCount > 0;
-
-        if (!hasPendingMigrations && !hasOutdatedHooks) {
-          if (utils.isJsonMode()) {
-            output.json({ success: true, pending: [], hooks: hooksResult });
-            return;
-          }
-          console.log('Doctor: no pending migrations. See docs/migrations.md for migration policy and guidance.');
-          console.log('Doctor: all installed hooks are up-to-date.');
-          return;
-        }
-
-        if (opts.dryRun) {
-          if (utils.isJsonMode()) {
-            const out: any = {
-              success: true,
-              dryRun: true,
-              pending: hasPendingMigrations ? pending : [],
-              hooks: hooksResult,
-            };
-            output.json(out);
-            return;
-          }
-          // Dry-run: list all pending migrations
-          if (hasPendingMigrations) {
-            console.log('Pending migrations:');
-            pending.forEach(p => console.log(` - ${p.id}: ${p.description} (safe=${p.safe})`));
-          }
-          // List outdated hooks
-          if (hasOutdatedHooks) {
-            console.log('');
-            console.log('Outdated hooks:');
-            hooksResult.hooks
-              .filter(h => h.status === 'outdated')
-              .forEach(h => console.log(` - ${h.name} at ${h.hookPath}`));
-          }
-          if (!hasOutdatedHooks && hasPendingMigrations) {
-            console.log('');
-            console.log('Doctor: all installed hooks are up-to-date.');
-          }
-          return;
-        }
-
-        // Not a dry-run: list safe migrations and outdated hooks, ask to apply
-        const safeMigs = pending ? pending.filter(p => p.safe) : [];
-        if (utils.isJsonMode()) {
-          if (!opts.confirm) {
-            const out: any = {
-              success: true,
-              pending: hasPendingMigrations ? pending : [],
-              safeMigrations: safeMigs,
-              hooks: hooksResult,
-              requiresConfirm: true,
-            };
-            output.json(out);
-            return;
-          }
-
-          // Apply hooks first, then migrations
-          let hooksApplied: string[] = [];
-          let hooksSkipped: string[] = [];
-          let hookError: string | undefined;
-
-          if (hasOutdatedHooks) {
-            const hookResult = upgradeHooks('.githooks', hooksTargetDir);
-            if (hookResult.success) {
-              hooksApplied = hookResult.upgraded;
-              hooksSkipped = hookResult.skipped;
-            } else {
-              hookError = hookResult.error;
-            }
-          }
-
-          if (hookError) {
-            process.exitCode = 1;
-            output.json({ success: false, error: hookError });
-            return;
-          }
-
-          try {
-            let migrationResult = { applied: [] as any[], backups: [] as string[] };
-            if (hasPendingMigrations) {
-              migrationResult = withStoreMutationLock(ctx.dataPath, () => runMigrations({
-                dryRun: false,
-                confirm: true,
-                logger: { info: s => console.error(s), error: s => console.error(s) }
-              }));
-            }
-
-            output.json({
-              success: true,
-              pending: hasPendingMigrations ? pending : [],
-              safeMigrations: safeMigs,
-              applied: migrationResult.applied,
-              backups: migrationResult.backups,
-              hooks: hooksResult,
-              hooksApplied,
-              hooksSkipped,
-            });
-            return;
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            process.exitCode = 1;
-            output.json({ success: false, error: message });
-            return;
-          }
-        }
-        console.log('Pending safe migrations:');
-        safeMigs.forEach(p => console.log(` - ${p.id}: ${p.description}`));
-        console.log('');
-
-        // Confirm before applying unless --confirm provided
-        let proceed = Boolean(opts.confirm);
-        const totalItems = (hasPendingMigrations ? pending.length : 0) + hooksResult.outdatedCount;
-        if (totalItems > 0 && !proceed) {
-          // Prompt interactively
-          const readlineMod = await import('node:readline');
-          const answer = await new Promise<boolean>(resolve => {
-            const rl = readlineMod.createInterface({ input: process.stdin, output: process.stdout });
-            const parts: string[] = [];
-            if (hasPendingMigrations) parts.push(`${pending.length} pending migration(s)`);
-            if (hasOutdatedHooks) parts.push(`${hooksResult.outdatedCount} outdated hook(s)`);
-            rl.question(`Apply ${parts.join(' and ')}? (y/N): `, (a: string) => {
-              rl.close();
-              const v = (a || '').trim().toLowerCase();
-              resolve(v === 'y' || v === 'yes');
-            });
-          });
-          proceed = answer;
-        }
-
-        if (!proceed) {
-          if (utils.isJsonMode()) output.json({ success: false, message: 'User declined to apply changes' });
-          else console.log('Aborted: changes not applied.');
-          return;
-        }
-
-        // Apply hooks first, then migrations
-        let hooksApplied: string[] = [];
-        let hookError: string | undefined;
-        if (hasOutdatedHooks) {
-          const hookResult = upgradeHooks('.githooks', hooksTargetDir);
-          if (hookResult.success) {
-            hooksApplied = hookResult.upgraded;
-          } else {
-            hookError = hookResult.error;
-          }
-        }
-
-        if (hookError) {
-          if (utils.isJsonMode()) {
-            output.json({ success: false, error: hookError });
-          } else {
-            console.error(`Hook upgrade failed: ${hookError}`);
-          }
-          return;
-        }
-
-        // Apply migrations
-        try {
-          let migrationResult = { applied: [] as any[], backups: [] as string[] };
-          if (hasPendingMigrations) {
-            migrationResult = withStoreMutationLock(ctx.dataPath, () => runMigrations({ dryRun: false, confirm: true, logger: { info: s => console.error(s), error: s => console.error(s) } }));
-          }
-          if (utils.isJsonMode()) {
-            output.json({ success: true, applied: migrationResult.applied, backups: migrationResult.backups });
-            return;
-          }
-          if (migrationResult.applied.length > 0) {
-            console.log(`Applied migrations: ${migrationResult.applied.map(a => a.id).join(', ')}`);
-          }
-          if (migrationResult.backups && migrationResult.backups.length > 0) console.log(`Backups: ${migrationResult.backups.join(', ')}`);
-          if (hooksApplied.length > 0) {
-            console.log(`Upgraded hooks: ${hooksApplied.join(', ')}`);
-          }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          if (utils.isJsonMode()) output.json({ success: false, error: message });
-          else console.error(`Migration failed: ${message}`);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (utils.isJsonMode()) output.json({ success: false, error: message });
-        else console.error(`Doctor upgrade failed: ${message}`);
-      }
-    });
+  registerUpgradeCommand(doctor, { output, utils, dataPath: ctx.dataPath });
 
   registerStageSyncCommand(doctor, { output, utils, dataPath: ctx.dataPath });
 
