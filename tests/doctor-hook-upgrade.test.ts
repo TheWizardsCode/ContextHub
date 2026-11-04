@@ -521,6 +521,52 @@ describe('hook-upgrade module', () => {
       expect(stripTrailingNewline(canonical)).toBe(stripTrailingNewline(committed));
     });
 
+    // WL-0MW2N56M2004PSRP AC1: the expected text is a checked-in fixture (the
+    // hook `tce-the-rising` committed under RISE-0MVSS1KVV002TJUL), not a
+    // comparison of the generator against itself. A drift in the embedded
+    // template, the committed hook, or the intended external contract fails
+    // here — which is what stops `wl doctor upgrade` silently downgrading a
+    // project's improved hook.
+    const PRE_PUSH_FIXTURE = path.join(
+      process.cwd(),
+      'tests',
+      'fixtures',
+      'pre-push-hook.expected.sh',
+    );
+
+    it('canonical pre-push equals the checked-in expected fixture byte-for-byte', () => {
+      const canonical = generateCanonicalHookContent('pre-push')!;
+      const expected = fs.readFileSync(PRE_PUSH_FIXTURE, 'utf-8');
+      expect(canonical).toBe(expected);
+    });
+
+    it('committed .githooks/pre-push equals the checked-in expected fixture byte-for-byte', () => {
+      const committed = fs.readFileSync(
+        path.join(process.cwd(), '.githooks', 'pre-push'),
+        'utf-8',
+      );
+      const expected = fs.readFileSync(PRE_PUSH_FIXTURE, 'utf-8');
+      expect(committed).toBe(expected);
+    });
+
+    it('canonical pre-push carries the RISE-0MVSS1KVV002TJUL improvements', () => {
+      const content = generateCanonicalHookContent('pre-push')!;
+      // 1. The project root is pinned to the pushed tree.
+      expect(content).toContain('--project-root "$repo_root"');
+      // 2. HEAD is compared with the pushed dev/main sha.
+      expect(content).toContain('is not the ref being pushed to dev/main');
+      expect(content).toContain('gated_shas');
+      // 3. An all-zero local sha (ref deletion) is not gated.
+      expect(content).toContain('*[!0]*');
+      // 4. The run is captured to a log and its tail surfaced on failure.
+      expect(content).toContain('--- run_tests.py output (tail) ---');
+      expect(content).toContain('tail -n 40');
+      // 5. The mirror wording the contract tests assert.
+      expect(content).toContain('mirrored gate cache entry');
+      // 6. The defensive git-dir / git-common-dir resolution.
+      expect(content).toContain('mkdir -p "$main_cache"');
+    });
+
     it('returns content for post-checkout hook', () => {
       const content = generateCanonicalHookContent('post-checkout');
       expect(content).not.toBeNull();

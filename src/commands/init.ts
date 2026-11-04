@@ -418,12 +418,17 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
     `fi\n` +
     `exit 0\n`;
 
-  const wrapperContent = (centralPath: string) => (
+  // The committed wrappers must be portable: `.githooks/` is checked in and
+  // shared across clones and machines, so a hardcoded absolute path breaks
+  // every other checkout — and `wl doctor upgrade` flags it as outdated
+  // immediately after `wl init` (WL-0MW2N56M2004PSRP). Resolve the central
+  // script relative to the wrapper instead, matching
+  // `generateCanonicalHookContent('post-merge' | 'post-rewrite')`.
+  const committedWrapperContent =
     `#!/bin/sh\n` +
     `# ${WORKLOG_POST_PULL_HOOK_MARKER}\n` +
     `# Wrapper that delegates to central Worklog post-pull script (committed hooks).\n` +
-    `exec \"${centralPath}\" \"$@\"\n`
-  );
+    `exec \"$(dirname \"$0\")/worklog-post-pull\" \"$@\"\n`;
 
    const prePushContent = PRE_PUSH_HOOK_CONTENT;
 
@@ -498,7 +503,7 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
        } else if (basename === 'post-checkout') {
          fs.writeFileSync(file, postCheckoutContent, { encoding: 'utf-8', mode: 0o755 });
        } else {
-         fs.writeFileSync(file, wrapperContent(centralScript), { encoding: 'utf-8', mode: 0o755 });
+         fs.writeFileSync(file, committedWrapperContent, { encoding: 'utf-8', mode: 0o755 });
        }
       try { fs.chmodSync(file, 0o755); } catch {}
       installed.push(file);
