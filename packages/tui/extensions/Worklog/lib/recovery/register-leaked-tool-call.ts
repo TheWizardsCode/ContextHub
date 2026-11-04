@@ -173,9 +173,21 @@ export function registerLeakedToolCallRecovery(pi: ExtensionAPI): void {
   pi.on(
     'message_end',
     safeHandler(async (event, ctx) => {
-      // Contract reminder: returning a repaired message is what makes Pi execute
-      // the recovered call in this turn (see the module header). Do not mutate
-      // `event.message` here — Pi applies the returned message in place.
+      // Contract (AC2): Pi stores the finalised assistant message before
+      // emitting `message_end`, and `AgentSession._replaceMessageInPlace()`
+      // applies the message *returned* here onto that stored object — before
+      // `agent-loop` filters `toolCall` blocks. Verified on the repo's pinned
+      // `pi-coding-agent@0.79.10` and on the installed 1.5.0; the tripwire is
+      // `leaked-tool-call.execution.test.ts`. Returning the repaired message is
+      // what makes the recovered call execute in this turn, so never mutate
+      // `event.message` directly.
+      //
+      // Guards: the master switch, a user abort, a context without `ui`
+      // (print/JSON/RPC/headless modes), a non-assistant message and an empty
+      // active-tool list all decline — nothing is synthesised and nothing is
+      // notified. `repairAssistantMessage()` additionally refuses a truncated
+      // parameter, a parameterless block, an inactive tool and a duplicate, and
+      // leaves rejected markup visible as evidence.
       if (!LEAKED_TOOL_CALL_CONFIG.enabled) return;
       if (interruptibleState.userAborted) return;
 
@@ -215,6 +227,20 @@ export function registerLeakedToolCallRecovery(pi: ExtensionAPI): void {
 
   // The pinned SDK types `turn_end` without a result type; Pi ≥1.5 consumes a
   // `BoundaryResult` here, so the handler is cast at this one boundary.
+  //
+  // Bounds (AC3, enforced in `handleTurnEnd`): at most one continuation per
+  // assistant message (content fingerprint), never when the message already
+  // produced tool results, never for `quoted` / `duplicate` /
+  // `unrepairable-stop-reason` skips, and at most
+  // `LEAKED_TOOL_CALL_CONFIG.sessionCap` (default 5) per session with one final
+  // warning at the cap. `session_start` resets every counter and record.
+  //
+  // Continuation transport is capability-detected from the event shape
+  // (`detectBoundaryResultSupport`: `entries` plus `context.canContinue`), not
+  // from a version string: on Pi ≥1.5 the handler returns
+  // `{ entries: [{ type: 'custom_message', … }], continue: true }`; on the
+  // pinned 0.79.10 the same corrective text is delivered through the
+  // invisible-continue path (`agent.prompt([...])`) once the run settles.
   pi.on(
     'turn_end',
     safeHandler(async (event, ctx) => handleTurnEnd(event, ctx)) as any,
