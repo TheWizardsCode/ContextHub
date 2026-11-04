@@ -461,6 +461,86 @@ symbol in its last column must really be re-exported by the barrel
 | change a shared type | `src/github/types.ts` |
 | change the shared surface consumers import | `src/github.ts` (barrel) |
 
+## Doctor Module Layout
+
+`src/commands/doctor.ts` is the single entry point for `wl doctor`
+(`src/command-registry.ts` dynamically imports it for the default export) and a
+thin registrar: it defines the root `doctor` command and delegates every action
+to a single-concern module under `src/commands/doctor/`, so a `prune` fix does
+not require reading the `--fix` prompt and a notice tweak does not require
+reading the prefix rename (WL-0MVGKH1770008MNU).
+
+The CLI-agnostic validators under `src/doctor/` (`status-stage-check.ts`,
+`dependency-check.ts`, `file-paths-check.ts`, `hook-upgrade.ts`,
+`foreign-items-check.ts`, `audit-gaps-check.ts`, `parent-check.ts`,
+`podcast-scripts-check.ts`, `prefix-check.ts`,
+`audit-fingerprint-skew-check.ts`, `fix.ts`) are a **different**
+family: they are pure, `PluginContext`-free logic consumed as-is by the command
+modules.
+
+### Module responsibilities
+
+| Module | Responsibility |
+|---|---|
+| `src/commands/doctor.ts` | Registrar: the root `doctor` command definition (`--fix`, `--prefix`), the module layout documentation, and the ordered calls into the per-subcommand registrars. |
+| `src/commands/doctor/notices.ts` | Shared pending-schema-migration and pending read-cache notices (detection, synthetic findings, human output) plus the cache formatting helpers (`formatCacheBytes`, `DAY_MS`). |
+| `src/commands/doctor/upgrade.ts` | `doctor upgrade`: preview (`--dry-run`) or apply (`--confirm`) pending schema migrations and outdated git hooks. |
+| `src/commands/doctor/stage-sync.ts` | `doctor stage-sync`: detect and (`--apply`) correct stale status/stage combinations. |
+| `src/commands/doctor/prune.ts` | `doctor prune`: hard-delete soft-deleted items older than a threshold, never orphaning linked GitHub issues. |
+| `src/commands/doctor/cache.ts` | `doctor cache`: report and (`--prune`) reclaim the bounded read-cache state directory. |
+| `src/commands/doctor/foreign-items.ts` | `doctor foreign-items`: report foreign-prefix items and, with `--apply`, hard-delete them (optionally rewriting the remote worklog ref). |
+| `src/commands/doctor/prefix.ts` | `doctor prefix`: preview (default) or apply a project ID-prefix rename together with its revertible rename map. |
+| `src/commands/doctor/audit-gaps.ts` | `doctor audit-gaps`: read-only report of `completed`/`in_review` items with no audit record. |
+| `src/commands/doctor/dangling-parents.ts` | `doctor dangling-parents`: detect and (with a fix flag) detach parent references to non-existent items. |
+| `src/commands/doctor/priority.ts` | `doctor priority`: detect non-canonical priorities and (`--apply`) map the mappable ones. |
+| `src/commands/doctor/file-paths.ts` | `doctor file-paths`: check intake-stage items for `**Key Files:**` sections and add placeholders. |
+| `src/commands/doctor/migrate.ts` | `doctor migrate`: import a persistent JSONL snapshot into SQLite, optionally deleting the file. |
+| `src/commands/doctor/validate.ts` | Root `doctor` action: findings aggregation, the interactive `--fix` flow and notice appending. |
+
+### Cycle-safe layering
+
+The dependency direction is strictly downward: the registrar imports every
+per-subcommand module, and no module under `src/commands/doctor/` imports back
+from the registrar (`src/commands/doctor.ts`) — not even type-only. Each module
+is handed a narrow typed context (`program`/`output`/`utils` and `dataPath` only
+where needed) instead of the full `PluginContext` surface, so the family can
+never be part of a cycle.
+
+```
+src/commands/doctor/notices.ts (leaf)
+      ↓
+src/commands/doctor/<subcommand>.ts   (one per doctor subcommand)
+      ↓
+src/commands/doctor/validate.ts       (root action)
+      ↓
+src/commands/doctor.ts (registrar — imports downward only; nothing imports it)
+```
+
+`tests/doctor-line-count-guard.test.ts` enforces the 1,000-line ceiling (no
+exemptions) for the whole family, keeps `src/commands/doctor.ts` a thin
+registrar, and fails when this section drifts (every family module must be
+named here). Behaviour is locked by the untouched
+`tests/doctor-*.test.ts` / `tests/cli/doctor-*.test.ts` suites.
+
+### Where to find X in the doctor module
+
+| I want to… | Look in |
+|---|---|
+| change the validation pass, findings aggregation or the `--fix` prompt | `src/commands/doctor/validate.ts` |
+| change the pending-upgrade / pending read-cache notices | `src/commands/doctor/notices.ts` |
+| change schema-migration or git-hook upgrades | `src/commands/doctor/upgrade.ts` |
+| change stale status/stage detection or repair | `src/commands/doctor/stage-sync.ts` |
+| change soft-delete pruning or its GitHub guard | `src/commands/doctor/prune.ts` |
+| change read-cache reporting or pruning | `src/commands/doctor/cache.ts` |
+| change foreign-prefix reporting or cleanup | `src/commands/doctor/foreign-items.ts` |
+| change the ID-prefix rename | `src/commands/doctor/prefix.ts` |
+| change the audit-gap report | `src/commands/doctor/audit-gaps.ts` |
+| change dangling-parent detection or detaching | `src/commands/doctor/dangling-parents.ts` |
+| change priority validation or mapping | `src/commands/doctor/priority.ts` |
+| change `**Key Files:**` checking or placeholders | `src/commands/doctor/file-paths.ts` |
+| change JSONL → SQLite migration | `src/commands/doctor/migrate.ts` |
+| change which subcommands exist or their registration order | `src/commands/doctor.ts` |
+
 ## File Structure
 
 ```
