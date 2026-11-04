@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  LEAKED_TOOL_CALL_CONFIG,
   LEAKED_TOOL_CALL_DIALECTS,
   MAX_NOTE_ARG_LENGTH,
   RECOVERY_NOTE_PREFIX,
@@ -23,7 +24,8 @@ import {
 /**
  * The shape observed live on the Pi TUI (operator report, 2026-11-03):
  * two calls inside one `<response>` wrapper, the second `</tool_call>` closer
- * immediately followed by the next `<tool_call>` opener.
+ * immediately followed by the next `<tool_call>` opener. The operator's exact
+ * sample is kept verbatim as `OPERATOR_RESPONSE_SAMPLE` below (AC1 fixture).
  */
 const LIVE_LEAK = `<response>
 
@@ -60,6 +62,89 @@ ls -la
 
 /** Active tools used by most tests. */
 const ACTIVE_TOOLS = ['read', 'bash'] as const;
+
+// ── Fixtures: AC1 dialect matrix ──────────────────────────────────────
+
+/**
+ * The operator's exact `<response>` sample from the parent item
+ * (WL-0MW0WBWY3006LQ8W, 2026-11-03) — copied byte-for-byte, trailing newline
+ * included. Note the missing `</response>` closer and the two `<tool_call>`
+ * wrappers adjacent with no separator: both are real, not typos.
+ */
+const OPERATOR_RESPONSE_SAMPLE = `<response>
+
+ <tool_call>
+ <function=read>
+ <parameter=path>
+ /home/rgardler/.pi/agent/skills/implement/SKILL.md
+ </parameter>
+ </function>
+ </tool_call><tool_call>
+ <function=bash>
+ <parameter=command>
+ cd /home/rgardler/projects/ContextHub && wl show WL-0MVGKGU19004NTHB --json 2>&1
+ </parameter>
+ </function>
+ </tool_call>
+`;
+
+/** Indentation and blank-line variance around an otherwise complete call. */
+const INDENTED_LEAK = `   <tool_call>
+\t<function=read>
+
+\t   <parameter=path>
+
+\t      /tmp/indented.txt
+
+\t   </parameter>
+\t</function>
+   </tool_call>`;
+
+/** Two complete blocks adjacent with no separator at all. */
+const ADJACENT_LEAK =
+  '<function=bash><parameter=command>ls</parameter></function></tool_call><tool_call>' +
+  '<function=read><parameter=path>/etc/hosts</parameter></function></tool_call>';
+
+/** A half-streamed `bash` sample: the closer arrived truncated (`</param`). */
+const TRUNCATED_BASH_LEAK = `<tool_call>
+ <function=bash>
+ <parameter=command>
+ rm -rf /tmp/important
+ </param`;
+
+// ── Fixtures: AC2 false-positive guard ────────────────────────────────
+
+/** The markup inside a fenced code span — prose *about* markup, not a leak. */
+const FENCED_LEAK = `The shape we recover looks like this:
+
+\`\`\`text
+<tool_call>
+<function=bash>
+<parameter=command>
+rm -rf /tmp/example
+</parameter>
+</function>
+</tool_call>
+\`\`\`
+
+Nothing in that block is executed by the model.`;
+
+/** The markup inside an inline code span. */
+const INLINE_CODE_LEAK =
+  'Inline prose keeps the tag inert: `<function=read><parameter=path>/etc/hosts</parameter></function>`.';
+
+/** The markup inside a markdown blockquote — a quoted example. */
+const BLOCKQUOTE_LEAK = `> <tool_call>
+> <function=bash>
+> <parameter=command>
+> rm -rf /tmp/example
+> </parameter>
+> </function>
+> </tool_call>`;
+
+/** The markup quoted inside a sentence. */
+const DOUBLE_QUOTED_LEAK =
+  'The operator pasted "<function=bash><parameter=command>rm -rf /tmp/example</parameter></function>" and nothing ran.';
 
 function assistantMessage(
   text: string,
@@ -376,5 +461,222 @@ describe('repairAssistantMessage — no-op paths', () => {
     expect(second.repaired).toBe(false);
     expect(second.message).toBe(first.message);
     expect(toolCallsOf(second.message)).toHaveLength(2);
+  });
+});
+
+// ── AC1: dialect matrix ───────────────────────────────────────────────
+// Every documented dialect variance either parses correctly or is explicitly
+// rejected — a legitimate message is never rewritten on a partial match.
+
+describe('dialect matrix (AC1)', () => {
+  it("recovers the operator's exact <response> sample", () => {
+    const calls = parseLeakedToolCalls(OPERATOR_RESPONSE_SAMPLE);
+
+    expect(calls.map((call) => call.name)).toEqual(['read', 'bash']);
+    expect(calls.every((call) => call.complete)).toBe(true);
+
+    const outcome = repairAssistantMessage(
+      assistantMessage(OPERATOR_RESPONSE_SAMPLE),
+      ACTIVE_TOOLS,
+    );
+
+    expect(outcome.repaired).toBe(true);
+    expect(toolCallsOf(outcome.message).map((call: any) => call.name)).toEqual([
+      'read',
+      'bash',
+    ]);
+    const text = textOf(outcome.message);
+    expect(text).not.toContain('<tool_call>');
+    expect(text).not.toContain('</function>');
+    expect(text).toContain(
+      '[recovered tool call: read(path=/home/rgardler/.pi/agent/skills/implement/SKILL.md)]',
+    );
+  });
+
+  it('parses blocks with indentation and blank-line variance', () => {
+    const calls = parseLeakedToolCalls(INDENTED_LEAK);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].complete).toBe(true);
+    expect(calls[0].arguments).toEqual({ path: '/tmp/indented.txt' });
+  });
+
+  it('parses adjacent blocks that have no separator', () => {
+    const calls = parseLeakedToolCalls(ADJACENT_LEAK);
+
+    expect(calls.map((call) => call.name)).toEqual(['bash', 'read']);
+    expect(calls.every((call) => call.complete)).toBe(true);
+    expect(calls[0].arguments).toEqual({ command: 'ls' });
+    expect(calls[1].arguments).toEqual({ path: '/etc/hosts' });
+
+    const outcome = repairAssistantMessage(assistantMessage(ADJACENT_LEAK), ACTIVE_TOOLS);
+
+    expect(outcome.repaired).toBe(true);
+    expect(toolCallsOf(outcome.message)).toHaveLength(2);
+  });
+
+  it('rejects the truncated bash sample outright', () => {
+    const [call] = parseLeakedToolCalls(TRUNCATED_BASH_LEAK);
+
+    expect(call.complete).toBe(false);
+    expect(call.reason).toBe('unterminated-parameter');
+
+    const outcome = repairAssistantMessage(assistantMessage(TRUNCATED_BASH_LEAK), ACTIVE_TOOLS);
+
+    expect(outcome.repaired).toBe(false);
+    expect(toolCallsOf(outcome.message)).toHaveLength(0);
+    expect(outcome.message.stopReason).toBe('stop');
+  });
+});
+
+// ── AC2: rejection matrix ─────────────────────────────────────────────
+// Zero calls are synthesised and `complete: false` is reported for every
+// unsafe or non-call shape.
+
+describe('rejection matrix (AC2)', () => {
+  const rejected: Array<{
+    id: string;
+    text: string;
+    activeTools?: readonly string[];
+    reason: string;
+  }> = [
+    { id: 'unterminated parameter', text: TRUNCATED_BASH_LEAK, reason: 'unterminated-parameter' },
+    {
+      id: 'tool absent from the active-tool list',
+      text: COMPLETE_BLOCK,
+      activeTools: ['read'],
+      reason: 'inactive-tool',
+    },
+    {
+      id: 'block with no parameters',
+      text: '<tool_call>\n<function=read>\n</function>\n</tool_call>',
+      reason: 'missing-parameter',
+    },
+    { id: 'fenced code span', text: FENCED_LEAK, reason: 'quoted' },
+    { id: 'inline code span', text: INLINE_CODE_LEAK, reason: 'quoted' },
+    { id: 'blockquote', text: BLOCKQUOTE_LEAK, reason: 'quoted' },
+    { id: 'quoted prose', text: DOUBLE_QUOTED_LEAK, reason: 'quoted' },
+  ];
+
+  it.each(rejected)('synthesises nothing for $id', ({ text, activeTools, reason }) => {
+    const message = assistantMessage(text);
+
+    const outcome = repairAssistantMessage(message, activeTools ?? ACTIVE_TOOLS);
+
+    expect(outcome.repaired).toBe(false);
+    expect(outcome.recovered).toEqual([]);
+    expect(toolCallsOf(outcome.message)).toHaveLength(0);
+    expect(outcome.message).toBe(message);
+    expect(outcome.message.stopReason).toBe('stop');
+    expect(outcome.skipped[0].complete).toBe(false);
+    expect(outcome.skipped[0].reason).toBe(reason);
+  });
+
+  it('leaves fenced and quoted markup byte-for-byte untouched', () => {
+    for (const text of [FENCED_LEAK, INLINE_CODE_LEAK, BLOCKQUOTE_LEAK, DOUBLE_QUOTED_LEAK]) {
+      const message = assistantMessage(text);
+
+      const outcome = repairAssistantMessage(message, ACTIVE_TOOLS);
+
+      expect(outcome.message).toBe(message);
+      expect(textOf(outcome.message)).toBe(text);
+    }
+  });
+});
+
+// ── AC3: duplicate suppression ────────────────────────────────────────
+
+describe('duplicate suppression (AC3)', () => {
+  it('drops a call identical to one already parsed in the same message', () => {
+    const message = assistantMessage(`${COMPLETE_BLOCK}\n${COMPLETE_BLOCK}`);
+
+    const outcome = repairAssistantMessage(message, ACTIVE_TOOLS);
+
+    expect(outcome.repaired).toBe(true);
+    expect(outcome.recovered.map((call) => call.name)).toEqual(['bash']);
+    expect(outcome.skipped.map((call) => call.reason)).toEqual(['duplicate']);
+    expect(toolCallsOf(outcome.message)).toHaveLength(1);
+
+    const notes = textOf(outcome.message).match(/\[recovered tool call: /g) ?? [];
+    expect(notes).toHaveLength(1);
+    expect(textOf(outcome.message)).not.toContain('<function=');
+  });
+
+  it('still recovers the distinct call that follows a duplicate', () => {
+    const readBlock = `<tool_call>
+<function=read>
+<parameter=path>
+/etc/hosts
+</parameter>
+</function>
+</tool_call>`;
+    const message = assistantMessage(
+      `${COMPLETE_BLOCK}\n${COMPLETE_BLOCK}\n${readBlock}`,
+    );
+
+    const outcome = repairAssistantMessage(message, ACTIVE_TOOLS);
+
+    expect(outcome.recovered.map((call) => call.name)).toEqual(['bash', 'read']);
+    expect(outcome.skipped.map((call) => call.reason)).toEqual(['duplicate']);
+    expect(toolCallsOf(outcome.message)).toHaveLength(2);
+
+    const notes = textOf(outcome.message).match(/\[recovered tool call: /g) ?? [];
+    expect(notes).toHaveLength(2);
+  });
+});
+
+// ── AC4: idempotence ─────────────────────────────────────────────────
+
+describe('idempotence (AC4)', () => {
+  it('is a strict no-op when applied to already-repaired output', () => {
+    const first = repairAssistantMessage(
+      assistantMessage(OPERATOR_RESPONSE_SAMPLE),
+      ACTIVE_TOOLS,
+    );
+    expect(first.repaired).toBe(true);
+    const snapshot = JSON.parse(JSON.stringify(first.message));
+
+    const second = repairAssistantMessage(first.message, ACTIVE_TOOLS);
+
+    expect(second.repaired).toBe(false);
+    expect(second.message).toBe(first.message);
+    expect(second.message).toEqual(first.message);
+    expect(JSON.parse(JSON.stringify(second.message))).toEqual(snapshot);
+    expect(second.recovered).toEqual([]);
+    expect(second.skipped).toEqual([]);
+
+    const notes = textOf(second.message).match(/\[recovered tool call: /g) ?? [];
+    expect(notes).toHaveLength(2);
+  });
+});
+
+// ── AC6: settings ────────────────────────────────────────────────────
+
+describe('LEAKED_TOOL_CALL_CONFIG (AC6)', () => {
+  it('is enabled by default with a session cap of 5', () => {
+    expect(LEAKED_TOOL_CALL_CONFIG.enabled).toBe(true);
+    expect(LEAKED_TOOL_CALL_CONFIG.sessionCap).toBe(5);
+  });
+
+  it('renders recovery notes from its template (one source of truth)', () => {
+    expect(LEAKED_TOOL_CALL_CONFIG.noteTemplate.startsWith(RECOVERY_NOTE_PREFIX)).toBe(true);
+    expect(LEAKED_TOOL_CALL_CONFIG.noteTemplate).toContain('{name}');
+    expect(LEAKED_TOOL_CALL_CONFIG.noteTemplate).toContain('{arguments}');
+
+    const expected = LEAKED_TOOL_CALL_CONFIG.noteTemplate
+      .replace('{name}', 'read')
+      .replace('{arguments}', 'path=/tmp/a.txt');
+
+    expect(formatRecoveryNote({ name: 'read', arguments: { path: '/tmp/a.txt' } })).toBe(
+      expected,
+    );
+  });
+
+  it('exposes a corrective continuation prompt for the fallback slice', () => {
+    const prompt = LEAKED_TOOL_CALL_CONFIG.correctiveContinuationPrompt;
+
+    expect(typeof prompt).toBe('string');
+    expect(prompt.toLowerCase()).toContain('tool call');
+    expect(prompt.length).toBeGreaterThan(40);
   });
 });

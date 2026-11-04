@@ -32,11 +32,19 @@
  *   strict about *safety*: a `<parameter=KEY>` whose value is not terminated
  *   by `</parameter>` marks the call `complete: false` and nothing is
  *   synthesised — a half-streamed `bash` command must never run.
+ * - Markup that is *quoted* (fenced code span, inline code span, markdown
+ *   blockquote or a quoted snippet) is prose about markup — docs, READMEs,
+ *   tests — and is rejected with `reason: 'quoted'` rather than executed.
  * - Repair is a pure transformer: it never mutates the message it is given
  *   and returns a new message object (Pi replaces the finalised message in
  *   place with whatever the `message_end` handler returns). A message that
  *   is already repaired contains no markup, so replaying the repair is a
  *   no-op (idempotence).
+ *
+ * Skip-reason vocabulary (the name in brackets is the shorthand used in
+ * WL-0MW109IIN009PADE's design notes): `unterminated-parameter`
+ * (truncated-parameter), `inactive-tool` (unknown-tool), `missing-parameter`
+ * (no-parameters), `quoted`, `duplicate` and `unrepairable-stop-reason`.
  *
  * Repair shape (WL-0MW109HU60042BVW AC1/AC2):
  * - an assistant message whose `text` block contains leaked markup gains an
@@ -44,8 +52,16 @@
  *   active, non-duplicate call (id from `node:crypto`),
  * - `stopReason` becomes `'toolUse'`,
  * - the leaked markup is replaced with a one-line note such as
- *   `[recovered tool call: read(path=/…/SKILL.md)]`,
+ *   `[recovered tool call: read(path=/…/SKILL.md)]` (template:
+ *   `LEAKED_TOOL_CALL_CONFIG.noteTemplate`),
+ * - a duplicate's markup is dropped without a note (the call is already going
+ *   to execute), while a call rejected for safety keeps its markup so a human
+ *   can see exactly what was refused,
  * - every other message field is preserved.
+ *
+ * The settings in `LEAKED_TOOL_CALL_CONFIG` are the single source of truth for
+ * the fallback (corrective-continue) and documentation slices; this module
+ * only *declares* them.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -108,6 +124,40 @@ export const LEAKED_TOOL_CALL_DIALECTS: readonly LeakedToolCallDialect[] =
 export const DEFAULT_LEAKED_TOOL_CALL_DIALECT: LeakedToolCallDialect =
   LEAKED_TOOL_CALL_DIALECTS[0];
 
+// ── Settings ──────────────────────────────────────────────────────────
+
+/**
+ * The recovery settings shared by every slice of the capability.
+ *
+ * The fallback slice (bounded corrective continue) and the docs slice consume
+ * these values instead of restating them, so the bound, the note format and
+ * the corrective prompt have exactly one definition
+ * (WL-0MW109IIN009PADE AC6).
+ */
+export interface LeakedToolCallConfig {
+  /** Whether leaked-call recovery is active at all. */
+  readonly enabled: boolean;
+  /** Maximum recoveries (repair + fallback) per session. */
+  readonly sessionCap: number;
+  /**
+   * Template for the one-line note that replaces recovered markup.
+   * Placeholders: `{name}` and `{arguments}`.
+   */
+  readonly noteTemplate: string;
+  /** Prompt used by the bounded corrective-continue fallback. */
+  readonly correctiveContinuationPrompt: string;
+}
+
+/** Defaults: enabled, five recoveries per session, one note format. */
+export const LEAKED_TOOL_CALL_CONFIG: Readonly<LeakedToolCallConfig> = Object.freeze({
+  enabled: true,
+  sessionCap: 5,
+  noteTemplate: '[recovered tool call: {name}({arguments})]',
+  correctiveContinuationPrompt:
+    'Your previous message contained a tool call written as plain text, so it never ran. ' +
+    'Re-issue that tool call through the structured tool-call interface instead of writing the markup as text.',
+});
+
 // ── Parsed call shape ─────────────────────────────────────────────────
 
 /** Why a parsed call was not turned into a structured `toolCall`. */
@@ -120,6 +170,8 @@ export type LeakedToolCallSkipReason =
   | 'inactive-tool'
   /** The message already carries an identical structured `toolCall`. */
   | 'duplicate'
+  /** The markup sits inside a quoted/fenced prose example, not a real leak. */
+  | 'quoted'
   /** The message's `stopReason` cannot be trusted to be a finished turn. */
   | 'unrepairable-stop-reason';
 
@@ -182,6 +234,33 @@ export function parseLeakedToolCalls(
         : nextOpenerStart;
     const body = text.slice(openerEnd, bodyEnd);
 
+    // Consume a `</tool_call>` that directly follows the function block so the
+    // note (or the dropped duplicate) replaces the per-call wrapper too.
+    let end =
+      functionCloseIndex !== -1 && functionCloseIndex < nextOpenerStart
+        ? functionCloseIndex + dialect.functionClose.length
+        : bodyEnd;
+    const trailingCallClose = new RegExp(
+      `^\\s*${escapeRegExp(dialect.callClose)}`,
+    ).exec(text.slice(end));
+    if (trailingCallClose) end += trailingCallClose[0].length;
+
+    // False-positive guard: markup inside a fenced/inline code span, a
+    // blockquote or a quoted snippet is prose *about* markup (docs, READMEs,
+    // tests), never a leaked call. Reject it before reading any parameter.
+    if (isQuotedMarkup(text, opener.start)) {
+      calls.push({
+        name: opener.name,
+        arguments: {},
+        complete: false,
+        reason: 'quoted',
+        start: opener.start,
+        end,
+        text: text.slice(opener.start, end),
+      });
+      continue;
+    }
+
     const parameters: Array<{ key: string; start: number; valueStart: number }> = [];
     const parameterOpen = new RegExp(dialect.parameterOpen.source, 'g');
     let parameterMatch: RegExpExecArray | null;
@@ -215,17 +294,6 @@ export function parseLeakedToolCalls(
       }
     }
 
-    // Consume a `</tool_call>` that directly follows the function block so the
-    // note replaces the per-call wrapper too.
-    let end =
-      functionCloseIndex !== -1 && functionCloseIndex < nextOpenerStart
-        ? functionCloseIndex + dialect.functionClose.length
-        : bodyEnd;
-    const trailingCallClose = new RegExp(
-      `^\\s*${escapeRegExp(dialect.callClose)}`,
-    ).exec(text.slice(end));
-    if (trailingCallClose) end += trailingCallClose[0].length;
-
     calls.push({
       name: opener.name,
       arguments: args,
@@ -255,9 +323,18 @@ export function formatRecoveryNote(call: {
   const rendered = Object.entries(call.arguments)
     .map(([key, value]) => `${key}=${truncate(collapseWhitespace(value), MAX_NOTE_ARG_LENGTH)}`)
     .join(', ');
-  const argList = rendered.length > 0 ? rendered : '';
-  return `${RECOVERY_NOTE_PREFIX}${call.name}(${argList})]`;
+  return LEAKED_TOOL_CALL_CONFIG.noteTemplate
+    .split(NOTE_NAME_PLACEHOLDER)
+    .join(call.name)
+    .split(NOTE_ARGUMENTS_PLACEHOLDER)
+    .join(rendered);
 }
+
+/** Placeholder for the tool name in `LEAKED_TOOL_CALL_CONFIG.noteTemplate`. */
+export const NOTE_NAME_PLACEHOLDER = '{name}';
+
+/** Placeholder for the rendered arguments in the note template. */
+export const NOTE_ARGUMENTS_PLACEHOLDER = '{arguments}';
 
 // ── Message repair ────────────────────────────────────────────────────
 
@@ -308,6 +385,16 @@ export interface RepairOutcome<T extends RecoverableAssistantMessage> {
   /** `true` when the message was changed and should replace the original. */
   repaired: boolean;
 }
+
+/**
+ * What happens to one parsed call inside a text block: recover it, drop it as a
+ * duplicate (no note — the call is already executing) or keep its markup (the
+ * call was rejected for safety and stays visible).
+ */
+type BlockDecision =
+  | { call: ParsedLeakedToolCall; action: 'keep' }
+  | { call: ParsedLeakedToolCall; action: 'drop-duplicate' }
+  | { call: ParsedLeakedToolCall; action: 'recover'; note: string };
 
 /**
  * Stop reasons from which a leaked call may be repaired. A `length` (max
@@ -363,45 +450,63 @@ export function repairAssistantMessage<T extends RecoverableAssistantMessage>(
     if (parsed.length === 0) return block;
 
     const text = (block as RecoverableTextBlock).text;
-    let rebuilt = '';
-    let cursor = 0;
+    const decisions: BlockDecision[] = [];
 
     for (const call of parsed) {
       if (!call.complete) {
         skipped.push(call);
+        decisions.push({ call, action: 'keep' });
         continue;
       }
       if (!stopReasonRepairable) {
         skipped.push({ ...call, complete: false, reason: 'unrepairable-stop-reason' });
+        decisions.push({ call, action: 'keep' });
         continue;
       }
       if (!active.has(call.name)) {
         skipped.push({ ...call, complete: false, reason: 'inactive-tool' });
+        decisions.push({ call, action: 'keep' });
         continue;
       }
       if (existingToolCalls.some((existing) => isSameCall(existing, call))) {
         skipped.push({ ...call, complete: false, reason: 'duplicate' });
+        decisions.push({ call, action: 'drop-duplicate' });
         continue;
       }
 
       const note = formatRecoveryNote(call);
-      const id = `call_${randomUUID()}`;
-      rebuilt += text.slice(cursor, call.start) + note;
-      cursor = call.end;
-
       const toolCall: RecoverableToolCallBlock = {
         type: 'toolCall',
-        id,
+        id: `call_${randomUUID()}`,
         name: call.name,
         arguments: { ...call.arguments },
       };
-      // Keep the dedup list aware of calls recovered in this same pass.
+      // Register before the next parsed call so an identical duplicate in the
+      // same message is dropped instead of executed twice (AC3).
       existingToolCalls.push(toolCall);
       synthesised.push(toolCall);
-      recovered.push({ id, name: call.name, arguments: { ...call.arguments }, note });
+      recovered.push({
+        id: toolCall.id,
+        name: call.name,
+        arguments: { ...call.arguments },
+        note,
+      });
+      decisions.push({ call, action: 'recover', note });
     }
 
-    if (cursor === 0) return block; // every parsed call was skipped
+    // A block with nothing recovered is returned untouched: safety-rejected
+    // markup (and an all-duplicate block) is evidence, not something to rewrite.
+    if (!decisions.some((decision) => decision.action === 'recover')) return block;
+
+    let rebuilt = '';
+    let cursor = 0;
+    for (const decision of decisions) {
+      if (decision.action === 'keep') continue; // leave rejected markup in place
+      rebuilt += text.slice(cursor, decision.call.start);
+      if (decision.action === 'recover') rebuilt += decision.note;
+      cursor = decision.call.end;
+    }
+
     rebuilt += text.slice(cursor);
     return { ...block, text: stripWrapperTags(rebuilt) };
   });
@@ -420,6 +525,60 @@ export function repairAssistantMessage<T extends RecoverableAssistantMessage>(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Is the markup at `offset` quoted prose rather than a leaked call?
+ *
+ * True when the offset sits inside a fenced code span (``` / ~~~) or an inline
+ * code span, on a markdown blockquote line (`>`), or immediately after an
+ * opening double quote. Those are the shapes a README, a test fixture or a
+ * chat message uses to *talk about* the markup, and rewriting them would
+ * corrupt legitimate prose (AC2 false-positive guard).
+ *
+ * Deliberately conservative: an unrecognised shape is treated as a leak so the
+ * safety guards (unterminated parameter, inactive tool, missing parameter)
+ * still decide whether anything executes.
+ */
+export function isQuotedMarkup(text: string, offset: number): boolean {
+  if (offset < 0 || offset > text.length) return false;
+
+  const lineStart = text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+  const linePrefix = text.slice(lineStart, offset);
+
+  // Markdown blockquote: `> <function=…>` (the example is quoted prose).
+  if (/^\s*>/.test(linePrefix)) return true;
+
+  // Inline code span: an odd number of backticks before the markup on its line.
+  if ((linePrefix.match(/`/g) ?? []).length % 2 === 1) return true;
+
+  // Quoted snippet: `"<function=…` — the sentence quotes the markup.
+  if (/["\u201c]\s*$/.test(linePrefix)) return true;
+
+  return isInsideFencedCode(text, offset);
+}
+
+/**
+ * Is `offset` inside a fenced code block?
+ *
+ * Walks the lines before the offset, toggling on each ``` / ~~~ fence line. A
+ * one-line ```` ```markup``` ```` span is not detected — the inline-backtick rule
+ * above already covers it.
+ */
+function isInsideFencedCode(text: string, offset: number): boolean {
+  let inside = false;
+  let lineStart = 0;
+
+  while (lineStart <= offset) {
+    const newline = text.indexOf('\n', lineStart);
+    const lineEnd = newline === -1 ? text.length : newline;
+    if (offset <= lineEnd) break; // this line holds the offset
+    if (/^\s*(```|~~~)/.test(text.slice(lineStart, lineEnd))) inside = !inside;
+    if (newline === -1) break;
+    lineStart = newline + 1;
+  }
+
+  return inside;
+}
 
 function stripWrapperTags(
   text: string,
@@ -444,6 +603,8 @@ function isSameCall(
   existing: RecoverableToolCallBlock,
   parsed: ParsedLeakedToolCall,
 ): boolean {
+  // Leaked arguments are always strings, so string comparison of the rendered
+  // values is the deep equality we need (AC3: name + arguments identical).
   if (existing.name !== parsed.name) return false;
   const existingArgs = existing.arguments ?? {};
   const existingKeys = Object.keys(existingArgs);
