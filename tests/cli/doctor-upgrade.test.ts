@@ -260,6 +260,62 @@ describe('doctor upgrade command', () => {
         stdout.indexOf('Applied migrations:'),
       );
     });
+
+    it('carries the preservation summary on the refusal path in JSON', async () => {
+      // Fault injection: a preservation store that silently refuses writes, so
+      // one legacy value stays orphaned and the drop gate must refuse. This is
+      // the only way to reach the refusal through the real CLI — the lossless
+      // sweep removes every natural orphan (WL-0MW2F2AC8002BBRV AC2).
+      const db = new Database(dbPath());
+      try {
+        db.exec(`
+          CREATE TABLE legacy_audit_preserved (
+            work_item_id TEXT PRIMARY KEY,
+            audit_text TEXT NOT NULL,
+            preserved_at TEXT NOT NULL
+          );
+          CREATE TRIGGER refuse_preserve
+            BEFORE INSERT ON legacy_audit_preserved
+            BEGIN SELECT RAISE(IGNORE); END;
+        `);
+      } finally {
+        db.close();
+      }
+
+      let failure: any;
+      try {
+        await execAsync(`tsx ${cliPath} --json doctor upgrade --confirm`);
+      } catch (e) {
+        failure = e;
+      }
+
+      expect(failure, 'the drop must be refused').toBeDefined();
+      const result = JSON.parse(failure.stdout);
+      expect(result.success).toBe(false);
+      expect(result.migrationId).toBe('20260604-drop-audit-column');
+      expect(result.offendingIds).toEqual(['TEST-UNMAPPABLE']);
+      // The same four-count summary the success paths report.
+      expect(result.preservation).toEqual({
+        candidates: 2,
+        mappedToAuditResult: 0,
+        preserveOnly: 2,
+        alreadyPreserved: 0,
+        orphaned: 2,
+      });
+
+      // Nothing was destroyed: the column survives and no marker was written.
+      const check = new Database(dbPath(), { readonly: true });
+      try {
+        const cols = check.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
+        expect(cols.map(c => c.name)).toContain('audit');
+        const dropped = check
+          .prepare('SELECT value FROM metadata WHERE key = ?')
+          .get('audit_column_dropped') as any;
+        expect(dropped).toBeUndefined();
+      } finally {
+        check.close();
+      }
+    });
   });
 
   describe('hook upgrade via CLI', () => {

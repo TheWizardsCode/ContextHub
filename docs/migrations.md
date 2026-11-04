@@ -77,8 +77,8 @@ Examples:
 
   The command lists safe migrations, prints the same legacy-audit blast-radius summary
   the dry-run shows (before anything is applied, in human and `--json` output alike; the
-  JSON payload carries it as `preservation`), and prompts for confirmation before
-  applying.
+  JSON payload carries it as `preservation`, including on the refusal path alongside
+  `migrationId` and `offendingIds`), and prompts for confirmation before applying.
 
 - Apply pending migrations non-interactively:
 

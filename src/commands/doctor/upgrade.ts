@@ -92,6 +92,10 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
         error: err.message,
         migrationId: err.migrationId,
         offendingIds: err.offendingIds,
+        // The blast radius is carried on the refusal path too, so a JSON
+        // consumer sees the same four counts as the success paths
+        // (AC2, WL-0MW2F2AC8002BBRV).
+        ...(preservation !== null ? { preservation } : {}),
       });
       return;
     }
