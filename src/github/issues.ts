@@ -28,6 +28,12 @@
  * family's import graph stays acyclic. `LEGACY_PRIORITY_MAP` and
  * `normalizeGithubIssue` stay private; the barrel re-exports the twelve public
  * issue symbols, and nothing more.
+ *
+ * Escaping: every user-provided value interpolated into a `gh` command string
+ * (title, assignee, comma-joined label list) is quoted with
+ * `quoteShellValue()` — POSIX single-quote wrapping. `JSON.stringify()` is NOT
+ * shell escaping: it leaves `$`, backticks and `!` open to substitution by the
+ * shell that `runGh*` launches (WL-0MW0QXTYD0065ZW7).
  */
 
 import throttler from '../github-throttler.js';
@@ -127,7 +133,7 @@ export async function assignGithubIssueAsync(
     // Schedule assignment through the throttler to respect concurrency/rate limits.
     const res = await throttler.schedule(async () => {
       return await runGhDetailedAsync(
-        `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${JSON.stringify(assignee)}`
+        `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${quoteShellValue(assignee)}`
       );
     });
     if (res.ok) {
@@ -165,7 +171,7 @@ export function assignGithubIssue(
   // still attempt a best-effort check: if throttler has a concurrency cap,
   // it won't be respected for this sync call. Prefer the async variant.
   const res = runGhDetailed(
-    `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${JSON.stringify(assignee)}`
+    `gh issue edit ${issueNumber} --repo ${config.repo} --add-assignee ${quoteShellValue(assignee)}`
   );
   if (res.ok) {
     return { ok: true };
@@ -279,7 +285,7 @@ export function issueToWorkItemFields(
  * Migration: Replace `createGithubIssue(config, payload)` with `await createGithubIssueAsync(config, payload)`.
  */
 export function createGithubIssue(config: GithubConfig, payload: { title: string; body: string; labels: string[] }): GithubIssueRecord {
-  const command = `gh issue create --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
+  const command = `gh issue create --repo ${config.repo} --title ${quoteShellValue(payload.title)} --body-file -`;
   const output = runGh(command, payload.body);
   let issueNumber: number | null = null;
   const match = output.match(/\/(\d+)$/);
@@ -289,7 +295,7 @@ export function createGithubIssue(config: GithubConfig, payload: { title: string
   if (issueNumber !== null && payload.labels.length > 0) {
     // Ensure labels once per process to reduce API calls
     ensureGithubLabelsOnce(config, payload.labels);
-    runGh(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(payload.labels.join(','))}`);
+    runGh(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${quoteShellValue(payload.labels.join(','))}`);
   }
   if (issueNumber === null) {
     const view = runGh(`gh issue list --repo ${config.repo} --limit 1 --json number,id,title,body,state,labels,updatedAt`);
@@ -306,7 +312,7 @@ export function createGithubIssue(config: GithubConfig, payload: { title: string
 
 export async function createGithubIssueAsync(config: GithubConfig, payload: { title: string; body: string; labels: string[] }): Promise<GithubIssueRecord> {
   return await throttler.schedule(async () => {
-    const command = `gh issue create --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
+    const command = `gh issue create --repo ${config.repo} --title ${quoteShellValue(payload.title)} --body-file -`;
     const output = await runGhAsync(command, payload.body);
     let issueNumber: number | null = null;
     const match = output.match(/\/(\d+)$/);
@@ -314,7 +320,7 @@ export async function createGithubIssueAsync(config: GithubConfig, payload: { ti
     if (issueNumber !== null && payload.labels.length > 0) {
       // Ensure labels once per process to reduce API calls
       await ensureGithubLabelsOnceAsync(config, payload.labels);
-      try { await runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(payload.labels.join(','))}`); } catch (_) {}
+      try { await runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${quoteShellValue(payload.labels.join(','))}`); } catch (_) {}
     }
     if (issueNumber === null) {
       const view = await runGhJsonAsync(`gh issue list --repo ${config.repo} --limit 1 --json number,id,title,body,state,labels,updatedAt`);
@@ -347,7 +353,7 @@ export async function updateGithubIssueAsync(
     const bodyChanged = (current.body || '') !== (payload.body || '');
     // Only edit title/body if something changed
     if (titleChanged || bodyChanged) {
-      const command = `gh issue edit ${issueNumber} --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`;
+      const command = `gh issue edit ${issueNumber} --repo ${config.repo} --title ${quoteShellValue(payload.title)} --body-file -`;
       ops.push(runGhAsync(command, payload.body).then(() => {}).catch(() => {}));
     }
 
@@ -366,14 +372,14 @@ export async function updateGithubIssueAsync(
       // prevents label accumulation when e.g. stage changes from idea -> done.
       const staleLabelsToRemove = current.labels.filter(label => isSingleValueCategoryLabel(label, config.labelPrefix) && !desiredSet.has(label));
       if (staleLabelsToRemove.length > 0) {
-        ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(staleLabelsToRemove.join(','))}`).then(() => {}).catch(() => {}));
+        ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${quoteShellValue(staleLabelsToRemove.join(','))}`).then(() => {}).catch(() => {}));
       }
 
       // Compute labels that are not already present
       const labelsToAdd = payload.labels.filter(l => !current.labels.includes(l));
       if (labelsToAdd.length > 0) {
         await ensureGithubLabelsOnceAsync(config, labelsToAdd);
-        ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(labelsToAdd.join(','))}`).then(() => {}).catch(() => {}));
+        ops.push(runGhAsync(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${quoteShellValue(labelsToAdd.join(','))}`).then(() => {}).catch(() => {}));
       }
     }
 
@@ -434,7 +440,7 @@ export function updateGithubIssue(
   const titleChanged = (current.title || '') !== (payload.title || '');
   const bodyChanged = (current.body || '') !== (payload.body || '');
   if (titleChanged || bodyChanged) {
-    ops.push(() => runGh(`gh issue edit ${issueNumber} --repo ${config.repo} --title ${JSON.stringify(payload.title)} --body-file -`, payload.body));
+    ops.push(() => runGh(`gh issue edit ${issueNumber} --repo ${config.repo} --title ${quoteShellValue(payload.title)} --body-file -`, payload.body));
   }
 
   if (payload.state === 'closed' && current.state !== 'closed') {
@@ -447,13 +453,13 @@ export function updateGithubIssue(
     const desiredSet = new Set(payload.labels);
     const staleLabelsToRemove = current.labels.filter(label => isSingleValueCategoryLabel(label, config.labelPrefix) && !desiredSet.has(label));
     if (staleLabelsToRemove.length > 0) {
-      ops.push(() => runGhSafe(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${JSON.stringify(staleLabelsToRemove.join(','))}`));
+      ops.push(() => runGhSafe(`gh issue edit ${issueNumber} --repo ${config.repo} --remove-label ${quoteShellValue(staleLabelsToRemove.join(','))}`));
     }
 
     const labelsToAdd = payload.labels.filter(l => !current.labels.includes(l));
     if (labelsToAdd.length > 0) {
       ensureGithubLabelsOnce(config, labelsToAdd);
-      ops.push(() => runGh(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${JSON.stringify(labelsToAdd.join(','))}`));
+      ops.push(() => runGh(`gh issue edit ${issueNumber} --repo ${config.repo} --add-label ${quoteShellValue(labelsToAdd.join(','))}`));
     }
   }
 

@@ -32,8 +32,13 @@
 
 import type { WorkItemPriority, WorkItemStatus } from '../types.js';
 import { parseRepoSlug } from './repo-slug.js';
-import { ghApiAsyncScheduled, ghApiJsonScheduled, runGhSafe } from './transport.js';
+import { ghApiAsyncScheduled, ghApiJsonScheduled, quoteShellValue, runGhSafe } from './transport.js';
 import type { GithubConfig, LabelEvent } from './types.js';
+
+// Label names are user text and reach a shell-executed `gh` command string, so
+// they are quoted with `quoteShellValue()` (POSIX single-quote wrapping).
+// `JSON.stringify()` is not a shell escaping primitive — it leaves `$`,
+// backticks and `!` open to double-quoted substitution (WL-0MW0QXTYD0065ZW7).
 
 export function labelColor(label: string): string {
   let hash = 0;
@@ -137,14 +142,14 @@ export function ensureGithubLabels(config: GithubConfig, labels: string[]): void
       continue;
     }
     const color = labelColor(label);
-    const createCommand = `gh api -X POST repos/${owner}/${name}/labels -f name=${JSON.stringify(label)} -f color=${JSON.stringify(color)}`;
+    const createCommand = `gh api -X POST repos/${owner}/${name}/labels -f name=${quoteShellValue(label)} -f color=${quoteShellValue(color)}`;
     const result = runGhSafe(createCommand);
     if (result !== null) {
       // Update cached set so subsequent calls in this process know the label exists.
       try { existing.add(label); } catch (_) {}
       continue;
     }
-    const fallbackCommand = `gh issue label create ${JSON.stringify(label)} --repo ${config.repo} --color ${color}`;
+    const fallbackCommand = `gh issue label create ${quoteShellValue(label)} --repo ${config.repo} --color ${color}`;
     runGhSafe(fallbackCommand);
     try { existing.add(label); } catch (_) {}
   }
@@ -184,13 +189,13 @@ export async function ensureGithubLabelsAsync(config: GithubConfig, labels: stri
     for (const label of unique) {
       if (existing.has(label)) continue;
       const color = labelColor(label);
-      const createCommand = `gh api -X POST repos/${owner}/${name}/labels -f name=${JSON.stringify(label)} -f color=${JSON.stringify(color)}`;
+      const createCommand = `gh api -X POST repos/${owner}/${name}/labels -f name=${quoteShellValue(label)} -f color=${quoteShellValue(color)}`;
         try {
           await ghApiAsyncScheduled(createCommand);
           existing.add(label);
           continue;
         } catch {
-          const fallbackCommand = `gh issue label create ${JSON.stringify(label)} --repo ${config.repo} --color ${color}`;
+          const fallbackCommand = `gh issue label create ${quoteShellValue(label)} --repo ${config.repo} --color ${color}`;
           try { await ghApiAsyncScheduled(fallbackCommand); existing.add(label); } catch (_) { /* ignore */ }
         }
     }
