@@ -100,6 +100,8 @@ function git(cwd: string, args: string[]): void {
 interface HookRepo {
   dir: string;
   logFile: string;
+  /** Directory the hook is executed from (a linked worktree when set). */
+  cwd?: string;
 }
 
 /**
@@ -150,7 +152,7 @@ function runHook(
   const home = makeTempDir('prepush-home-');
 
   const result = childProcess.spawnSync('sh', [HOOK_PATH], {
-    cwd: repo.dir,
+    cwd: repo.cwd ?? repo.dir,
     input: stdin,
     encoding: 'utf8',
     env: cleanGitEnv({
@@ -289,3 +291,122 @@ describe('pre-push gate documentation (WL-0MVHP5S01006GDDV)', () => {
     expect(hook).toContain('Set TEST_SCOPE_SKIP=1');
   });
 });
+
+/** Stub runner that writes a gate cache entry the way `run_tests.py` does. */
+const MIRROR_RUNNER = `import os
+import pathlib
+import subprocess
+import sys
+
+log = os.environ.get("STUB_TEST_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(" ".join(sys.argv[1:]) + "\\n")
+
+cache_name = os.environ.get("STUB_CACHE_ENTRY")
+if cache_name:
+    git_dir = subprocess.check_output(
+        ["git", "rev-parse", "--absolute-git-dir"], text=True
+    ).strip()
+    entry = pathlib.Path(git_dir) / "test-cache" / cache_name
+    entry.mkdir(parents=True, exist_ok=True)
+    (entry / "result.json").write_text('{"status": "green"}', encoding="utf-8")
+
+sys.exit(int(os.environ.get("STUB_TEST_EXIT", "0")))
+`;
+
+/**
+ * Create a repo with a linked worktree on branch `feature` and a stubbed
+ * `run_tests.py` *inside the worktree* (the hook's local resolution path).
+ * The main checkout has a `.worklog/cache` directory — the mirror target.
+ */
+function createMirrorRepo(): HookRepo {
+  const dir = makeTempDir('prepush-mirror-repo-');
+  const logFile = path.join(dir, 'runner-invocations.log');
+
+  git(dir, ['init', '-q']);
+  git(dir, ['config', 'user.email', 'test@example.com']);
+  git(dir, ['config', 'user.name', 'Pre-push Test']);
+  git(dir, ['config', 'commit.gpgsign', 'false']);
+  fs.writeFileSync(path.join(dir, 'README.md'), '# fixture\n');
+  git(dir, ['add', '.']);
+  git(dir, ['commit', '-q', '-m', 'fixture']);
+  git(dir, ['branch', '-M', 'dev']);
+  fs.mkdirSync(path.join(dir, '.worklog', 'cache'), { recursive: true });
+
+  const worktree = path.join(dir, 'wt');
+  git(dir, ['worktree', 'add', '-q', '-b', 'feature', worktree, 'dev']);
+  const runnerDir = path.join(worktree, 'skill', 'test', 'scripts');
+  fs.mkdirSync(runnerDir, { recursive: true });
+  fs.writeFileSync(path.join(runnerDir, 'run_tests.py'), MIRROR_RUNNER);
+
+  return { dir, logFile, cwd: worktree };
+}
+
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+describe.skipIf(process.platform === 'win32')(
+  'pre-push test-cache mirroring (SA-0MVTFMB7K002Y1F3)',
+  () => {
+    it('mirrors a worktree gate cache entry into the main checkout cache', () => {
+      const repo = createMirrorRepo();
+      const result = runHook(repo, 'refs/heads/dev', {
+        STUB_CACHE_ENTRY: 'entry-abc',
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.invocations).toHaveLength(1);
+      const mirrored = path.join(
+        repo.dir,
+        '.worklog',
+        'cache',
+        'entry-abc',
+        'result.json',
+      );
+      expect(fs.readFileSync(mirrored, 'utf8')).toBe('{"status": "green"}');
+      expect(result.stderr).toContain('mirrored cache entry entry-abc');
+    });
+
+    it('leaves a cache entry the main checkout already holds untouched', () => {
+      const repo = createMirrorRepo();
+      const existing = path.join(
+        repo.dir,
+        '.worklog',
+        'cache',
+        'entry-abc',
+        'result.json',
+      );
+      fs.mkdirSync(path.dirname(existing), { recursive: true });
+      fs.writeFileSync(existing, '{"status": "already-cached"}');
+
+      const result = runHook(repo, 'refs/heads/dev', {
+        STUB_CACHE_ENTRY: 'entry-abc',
+      });
+
+      expect(result.status).toBe(0);
+      expect(fs.readFileSync(existing, 'utf8')).toBe('{"status": "already-cached"}');
+      expect(result.stderr).not.toContain('mirrored cache entry entry-abc');
+    });
+
+    it.skipIf(isRoot)('never fails the push when a cache entry cannot be mirrored', () => {
+      // A copy failure must be reported and swallowed (fail-soft): cache
+      // plumbing never decides a push. Skipped as root, where directory
+      // permissions cannot deny the copy.
+      const repo = createMirrorRepo();
+      const mainCache = path.join(repo.dir, '.worklog', 'cache');
+      fs.chmodSync(mainCache, 0o500);
+      let result: HookResult;
+      try {
+        result = runHook(repo, 'refs/heads/dev', {
+          STUB_CACHE_ENTRY: 'entry-abc',
+        });
+      } finally {
+        fs.chmodSync(mainCache, 0o755);
+      }
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toContain('warning: could not mirror cache entry entry-abc');
+      expect(fs.existsSync(path.join(mainCache, 'entry-abc'))).toBe(false);
+    });
+  },
+);
