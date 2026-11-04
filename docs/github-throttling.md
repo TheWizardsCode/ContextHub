@@ -53,5 +53,6 @@ Testing
 
 Implementation
 
-See `src/github-throttler.ts` for the throttler implementation and `src/github.ts`
-for example usage patterns. 
+See `src/github-throttler.ts` for the throttler implementation and
+`src/github/transport.ts` (the `ghApi*Scheduled` wrappers) for example usage
+patterns. 

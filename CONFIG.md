@@ -141,6 +141,54 @@ pi extension sends as the `X-Priority` provider request header (fail-open:
 unset/invalid → no header, the proxy applies its own `medium` default). This
 is an environment variable, not a Worklog config key.
 
+## Host-wide dispatch budget (herdr downtime worker)
+
+The herdr downtime worker limits how many `implement` and `audit` panes one
+**machine** runs at once, across every herdr instance and project
+(WL-0MVXWQFGV000D2AB). The budget is machine-scoped — **not** a per-instance
+`~/.config/herdr/worklog-plugin.json` key — so it cannot drift per instance.
+The authoritative record is the ledger
+`~/.herdr/downtime/dispatch-budget.json` (one entry per in-flight dispatch);
+the caps are configured beside it.
+
+| Setting | Default | Range / meaning |
+|---|---|---|
+| `budget.json` → `maxImplement` | `2` | clamp `0`–`32`; `0` disables the implement tier host-wide |
+| `budget.json` → `maxAudit` | `1` | clamp `0`–`32`; `0` disables the audit tier host-wide; `1` reproduces the previous single-flight audit behaviour exactly |
+| `HERDR_HOST_MAX_IMPLEMENT` | unset | Overrides `maxImplement`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning) |
+| `HERDR_HOST_MAX_AUDIT` | unset | Overrides `maxAudit`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning) |
+| `HERDR_COORDINATION_DIR` | `~/.herdr/downtime` | Machine coordination directory holding the ledger and `budget.json` |
+
+`budget.json` shape (both keys optional; an absent file yields the defaults
+above):
+
+```json
+{ "maxImplement": 2, "maxAudit": 1 }
+```
+
+Resolution order: `budget.json` → the built-in defaults → the env override →
+the `0..32` clamp. **`0` is a per-tier kill switch**, not "unlimited": that
+tier never dispatches on this host. A malformed `budget.json` (not an object,
+non-numeric, negative) falls back to the defaults for the invalid field and
+records a warning rather than throwing; an unresolvable coordination
+directory degrades to "no ledger" (dispatch behaves exactly as before the
+budget existed).
+
+The default `maxImplement: 2` is deliberately conservative: it bounds
+**in-flight agent work per machine** (operator intent), not LLM capacity — the
+proxy free-slot and prefill gates remain the inner limiter, and the budget can
+only reduce concurrency below them.
+
+Fail directions differ by path by design: dispatcher-fired work **fails
+closed** on an unreadable ledger (`host-budget-unknown`, then a self-healing
+rewrite from the live pane list), while a hand-fired `/skill:implement` /
+`/skill:audit` shortcut **fails open with a visible notice** (a human owns the
+decision). Hand-fired over-quota dispatches open the confirmation dialog; a
+proceed records `override: { "by": "user" }` on the ledger entry. See
+[`docs/dev/downtime-dispatcher.md`](docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope)
+for the gate table, reason tokens, audit-cap unification and the rolling-window
+out-of-scope note.
+
 ## Configuration Override System
 
 The system loads configuration in this order:
@@ -162,6 +210,53 @@ The system loads configuration in this order:
 **For individual users**: If no defaults file exists, just use `wl init` to create your local `config.yaml`.
 
 If no configuration exists at all, the system defaults to using `WI` as the prefix.
+
+## Cross-repo project discovery (`projectsRoot`)
+
+`projectsRoot` tells `wl` which directory holds the sibling project checkouts it
+may consult for **cross-repo dependencies** (a work item in this project blocked
+by a work item in another project's store). Discovery is implemented once, in
+`src/cross-repo/project-registry.ts`, and is exposed by `wl project list`.
+
+```yaml
+# .worklog/config.yaml
+projectsRoot: /home/me/projects
+
+# Recorded prefix → project mappings, written by `wl project add`.
+projects:
+  SA:
+    path: /home/me/projects/SorraAgents
+    gitUrl: git@github.com:example/SorraAgents.git
+```
+
+- **Default:** the parent directory of the current checkout (its git root when
+  run from a subdirectory). Set `projectsRoot` only when projects live
+  elsewhere.
+- **Discovery rule:** one scan of the immediate subdirectories of
+  `projectsRoot`. A candidate is a project when it is **not hidden**, is a
+  **git repository** and holds a **genuine** worklog store
+  (`.worklog/initialized` or `.worklog/worklog.db`). Worktree-shaped stubs that
+  only carry the tracked `.worklog/config.yaml`, non-git folders and hidden
+  folders are excluded. The prefix comes from each project's own
+  `.worklog/config.yaml`.
+- **Ambiguity:** when two projects declare the same prefix the scan reports
+  that prefix as `ambiguous` with both paths instead of picking an owner.
+- **Fail-open:** a missing or unreadable `projectsRoot` produces an empty list
+  plus a warning — never an error.
+- **Memoised:** the scan result is cached per process for the resolved root.
+
+Inspect the discovered map with:
+
+```sh
+wl project list
+wl --json project list
+```
+
+The `projects` map records the mappings written by `wl project add` (see
+[`CLI.md`](CLI.md#project-subcommands)); discovery itself derives the map from
+the sibling stores. `wl project add` clones a missing project into the
+projects root and adds only its `projects.<PREFIX>` entry, preserving every
+other key in `.worklog/config.yaml`.
 
 ## Project CTA (Call-to-Action)
 

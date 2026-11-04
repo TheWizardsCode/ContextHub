@@ -21,7 +21,11 @@
  * (the split guard's cycle gates stay satisfied).
  */
 
-import { appendCoordinationLogEntry, type CoordinationLogEntry } from './downtime-log.js';
+import {
+  appendCoordinationLogEntry,
+  coordinationLogPolicyFromConfig,
+  type CoordinationLogEntry,
+} from './downtime-log.js';
 import {
   DOWNTIME_ERROR_STRIKE_LIMIT,
   type DecisionEntryFields,
@@ -159,7 +163,11 @@ export async function writeCapacityStarvationSignal(
     if (typeof ctx.opts.deps.recordDecision === 'function') {
       await ctx.opts.deps.recordDecision(entry, cwd);
     } else {
-      await appendCoordinationLogEntry(cwd, entry);
+      await appendCoordinationLogEntry(
+        cwd,
+        entry,
+        coordinationLogPolicyFromConfig(ctx.opts.config()),
+      );
     }
   } catch {
     // fail-closed: observation logging must never affect dispatch

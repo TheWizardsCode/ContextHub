@@ -373,6 +373,25 @@ export interface WorklogConfig {
    * ```
    */
   cta?: string;
+  /**
+   * Directory scanned by cross-repo project discovery (WL-0MVWEELAW005SDLU).
+   * Immediate subdirectories that are git repositories holding a genuine
+   * `.worklog/` store become discoverable sibling projects.
+   *
+   * Default: the parent directory of the current checkout.
+   *
+   * Example:
+   * ```yaml
+   * projectsRoot: /home/me/projects
+   * ```
+   */
+  projectsRoot?: string;
+  /**
+   * Recorded prefix → project mappings for cross-repo dependencies.
+   * `wl project add` will write entries here (`path` and `gitUrl`); discovery
+   * itself derives the map from each sibling store's own `config.yaml`.
+   */
+  projects?: Record<string, { path?: string; gitUrl?: string }>;
 }
 
 /**
@@ -447,11 +466,53 @@ export interface ConflictDetail {
 }
 
 /**
+ * Resolution state of a foreign (cross-project) dependency target
+ * (parent WL-0MVWABT2Z001XMSD, design constraint D3).
+ *
+ * - `resolved`    — a discovered sibling project's store holds the item;
+ * - `unresolved`  — the owning store was read but holds no such item;
+ * - `unavailable` — no owner could be identified, or the store could not be
+ *                   read (missing, unreadable, ambiguous prefix).
+ */
+export type ForeignDependencyState = 'resolved' | 'unresolved' | 'unavailable';
+
+/**
+ * The shared view of one foreign dependency edge, emitted by every gating
+ * surface (`wl next`, `wl worklist`, `wl doctor`).
+ *
+ * `unresolved` is the fail-safe flag: `true` means the target could not be
+ * resolved and the edge therefore keeps blocking the dependent. `blocking`
+ * reports the decision actually applied by the gating path, which is `false`
+ * for a resolved terminal target and for an undiscoverable prefix (a
+ * coordination note, never a block).
+ */
+export interface ForeignDependencyView {
+  /** The foreign target's work-item id. */
+  id: string;
+  /** Always `true`: this view only exists for cross-project edges. */
+  foreign: true;
+  /** Tri-state resolution result. */
+  foreign_dependency: ForeignDependencyState;
+  /** `true` when the target could not be resolved (fail-safe block). */
+  unresolved: boolean;
+  /** `true` when this edge currently blocks the dependent. */
+  blocking: boolean;
+  /** Why the target could not be resolved; present only when it could not. */
+  reason?: string;
+}
+
+/**
  * Result of finding the next work item with selection reason
  */
 export interface NextWorkItemResult {
   workItem: WorkItem | null;
   reason: string;
+  /**
+   * Foreign dependency edges of the selected item, present only when the item
+   * has at least one cross-project edge (so output for items without foreign
+   * edges is byte-identical to the pre-cross-repo shape).
+   */
+  foreign_dependencies?: ForeignDependencyView[];
 }
 
 /**

@@ -201,7 +201,7 @@ export async function main({ cache, cacheEnabled }: CliMainOptions): Promise<voi
     const groupsDef: { name: string; names: string[] }[] = [
       { name: 'Issue Management', names: ['create', 'update', 'comment', 'close', 'delete', 'dep', 'reviewed', 'audit'] },
       { name: 'Status', names: ['in-progress', 'next', 'worklist', 'recent', 'list', 'show', 'search'] },
-      { name: 'Team', names: ['sync', 'github', 'import', 'export'] },
+      { name: 'Team', names: ['sync', 'github', 'import', 'export', 'project'] },
       { name: 'Maintenance', names: ['migrate', 're-sort', 'doctor', 'unlock'] },
       { name: 'Plugins', names: [] },
     ];

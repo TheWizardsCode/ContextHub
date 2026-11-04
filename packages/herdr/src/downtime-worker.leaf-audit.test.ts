@@ -1521,6 +1521,24 @@ describe('scripted decision-log scenario — dispatch / budget-skip / stale slot
       { reason: 'slots-unavailable', freeSlots: 0, totalSlots: 3 },
     ]);
   });
+
+  it('captures the decisions when a saturated host delays every log append', async () => {
+    // Regression pin (WL-0MW0YD2T6004FRDJ): decision entries are written
+    // fire-and-forget, so the scenario used to read the log back after a
+    // fixed 25 ms sleep. On a saturated host that append landed later and
+    // the captures came back EMPTY — red on the same tree that passed on
+    // `--rerun-failures`. The scenario now awaits the in-flight appends, so
+    // a slow append only makes it slower, never emptier.
+    const delayed = await runLeafAuditDecisionLogScenario({ decisionLogDelayMs: 150 });
+
+    expect(delayed.map((capture) => capture.decisions.map((entry) => entry.reason))).toEqual([
+      ['leaf-audit-admission'],
+      ['audit-tier-budget-skipped'],
+      ['slots-unavailable'],
+    ]);
+    // The dispatch outcomes are unchanged by the delay — only the wait is.
+    expect(delayed.map((capture) => capture.dispatched)).toEqual([true, false, false]);
+  });
 });
 
 // ── Closing verification: parent AC6 traceability ─────────────────────

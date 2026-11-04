@@ -25,7 +25,7 @@ replaced by the `tests/` umbrella.
 | Gate | Where it runs | Scope | Suites |
 |---|---|---|---|
 | Implement finish | `implement.py finish` (development time) | changed | Named group selected from the changed files (`groups` in `.pi/test-config.json`); otherwise the affected test files; falls back to the full canonical suite when nothing narrower is selectable |
-| Dev-push | `pre-push` hook (when installed) | full | The full canonical suite (`suiteCommands`) |
+| Dev-push | `pre-push` hook, on `refs/heads/dev` / `refs/heads/main` pushes | full | The full canonical suite (`suiteCommands`) |
 | Ship release | `dev` → `main` promotion | full | The full canonical suite, re-run on the merged tree |
 | Audit (F3) | audit skill, on a cache miss | full | The full canonical suite, read from the per-repo test cache |
 
@@ -48,13 +48,24 @@ own file set (the shared-basename unit-vs-CLI variants — e.g.
 `tests/audit.test.ts` + `tests/cli/audit.test.ts` — each execute exactly
 once).
 
-> **This repository's `pre-push` hook does not run the test suite today** — it
-> enforces branch policy, the context budget and `wl sync` only. Until it
-> does, the canonical suite is enforced at development time by
-> `implement.py finish` (which falls back to full scope for `.pi/`-only
-> changes) and by the `ship` release gate at release time. This is a
-> pre-existing gap tracked separately; do not treat a successful push as
-> full-suite evidence.
+> **The `pre-push` hook enforces the full canonical suite on a `dev`/`main`
+> push** (WL-0MVHP5S01006GDDV). When a pushed remote ref is `refs/heads/dev`
+> or `refs/heads/main`, the hook runs
+> `python3 <run_tests.py> --scope full --strict-git-env` — the same invocation
+> as the `ship` release gate — after branch policy and the context-budget
+> gate. A red suite blocks the push (exit 1), and the run is recorded in the
+> per-repo test cache that audits consume. Feature-branch, tag and
+> `refs/worklog/data` pushes run no tests. The suite is therefore enforced at
+> development time by `implement.py finish` (changed scope, falling back to
+> full scope for `.pi/`-only changes) **and** at dev-push time (full scope).
+>
+> **Bypass and residual risk.** `TEST_SCOPE_SKIP=1` bypasses the gate (not
+> recommended). A missing `run_tests.py` hard-fails the push rather than
+> silently skipping, so a plain contributor checkout cannot push to
+> `dev`/`main` without the gate (parity with the `ship` release gate). If the
+> bypass is used, the pushed tree carries no full-suite assertion until the
+> `ship` release gate re-runs the suite on the merged `dev`→`main` tree — do
+> not treat a bypassed push as full-suite evidence.
 
 ### The herdr package suite is a separate, opt-in gate
 
@@ -95,10 +106,34 @@ suite. `--type full` still resolves from `suiteCommands`, so a bare
 
 Only a `--type full` run at `scope=full` counts as full-suite evidence for the
 audit skill. `--type herdr` and `--group herdr` runs use independent cache
-keys (`herdr`, `group:herdr`): they are recorded and queryable, but they
-**never satisfy a "full test suite passes" AC**. Auditing a herdr-only change
-still needs operator attestation (`--green-run HEAD`) or a herdr-aware audit
-follow-up (not implemented).
+keys (`herdr`, `group:herdr`) and **never satisfy a "full test suite passes"
+AC** — that contract is unchanged.
+
+Since **WL-0MVHP5NTU009PA3I** the audit is herdr-aware for the herdr package
+suite itself. When a work item's resolved touched files include a
+`packages/herdr/**` path (committed paths plus Key Files), the audit (F3)
+consults both herdr cache keys, read-only, within the same 24h acceptance
+window it uses for full-suite evidence. When a green full-scope herdr run
+exists at the audited git state it injects a **HERDR SUITE GREEN RUN** evidence
+block (parent Phase-1 screen, both child Phase-1 screens, every Phase 2
+prompt) and records `Herdr suite evidence: <sha> (cached herdr package-suite
+run)` in the report. The block may satisfy a criterion **explicitly about the
+herdr package suite**, and states explicitly that it does not satisfy the
+full-suite AC. The `Herdr suite passes` AC on a herdr-touching item therefore
+no longer needs operator attestation (`--green-run HEAD`); populating the
+cache with one sanctioned run is enough:
+
+```bash
+python3 <test-skill>/scripts/run_tests.py --type herdr --json
+# or
+python3 <test-skill>/scripts/run_tests.py --group herdr --json
+```
+
+A herdr cache miss/red/changed-scope entry yields no evidence (fail-open
+partial, with a diagnostic), and a work item that does not touch
+`packages/herdr/**` never queries the herdr keys. The audit never executes the
+herdr suite itself; the change is the audit runner's (tracked as the
+SorraAgents cross-repo companion SA-0MW133H3P008TNPQ).
 
 ### Full `tests/` coverage (WL-0MVG4FF9200346NR)
 

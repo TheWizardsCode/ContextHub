@@ -154,6 +154,35 @@ export interface DowntimeDispatchDeps {
   ): Promise<boolean>;
   /** CAS claim rollback (see `DowntimeWorkerDeps.rollbackClaim`). */
   rollbackClaim(itemId: string, original: DowntimeClaimExpected, cwd: string): Promise<boolean>;
+  /**
+   * Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3, audit tier
+   * WL-0MVXY0XPF006YUHA F2): the ONE machine-scoped ledger read per dispatch
+   * attempt, called in `dispatchClaimedTier` immediately before the dispatch
+   * marker is written so both dispatcher paths funnel through it (F3 AC1).
+   * Applies to the `implement` and `audit` kinds — plan/intake/risk-effort are
+   * never budgeted. Optional — absent means no host budget (legacy/test callers
+   * stay byte-identical).
+   */
+  admitHostDispatch?(
+    input: DowntimeHostBudgetAdmissionInput,
+  ): Promise<DowntimeHostBudgetAdmission>;
+  /**
+   * Record the spawned pane id on a reserved budget entry (AC3 "confirm").
+   * Countable in the ledger's liveness rules for the implement tier (the audit
+   * tier counts a fresh entry regardless, as the retired marker did).
+   * Best-effort.
+   */
+  confirmHostDispatch?(
+    itemId: string,
+    kind: DowntimeDispatchKind,
+    paneId: string,
+    cwd: string,
+  ): Promise<void>;
+  /**
+   * Release a host-budget reservation (AC3): every abort path in the claim
+   * pipeline, and the pane-close handler. Idempotent, never throws.
+   */
+  releaseHostDispatch?(itemId: string, cwd: string): Promise<void>;
   /** Machine-wide stalled-work scan (see `DowntimeWorkerDeps`). */
   scanStalledPanes?(cwd: string, opts: StalledScanOptions): Promise<StalledPaneCandidate[]>;
   /**
@@ -165,6 +194,41 @@ export interface DowntimeDispatchDeps {
     candidate: StalledPaneCandidate,
     opts: StalledScanOptions,
   ): Promise<{ resumed: boolean }>;
+}
+
+/**
+ * Host-budget admission request (WL-0MVXY0YG7009JMHI F3): one dispatch asking
+ * the machine-scoped ledger whether it may start. Structurally mirrors
+ * `host-dispatch-budget.ts`'s admission input so the dispatch pipeline depends
+ * on the seam, not on the ledger module.
+ */
+export interface DowntimeHostBudgetAdmissionInput {
+  itemId: string;
+  /**
+   * Dispatch kind. The `implement` and `audit` kinds are budgeted; the pipeline
+   * only calls the seam for those two.
+   */
+  kind: DowntimeDispatchKind;
+  /** Worklog root the dispatch operates on. */
+  cwd: string;
+}
+
+/**
+ * Host-budget admission verdict. `live`/`max` are the tier's observed count and
+ * configured cap, carried on the outcome as evidence (F3 AC2).
+ */
+export interface DowntimeHostBudgetAdmission {
+  admitted: boolean;
+  live: number;
+  max: number;
+  /**
+   * Refusal token: `host-budget-implement` | `host-budget-audit` |
+   * `audit-host-saturated` (the audit tier at `maxAudit: 1`, preserving the
+   * retired marker's token) | `host-budget-unknown`.
+   */
+  reason?: string;
+  /** True when an unreadable ledger was rewritten from live panes (AC6). */
+  repaired?: boolean;
 }
 
 /** Audit event recorded for every successful downtime dispatch. */
@@ -361,8 +425,28 @@ export interface DowntimeDispatchOutcome {
    * audit tier was skipped — an empty remaining backlog reports this
    * reason, NEVER 'no-candidate', so the cooldown is not entered while
    * the item is already audited).
+   *
+   * Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3, audit tier
+   * WL-0MVXY0XPF006YUHA F2):
+   * `host-budget-implement` (the ledger reports the implement tier at or over
+   * its machine-wide cap, or the tier is disabled with `maxImplement: 0`),
+   * `host-budget-audit` (the same for the audit tier at any cap other than 1,
+   * including the `maxAudit: 0` kill switch) and `host-budget-unknown` (the
+   * ledger could not be read: the dispatcher fails closed and rewrites it from
+   * the live pane list). The audit tier keeps the retired marker's token
+   * `audit-host-saturated` at its `maxAudit: 1` default, so existing consumers
+   * and logs are unchanged. All of these are NEUTRAL skips — no strike, no
+   * attempt budget, no no-candidate cooldown — so the next idle tick re-checks
+   * as soon as a slot frees. `budget` carries the `live`/`max` evidence.
    */
   reason?: string;
+  /**
+   * Host-budget evidence (WL-0MVXY0YG7009JMHI F3 AC2): the tier's observed
+   * live count and configured cap at admission time. Present on a
+   * `host-budget-implement` / `host-budget-unknown` refusal (and on any other
+   * outcome the admission seam annotated); absent everywhere else.
+   */
+  budget?: { live: number; max: number };
   /**
    * Spawn-level error message ('spawn-failed' trace, e.g. ENOENT on
    * send-to-pi.sh — WL-0MSLWJ3I70031Z8U AC2).

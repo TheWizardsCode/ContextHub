@@ -12,6 +12,46 @@ Backups
 - Before applying migrations the runner creates a timestamped backup of the database in
   `<dbdir>/backups/`.
 - The runner prunes backups to keep the most recent 5 backups to limit disk usage.
+- All migrations in one run are applied inside a single transaction: a migration that
+  refuses to run rolls the whole run back, leaving every migration pending and no data
+  changed (WL-0MW1W61CG005K893).
+
+Migration authoring contracts
+-----------------------------
+Three rules keep an upgrade safe on a database holding real data.
+
+1. **Lossless backfill before any destructive step.** A migration that drops or rewrites a
+   column must first preserve every value it cannot map onto the replacement model. The
+   legacy audit-text migration is the reference case: `20260604-backfill-audit-results`
+   maps parseable `workitems.audit` JSON into `audit_results` (keeping the verbatim source
+   text in `raw_output` as provenance) and preserves every unmappable value verbatim in
+   `legacy_audit_preserved`. Unmappable text is never silently skipped
+   (WL-0MW1W61CG005K893).
+
+   `legacy_audit_preserved` is deliberately a dedicated table rather than
+   `audit_results.raw_output`: `getAuditResult()` treats any existing `audit_results` row as
+   a real verdict (`readyToClose: false`), so parking unmappable legacy text there would
+   misrepresent those items as "audited and rejected" in `wl next`, the audit gates and the
+   JSONL export.
+
+2. **Destructive steps are gated.** `20260604-drop-audit-column` re-runs the preservation
+   sweep and then refuses to drop while any non-empty legacy value has no
+   `audit_results` row and no `legacy_audit_preserved` row. The refusal raises
+   `MigrationUnsafeError`, names the offending work-item ids (first 10 plus a total),
+   aborts the transaction and exits non-zero. A populated `raw_output` or preservation row
+   is sufficient authority to proceed: the gate protects data, not parseability.
+
+3. **`safe` means destructive.** A migration is `safe: false` only when its `apply()` really
+   performs destructive DDL/DML (`DROP COLUMN`, `DROP TABLE`, `DELETE FROM`). Historical
+   entries kept only for their metadata sentinel are declared `neutralised: true`, are
+   always `safe: true`, and render as `no-op (historical)` in `wl doctor upgrade` output so
+   they can never be mistaken for a destructive migration. A lint test enforces both
+   directions (`tests/unit/migration-audit-preservation.test.ts`).
+
+`schemaVersion` is recorded only when the schema is genuinely at HEAD: the runner advances
+it on the zero-pending path (so a stale recorded version cannot produce a permanent
+"expects schemaVersion=9" warning) and refuses to advance it while migrations remain
+pending, for example when a caller filters to safe migrations only.
 
 Running `wl doctor upgrade`
 ---------------------------
@@ -21,13 +61,24 @@ Examples:
 
   `wl doctor upgrade --dry-run`
 
-  This lists pending migrations without applying them.
+  This lists pending migrations without applying them, renders neutralised historical
+  entries as `no-op (historical)`, and reports the legacy audit-text blast radius: the
+  number of items carrying legacy audit text, how many are already mapped into
+  `audit_results`, how many would be preserved verbatim in `legacy_audit_preserved`, how
+  many are already preserved, and how many still have no successor row. The drop
+  migration re-runs the preservation sweep before it checks the gate, so a
+  still-orphaned value is preserved rather than destroyed; the gate refuses only when
+  preservation itself cannot complete, which changes nothing and reports the ids.
+  In `--json` mode the same counts appear as a `preservation` object.
 
 - Apply pending migrations interactively:
 
   `wl doctor upgrade`
 
-  The command lists safe migrations and prompts for confirmation before applying.
+  The command lists safe migrations, prints the same legacy-audit blast-radius summary
+  the dry-run shows (before anything is applied, in human and `--json` output alike; the
+  JSON payload carries it as `preservation`, including on the refusal path alongside
+  `migrationId` and `offendingIds`), and prompts for confirmation before applying.
 
 - Apply pending migrations non-interactively:
 
@@ -134,7 +185,16 @@ Examples:
   `wl doctor upgrade`
 
 The committed hook scripts live in `.githooks/` and include:
-- `pre-push` — auto-syncs Worklog data before pushing, uses `--git-branch refs/worklog/data`
+- `pre-push` — auto-syncs Worklog data before pushing, uses `--git-branch refs/worklog/data`,
+  and on a `dev`/`main` push runs the full canonical suite and **mirrors the gate run's
+  test-cache entries into the main checkout's `.worklog/cache`** (`mirror_suite_cache`).
+  A worktree push (the `implement.py finish` path) caches under
+  `<worktree git dir>/test-cache` because a worktree has no `.worklog/`; mirroring keeps the
+  pushed commit's green full-suite entry visible to post-push verification and to audits.
+  Cache keys are content-addressed, so only entries the main cache lacks are copied, and the
+  copy is fail-soft (a copy failure warns and never blocks the push). This behaviour is part
+  of the embedded canonical template (`PRE_PUSH_HOOK_CONTENT`), so `wl doctor upgrade` never
+  reports a repository that carries it as divergent (WL-0MVHP5S01006GDDV).
 - `post-checkout` — auto-syncs after branch checkout; skips worktrees/temp worktrees
 - `post-merge` — wrapper that delegates to `worklog-post-pull`
 - `post-rewrite` — wrapper that delegates to `worklog-post-pull`

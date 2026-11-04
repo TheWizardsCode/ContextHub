@@ -75,7 +75,7 @@ export function isCacheableReadCommand(command: string): boolean {
  * cached entry. Its JSON form is cacheable (it is in `READ_CACHE_COMMANDS`,
  * WL-0MVI0IS6Y0028KTO); this set keeps the non-JSON form classified as a read.
  */
-export const PURE_READ_COMMANDS: ReadonlySet<string> = new Set(['worklist']);
+export const PURE_READ_COMMANDS: ReadonlySet<string> = new Set(['worklist', 'project']);
 
 /** True when the command is read-only even though the invocation is not cached. */
 export function isPureReadCommand(command: string): boolean {

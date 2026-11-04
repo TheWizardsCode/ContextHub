@@ -26,6 +26,8 @@ export {
   type ConflictFieldDetail,
   type ConflictDetail,
   type NextWorkItemResult,
+  type ForeignDependencyState,
+  type ForeignDependencyView,
   type ShowJsonOutput,
   type DemotedParent,
   type RevertedItem,

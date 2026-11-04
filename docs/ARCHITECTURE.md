@@ -342,6 +342,205 @@ import-cycle-free (WL-0MVP9PCOU004L8HN AC4).
 See [docs/dev/worklog-sync.md](dev/worklog-sync.md) for the dev-facing
 orientation to this layout.
 
+## Interview Module Layout
+
+`src/commands/interview.ts` is the command entry point **and** the stable public
+barrel for the `wl interview` backend. It keeps Commander registration and the
+readline prompt loop; every behavioural concern lives in a focused module under
+`src/interview/`, so a Q/A parsing fix does not require reading the LLM and
+registration code (WL-0MVGKGXN80006V9P).
+
+### Module responsibilities
+
+| Module | Responsibility | Public symbols re-exported by the barrel |
+|---|---|---|
+| `src/commands/interview.ts` | Command registration, prompt loop, deps surface; public barrel re-exporting the frozen 41-symbol surface. | `InterviewPromptLoop`, `InterviewCommandDeps`, `defaultClearPrompt`, default `register` |
+| `src/interview/section.ts` | Clarifying-section heading detection and body extraction. | `ClarifyingSection`, `extractClarifyingSection` |
+| `src/interview/qa.ts` | Q/A parsing, answer-region computation and lossless re-serialisation. | `ClarifyingQAPair`, `parseQAPairs`, `rebuildQAPairs`, `rebuildDescription` |
+| `src/interview/explanation.ts` | Producer-review explanation: evidence formatting, prompt, render, structured fallback, LLM call. | `PRODUCER_REVIEW_INSTRUCTION`, `MAX_PROMPT_CONTEXT_BYTES`, `MAX_AUDIT_SUMMARY_BYTES`, `MAX_AUDIT_RAW_OUTPUT_BYTES`, `MAX_EXPLANATION_LENGTH`, `MAX_EXPLANATION_LINES`, `EXPLANATION_TIMEOUT_MS`, `ProducerReviewAuditContext`, `ProducerReviewExplanationDeps`, `renderExplanation`, `buildExplanationPrompt`, `buildFallbackExplanation`, `ProducerReviewExplanationResult`, `buildProducerReviewExplanationResult`, `buildProducerReviewExplanation` |
+| `src/interview/extraction.ts` | LLM-assisted question extraction plus canonical-section insert/merge. | `EXTRACTION_INSTRUCTION`, `MAX_EXTRACTION_DESCRIPTION_BYTES`, `EXTRACTION_TIMEOUT_MS`, `buildExtractionPrompt`, `parseExtractedQuestions`, `LlmExtractionResult`, `tryExtractQuestionsWithLlm`, `extractQuestionsWithLlm`, `buildExtractedPairs`, `EXTRACTED_SECTION_HEADER`, `insertClarifyingSection` |
+| `src/interview/loop.ts` | Interactive walkthrough: prompt/persist answers, outcome accounting. | `InterviewStore`, `InterviewIO`, `InterviewOutcome`, `InterviewRunOptions`, `runInterview` |
+
+### Cycle-safe layering
+
+The dependency direction is one-way and acyclic:
+
+```
+section / qa
+      ↓
+extraction (type-imports qa)
+      ↓
+loop (imports section, qa, extraction)
+      ↑
+src/commands/interview.ts (entry + barrel; nothing under src/interview/ imports it)
+```
+
+No module under `src/interview/` imports `../commands/interview.js` — not even
+type-only — so the barrel can never be part of a cycle.
+`tests/interview/split-guard.test.ts` enforces this statically, alongside the
+1,000-line ceiling (no exemptions) and the frozen public surface.
+
+### Where to find X in the interview module
+
+| I want to… | Look in |
+|---|---|
+| change how the clarifying-questions heading is found | `src/interview/section.ts` |
+| change Q/A parsing or the lossless re-serialiser | `src/interview/qa.ts` |
+| change the producer-review explanation or its prompt | `src/interview/explanation.ts` |
+| change LLM question extraction or section insert/merge | `src/interview/extraction.ts` |
+| change the interactive walkthrough, persistence or outcome accounting | `src/interview/loop.ts` |
+| change a CLI flag, the JSON shape or the prompt loop | `src/commands/interview.ts` |
+| change the shared surface consumers import | `src/commands/interview.ts` (barrel) |
+
+## GitHub Module Layout
+
+`src/github.ts` is the stable public entry point for the GitHub integration: a
+thin barrel of re-exports with no logic of its own. Every concern it used to
+contain lives in a focused module under `src/github/`, so a payload-mapping fix
+does not require reading the `gh` transport and a label fix does not require
+reading issue CRUD (WL-0MVGKGR2H006MNVG, completed by
+WL-0MVVLY034000MDVA).
+
+### Module responsibilities
+
+| Module | Responsibility | Public symbols re-exported by the barrel |
+|---|---|---|
+| `src/github.ts` | Public barrel: re-exports the frozen 58-symbol surface (52 values + 6 types) and documents where each concern lives. | all 58 |
+| `src/github/types.ts` | Shared type declarations (`GithubConfig`, `GithubIssueRecord`, `GithubIssueComment`, `IssueHierarchy`, `AssignGithubIssueResult`, `LabelEvent`). | 6 types: `GithubConfig`, `GithubIssueRecord`, `GithubIssueComment`, `IssueHierarchy`, `AssignGithubIssueResult`, `LabelEvent` |
+| `src/github/transport.ts` | `gh` CLI plumbing: command execution (sync/async/detailed), scheduling through the central throttler, rate-limit detection, stdout capture and shell escaping. | `setVerboseLogger`, `isSecondaryRateLimitText`, `SecondaryRateLimitError`, `ghApiAsyncScheduled`, `ghApiDetailedScheduled`, `ghApiJsonScheduled` |
+| `src/github/repo-slug.ts` | Repo-slug resolution from config or the `origin` git remote. | `parseRepoSlug`, `getRepoFromGitRemote` |
+| `src/github/markers.ts` | The worklog marker format and body parsers (item id, comment id, parent/child ids and issue numbers). | `buildWorklogMarker`, `buildWorklogCommentMarker`, `stripWorklogMarkers`, `extractWorklogId`, `extractWorklogCommentId`, `extractParentId`, `extractParentIssueNumber`, `extractChildIds`, `extractChildIssueNumbers` |
+| `src/github/labels.ts` | Label concern: prefix normalisation, deterministic colour derivation, single-value category predicates, the label-ensuring paths with their process caches, and the label-event read path. | `normalizeGithubLabelPrefix`, `isSingleValueCategoryLabel`, `ensureGithubLabelsAsync`, `LabelEventCache`, `fetchLabelEventsAsync`, `labelFieldsDiffer`, `getLatestLabelEventTimestamp` |
+| `src/github/hierarchy.ts` | Issue-hierarchy plumbing: sub-issue links, node-id lookup and parent timeline reads. | `getIssueHierarchy`, `getIssueNodeIdAsync`, `getIssueHierarchyAsync`, `addSubIssueLink`, `addSubIssueLinkResult`, `addSubIssueLinkAsync`, `addSubIssueLinkResultAsync`, `listParentIssueNumbersFromTimeline` |
+| `src/github/comments.ts` | Issue-comment CRUD in its synchronous and asynchronous forms, plus private response normalisation. | `listGithubIssueComments`, `listGithubIssueCommentsAsync`, `createGithubIssueComment`, `createGithubIssueCommentAsync`, `updateGithubIssueComment`, `updateGithubIssueCommentAsync`, `getGithubIssueComment`, `getGithubIssueCommentAsync` |
+| `src/github/issues.ts` | Issue CRUD and payload mapping: work item → issue payload, label → work-item fields (including the legacy `P0`–`P3` priority map), issue list/create/update/get (sync and async), assignment and the label-ensuring calls create/update depend on. | `workItemToIssuePayload`, `issueToWorkItemFields`, `createGithubIssue`, `createGithubIssueAsync`, `updateGithubIssue`, `updateGithubIssueAsync`, `getGithubIssue`, `getGithubIssueAsync`, `listGithubIssues`, `listGithubIssuesAsync`, `assignGithubIssue`, `assignGithubIssueAsync` |
+
+The flat siblings `src/github-sync.ts`, `src/github-throttler.ts`,
+`src/github-metrics.ts` and `src/github-pre-filter.ts` are unrelated modules
+and are deliberately **not** part of this family.
+
+### Cycle-safe layering
+
+The dependency direction is strictly bottom-up, so the import graph stays
+acyclic:
+
+```
+types (leaves)
+      ↓
+transport → repo-slug → markers
+      ↓
+labels / hierarchy / comments
+      ↓
+issues (imports transport, markers, labels)
+      ↓
+src/github.ts (barrel — re-exports the family modules; nothing imports it)
+```
+
+No module under `src/github/` imports `../github.js` — not even type-only — so
+the barrel can never be part of a cycle. `tests/github/github-split-guard.test.ts`
+enforces this statically, alongside the 1,000-line ceiling (no exemptions) and
+the frozen public surface (`tests/github/github.split-baseline.json`). The same
+guard also fails when this section drifts: every file path named here must
+exist, every module in the table above must be a real family module, and every
+symbol in its last column must really be re-exported by the barrel
+(WL-0MVVLY0QW007L9ZB).
+
+### Where to find X in the github module
+
+| I want to… | Look in |
+|---|---|
+| change how a work item becomes an issue payload | `src/github/issues.ts` (`workItemToIssuePayload`) |
+| change how labels decode into work-item fields | `src/github/issues.ts` (`issueToWorkItemFields`) |
+| change issue list/create/update/get or assignment | `src/github/issues.ts` |
+| change issue-comment CRUD | `src/github/comments.ts` |
+| change sub-issue links or hierarchy reads | `src/github/hierarchy.ts` |
+| change label names, colours, ensuring or label events | `src/github/labels.ts` |
+| change the marker format or body parsers | `src/github/markers.ts` |
+| change repo-slug resolution | `src/github/repo-slug.ts` |
+| change `gh` execution, throttling or rate-limit handling | `src/github/transport.ts` |
+| change a shared type | `src/github/types.ts` |
+| change the shared surface consumers import | `src/github.ts` (barrel) |
+
+## Doctor Module Layout
+
+`src/commands/doctor.ts` is the single entry point for `wl doctor`
+(`src/command-registry.ts` dynamically imports it for the default export) and a
+thin registrar: it defines the root `doctor` command and delegates every action
+to a single-concern module under `src/commands/doctor/`, so a `prune` fix does
+not require reading the `--fix` prompt and a notice tweak does not require
+reading the prefix rename (WL-0MVGKH1770008MNU).
+
+The CLI-agnostic validators under `src/doctor/` (`status-stage-check.ts`,
+`dependency-check.ts`, `file-paths-check.ts`, `hook-upgrade.ts`,
+`foreign-items-check.ts`, `audit-gaps-check.ts`, `parent-check.ts`,
+`podcast-scripts-check.ts`, `prefix-check.ts`,
+`audit-fingerprint-skew-check.ts`, `fix.ts`) are a **different**
+family: they are pure, `PluginContext`-free logic consumed as-is by the command
+modules.
+
+### Module responsibilities
+
+| Module | Responsibility |
+|---|---|
+| `src/commands/doctor.ts` | Registrar: the root `doctor` command definition (`--fix`, `--prefix`), the module layout documentation, and the ordered calls into the per-subcommand registrars. |
+| `src/commands/doctor/notices.ts` | Shared pending-schema-migration and pending read-cache notices (detection, synthetic findings, human output) plus the cache formatting helpers (`formatCacheBytes`, `DAY_MS`). |
+| `src/commands/doctor/upgrade.ts` | `doctor upgrade`: preview (`--dry-run`) or apply (`--confirm`) pending schema migrations and outdated git hooks. |
+| `src/commands/doctor/stage-sync.ts` | `doctor stage-sync`: detect and (`--apply`) correct stale status/stage combinations. |
+| `src/commands/doctor/prune.ts` | `doctor prune`: hard-delete soft-deleted items older than a threshold, never orphaning linked GitHub issues. |
+| `src/commands/doctor/cache.ts` | `doctor cache`: report and (`--prune`) reclaim the bounded read-cache state directory. |
+| `src/commands/doctor/foreign-items.ts` | `doctor foreign-items`: report foreign-prefix items and, with `--apply`, hard-delete them (optionally rewriting the remote worklog ref). |
+| `src/commands/doctor/prefix.ts` | `doctor prefix`: preview (default) or apply a project ID-prefix rename together with its revertible rename map. |
+| `src/commands/doctor/audit-gaps.ts` | `doctor audit-gaps`: read-only report of `completed`/`in_review` items with no audit record. |
+| `src/commands/doctor/dangling-parents.ts` | `doctor dangling-parents`: detect and (with a fix flag) detach parent references to non-existent items. |
+| `src/commands/doctor/priority.ts` | `doctor priority`: detect non-canonical priorities and (`--apply`) map the mappable ones. |
+| `src/commands/doctor/file-paths.ts` | `doctor file-paths`: check intake-stage items for `**Key Files:**` sections and add placeholders. |
+| `src/commands/doctor/migrate.ts` | `doctor migrate`: import a persistent JSONL snapshot into SQLite, optionally deleting the file. |
+| `src/commands/doctor/validate.ts` | Root `doctor` action: findings aggregation, the interactive `--fix` flow and notice appending. |
+
+### Cycle-safe layering
+
+The dependency direction is strictly downward: the registrar imports every
+per-subcommand module, and no module under `src/commands/doctor/` imports back
+from the registrar (`src/commands/doctor.ts`) — not even type-only. Each module
+is handed a narrow typed context (`program`/`output`/`utils` and `dataPath` only
+where needed) instead of the full `PluginContext` surface, so the family can
+never be part of a cycle.
+
+```
+src/commands/doctor/notices.ts (leaf)
+      ↓
+src/commands/doctor/<subcommand>.ts   (one per doctor subcommand)
+      ↓
+src/commands/doctor/validate.ts       (root action)
+      ↓
+src/commands/doctor.ts (registrar — imports downward only; nothing imports it)
+```
+
+`tests/doctor-line-count-guard.test.ts` enforces the 1,000-line ceiling (no
+exemptions) for the whole family, keeps `src/commands/doctor.ts` a thin
+registrar, and fails when this section drifts (every family module must be
+named here). Behaviour is locked by the untouched
+`tests/doctor-*.test.ts` / `tests/cli/doctor-*.test.ts` suites.
+
+### Where to find X in the doctor module
+
+| I want to… | Look in |
+|---|---|
+| change the validation pass, findings aggregation or the `--fix` prompt | `src/commands/doctor/validate.ts` |
+| change the pending-upgrade / pending read-cache notices | `src/commands/doctor/notices.ts` |
+| change schema-migration or git-hook upgrades | `src/commands/doctor/upgrade.ts` |
+| change stale status/stage detection or repair | `src/commands/doctor/stage-sync.ts` |
+| change soft-delete pruning or its GitHub guard | `src/commands/doctor/prune.ts` |
+| change read-cache reporting or pruning | `src/commands/doctor/cache.ts` |
+| change foreign-prefix reporting or cleanup | `src/commands/doctor/foreign-items.ts` |
+| change the ID-prefix rename | `src/commands/doctor/prefix.ts` |
+| change the audit-gap report | `src/commands/doctor/audit-gaps.ts` |
+| change dangling-parent detection or detaching | `src/commands/doctor/dangling-parents.ts` |
+| change priority validation or mapping | `src/commands/doctor/priority.ts` |
+| change `**Key Files:**` checking or placeholders | `src/commands/doctor/file-paths.ts` |
+| change JSONL → SQLite migration | `src/commands/doctor/migrate.ts` |
+| change which subcommands exist or their registration order | `src/commands/doctor.ts` |
+
 ## File Structure
 
 ```

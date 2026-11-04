@@ -1,6 +1,6 @@
 {
   "name": "worklog",
-  "version": "1.0.25",
+  "version": "1.0.27",
   "description": "A simple experimental issue tracker for AI agents",
   "main": "dist/index.js",
   "type": "module",
@@ -56,6 +56,7 @@
     "js-yaml": "^4.1.1"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.79.10",
     "@earendil-works/pi-coding-agent": "^0.79.10",
     "@types/better-sqlite3": "^7.6.13",
     "@types/chalk": "^0.4.31",

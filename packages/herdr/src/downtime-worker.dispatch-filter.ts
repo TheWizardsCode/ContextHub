@@ -101,7 +101,7 @@ export async function dispatchFromHerdrList(
   deps: DowntimeDispatchDeps,
   items: DowntimeHerdrItem[],
   ctx: { cwd: string; model: string; localPreference?: LocalPreference; localPreferenceMode?: LocalPreferenceMode; freeSlots?: number; frozen: boolean; cpuSaturated: boolean; panesEligible: boolean; auditSlotBudget: number | undefined; pinnedAuditItemId?: string; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean; auditHostSaturated: boolean },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean; auditHostSaturated: boolean; hostBudgetReason?: string; hostBudget?: { live: number; max: number } },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -237,7 +237,13 @@ export async function dispatchFromHerdrList(
     // still be the active-audit item that should cause the skip).
     if (k === 'audit') {
       const active = await deps.getActiveAudit(ctx.cwd);
-      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide') { flags.auditHostSaturated = true; } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
+      // Host-wide budget refusal (WL-0MVXY0XPF006YUHA F2): the source tells the
+      // host-wide ledger/marker check from the per-worklog marker check, and
+      // `reason`/`budget` carry the cap decision (`audit-host-saturated` at
+      // maxAudit 1, `host-budget-audit` otherwise, `host-budget-unknown` on a
+      // fail-closed ledger) plus its live/max evidence, so the terminal reason
+      // is reported rather than inferred here.
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide') { flags.auditHostSaturated = true; if (typeof active.reason === 'string') { flags.hostBudgetReason = active.reason; } if (active.budget !== undefined) { flags.hostBudget = active.budget; } } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
     }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion

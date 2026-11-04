@@ -39,7 +39,7 @@ const entryInvocation = buildStartupInvocation(resolveStartupTarget('auto', repo
 const EXPECTED_GROUPS: Record<string, string[]> = {
   'Issue Management': ['create', 'update', 'delete', 'comment', 'close', 'dep', 'reviewed', 'audit'],
   Status: ['list', 'show', 'next', 'worklist', 'in-progress', 'recent', 'search'],
-  Team: ['export', 'import', 'sync', 'github'],
+  Team: ['export', 'import', 'sync', 'github', 'project'],
   Maintenance: ['migrate', 're-sort', 'doctor', 'unlock'],
   Other: [
     'init',

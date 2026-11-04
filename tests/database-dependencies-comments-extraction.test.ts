@@ -59,6 +59,7 @@ const OWNERSHIP: ReadonlyArray<{
       ['getAllDependencyEdges', 'getAllDependencyEdges'],
       ['isDependencyActive', 'isDependencyActive'],
       ['getActiveDependencyBlockers', 'getActiveDependencyBlockers'],
+      ['getForeignDependencyViews', 'getForeignDependencyViews'],
       ['getInboundDependents', 'getInboundDependents'],
       ['hasActiveBlockers', 'hasActiveBlockers'],
       ['reconcileBlockedStatus', 'reconcileBlockedStatus'],

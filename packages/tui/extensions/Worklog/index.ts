@@ -20,6 +20,7 @@ import { registerSessionHealth } from './session-health.js';
 import { INSTALL_GUARDRAILS } from './lib/guardrails.js';
 import { registerSkillPathTool } from './lib/skill-path.js';
 import { registerRecoveryModule } from './lib/recovery/register-recovery.js';
+import { registerLeakedToolCallRecovery } from './lib/recovery/register-leaked-tool-call.js';
 import { registerLeaseRelease } from './lease-release.js';
 import { registerRequestPriority } from './request-priority.js';
 
@@ -40,6 +41,11 @@ export function createWorklogPiExtension() {
 
     // ── Recovery module (automatic error recovery, `/retry`) ──────────
     registerRecoveryModule(pi);
+
+    // ── Leaked tool-call recovery (repair at `message_end`) ────────────
+    // A model that emits Hermes/Qwen tool-call markup as plain text still
+    // gets its call executed in the same turn (WL-0MW109HU60042BVW).
+    registerLeakedToolCallRecovery(pi);
 
     // ── Lease release (proactive proxy model lease release on /new) ────
     registerLeaseRelease(pi);

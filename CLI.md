@@ -649,8 +649,42 @@ Behavior:
 - `dep add` automatically sets `itemId` status to `blocked` when the dependency is active (i.e. `dependsOnId` is not completed or deleted).
 - `dep rm` warns and exits 0 when ids are missing.
 - `dep list` warns and exits 0 when ids are missing.
-- `dep list --outgoing` shows only outbound dependencies.
-- `dep list --incoming` shows only inbound dependencies.
+
+Options (per subcommand):
+
+- `--prefix <prefix>` — Override the default prefix (`add`, `rm` and `list`).
+- `--outgoing` — `list` only: show outbound dependencies.
+- `--incoming` — `list` only: show inbound dependencies.
+
+**Foreign (cross-project) ids.** An id whose prefix belongs to a discovered
+sibling project is resolved **read-only** from that project's store, and the
+edge is recorded in the local store (see
+[`CONFIG.md`](CONFIG.md#cross-repo-project-discovery-projectsroot)). `dep add`,
+`dep rm` and `dep list` all accept such ids; `wl dep --help` states it too. The
+full workflow — discovery, ambiguity, the fail-safe states and clone
+remediation — is documented in
+[`MULTI_PROJECT_GUIDE.md`](MULTI_PROJECT_GUIDE.md#cross-repo-dependencies).
+
+**Unknown project remediation.** When the prefix belongs to **no** discovered
+project, `dep add` and `dep list` exit non-zero with an actionable payload
+instead of a bare `Work item not found`:
+
+```json
+{
+  "success": false,
+  "error": "No discovered project declares the prefix 'GHOST'. Run `wl project add GHOST --git-url <url>` to clone the project into /home/me/projects, then retry.",
+  "error_code": "unknown_project",
+  "prefix": "GHOST",
+  "projects_root": "/home/me/projects",
+  "remediation": "Run `wl project add GHOST --git-url <url>` to clone the project into /home/me/projects, then retry."
+}
+```
+
+A *same-project* missing id keeps the plain not-found payload — the
+remediation is only for a foreign prefix. `wl next --json` reports the same
+`error_code`, `prefix`, `projects_root` and `remediation` on a
+`foreign_dependencies` entry whose prefix no project declares (it stays a
+non-blocking coordination note, so the dependent remains selectable).
 
 **Automatic unblocking:** Dependents are automatically unblocked when all their blockers
 become inactive (completed, deleted, or moved to a non-blocking stage such as `in_review`
@@ -1223,6 +1257,129 @@ Notes on defaults and behavior:
 - `--since <ISO timestamp>` — Optional; when provided `import` only considers issues updated since that timestamp.
 - `--create-new` (import only) — Optional flag; when set the importer will create new work items for unmarked GitHub issues. Default behavior: enabled unless `githubImportCreateNew` is explicitly set to `false` in configuration.
 
+### `project` (subcommands)
+
+Inspect the sibling projects `wl` discovered for cross-repo dependencies, and
+clone a missing one so its work items can be depended on.
+
+Subcommands:
+
+- `list` — Print the `prefix → path` map of discovered projects, sorted by
+  prefix. Options: `--projects-root <path>` (override the configured projects
+  root for this run).
+- `add <prefix>` — Clone a project into the projects root and record its
+  `prefix → path/gitUrl` mapping in this checkout's `.worklog/config.yaml`.
+  Options:
+  - `--git-url <url>` — Repository URL to clone. Required unless
+    `--interactive` is passed.
+  - `--path <dir>` — Clone target directory (default:
+    `<projectsRoot>/<prefix-lowercased>`). Relative paths resolve against the
+    current directory.
+  - `--interactive` — Prompt for the git URL when `--git-url` is omitted. This
+    is the **only** path that reads stdin: agents cannot answer prompts, so a
+    run without `--git-url` and without this flag fails deterministically
+    (`error_code: "missing_git_url"`).
+  - `--projects-root <path>` — Override the projects root to clone into.
+
+The scan behind `list` is the single implementation used by the whole
+framework (`src/cross-repo/project-registry.ts`): it reads the immediate
+subdirectories of the projects root once and keeps only **git repositories**
+that hold a **genuine** worklog store (`.worklog/initialized` or
+`.worklog/worklog.db`). Hidden folders, non-git folders and worktree-shaped
+stubs (only the tracked `.worklog/config.yaml`) are excluded. The projects
+root is the `projectsRoot` key in `.worklog/config.yaml`, defaulting to the
+parent of the current checkout — see
+[`CONFIG.md`](CONFIG.md#cross-repo-project-discovery-projectsroot).
+
+A prefix declared by more than one project is reported as **ambiguous** — both
+paths are shown and no owner is guessed. A missing or unreadable projects root
+prints a warning and an empty list (never an error).
+
+`project list --json` output shape:
+
+```json
+{
+  "success": true,
+  "projectsRoot": "/home/me/projects",
+  "projects": [
+    { "prefix": "ALPHA", "path": "/home/me/projects/alpha", "ambiguous": false },
+    { "prefix": "DUP", "path": null, "ambiguous": true }
+  ],
+  "warnings": []
+}
+```
+
+#### `project add` behaviour
+
+`wl project add` is the remediation for an `unknown_project` dependency error
+(see [`dep`](#dep-subcommands)): it makes the missing project present at the
+location discovery scans and records the mapping explicitly.
+
+- **Clone only when absent.** An existing directory is never re-cloned: a
+  second run against a correct clone is a no-op that reports
+  `"cloned": false`, keeps the clone (untracked files included) and re-records
+  the same mapping.
+- **Prefix validation.** The cloned (or existing) checkout's
+  `.worklog/config.yaml` must declare the requested prefix. A mismatch exits
+  non-zero with `error_code: "prefix_mismatch"`, names both prefixes, removes a
+  clone it just made and records **no** mapping.
+- **Clone failure.** An unreachable URL exits non-zero with
+  `error_code: "clone_failed"`; a partial clone directory is removed and no
+  mapping is recorded.
+- **Credentials.** `git clone` runs with the operator's existing git
+  configuration; the command never prompts for credentials.
+- **Config preservation.** Only the `projects.<PREFIX>` entry is added — every
+  other `.worklog/config.yaml` key is preserved.
+
+`--json` success shape:
+
+```json
+{
+  "success": true,
+  "prefix": "GAMMA",
+  "path": "/home/me/projects/gamma",
+  "gitUrl": "git@github.com:example/gamma.git",
+  "cloned": true
+}
+```
+
+`--json` failure shape (written to stderr, like every CLI error payload):
+
+```json
+{
+  "success": false,
+  "error": "Prefix mismatch: … declares DELTA but GAMMA was requested. No mapping was recorded.",
+  "error_code": "prefix_mismatch",
+  "prefix": "GAMMA",
+  "declared_prefix": "DELTA"
+}
+```
+
+`error_code` is one of `invalid_prefix`, `missing_git_url`, `invalid_project`,
+`prefix_mismatch`, `clone_failed` or `config_error`.
+
+`list` examples:
+
+```sh
+wl project list
+wl --json project list
+wl project list --projects-root /srv/checkouts
+```
+
+`add` examples:
+
+```sh
+wl project add GAMMA --git-url git@github.com:example/gamma.git
+wl --json project add GAMMA --git-url git@github.com:example/gamma.git --path /srv/checkouts/gamma
+wl project add GAMMA --interactive   # prompts for the URL (only interactive path)
+```
+
+> **Discovery still requires a genuine store.** The recorded mapping is a
+> durable record of where the project lives; discovery continues to derive the
+> `prefix → path` map from each sibling's own store. A freshly cloned
+> repository that has no local `.worklog/worklog.db` yet becomes discoverable
+> once its store exists (for example after `wl sync` inside the clone).
+
 ### `export` [options]
 
 Export work items and comments to a JSONL file.
@@ -1317,6 +1474,7 @@ Subcommands:
 - `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
 - `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
+- `prefix [options]` — Preview (default, read-only) or apply a rename of the project's ID prefix, rewriting every ID-bearing record in the SQLite store plus the `prefix:` entry in `.worklog/config.yaml` and writing a revertible rename map. Options: `--to <prefix>` (target prefix; ASCII letters and digits only), `--apply` (request the rename and prompt for an explicit `y`; fails closed without a TTY), `--confirm` (apply without prompting; required for non-interactive runs), `--prefix <prefix>` (override the source prefix). See [`doctor prefix`](#doctor-prefix-options).
 - `audit-gaps [options]` — Read-only report of every `completed`/`in_review` item with **no audit record**, showing root vs `child of <parent-id>`, age (from `activityAt`/`updatedAt`), and coverage/waiver status (`uncovered` / `covered` / `waived`). Omits items with a fresh audit; a child covered by a fresh-audited direct parent is reported as `covered`, not flagged. Options: `--prefix <prefix>`. No `--apply` (read-only).
 - `cache [options]` — Report or prune the bounded read-cache **state directory** (`<cache-dir>/state`, one small counter file per worklog dir ever seen; see `CONFIG.md`). Options: `--prune` (remove stale counters and enforce the file bound; default is report-only), `--dry-run` (report-only; always wins when combined with `--prune`), `--max-files <n>` (counter bound, default 1000), `--ttl-days <n>` (remove counters untouched for this many days, default 7). Works without a worklog (pure cache hygiene).
 
@@ -1338,6 +1496,10 @@ wl doctor foreign-items                  # Report foreign-prefix work items (rea
 wl doctor foreign-items --dry-run --json # JSON report of foreign items
 wl doctor foreign-items --apply          # Hard-delete foreign items (destructive)
 wl doctor foreign-items --apply --push  # Clean DB and rewrite remote worklog ref
+wl doctor prefix                        # Preview an ID-prefix rename (read-only; default)
+wl doctor prefix --to CC                # Preview renumbering every ID to the CC prefix
+wl doctor prefix --to CC --confirm      # Apply the rename (writes a rename map)
+wl doctor prefix --to CC --apply        # Interactive apply (prompts; fails closed without a TTY)
 wl doctor audit-gaps                    # Report completed/in_review items with no audit (read-only)
 wl doctor audit-gaps --json             # Machine-readable audit-gap report
 wl doctor cache                         # Report read-cache state counters (dry run)
@@ -1374,6 +1536,53 @@ When the read-cache state directory holds pruneable counters, a synthetic
 finding with `checkId: "read-cache.state"` and `type: "maintenance"` is appended
 the same additive way (`itemId: null`); its `message` names the counts and points
 at `wl doctor cache` / `wl doctor cache --prune`.
+
+### `doctor prefix` [options]
+
+Preview (default) or apply a rename of the project's ID prefix, rewriting every
+ID-bearing record in the SQLite store plus the `prefix:` entry in
+`.worklog/config.yaml` (WL-0MVZ2U4E0003IVSZ). Prefixes are validated (non-empty,
+ASCII alphanumeric, no `-`); only the substring before the first `-` changes, so
+suffixes are preserved.
+
+Options:
+
+- `--to <prefix>` — Target prefix (defaults to the current prefix: pure report).
+- `--apply` — Request the rename; prompts for an explicit `y` and fails closed
+  (non-zero exit, zero writes) when stdin is not a TTY.
+- `--confirm` — Apply the rename without prompting (required for
+  non-interactive runs).
+- `--prefix <prefix>` — Override the default prefix (optional).
+
+Preview is the default: a bare `wl doctor prefix` (or `--to` without
+`--apply`/`--confirm`) reports counts and sample renames and writes nothing. The
+write path must be requested explicitly. `--apply` then runs the confirmation
+gate: only an answer of `y` proceeds (`yes`, `n`, an empty answer and anything
+else decline), and a non-interactive session without `--confirm` refuses.
+
+Exit codes:
+
+- `0` — preview rendered, rename applied, an interactive prompt declined, or an
+  idempotent replay (the store already carries the target prefix).
+- `1` — refusal or validation error: an invalid `--to` value, a write requested
+  in a non-interactive session without `--confirm`, or a missing
+  `.worklog/config.yaml`. Nothing is written on any non-zero exit.
+
+Examples:
+
+```sh
+wl doctor prefix --to CC               # Preview counts + sample renames (no writes)
+wl --json doctor prefix --to CC        # Machine-readable preview
+wl doctor prefix --to CC --confirm     # Apply; writes .worklog/prefix-rename-<timestamp>.json
+wl doctor prefix --to CC --apply       # Interactive apply (prompts for `y`)
+```
+
+The JSON report carries `success`, `dryRun`, `applied`, `fromPrefix`,
+`toPrefix`, `counts` (`items`, `comments`, `dependencyEdges`, `auditRecords`),
+`samples` (up to 10 `{ from, to }` pairs), `renamedCount` and `renameMapPath`
+(`null` unless this run wrote). Re-running a completed rename is an idempotent
+no-op (`applied: false`, `renamedCount: 0`, `renameMapPath: null`). See
+[DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#renaming-the-project-prefix-wl-doctor-prefix).
 
 ### `re-sort` [options]
 
