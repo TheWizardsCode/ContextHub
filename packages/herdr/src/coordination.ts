@@ -49,6 +49,19 @@ export const COORDINATION_LOCK_FILE = 'downtime-coordination.lock';
 /** Current coordination file format version. */
 export const COORDINATION_FILE_VERSION = 1;
 
+/** Leader lock file name (mirrors `leader-election.ts`). */
+export const LEADER_LEASE_FILE = 'downtime-leader-lease.json';
+
+/**
+ * How long a leader block stays believable (WL-0MW1VINII003IL7R).
+ *
+ * Two lease generations (the lease TTL is 300 s and the leader refreshes its
+ * block on every leader check-in — 240 s). That tolerates one missed check-in
+ * while a dead leader can never masquerade as live for more than two
+ * generations. Read rule only: the block is written every check-in regardless.
+ */
+export const DEFAULT_LEADER_BLOCK_STALE_MS = 600_000;
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 /**
@@ -75,10 +88,46 @@ export interface CoordinationEntry {
   lastUpdated: string;
 }
 
+/**
+ * The elected leader's identity and health, recorded in the shared file
+ * alongside (but never inside) the offer list (WL-0MW1VINII003IL7R).
+ *
+ * Why it exists: the leader removes its OWN entry whenever its window is empty
+ * ("no dead offers"), so the one instance permitted to dispatch could be
+ * absent from `entries` entirely. During the 2026-11-04 outage the file showed
+ * five healthy offers while nothing dispatched anywhere for eight hours, and
+ * the refusals lived only in one project's per-root log. This block makes the
+ * dispatcher and its latest outcome readable from the shared state.
+ *
+ * It is EVIDENCE, never an offer: no dispatch path may read it as work.
+ */
+export interface CoordinationLeader {
+  /** Instance id of the lease holder. */
+  instanceId: string;
+  /** Worklog root the leader dispatches for (its own cwd). */
+  worklogRoot: string;
+  /**
+   * The leader's most recent recorded dispatch DECISION token (e.g.
+   * `slots-unavailable`, `capacity-saturated`, `no-candidate`), or null when it
+   * has recorded none. Observational: it is the standing refusal signal an
+   * operator needs when nothing is being dispatched.
+   */
+  lastDecisionReason: string | null;
+  /** ISO-8601 UTC time of that decision, or null. */
+  lastDecisionAt: string | null;
+  /** ISO-8601 UTC heartbeat — refreshed on every leader check-in. */
+  lastUpdated: string;
+}
+
 /** Full coordination file shape. */
 export interface CoordinationData {
   version: number;
   entries: CoordinationEntry[];
+  /**
+   * The elected leader (WL-0MW1VINII003IL7R). OPTIONAL so a legacy file parses
+   * unchanged and a pre-feature reader simply ignores the key.
+   */
+  leader?: CoordinationLeader;
 }
 
 // ── Low-level read/write (lockless, atomic) ───────────────────────────
@@ -175,10 +224,38 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
         lastUpdated: typeof entry.lastUpdated === 'string' ? entry.lastUpdated : new Date(0).toISOString(),
       });
     }
-    return { version: typeof data.version === 'number' ? data.version : COORDINATION_FILE_VERSION, entries };
+    return {
+      version: typeof data.version === 'number' ? data.version : COORDINATION_FILE_VERSION,
+      entries,
+      ...parseLeader(data.leader),
+    };
   } catch {
     return null; // missing / unreadable / corrupt → fail-safe
   }
+}
+
+/**
+ * Validate a leader block read from disk (WL-0MW1VINII003IL7R). A malformed
+ * block is DROPPED, never fatal: a bad leader record must not cost a reader its
+ * offer list. Returns `{}` when absent/invalid, `{ leader }` when usable.
+ */
+function parseLeader(raw: unknown): { leader?: CoordinationLeader } {
+  if (typeof raw !== 'object' || raw === null) return {};
+  const o = raw as Partial<CoordinationLeader>;
+  if (typeof o.instanceId !== 'string' || o.instanceId.length === 0) return {};
+  return {
+    leader: {
+      instanceId: o.instanceId,
+      worklogRoot: typeof o.worklogRoot === 'string' ? o.worklogRoot : '',
+      lastDecisionReason:
+        typeof o.lastDecisionReason === 'string' && o.lastDecisionReason.length > 0
+          ? o.lastDecisionReason
+          : null,
+      lastDecisionAt:
+        typeof o.lastDecisionAt === 'string' && o.lastDecisionAt.length > 0 ? o.lastDecisionAt : null,
+      lastUpdated: typeof o.lastUpdated === 'string' ? o.lastUpdated : '',
+    },
+  };
 }
 
 /** Normalize an entry so `directory` and `worklogRoot` are both populated (compat). */
@@ -325,6 +402,78 @@ export function getEntry(
   const data = readCoordinationFile(worklogDir);
   if (data === null) return null;
   return data.entries.find((e) => e.instanceId === instanceId) ?? null;
+}
+
+// ── Leader block (WL-0MW1VINII003IL7R) ────────────────────────────────
+
+/**
+ * Record or refresh the elected leader's identity + latest decision outcome.
+ *
+ * Written by the lease holder on every leader check-in (and on election), so
+ * the shared state always names the dispatcher even when its own offer was
+ * removed. `entries` is left EXACTLY as it is — this never creates or
+ * resurrects an offer.
+ *
+ * Fail-safe: returns false on lock contention or I/O failure; never throws.
+ */
+export function upsertLeader(
+  worklogDir: string,
+  leader: CoordinationLeader,
+): boolean {
+  if (leader.instanceId.length === 0) return false;
+  const normalized: CoordinationLeader = {
+    instanceId: leader.instanceId,
+    worklogRoot: leader.worklogRoot,
+    lastDecisionReason: leader.lastDecisionReason ?? null,
+    lastDecisionAt: leader.lastDecisionAt ?? null,
+    lastUpdated:
+      typeof leader.lastUpdated === 'string' && leader.lastUpdated.length > 0
+        ? leader.lastUpdated
+        : new Date().toISOString(),
+  };
+  return withCoordLock(worklogDir, () => {
+    const data: CoordinationData = readCoordinationFile(worklogDir) ?? {
+      version: COORDINATION_FILE_VERSION,
+      entries: [],
+    };
+    return writeCoordinationFile(worklogDir, { ...data, leader: normalized });
+  }) ?? false;
+}
+
+/**
+ * Read the leader block, applying the freshness rule.
+ *
+ * Returns null when absent, malformed, or STALE (older than `staleMs`, default
+ * {@link DEFAULT_LEADER_BLOCK_STALE_MS}): a crashed leader must never read as a
+ * live one. Fail-safe: a missing/corrupt file also yields null.
+ */
+export function getLeader(
+  worklogDir: string,
+  opts: { nowMs?: number; staleMs?: number } = {},
+): CoordinationLeader | null {
+  const data = readCoordinationFile(worklogDir);
+  const leader = data?.leader;
+  if (leader === undefined) return null;
+  const nowMs = opts.nowMs ?? Date.now();
+  const staleMs = opts.staleMs ?? DEFAULT_LEADER_BLOCK_STALE_MS;
+  const updatedMs = Date.parse(leader.lastUpdated);
+  if (!Number.isFinite(updatedMs)) return null; // unparseable → not live
+  if (nowMs - updatedMs > staleMs) return null; // stale → not live
+  return leader;
+}
+
+/**
+ * Remove the leader block (lease release / leadership hand-off).
+ * Returns true when a block was removed, false when none was present or the
+ * operation failed (fail-safe).
+ */
+export function removeLeader(worklogDir: string): boolean {
+  return withCoordLock(worklogDir, () => {
+    const data = readCoordinationFile(worklogDir);
+    if (data === null || data.leader === undefined) return false;
+    const { leader: _dropped, ...rest } = data;
+    return writeCoordinationFile(worklogDir, rest);
+  }) ?? false;
 }
 
 /**

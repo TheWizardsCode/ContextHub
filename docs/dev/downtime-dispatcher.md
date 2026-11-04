@@ -341,8 +341,42 @@ WL-0MTF0KLO10043YAN) stores one entry per herdr instance — `directory` + `work
 {"version":1,"entries":[
   {"instanceId":"<uuid>","workItemId":"<wl-id>","directory":"<worklog-root>","worklogRoot":"<worklog-root>",
    "assignedAt":"<iso>","lastUpdated":"<iso>"}
-]}
+],
+ "leader":{"instanceId":"<uuid>","worklogRoot":"<worklog-root>",
+           "lastDecisionReason":"slots-unavailable","lastDecisionAt":"<iso>","lastUpdated":"<iso>"}}
 ```
+
+**The leader block (WL-0MW1VINII003IL7R).** The `entries` array is an OFFER list,
+and a check-in removes the instance's own entry whenever its window is empty
+("no dead offers"). That left the one instance permitted to dispatch — the
+elected leader — absent from the file entirely, so a machine-wide stop was
+invisible: during the 2026-11-04 overnight outage the file listed five healthy
+offers while nothing dispatched anywhere for eight hours, and the refusals
+existed only in one project's per-root `downtime-coordination.log`.
+
+The top-level `leader` block fixes that. It is written by the lease holder on
+election, on every leader check-in (4-minute heartbeat) and whenever a decision
+token changes, and it records:
+
+| Field | Meaning |
+|---|---|
+| `instanceId` | the instance holding the lease — the only one that may dispatch |
+| `worklogRoot` | the root the leader dispatches for (its own cwd) |
+| `lastDecisionReason` | its most recent recorded no-dispatch reason (`slots-unavailable`, `capacity-saturated`, `no-candidate`, …), or `null` |
+| `lastDecisionAt` | when that reason was first recorded, or `null` |
+| `lastUpdated` | heartbeat, refreshed on every leader check-in |
+
+Read rule: `getLeader()` returns `null` for an absent, malformed or **stale**
+block — older than `DEFAULT_LEADER_BLOCK_STALE_MS` (600 s, two lease
+generations, tolerating one missed 240 s check-in). A crashed leader therefore
+never reads as live.
+
+**It is evidence, never an offer.** No dispatch path reads the block:
+`hasPeerOffer`, offer selection, the own-backlog fallback and every gate
+consume `entries` only, and writing the block never creates or resurrects an
+entry. It is additive and cross-version safe — a pre-feature instance ignores
+the key, a new instance reads a legacy file (no `leader`) exactly as before, and
+a malformed block is dropped rather than costing the reader its offer list.
 
 Legacy per-worklog `<worklog-root>/.worklog/downtime-coordination.json` is retired
 (F6 WL-0MTII4CWT00452HU): once the machine dir is authoritative, stale per-worklog
@@ -1865,7 +1899,10 @@ coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
 (`.worklog/downtime-coordination.json`) is an **offer list, not the
 backlog**: the leader removes each entry after dispatching (see step 4
 above), so an empty file right after a dispatch is a *transient gap* while
-the worklog still holds dispatchable work. Therefore:
+the worklog still holds dispatchable work. Its top-level `leader` block
+(WL-0MW1VINII003IL7R) is a separate, non-offer record — "no peer offer" and
+"the leader block names a leader" are independent facts, and nothing here
+reads the block as work. Therefore:
 
 - **Probe before pause:** a coordination-mode `no-candidate` outcome probes
   the worklog (`computeMostImportantItem`) before any cooldown. A
@@ -3157,7 +3194,7 @@ likewise re-read live every tick and clamped on load
 | ~~`~/.herdr/downtime/downtime-dispatch-tab-anchors.json`~~ | **Retired** (per-prefix map). Item tabs are discovered via `herdr tab list`; a leftover file is no longer read. |
 | `~/.herdr/downtime/downtime-leader.lock` | Leader lock file (machine dir, `O_CREAT\|O_EXCL`) |
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
-| `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) |
+| `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
 | `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `implement`/`audit` dispatch (WL-0MVXY0WQF0069YDJ); audit entries stale-release after 2 h |
 | `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override) |

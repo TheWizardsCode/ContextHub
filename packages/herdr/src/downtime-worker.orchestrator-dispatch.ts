@@ -41,7 +41,7 @@ import {
 } from './downtime-worker.constants.js';
 import { dispatchFromCoordination } from './downtime-worker.coordination-leader.js';
 import { computeMostImportantItem } from './downtime-worker.coordination.js';
-import { hasPeerOffer, readCoordinationFile } from './coordination.js';
+import { hasPeerOffer, readCoordinationFile, upsertLeader } from './coordination.js';
 import { countFreeUnownedSlots, evaluatePrefillPacing } from './downtime-worker.idle.js';
 import { dispatchDowntimeWork } from './downtime-worker.dispatch.js';
 import {
@@ -272,6 +272,22 @@ export async function recordDecision(
   }
   ctx.lastDecisionReason = reason;
   ctx.lastDecisionAt = now;
+  // Leader-block outcome refresh (WL-0MW1VINII003IL7R): keep the shared
+  // coordination state's `leader.lastDecisionReason`/`lastDecisionAt` in step
+  // with the standing refusal, so "why is nothing being dispatched?" is
+  // answerable from the machine file alone. Written here (not on the
+  // rate-limited repeat path) so an unchanged reason costs no extra write —
+  // the leader's 4-minute check-in refreshes the block's heartbeat.
+  // Observational only: never an offer, never a gate. Fail-safe by itself.
+  if (ctx.leaderState && ctx.opts.coordinationDir !== undefined) {
+    upsertLeader(ctx.opts.coordinationDir, {
+      instanceId: ctx.instanceId,
+      worklogRoot: cwd,
+      lastDecisionReason: reason,
+      lastDecisionAt: new Date(now).toISOString(),
+      lastUpdated: new Date(now).toISOString(),
+    });
+  }
   const entry: CoordinationLogEntry = {
     kind: 'decision',
     operation: 'no-dispatch',

@@ -20,7 +20,7 @@
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  */
 
-import { getEntry, hasPeerOffer, readCoordinationFile } from './coordination.js';
+import { getEntry, hasPeerOffer, readCoordinationFile, upsertLeader } from './coordination.js';
 import { appendCoordinationLogEntry, coordinationLogPolicyFromConfig } from './downtime-log.js';
 import { DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS } from './capacity-starvation.js';
 import { disableMarkerExists } from './downtime-disable-marker.js';
@@ -178,6 +178,19 @@ export async function runLeaderElectionAndCheckIn(
           },
           coordinationLogPolicyFromConfig(cfg),
         );
+        // On a leadership win the block is written IMMEDIATELY rather than at
+        // the next check-in: a takeover must name the new dispatcher at once,
+        // and a fresh leader has no recorded decision yet (null token) so the
+        // block can never inherit the previous holder's stale refusal
+        // (WL-0MW1VINII003IL7R).
+        upsertLeader(ctx.opts.coordinationDir!, {
+          instanceId: ctx.instanceId,
+          worklogRoot: cfg.cwd,
+          lastDecisionReason: ctx.lastDecisionReason,
+          lastDecisionAt:
+            ctx.lastDecisionAt > 0 ? new Date(ctx.lastDecisionAt).toISOString() : null,
+          lastUpdated: new Date(tickNow).toISOString(),
+        });
       }
     }
 
@@ -188,6 +201,14 @@ export async function runLeaderElectionAndCheckIn(
     // instance contributes its most important item; the single elected
     // leader dispatches from the list. Leader every 4 min
     // (WL-0MTOCBP1D009P4U3); clamp ≥ 60 s.
+    //
+    // Leader visibility (WL-0MW1VINII003IL7R): the elected leader's identity
+    // and latest decision token are recorded in a separate `leader` block
+    // (`upsertLeader`). The check-in removes the leader's OWN offer whenever
+    // its window is empty ("no dead offers"), so before this the one instance
+    // permitted to dispatch could be absent from the file entirely — the
+    // 2026-11-04 outage showed five healthy offers and no dispatcher for eight
+    // hours. The block is evidence only; `entries` semantics are untouched.
     //
     // WL-0MTMPSCL8000O45H AC2 — immediate re-offer when the owner's own
     // entry was removed by the leader's dispatch (push-based re-offer
@@ -263,6 +284,22 @@ export async function runLeaderElectionAndCheckIn(
       } catch {
         // Fail-safe: a throwing check-in (stub or regression) must never
         // crash the worker — retried at the next cadence.
+      }
+      // Leader-block heartbeat (WL-0MW1VINII003IL7R): record the dispatcher
+      // and its latest decision token regardless of the check-in's offer
+      // outcome — the empty-window case is precisely the one that used to be
+      // invisible. Written after the check-in so the block never races the
+      // offer upsert for the lock, and OUTSIDE the try above so a throwing
+      // check-in cannot suppress it. `upsertLeader` is itself fail-safe.
+      if (ctx.leaderState) {
+        upsertLeader(ctx.opts.coordinationDir!, {
+          instanceId: ctx.instanceId,
+          worklogRoot: cfg.cwd,
+          lastDecisionReason: ctx.lastDecisionReason,
+          lastDecisionAt:
+            ctx.lastDecisionAt > 0 ? new Date(ctx.lastDecisionAt).toISOString() : null,
+          lastUpdated: new Date(tickNow).toISOString(),
+        });
       }
     }
 
