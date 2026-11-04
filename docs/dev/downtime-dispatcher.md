@@ -490,6 +490,34 @@ signal (and `localAbandonedSlots` exposes the self-contradictory snapshot), so
 "the proxy's `/slots` query is failing" is distinguishable from "only the
 counts are cached" using the decision log alone.
 
+#### Why the header keeps a single `no-slots` token (WL-0MW2F2B5W004V57W)
+
+**Decision: the header blocking token is NOT split.**
+`decisionHeaderToken('slots-unavailable')` returns `no-slots` for a
+stale-detail snapshot and for a plainly unusable payload alike
+(WL-0MW1VITA8009RLHQ AC4). This is deliberate, for three reasons:
+
+1. **The header answers one question.** `no-slots` is displayed as
+   `[downtime held: no-slots]` in the herdr worklist and answers only *can this
+   worker dispatch right now?* The answer is `no` in both cases, and so is the
+   operator's action (fix or wait out the proxy's `/slots` path).
+2. **The *why* is multi-valued and per-tick.** Three independent staleness
+   flags plus the proxy's abandoned-slot count would each need a header
+   segment, overflowing a short, stable blocking label and drifting the header
+   away from the decision log's vocabulary of record.
+3. **The distinction is already recorded elsewhere, on the same entry.** The
+   `slots-unavailable` decision entry carries `slotsStale`,
+   `slotsDetailStale`, `slotCountsStale` and `localAbandonedSlots` (table
+   above), so "frozen detail / fresh counts" is attributable from the decision
+   log alone. Splitting the header token would duplicate that evidence and
+   change the worklist's blocking display for no diagnostic gain.
+
+The retained-single-token decision is pinned by a test in
+`packages/herdr/src/downtime-worker.stale-detail.test.ts` ("keeps one
+`no-slots` header token"): a frozen-detail payload and a plain unusable
+payload both report `blockReason === 'no-slots'`, while only the stale one
+records `slotsDetailStale` / `slotCountsStale` on its decision entry.
+
 ### Prefill serialisation pacing (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX)
 
 **Problem:** the proxy serialises local prefills (`local_max_concurrent_prefills`,

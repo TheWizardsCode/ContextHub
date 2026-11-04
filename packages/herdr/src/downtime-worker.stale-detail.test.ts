@@ -24,6 +24,12 @@
  *     self-contradictory snapshot (counts say free, detail says all slots busy)
  *     is visible in the record.
  *  5. A legacy payload records none of the new fields (log shape unchanged).
+ *  6. The herdr header keeps ONE `no-slots` blocking token for every unusable
+ *     per-slot detail (WL-0MW2F2B5W004V57W, parent AC4): the staleness
+ *     distinction lives on the decision entry, not in the header — see the
+ *     rationale in `decisionHeaderToken` and
+ *     docs/dev/downtime-dispatcher.md → "Why the header keeps a single
+ *     `no-slots` token".
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -37,7 +43,7 @@ import {
   type DowntimeWorkerDeps,
 } from './downtime-worker.js';
 import { usablePerSlotSlots, evaluateIdle, countFreeUnownedSlots } from './downtime-worker.idle.js';
-import { capacityEvidence } from './downtime-worker.constants.js';
+import { capacityEvidence, decisionHeaderToken } from './downtime-worker.constants.js';
 import { readCoordinationLogEntries } from './downtime-log.js';
 
 // ── Payload fixtures ───────────────────────────────────────────────────
@@ -255,6 +261,46 @@ describe('slots-unavailable decision entries are attributable', () => {
       });
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps one `no-slots` header token: the staleness distinction lives in the record', async () => {
+    const staleRoot = mkdtempSync(join(tmpdir(), 'herdr-stale-token-'));
+    const plainRoot = mkdtempSync(join(tmpdir(), 'herdr-plain-token-'));
+    try {
+      // Frozen snapshot vs a plainly unusable (empty) per-slot payload. Both
+      // are `slots-unavailable`; the header must NOT split (AC4 decision:
+      // the blocking state an operator acts on is identical either way).
+      const staleWorker = makeWorker(frozenSnapshotPayload(), staleRoot);
+      await staleWorker.tick();
+      const plainWorker = makeWorker({ ...legacyPayload(), slots: [] }, plainRoot);
+      await plainWorker.tick();
+
+      expect(decisionHeaderToken('slots-unavailable')).toBe('no-slots');
+      expect(staleWorker.blockReason).toBe('no-slots');
+      expect(plainWorker.blockReason).toBe('no-slots');
+
+      // The distinction the header deliberately omits IS attributable on the
+      // decision entry — and the plain payload's entry keeps its old shape.
+      await vi.waitFor(async () => {
+        const stale = (await readCoordinationLogEntries(staleRoot)).filter((e) => e.kind === 'decision');
+        expect(stale).toHaveLength(1);
+        expect(stale[0]).toMatchObject({
+          reason: 'slots-unavailable',
+          slotsStale: true,
+          slotsDetailStale: true,
+          slotCountsStale: false,
+          localAbandonedSlots: 2,
+        });
+        const plain = (await readCoordinationLogEntries(plainRoot)).filter((e) => e.kind === 'decision');
+        expect(plain).toHaveLength(1);
+        expect(plain[0].reason).toBe('slots-unavailable');
+        expect(plain[0]).not.toHaveProperty('slotsDetailStale');
+        expect(plain[0]).not.toHaveProperty('slotCountsStale');
+      });
+    } finally {
+      rmSync(staleRoot, { recursive: true, force: true });
+      rmSync(plainRoot, { recursive: true, force: true });
     }
   });
 

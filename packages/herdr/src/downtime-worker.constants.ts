@@ -141,6 +141,26 @@ export function decisionHeaderToken(reason: string): string {
     case 'review-queue-hold':
       return 'review-queue';
     case 'slots-unavailable':
+      // ONE token for every unusable per-slot detail, deliberately
+      // (WL-0MW1VITA8009RLHQ AC4, recorded in follow-up WL-0MW2F2B5W004V57W).
+      // A stale-detail snapshot (`slots_detail_stale` / `slot_counts_stale`)
+      // is NOT split into its own header token, because:
+      //  - the header blocking token answers one question — "can this worker
+      //    dispatch right now?" — and the answer, and the operator's action
+      //    (fix or wait out the proxy's `/slots` path), are identical whether
+      //    the detail is stale or plainly unusable;
+      //  - the *why* is per-tick, multi-valued evidence (three independent
+      //    staleness flags plus the proxy's abandoned-slot count) that a short,
+      //    stable header segment cannot carry without overflowing the
+      //    worklist's `[downtime held: …]` label or drifting from the decision
+      //    log's vocabulary of record.
+      // The distinction that AC4 asks for IS recorded, on the very same
+      // `slots-unavailable` decision entry, as `slotsStale`,
+      // `slotsDetailStale`, `slotCountsStale` and `localAbandonedSlots`
+      // (see `capacityEvidence` below), so a refusal caused by a frozen
+      // snapshot is attributable from the decision log alone. Documented in
+      // docs/dev/downtime-dispatcher.md → "Why the header keeps a single
+      // `no-slots` token" and pinned by downtime-worker.stale-detail.test.ts.
       return 'no-slots';
     case 'capacity-saturated':
       return 'saturated';
