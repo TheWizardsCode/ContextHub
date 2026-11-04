@@ -77,6 +77,30 @@ export interface LlamaStatus {
    */
   slots_stale?: boolean;
   /**
+   * Proxy degradation flag (WL-0MW1VITA8009RLHQ): `true` when the per-slot
+   * `slots` DETAIL itself is a last-known snapshot, independent of whether the
+   * COUNTS are fresh. Served alongside `slots_stale`; ABSENT on pre-feature
+   * proxies. EVIDENCE ONLY — availability continues to be governed solely by
+   * `slots_stale` + the per-slot detail (WL-0MUXVPXAZ005RESW). Its purpose is
+   * attribution: a refusal caused by a frozen snapshot must be distinguishable
+   * from one caused by an unreadable payload.
+   */
+  slots_detail_stale?: boolean;
+  /**
+   * Proxy degradation flag (WL-0MW1VITA8009RLHQ): `true` when the served slot
+   * COUNTS (`available_slots`/`total_slots`) are last-known. Absent on
+   * pre-feature proxies. EVIDENCE ONLY — `available_slots` is never a dispatch
+   * budget (WL-0MUXVPXAZ005RESW removed the count-based fallback).
+   */
+  slot_counts_stale?: boolean;
+  /**
+   * Proxy-reported count of abandoned local slots (WL-0MW1VITA8009RLHQ).
+   * Advisory EVIDENCE ONLY: it exposes a self-contradictory snapshot (counts say
+   * capacity is free while the cached per-slot detail says every slot is busy)
+   * in the decision record. Absent on pre-feature proxies.
+   */
+  local_abandoned_slots?: number;
+  /**
    * Per-slot identity (LP-0MSG5TA7Y002GN39): served by proxies that expose
    * slot-level detail, and the ONLY trusted availability source
    * (WL-0MUXVPXAZ005RESW). When present and non-stale, the downtime worker

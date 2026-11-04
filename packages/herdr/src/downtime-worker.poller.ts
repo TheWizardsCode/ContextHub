@@ -192,6 +192,31 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     slotsStale = o.slots_stale;
   }
 
+  // Per-signal staleness (WL-0MW1VITA8009RLHQ): the proxy serves THREE
+  // independent flags and `slots_stale` alone cannot say WHICH part of the
+  // payload is untrustworthy. `slots_detail_stale` means the per-slot detail is
+  // a last-known snapshot; `slot_counts_stale` means the counts are. Both are
+  // EVIDENCE ONLY — availability is still decided by `slots_stale` plus the
+  // per-slot detail (`usablePerSlotSlots`), and the count-based fallback stays
+  // removed (WL-0MUXVPXAZ005RESW). They use the same optional contract as
+  // `slots_stale`: absent → undefined (pre-feature proxy, behaviour unchanged);
+  // non-boolean → ambiguous → reject the poll (fail-closed).
+  let slotsDetailStale: boolean | undefined;
+  if (o.slots_detail_stale !== undefined) {
+    if (typeof o.slots_detail_stale !== 'boolean') return null;
+    slotsDetailStale = o.slots_detail_stale;
+  }
+  let slotCountsStale: boolean | undefined;
+  if (o.slot_counts_stale !== undefined) {
+    if (typeof o.slot_counts_stale !== 'boolean') return null;
+    slotCountsStale = o.slot_counts_stale;
+  }
+  // Abandoned-slot count (WL-0MW1VITA8009RLHQ): advisory evidence of a
+  // self-contradictory snapshot. Malformed → ambiguous → reject (fail-closed),
+  // consistent with the other availability-adjacent counters.
+  const localAbandonedSlots = parseOptionalCount(o.local_abandoned_slots);
+  if (localAbandonedSlots === null) return null;
+
   // Optional per-slot identity (LP-0MSG5TA7Y002GN39): absent on pre-feature
   // proxies (slots stays undefined — backward compatible). A malformed
   // array (non-array, entry missing/empty slot_id, non-boolean
@@ -365,6 +390,9 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     contention_queued_count: contentionQueuedCount,
     slots,
     slots_stale: slotsStale,
+    slots_detail_stale: slotsDetailStale,
+    slot_counts_stale: slotCountsStale,
+    local_abandoned_slots: localAbandonedSlots,
     status_schema_version: statusSchemaVersion,
     capacity_hint: capacityHint,
     prefill_budget_seconds: prefillBudget,

@@ -436,6 +436,7 @@ authoritative**:
 | `capacity_hint: "saturated"` | defensive no-dispatch (reason `capacity-saturated`, header `saturated`), even if the per-slot detail looks inconsistent |
 | `capacity_hint: "idle"` / `"prefill_bound"` | not by themselves a stop; the per-slot free budget still applies |
 | `slots[].phase`, `slots[].context_tokens` | advisory evidence only — recorded in the decision log, never a gate |
+| `slots_detail_stale`, `slot_counts_stale`, `local_abandoned_slots` | **evidence only** — see *Attributing a stale slot snapshot* below |
 | `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | not availability gates; they feed the calibration-gated, occupancy-only prefill-ETA deferral (`prefill-eta`, see *Prefill serialisation pacing* below) |
 
 With truthful lease state, the coarse global `local_lease_active` flag no
@@ -451,6 +452,35 @@ poll (treated as busy); malformed advisory fields are ignored.
 Every no-dispatch decision entry records the observed `capacityHint`,
 `statusSchemaVersion`, `idleLeasedSlots`, `generatingSlots`, `slotPhases`
 and `slotPrefillEtaSeconds` so an operator can see *why* a tick refused.
+
+#### Attributing a stale slot snapshot (WL-0MW1VITA8009RLHQ)
+
+The proxy serves **three independent** staleness flags, and `slots_stale`
+alone cannot say *which* part of the payload is untrustworthy:
+
+| Flag | Meaning |
+|---|---|
+| `slots_stale` | the per-slot detail cannot be paired with the counts (the **availability** flag) |
+| `slots_detail_stale` | the per-slot `slots` detail is a last-known snapshot |
+| `slot_counts_stale` | the served counts (`available_slots`/`total_slots`) are last-known |
+
+All three (plus `local_abandoned_slots`) are parsed with the same optional
+contract as `slots_stale`: absent on a pre-feature proxy (behaviour and log
+shape unchanged); a malformed value rejects the poll (fail-closed); present →
+recorded on the decision entry as `slotsStale`, `slotsDetailStale`,
+`slotCountsStale` and `localAbandonedSlots`.
+
+They are **evidence, never a budget.** `slots_stale` remains the availability
+flag and `available_slots` is still never used as a dispatch budget
+(WL-0MUXVPXAZ005RESW), so "counts fresh, detail stale" is still a
+`slots-unavailable` stop — reading it as usable capacity is precisely what
+starved dispatch through the 2026-11-04 night, when the proxy served an
+8-hour-old detail snapshot with fresh counts while both cached slots were
+frozen `is_processing: true`. Before this change that whole distinction
+collapsed into one opaque refusal; now the decision entry names the stale
+signal (and `localAbandonedSlots` exposes the self-contradictory snapshot), so
+"the proxy's `/slots` query is failing" is distinguishable from "only the
+counts are cached" using the decision log alone.
 
 ### Prefill serialisation pacing (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX)
 

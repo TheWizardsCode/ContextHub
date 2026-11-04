@@ -241,6 +241,20 @@ interface CapacityEvidence {
    * operator see WHY a tick was admitted or deferred without reading the
    * proxy. Absent on pre-feature proxies (and when malformed).
    */
+  /**
+   * Slot-snapshot staleness evidence (WL-0MW1VITA8009RLHQ): which part of the
+   * proxy payload is last-known (`slots_stale`, `slots_detail_stale`,
+   * `slot_counts_stale`) plus the proxy's abandoned-slot count. Recorded on
+   * every polled decision when served, so a refusal caused by a frozen snapshot
+   * is attributable from the decision log alone — the 2026-11-04 outage served
+   * detail-stale/counts-fresh for eight hours and the distinction never reached
+   * the log. Absent on pre-feature proxies (log shape unchanged). EVIDENCE
+   * ONLY: these never admit or refuse a dispatch.
+   */
+  slotsStale?: boolean;
+  slotsDetailStale?: boolean;
+  slotCountsStale?: boolean;
+  localAbandonedSlots?: number;
   localIdleSeconds?: number;
   localLastActivitySource?: string;
 }
@@ -366,6 +380,19 @@ export function capacityEvidence(
   slots: LlamaSlot[] | null,
 ): CapacityEvidence {
   const evidence: CapacityEvidence = {};
+  // Snapshot-staleness evidence (WL-0MW1VITA8009RLHQ): attached BEFORE the
+  // `slots === null` early return below, because the unusable-detail case is
+  // exactly when an operator needs to know which signal was stale.
+  if (typeof status.slots_stale === 'boolean') evidence.slotsStale = status.slots_stale;
+  if (typeof status.slots_detail_stale === 'boolean') {
+    evidence.slotsDetailStale = status.slots_detail_stale;
+  }
+  if (typeof status.slot_counts_stale === 'boolean') {
+    evidence.slotCountsStale = status.slot_counts_stale;
+  }
+  if (typeof status.local_abandoned_slots === 'number') {
+    evidence.localAbandonedSlots = status.local_abandoned_slots;
+  }
   if (status.capacity_hint !== undefined) evidence.capacityHint = status.capacity_hint;
   if (status.status_schema_version !== undefined) {
     evidence.statusSchemaVersion = status.status_schema_version;
