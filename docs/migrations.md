@@ -12,6 +12,46 @@ Backups
 - Before applying migrations the runner creates a timestamped backup of the database in
   `<dbdir>/backups/`.
 - The runner prunes backups to keep the most recent 5 backups to limit disk usage.
+- All migrations in one run are applied inside a single transaction: a migration that
+  refuses to run rolls the whole run back, leaving every migration pending and no data
+  changed (WL-0MW1W61CG005K893).
+
+Migration authoring contracts
+-----------------------------
+Three rules keep an upgrade safe on a database holding real data.
+
+1. **Lossless backfill before any destructive step.** A migration that drops or rewrites a
+   column must first preserve every value it cannot map onto the replacement model. The
+   legacy audit-text migration is the reference case: `20260604-backfill-audit-results`
+   maps parseable `workitems.audit` JSON into `audit_results` (keeping the verbatim source
+   text in `raw_output` as provenance) and preserves every unmappable value verbatim in
+   `legacy_audit_preserved`. Unmappable text is never silently skipped
+   (WL-0MW1W61CG005K893).
+
+   `legacy_audit_preserved` is deliberately a dedicated table rather than
+   `audit_results.raw_output`: `getAuditResult()` treats any existing `audit_results` row as
+   a real verdict (`readyToClose: false`), so parking unmappable legacy text there would
+   misrepresent those items as "audited and rejected" in `wl next`, the audit gates and the
+   JSONL export.
+
+2. **Destructive steps are gated.** `20260604-drop-audit-column` re-runs the preservation
+   sweep and then refuses to drop while any non-empty legacy value has no
+   `audit_results` row and no `legacy_audit_preserved` row. The refusal raises
+   `MigrationUnsafeError`, names the offending work-item ids (first 10 plus a total),
+   aborts the transaction and exits non-zero. A populated `raw_output` or preservation row
+   is sufficient authority to proceed: the gate protects data, not parseability.
+
+3. **`safe` means destructive.** A migration is `safe: false` only when its `apply()` really
+   performs destructive DDL/DML (`DROP COLUMN`, `DROP TABLE`, `DELETE FROM`). Historical
+   entries kept only for their metadata sentinel are declared `neutralised: true`, are
+   always `safe: true`, and render as `no-op (historical)` in `wl doctor upgrade` output so
+   they can never be mistaken for a destructive migration. A lint test enforces both
+   directions (`tests/unit/migration-audit-preservation.test.ts`).
+
+`schemaVersion` is recorded only when the schema is genuinely at HEAD: the runner advances
+it on the zero-pending path (so a stale recorded version cannot produce a permanent
+"expects schemaVersion=9" warning) and refuses to advance it while migrations remain
+pending, for example when a caller filters to safe migrations only.
 
 Running `wl doctor upgrade`
 ---------------------------
@@ -21,7 +61,11 @@ Examples:
 
   `wl doctor upgrade --dry-run`
 
-  This lists pending migrations without applying them.
+  This lists pending migrations without applying them, renders neutralised historical
+  entries as `no-op (historical)`, and reports the legacy audit-text blast radius
+  (items carrying legacy audit text, how many are already mapped, how many would be
+  preserved verbatim, and how many are still unpreserved — in which case the column drop
+  will refuse and change nothing).
 
 - Apply pending migrations interactively:
 

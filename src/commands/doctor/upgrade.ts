@@ -14,7 +14,13 @@
  */
 
 import type { Command } from 'commander';
-import { listPendingMigrations, runMigrations } from '../../migrations/index.js';
+import * as path from 'node:path';
+import {
+  listPendingMigrations,
+  runMigrations,
+  auditPreservationSummary,
+  MigrationUnsafeError,
+} from '../../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir } from '../../doctor/hook-upgrade.js';
 import { withStoreMutationLock } from '../../mutation-lock.js';
 
@@ -38,6 +44,37 @@ export interface UpgradeCommandContext {
 /** Register the `wl doctor upgrade` subcommand on the parent `doctor` command. */
 export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandContext): void {
   const { output, utils, dataPath } = ctx;
+  // Resolve the database the same way the migration runner's default does, but
+  // from the injected `dataPath` so an explicit worklog location is honoured
+  // (WL-0MW1W61CG005K893).
+  const dbFile = path.join(path.dirname(dataPath), 'worklog.db');
+
+  /** Human-readable migration line: neutralised entries never read as unsafe. */
+  const formatMigration = (p: { id: string; description: string; safe: boolean; neutralised?: boolean }): string =>
+    ` - ${p.id}: ${p.description} (${p.neutralised ? 'no-op (historical)' : `safe=${p.safe}`})`;
+
+  /**
+   * Legacy audit-text blast radius (WL-0MW1W61CG005K893): how much legacy data
+   * the pending drop would touch, and how much of it has no preserved copy yet.
+   * `null` when there is nothing to lose.
+   */
+  const preservation = auditPreservationSummary(dbFile);
+
+  const reportUnsafeMigration = (err: MigrationUnsafeError): void => {
+    if (utils.isJsonMode()) {
+      output.json({
+        success: false,
+        error: err.message,
+        migrationId: err.migrationId,
+        offendingIds: err.offendingIds,
+      });
+      return;
+    }
+    console.error(`Refusing to upgrade: ${err.message}`);
+    console.error(
+      'No data was changed. Re-run after investigating the listed work items (the migration stays pending).',
+    );
+  };
 
   doctor
     .command('upgrade')
@@ -49,7 +86,7 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
       // Migration + hook upgrade subcommand
       utils.requireInitialized();
       try {
-        const pending = listPendingMigrations();
+        const pending = listPendingMigrations(dbFile);
         const hooksTargetDir = detectHooksTargetDir();
         const hooksResult = dryRunHooks('.githooks', hooksTargetDir);
 
@@ -74,13 +111,23 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
               pending: hasPendingMigrations ? pending : [],
               hooks: hooksResult,
             };
+            if (preservation !== null) out.preservation = preservation;
             output.json(out);
             return;
           }
           // Dry-run: list all pending migrations
           if (hasPendingMigrations) {
             console.log('Pending migrations:');
-            pending.forEach(p => console.log(` - ${p.id}: ${p.description} (safe=${p.safe})`));
+            pending.forEach(p => console.log(formatMigration(p)));
+          }
+          // Legacy audit-text blast radius (WL-0MW1W61CG005K893)
+          if (preservation !== null && preservation.candidates > 0) {
+            console.log('');
+            console.log('Legacy audit text (workitems.audit):');
+            console.log(` - items with legacy audit text: ${preservation.candidates}`);
+            console.log(` - already mapped to audit_results: ${preservation.mappedToAuditResult}`);
+            console.log(` - preserved verbatim (legacy_audit_preserved): ${preservation.alreadyPreserved}`);
+            console.log(` - still unpreserved (the drop would refuse): ${preservation.orphaned}`);
           }
           // List outdated hooks
           if (hasOutdatedHooks) {
@@ -140,7 +187,7 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
                 dryRun: false,
                 confirm: true,
                 logger: { info: s => console.error(s), error: s => console.error(s) }
-              }));
+              }, dbFile));
             }
 
             output.json({
@@ -155,6 +202,11 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
             });
             return;
           } catch (err) {
+            if (err instanceof MigrationUnsafeError) {
+              process.exitCode = 1;
+              reportUnsafeMigration(err);
+              return;
+            }
             const message = err instanceof Error ? err.message : String(err);
             process.exitCode = 1;
             output.json({ success: false, error: message });
@@ -162,7 +214,15 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
           }
         }
         console.log('Pending safe migrations:');
-        safeMigs.forEach(p => console.log(` - ${p.id}: ${p.description}`));
+        safeMigs.forEach(p => console.log(formatMigration(p)));
+        if (preservation !== null && preservation.candidates > 0) {
+          console.log('');
+          console.log(
+            `Legacy audit text: ${preservation.candidates} item(s) carry it; ` +
+              `${preservation.mappedToAuditResult} already mapped, ` +
+              `${preservation.preserveOnly} will be preserved verbatim before the column drop.`,
+          );
+        }
         console.log('');
 
         // Confirm before applying unless --confirm provided
@@ -216,7 +276,7 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
         try {
           let migrationResult = { applied: [] as any[], backups: [] as string[] };
           if (hasPendingMigrations) {
-            migrationResult = withStoreMutationLock(dataPath, () => runMigrations({ dryRun: false, confirm: true, logger: { info: s => console.error(s), error: s => console.error(s) } }));
+            migrationResult = withStoreMutationLock(dataPath, () => runMigrations({ dryRun: false, confirm: true, logger: { info: s => console.error(s), error: s => console.error(s) } }, dbFile));
           }
           if (utils.isJsonMode()) {
             output.json({ success: true, applied: migrationResult.applied, backups: migrationResult.backups });
@@ -230,6 +290,11 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
             console.log(`Upgraded hooks: ${hooksApplied.join(', ')}`);
           }
         } catch (err) {
+          if (err instanceof MigrationUnsafeError) {
+            process.exitCode = 1;
+            reportUnsafeMigration(err);
+            return;
+          }
           const message = err instanceof Error ? err.message : String(err);
           if (utils.isJsonMode()) output.json({ success: false, error: message });
           else console.error(`Migration failed: ${message}`);
