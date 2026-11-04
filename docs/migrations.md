@@ -62,16 +62,23 @@ Examples:
   `wl doctor upgrade --dry-run`
 
   This lists pending migrations without applying them, renders neutralised historical
-  entries as `no-op (historical)`, and reports the legacy audit-text blast radius
-  (items carrying legacy audit text, how many are already mapped, how many would be
-  preserved verbatim, and how many are still unpreserved — in which case the column drop
-  will refuse and change nothing).
+  entries as `no-op (historical)`, and reports the legacy audit-text blast radius: the
+  number of items carrying legacy audit text, how many are already mapped into
+  `audit_results`, how many would be preserved verbatim in `legacy_audit_preserved`, how
+  many are already preserved, and how many still have no successor row. The drop
+  migration re-runs the preservation sweep before it checks the gate, so a
+  still-orphaned value is preserved rather than destroyed; the gate refuses only when
+  preservation itself cannot complete, which changes nothing and reports the ids.
+  In `--json` mode the same counts appear as a `preservation` object.
 
 - Apply pending migrations interactively:
 
   `wl doctor upgrade`
 
-  The command lists safe migrations and prompts for confirmation before applying.
+  The command lists safe migrations, prints the same legacy-audit blast-radius summary
+  the dry-run shows (before anything is applied, in human and `--json` output alike; the
+  JSON payload carries it as `preservation`), and prompts for confirmation before
+  applying.
 
 - Apply pending migrations non-interactively:
 

@@ -20,6 +20,7 @@ import {
   runMigrations,
   auditPreservationSummary,
   MigrationUnsafeError,
+  type AuditPreservationSummary,
 } from '../../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir } from '../../doctor/hook-upgrade.js';
 import { withStoreMutationLock } from '../../mutation-lock.js';
@@ -59,6 +60,30 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
    * `null` when there is nothing to lose.
    */
   const preservation = auditPreservationSummary(dbFile);
+
+  /**
+   * The legacy audit-text blast radius as human lines (WL-0MW1W61CG005K893).
+   * One formatter shared by the dry-run and the applying run, so the operator
+   * sees the same four counts (candidates, parsed, preserved, orphaned) plus
+   * the already-preserved detail in **both** modes and can approve on
+   * evidence rather than faith.
+   *
+   * `orphaned` is the count with no successor row *right now*: the drop
+   * migration re-runs the preservation sweep first, so those values are
+   * preserved rather than destroyed — the gate refuses only when preservation
+   * itself cannot complete.
+   */
+  const preservationLines = (p: AuditPreservationSummary): string[] => [
+    ` - items with legacy audit text: ${p.candidates}`,
+    ` - already mapped to audit_results: ${p.mappedToAuditResult}`,
+    ` - unmappable, preserved verbatim on apply: ${p.preserveOnly}`,
+    ` - already preserved in legacy_audit_preserved: ${p.alreadyPreserved}`,
+    ` - orphaned (no successor row yet; the drop preserves these first): ${p.orphaned}`,
+  ];
+
+  /** True when there is legacy audit text worth reporting. */
+  const hasPreservation = (p: AuditPreservationSummary | null): p is AuditPreservationSummary =>
+    p !== null && p.candidates > 0;
 
   const reportUnsafeMigration = (err: MigrationUnsafeError): void => {
     if (utils.isJsonMode()) {
@@ -121,13 +146,10 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
             pending.forEach(p => console.log(formatMigration(p)));
           }
           // Legacy audit-text blast radius (WL-0MW1W61CG005K893)
-          if (preservation !== null && preservation.candidates > 0) {
+          if (hasPreservation(preservation)) {
             console.log('');
             console.log('Legacy audit text (workitems.audit):');
-            console.log(` - items with legacy audit text: ${preservation.candidates}`);
-            console.log(` - already mapped to audit_results: ${preservation.mappedToAuditResult}`);
-            console.log(` - preserved verbatim (legacy_audit_preserved): ${preservation.alreadyPreserved}`);
-            console.log(` - still unpreserved (the drop would refuse): ${preservation.orphaned}`);
+            preservationLines(preservation).forEach(line => console.log(line));
           }
           // List outdated hooks
           if (hasOutdatedHooks) {
@@ -155,6 +177,9 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
               hooks: hooksResult,
               requiresConfirm: true,
             };
+            // The blast radius is reported before applying in JSON mode too
+            // (AC4, WL-0MW1W61CG005K893).
+            if (preservation !== null) out.preservation = preservation;
             output.json(out);
             return;
           }
@@ -196,6 +221,9 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
               safeMigrations: safeMigs,
               applied: migrationResult.applied,
               backups: migrationResult.backups,
+              // Pre-apply blast radius: what the run had to preserve
+              // (AC4, WL-0MW1W61CG005K893).
+              ...(preservation !== null ? { preservation } : {}),
               hooks: hooksResult,
               hooksApplied,
               hooksSkipped,
@@ -215,13 +243,12 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
         }
         console.log('Pending safe migrations:');
         safeMigs.forEach(p => console.log(formatMigration(p)));
-        if (preservation !== null && preservation.candidates > 0) {
+        // The same blast radius the dry-run shows, before anything is applied
+        // (AC4, WL-0MW1W61CG005K893).
+        if (hasPreservation(preservation)) {
           console.log('');
-          console.log(
-            `Legacy audit text: ${preservation.candidates} item(s) carry it; ` +
-              `${preservation.mappedToAuditResult} already mapped, ` +
-              `${preservation.preserveOnly} will be preserved verbatim before the column drop.`,
-          );
+          console.log('Legacy audit text (workitems.audit):');
+          preservationLines(preservation).forEach(line => console.log(line));
         }
         console.log('');
 
@@ -279,7 +306,13 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
             migrationResult = withStoreMutationLock(dataPath, () => runMigrations({ dryRun: false, confirm: true, logger: { info: s => console.error(s), error: s => console.error(s) } }, dbFile));
           }
           if (utils.isJsonMode()) {
-            output.json({ success: true, applied: migrationResult.applied, backups: migrationResult.backups });
+            output.json({
+              success: true,
+              applied: migrationResult.applied,
+              backups: migrationResult.backups,
+              // Pre-apply blast radius (AC4, WL-0MW1W61CG005K893).
+              ...(preservation !== null ? { preservation } : {}),
+            });
             return;
           }
           if (migrationResult.applied.length > 0) {

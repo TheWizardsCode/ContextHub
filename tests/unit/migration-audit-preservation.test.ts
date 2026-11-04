@@ -118,6 +118,14 @@ function columnExists(dbPath: string, table: string, column: string): boolean {
   );
 }
 
+/** Value of a `metadata` row, or `undefined` when the key is absent. */
+function metaValue(dbPath: string, key: string): string | undefined {
+  return withDb(dbPath, db => {
+    const row = db.prepare('SELECT value FROM metadata WHERE key = ?').get(key) as any;
+    return row ? String(row.value) : undefined;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // A. Lossless backfill + gated drop
 // ---------------------------------------------------------------------------
@@ -296,6 +304,127 @@ describe('assertAuditTextPreserved: the drop gate', () => {
       withDb(dbPath, db => {
         expect(() => assertAuditTextPreserved(db)).not.toThrow();
       });
+    } finally {
+      cleanupTempDir(tmp);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2. The incident shapes, exercised through the full `runMigrations` flow
+// ---------------------------------------------------------------------------
+
+describe('runMigrations: incident shapes end to end', () => {
+  it('upgrades a fresh database without touching legacy audit storage', async () => {
+    const { WorklogDatabase } = await import('../../src/database.js');
+    const tmp = createTempDir();
+    try {
+      const dbPath = path.join(tmp, 'worklog.db');
+      const db = new WorklogDatabase('MIG', dbPath, path.join(tmp, 'worklog-data.jsonl'), true, false);
+      try {
+        db.create({ title: 'Fresh item' });
+      } finally {
+        db.close();
+      }
+
+      // A schema created by this build carries no legacy `audit` column, so
+      // the upgrade has nothing to preserve and must simply complete.
+      const result = runMigrations({ confirm: true }, dbPath);
+
+      expect(result.applied.map(a => a.id)).toContain('20260604-drop-audit-column');
+      expect(columnExists(dbPath, 'workitems', 'audit')).toBe(false);
+      // No preservation store is materialised when there is nothing to keep.
+      expect(tableExists(dbPath, 'legacy_audit_preserved')).toBe(false);
+      // Fully migrated: a second run is a no-op and the version is at HEAD.
+      expect(runMigrations({ confirm: true }, dbPath).applied).toEqual([]);
+      expect(metaValue(dbPath, 'schemaVersion')).toBe(CURRENT_SCHEMA_VERSION);
+    } finally {
+      cleanupTempDir(tmp);
+    }
+  });
+
+  it('refuses the drop when a legacy value cannot be preserved, rolling the whole run back', () => {
+    const tmp = createTempDir();
+    try {
+      const dbPath = path.join(tmp, 'worklog.db');
+      createLegacyDb(dbPath, [
+        { id: 'WL-FLOW-ORPHAN', audit: 'legacy text with no successor' },
+        {
+          id: 'WL-FLOW-MAPPED',
+          audit: JSON.stringify({
+            time: '2026-05-01T10:00:00.000Z',
+            author: 'alice',
+            text: 'Ready to close: Yes',
+            status: 'Complete',
+          }),
+        },
+      ]);
+
+      // Fault injection: a preservation store that silently refuses writes
+      // (the sweep's `INSERT OR IGNORE` reports no change), so one value stays
+      // orphaned. This is the only way to reach the gate through the real
+      // runner — the lossless sweep removes every natural orphan — and it
+      // proves the gate refuses rather than letting the DROP COLUMN run.
+      withDb(dbPath, db => {
+        db.exec(`
+          CREATE TABLE legacy_audit_preserved (
+            work_item_id TEXT PRIMARY KEY,
+            audit_text TEXT NOT NULL,
+            preserved_at TEXT NOT NULL
+          );
+          CREATE TRIGGER refuse_preserve
+            BEFORE INSERT ON legacy_audit_preserved
+            BEGIN SELECT RAISE(IGNORE); END;
+        `);
+      });
+
+      let err: unknown;
+      try {
+        runMigrations({ confirm: true }, dbPath);
+      } catch (e) {
+        err = e;
+      }
+
+      // The refusal names the offending item and the migration.
+      expect(err).toBeInstanceOf(MigrationUnsafeError);
+      expect((err as MigrationUnsafeError).migrationId).toBe('20260604-drop-audit-column');
+      expect((err as MigrationUnsafeError).offendingIds).toEqual(['WL-FLOW-ORPHAN']);
+
+      // ... and the whole transaction rolled back: the column survives, no
+      // migration marker was written and the recorded version is unchanged.
+      expect(columnExists(dbPath, 'workitems', 'audit')).toBe(true);
+      expect(metaValue(dbPath, 'audit_backfill_complete')).toBeUndefined();
+      expect(metaValue(dbPath, 'audit_column_dropped')).toBeUndefined();
+      expect(metaValue(dbPath, 'schemaVersion')).toBe('6');
+      expect(listPendingMigrations(dbPath).map(m => m.id)).toContain('20260604-drop-audit-column');
+
+      // The legacy text is still readable in place — nothing was destroyed.
+      const rows = withDb(dbPath, db =>
+        db.prepare('SELECT id, audit FROM workitems ORDER BY id').all() as Array<{ id: string; audit: string }>,
+      );
+      expect(rows.map(r => [r.id, r.audit])).toEqual([
+        ['WL-FLOW-MAPPED', expect.stringContaining('Ready to close: Yes')],
+        ['WL-FLOW-ORPHAN', 'legacy text with no successor'],
+      ]);
+    } finally {
+      cleanupTempDir(tmp);
+    }
+  });
+
+  it('is a no-op upgrade when the legacy column is already gone', () => {
+    const tmp = createTempDir();
+    try {
+      const dbPath = path.join(tmp, 'worklog.db');
+      // A database that already ran the drop: the column is absent, so the
+      // gate has nothing to protect and the DDL is skipped.
+      createLegacyDb(dbPath, [{ id: 'WL-DROPPED', audit: null }], { withAuditColumn: false });
+
+      const result = runMigrations({ confirm: true }, dbPath);
+
+      expect(result.applied.map(a => a.id)).toContain('20260604-drop-audit-column');
+      expect(columnExists(dbPath, 'workitems', 'audit')).toBe(false);
+      expect(tableExists(dbPath, 'legacy_audit_preserved')).toBe(false);
+      expect(runMigrations({ confirm: true }, dbPath).applied).toEqual([]);
     } finally {
       cleanupTempDir(tmp);
     }

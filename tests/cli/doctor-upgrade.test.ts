@@ -69,6 +69,62 @@ function createLegacyDbWithoutAudit(dbPath: string): void {
   }
 }
 
+function createLegacyDbWithAuditText(dbPath: string, rows: Array<{ id: string; audit: string }>): void {
+  fs.rmSync(dbPath, { force: true });
+  const db = new Database(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS workitems (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        status TEXT NOT NULL,
+        priority TEXT NOT NULL,
+        sortIndex INTEGER NOT NULL DEFAULT 0,
+        parentId TEXT,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL,
+        tags TEXT NOT NULL,
+        assignee TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        issueType TEXT NOT NULL,
+        createdBy TEXT NOT NULL,
+        deletedBy TEXT NOT NULL,
+        deleteReason TEXT NOT NULL,
+        risk TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        githubIssueNumber INTEGER,
+        githubIssueId INTEGER,
+        githubIssueUpdatedAt TEXT,
+        needsProducerReview INTEGER NOT NULL DEFAULT 0,
+        audit TEXT
+      );
+      INSERT OR REPLACE INTO metadata (key, value) VALUES ('schemaVersion', '6');
+    `);
+    const insert = db.prepare(
+      `INSERT INTO workitems (id, title, description, status, priority, sortIndex, parentId,
+         createdAt, updatedAt, tags, assignee, stage, issueType, createdBy, deletedBy,
+         deleteReason, risk, effort, audit)
+       VALUES (?, ?, 'd', 'open', 'high', 100, NULL, '2026-01-01T00:00:00.000Z',
+         '2026-01-01T00:00:00.000Z', '[]', '', 'idea', 'task', '', '', '', '', '', ?)`,
+    );
+    for (const row of rows) insert.run(row.id, `Item ${row.id}`, row.audit);
+  } finally {
+    db.close();
+  }
+}
+
+const LEGACY_MAPPED_AUDIT = JSON.stringify({
+  time: '2026-05-01T10:00:00.000Z',
+  author: 'alice',
+  text: 'Ready to close: Yes',
+  status: 'Complete',
+});
+
 describe('doctor upgrade command', () => {
   let tempState: { tempDir: string; originalCwd: string };
 
@@ -120,6 +176,90 @@ describe('doctor upgrade command', () => {
     } finally {
       db.close();
     }
+  });
+
+  describe('legacy audit text blast radius (WL-0MW1W61CG005K893)', () => {
+    const dbPath = () => path.join(tempState.tempDir, '.worklog', 'worklog.db');
+
+    beforeEach(() => {
+      createLegacyDbWithAuditText(dbPath(), [
+        { id: 'TEST-MAPPED', audit: LEGACY_MAPPED_AUDIT },
+        { id: 'TEST-UNMAPPABLE', audit: 'legacy notes that are not JSON' },
+      ]);
+    });
+
+    it('reports the preservation summary in --dry-run JSON', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json doctor upgrade --dry-run`);
+      const result = JSON.parse(stdout);
+
+      expect(result.success).toBe(true);
+      expect(result.dryRun).toBe(true);
+      expect(result.preservation).toEqual({
+        candidates: 2,
+        mappedToAuditResult: 0,
+        preserveOnly: 2,
+        alreadyPreserved: 0,
+        orphaned: 2,
+      });
+
+      // Preview only: nothing was applied and the column is still there.
+      const db = new Database(dbPath(), { readonly: true });
+      try {
+        const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
+        expect(cols.map(c => c.name)).toContain('audit');
+      } finally {
+        db.close();
+      }
+    });
+
+    it('reports the preservation summary in --confirm JSON and preserves every value', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} --json doctor upgrade --confirm`);
+      const result = JSON.parse(stdout);
+
+      expect(result.success).toBe(true);
+      // The same blast radius the dry-run showed is reported by the applying run.
+      expect(result.preservation).toEqual({
+        candidates: 2,
+        mappedToAuditResult: 0,
+        preserveOnly: 2,
+        alreadyPreserved: 0,
+        orphaned: 2,
+      });
+      expect(result.applied.some((m: any) => m.id === '20260604-drop-audit-column')).toBe(true);
+
+      const db = new Database(dbPath(), { readonly: true });
+      try {
+        // The unmappable text survives verbatim; the parseable one is mapped.
+        const preserved = db
+          .prepare('SELECT work_item_id, audit_text FROM legacy_audit_preserved')
+          .all() as Array<{ work_item_id: string; audit_text: string }>;
+        expect(preserved).toEqual([
+          { work_item_id: 'TEST-UNMAPPABLE', audit_text: 'legacy notes that are not JSON' },
+        ]);
+        const mapped = db
+          .prepare('SELECT raw_output FROM audit_results WHERE work_item_id = ?')
+          .get('TEST-MAPPED') as any;
+        expect(mapped.raw_output).toBe(LEGACY_MAPPED_AUDIT);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('emits the same summary in human output before applying', async () => {
+      const { stdout } = await execAsync(`tsx ${cliPath} doctor upgrade --confirm`);
+
+      expect(stdout).toContain('Legacy audit text (workitems.audit):');
+      expect(stdout).toContain(' - items with legacy audit text: 2');
+      expect(stdout).toContain(' - already mapped to audit_results: 0');
+      expect(stdout).toContain(' - unmappable, preserved verbatim on apply: 2');
+      expect(stdout).toContain(' - already preserved in legacy_audit_preserved: 0');
+      expect(stdout).toContain(' - orphaned (no successor row yet; the drop preserves these first): 2');
+
+      // ... and it is printed *before* the migrations are applied.
+      expect(stdout.indexOf('Legacy audit text (workitems.audit):')).toBeLessThan(
+        stdout.indexOf('Applied migrations:'),
+      );
+    });
   });
 
   describe('hook upgrade via CLI', () => {
