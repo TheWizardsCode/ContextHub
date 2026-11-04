@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.0.26 (2026-11-04)
+> **Release focus:** This release focuses on making unattended multi-agent work more reliable and easier to diagnose, with cross-repo dependency blocking, machine-wide concurrency caps, recovery of plain-text tool calls, and clearer dispatch and downtime visibility. It also strengthens safety around upgrades, GitHub pushes, and dev/main test gating, while preserving legacy audit data and syncing worktree test results.
+### Features
+- Cross-repo dependencies now truly block work, with automatic project discovery and clone prompts. (WL-0MVWABT2Z001XMSD)
+- You can now cap how many implement and audit tasks run at once across your whole machine. (WL-0MVXWQFGV000D2AB)
+- Unattended agents no longer stall when a tool call arrives as plain text—it's recovered and run. (WL-0MW0WBWY3006LQ8W)
+- You can now see which machine is dispatching and why it may be idle, making silent overnight stalls easy to diagnose. (WL-0MW1VINII003IL7R)
+- Downtime dispatch logs now keep a full 24 hours of history, so overnight issues can be investigated after the fact. (WL-0MVKNC28B003UOLX)
+- Safely rename your project's ID prefix with a preview and confirmation step. (WL-0MVM8V79C003XH2J)
+- The interview command works exactly the same, but future fixes and improvements to it are now safer and faster to ship. (WL-0MVGKGXN80006V9P)
+- The recent dispatches view now shows the newest time blocks first, so you see the latest activity without scrolling. (WL-0MVLEM606008UAL1)
+- Removed a duplicate internal storage file so fixes always land in the version the game actually uses. (WL-0MVGKGU19004NTHB)
+- Audits now auto-verify herdr test runs, so your herdr changes get approved faster. (WL-0MVHP5NTU009PA3I)
+- Pushes to dev/main now run the full test suite and are blocked if tests fail. (WL-0MVHP5S01006GDDV)
+- Worktree test results now sync to the main checkout, so verification stays accurate. (WL-0MW20XXWE00466FP)
+### Bug Fixes
+- Pushing items to GitHub is now safe even when titles or labels contain special characters. (WL-0MW0QXTYD0065ZW7)
+- Upgrade reports now show exactly how much legacy audit data is preserved or orphaned, so nothing is lost silently. (WL-0MW2F2AC8002BBRV)
+- Downtime leader docs now match actual behavior, preventing confusing mismatches. (WL-0MW2FDK83007TU6Y)
+- Downtime status now clearly shows when slot data is outdated versus missing. (WL-0MW2F2B5W004V57W)
+- Upgrades now preserve all legacy audit text and refuse to drop anything that isn't safely backed up. (WL-0MW1W61CG005K893)
+- Machine health checks no longer raise false alarms on busy multi-agent hosts. (WL-0MVI8YM07002Z9VY)
+### Other
+- Confirmed the Wi-Fi crash fix holds up after 24 hours of stable play. (WL-0MVYEQKAM003THSP)
+- Internal code cleanup only — no gameplay changes. (WL-0MVGKHCP9005SJPZ)
+- Doctor commands now load faster and more reliably, with no change to how they work. (WL-0MVGKH1770008MNU)
+- Internal code cleanup for more stable, reliable updates. (WL-0MVGKGR2H006MNVG)
+
 ## v1.0.25 (2026-11-02)
 > **Release focus:** This release focuses on improving the reliability and speed of work item tracking, audits, and testing, with fixes for stale audits, flaky and slow test runs, and items being wrongly released or reverted. It also strengthens sync and approval behavior, plugin stability, and auditability of headless and GPU-related runs.
 ### Features
