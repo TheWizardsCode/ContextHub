@@ -439,7 +439,7 @@ export interface ParentAuditState {
  * edit.
  * The audit record in `audit_results` is the canonical source of truth;
  * audit-content comments are deprecated and not consumed by any flow
- * (ship/heartbeat/TUI/implement).
+ * (ship/TUI/implement).
  */
 export function isAuditFresh(
   auditedAt: string | null | undefined,

@@ -26,7 +26,7 @@ remediation plan are documented here.
 | 1 | Pi extension browse selection widget (`packages/tui/extensions/Worklog/lib/browse.ts`) | every 5s while active (4–5 spawns/tick) | `wl next`, `wl list`, `wl sync --if-idle` | **FIXED** (idle-gated + pane-focus-gated, `b8840d99`) |
 | 2 | Herdr worklist pane (`packages/herdr/src/worklist.ts` + `fetcher.ts`) | every `refreshIntervalMs` (user settings: **1500 ms!**) — 4 spawns/tick | `wl next`, `wl list --priority critical --root-only`, `wl list --status completed --stage in_review --root-only`, `wl list --status open,in-progress,blocked` | Gated in code (`b8840d99`) but **running panes pre-date the fix** + **settings override too aggressive**; refresh cycles single-flight since WL-0MSBVYBMD004007C |
 | 3 | Test harness `execAsync`/`execWithInput` (`tests/cli/cli-helpers.ts`) | per-test; leaked processes hang indefinitely | `wl create`, `wl show`, `wl update`, `wl init` | **FIXED** (process-tree kill + timeout, WL-0MSB447TJ000R3N8) |
-| 4 | Agent-invoked `wl` queries via the `bash` tool (skills: heartbeat, implement, intake, plan, cleanup) | per-query, sequential | `wl next`, `wl list`, `wl sync`, `wl show`, `wl update`, `wl comment` | Acceptable; bounded by agent activity |
+| 4 | Agent-invoked `wl` queries via the `bash` tool (skills: implement, intake, plan, cleanup) | per-query, sequential | `wl next`, `wl list`, `wl sync`, `wl show`, `wl update`, `wl comment` | Acceptable; bounded by agent activity |
 | 5 | `wl sync --if-idle` auto-sync timers (herdr panes / pi widget) | every 60s per visible pane | `wl sync --if-idle` | Gated with the pollers; lock-aware (`--if-idle`) |
 
 ---
@@ -151,16 +151,14 @@ Observed: 26 orphaned `wl create -t "Valid JSON test item N"` processes
 ### 2.4 Agent-invoked `wl` queries (bounded, acceptable)
 
 Skills invoke `wl` via the `bash` tool (each call spawns a shell → `wl`) or
-via `subprocess.run` in Python scripts (heartbeat, implement, intake, plan,
+via `subprocess.run` in Python scripts (implement, intake, plan,
 cleanup). These are:
 
 - **Sequential** (no concurrent fan-out),
 - **Short-lived** (complete in seconds; `subprocess.run` waits and reaps),
 - **Bounded** by actual agent activity (a work item being processed).
 
-The heartbeat skill polls `wl list`/`wl next` but only **per invocation**
-(after a completed process, per its completion-detection gate), not on a
-timer. No systematic leak is present here; no change required beyond the
+No systematic leak is present here; no change required beyond the
 health check below.
 
 ### 2.5 Why processes were not being cleaned up
@@ -258,7 +256,7 @@ ps -eo args | grep -E 'wl (next|list|sync)' | grep -v grep | wc -l
 | Pi browse widget (extension) | `runWl` via `execFile` (fetcher) | `wl next`, `wl list`, `wl sync --if-idle` | 5 s while active; **0 when idle** (fixed) | Promisified execFile; waited + reaped |
 | Herdr worklist pane | `runWl` via `execFile` (fetcher) | `wl next`, `wl list` ×3, `wl sync --if-idle` | `refreshIntervalMs` (default 30 s; **user override 1.5 s**) | Promisified execFile; waited + reaped |
 | Agent `bash` tool (skills) | shell spawn per query | `wl next`, `wl list`, `wl show`, `wl update`, `wl comment`, `wl sync` | per agent decision, sequential | Shell exits after command; reaped by pi |
-| Python skills (heartbeat, implement, intake, plan, cleanup) | `subprocess.run` | `wl list`, `wl next`, `wl audit-show`, `wl update` | per skill invocation (heartbeat: after each completed process, gated) | `subprocess.run` waits and reaps |
+| Python skills (implement, intake, plan, cleanup) | `subprocess.run` | `wl list`, `wl next`, `wl audit-show`, `wl update` | per skill invocation | `subprocess.run` waits and reaps |
 | Test harness | `exec`/`spawn(shell:true)` | `wl create/update/show/init` | per test | **Was**: shell PID only, orphans on SIGKILL. **Now**: detached + process-tree kill + timeout (WL-0MSB447TJ000R3N8) |
 
 **Key takeaway:** agents do **not** batch or cache `wl` queries — every query

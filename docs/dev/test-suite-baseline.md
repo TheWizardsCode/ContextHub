@@ -767,8 +767,7 @@ host-load-sensitive and compare only reports taken in the same conditions.
 
 `pytest -q -r a --disable-warnings` (via `run_tests.py --suite pytest`):
 **167 tests, 162 passed / 5 failed, 101–103 s**. The 5 failures are
-pre-existing skill-behaviour drift (`tests/skill/heartbeat/`,
-`skill/pane-triage/tests/`), confirmed identical on a clean tree with these
+pre-existing skill-behaviour drift (`skill/pane-triage/tests/`), confirmed identical on a clean tree with these
 changes stashed, and are tracked in WL-0MVH2T0ZV006KIOU. No Python test is
 ≥5 s, so no optimisation was needed and pytest is unchanged.
 

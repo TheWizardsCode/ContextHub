@@ -552,7 +552,7 @@ export interface DemotedParent {
  *
  * When an `in_review` item (status `completed`) receives a not-ready-to-close
  * audit verdict, it is moved back to `open`/`plan_complete` so it returns to
- * the planning queue instead of being swept up by heartbeat/release tooling.
+ * the planning queue instead of being swept up by release tooling.
  * This shape captures the lifecycle transition so callers can report it
  * (e.g. `completed`/`in_review` → `open`/`plan_complete`).
  */
