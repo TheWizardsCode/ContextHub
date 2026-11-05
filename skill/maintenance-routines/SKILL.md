@@ -1,6 +1,6 @@
 ---
 name: maintenance-routines
-description: "Create and maintain the daily automated maintenance routines (/skill:test 07:00, /skill:standup 08:00, /skill/refactor 09:00 — daily, priority high) in the project's .worklog/scheduled-prompts.json. Non-destructive and idempotent. Trigger on: '/skill:maintenance-routines', 'maintenance routines', 'schedule the daily test/standup/refactor runs'"
+description: "Maintain the daily high-priority maintenance routines (/skill:test 07:00, /skill:standup 08:00, /skill/refactor 09:00) in .worklog/scheduled-prompts.json; non-destructive and idempotent. Trigger on: 'maintenance routines', '/skill:maintenance-routines'"
 ---
 
 # Maintenance-Routines Skill
