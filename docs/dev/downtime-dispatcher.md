@@ -111,7 +111,7 @@ Layering: `downtime-log-storage.ts` and `downtime-log-budget.ts` are leaves;
 ## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
 
 The downtime dispatcher does **not** maintain its own ranking. The Herdr selection list
-(`packages/herdr/src/fetcher.ts:fetchNextItems` → `smart-selection.ts:selectWorkItems` →
+(`packages/herdr/src/fetcher.api.ts:fetchNextItems` → `smart-selection.ts:selectWorkItems` →
 `grouping.ts:regroupWorkItems`) is the **sole** ranking path (mandatory-always for critical +
 `completed`/`in_review`, `browseItemCount` windowing of "other" items, grouping logic,
 `reSort`/`computeScore` as used by the fetcher). The dispatcher (`dispatchDowntimeWork`,

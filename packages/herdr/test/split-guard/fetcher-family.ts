@@ -108,11 +108,11 @@ export { MAX_MODULE_LINES };
  * Files currently exempt from the size gate.
  *
  * This is a *shrink-only* allowlist: it may only ever lose entries, never gain
- * them. `fetcher.ts` is the not-yet-split monolith; the final barrel child
- * (WL-0MW08VZ5M003OK2X — the close-out child) empties the list once the split
- * is complete.
+ * them. The split is complete, so it is now empty and the size gate covers
+ * every `fetcher*.ts` production module — including the barrel — with no
+ * exemptions (close-out child WL-0MW08VZ5M003OK2X).
  */
-export const FETCHER_SPLIT_ALLOWLIST: readonly string[] = ['fetcher.ts'];
+export const FETCHER_SPLIT_ALLOWLIST: readonly string[] = [];
 
 /**
  * The allowlist as it stood at plan time. {@link FETCHER_SPLIT_ALLOWLIST} must

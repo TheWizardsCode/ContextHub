@@ -664,7 +664,7 @@ sync succeeded within the freshness window (`heartbeatTtlMs`).
 
 ### In-process fetch memoization (F4, herdr fetcher)
 
-`packages/herdr/src/fetcher.ts` dedupes concurrent identical `runWl` READ
+`packages/herdr/src/fetcher.cli.ts` dedupes concurrent identical `runWl` READ
 fetches within one pane process via an in-flight promise memo keyed by
 (worklog-dir, args, json-mode): racing refresh ticks that issue the same
 query spawn `wl` once and share the result. Writes are never memoized — a
