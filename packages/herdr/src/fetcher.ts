@@ -8,7 +8,6 @@
  */
 
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
 import { STAGES } from './worklist.constants.js';
@@ -16,20 +15,24 @@ import type { Stage } from './worklist.constants.js';
 import { isActiveBlocker } from './hydrator.js';
 import { parseDepListBlockersOutput } from './downtime-worker.js';
 import {
-  buildWlArgs,
   getExecFileAsync,
   getWorklogDir,
   setWorklogDirChangedHandler,
 } from './fetcher.args.js';
-import { acquireWlSpawnSlot, releaseWlSpawnSlot } from './fetcher.spawn-cap.js';
 import { extractItems, extractJson, normalizeItem } from './fetcher.json.js';
+import {
+  CLI_BINARIES,
+  DEFAULT_WL_TIMEOUT_MS,
+  clearFetchMemo,
+  runWl,
+  setFetchMemoInvalidationHandler,
+} from './fetcher.cli.js';
+import { enrichInProcessItems, withInProcessDb } from './fetcher.inprocess.js';
 import type {
   BlockerRef,
   ClaimResult,
   DependencyTargetRef,
   InProcessDb,
-  InProcessDbCtor,
-  InProcessOpenStats,
   InProcessRefreshScope,
   ReviewQueueState,
   RootSubstitution,
@@ -72,6 +75,12 @@ export type {
 // worklog-dir setters run this invalidation instead.
 setWorklogDirChangedHandler(clearFetchMemo);
 
+// The cli leaf owns the memo, this module owns the worklist-bundle snapshot;
+// the leaf may not import the barrel (parent AC4), so it reports a memo drop
+// here and the snapshot is invalidated alongside it (declared below — the
+// handler only runs after module init).
+setFetchMemoInvalidationHandler(clearWorklistBundleCaches);
+
 // ── Bounded `wl` spawn concurrency + `wl`-payload JSON helpers ───────
 //
 // Both sections are extracted verbatim into leaf modules
@@ -92,431 +101,21 @@ export {
 } from './fetcher.spawn-cap.js';
 export { extractJson, extractItems } from './fetcher.json.js';
 
-// ── CLI execution ─────────────────────────────────────────────────────
+// ── CLI execution + in-process SQLite reads ──────────────────────────
+//
+// Both sections are extracted verbatim into leaf modules
+// (WL-0MW08VVC0007L28M): the `wl` CLI spawn/timeout/retry/in-flight-memo path
+// lives in `./fetcher.cli.js` and the fail-open in-process SQLite read path in
+// `./fetcher.inprocess.js`. The barrel re-exports every consumer-imported
+// symbol so no consumer import path changes; the memo invalidation seam and the
+// private execution helpers stay module-private surface.
 
-/**
- * Default timeout (in milliseconds) for all wl CLI spawns in the refresh/
- * sync fetch path. 60_000 ms — matches the auto-sync safety timeout and the
- * Pi TUI extension convention (auto-sync.ts:227). A hung wl spawn (e.g.
- * waiting on a lock during a long `wl sync`) will reject after this period
- * instead of blocking the `refreshInFlight` guard forever (WL-0MSJNJXX2001NMHS).
- */
-export const DEFAULT_WL_TIMEOUT_MS = 60_000;
-
-const CLI_BINARIES = ['wl', 'worklog'];
-
-// ── In-process fetch memoization (F4 — WL-0MSGAEPOJ002824S) ───────────
-
-/**
- * Read commands whose results may be deduplicated in-process. Matches the
- * wl CLI read-cache command set (F2). Writes (update/create/sync/…) are
- * NEVER memoized — a deduped write would drop a mutation.
- */
-const MEMOIZABLE_COMMANDS = new Set(['list', 'next', 'worklist', 'show', 'search', 'status']);
-
-/** Cap on in-flight memo entries (bounded: entries are removed on settle, so
- * this caps only concurrent racing fetches, which is the dedupe window). */
-const MEMO_MAX_ENTRIES = 64;
-
-/**
- * Read commands subject to the spawn-concurrency cap (F5). These are the
- * per-pane data-load reads the parent AC targets; writes (update/create/
- * comment/…/sync) are deliberately left uncapped (see the cap comment). `dep`
- * is explicitly included though not memoizable: the metadata-panel dep-probe
- * fallback fans out one `wl dep list <id>` / `wl show <id>` per edge and must
- * never spawn unbounded.
- */
-const WL_SPAWN_CAPPED_COMMANDS: ReadonlySet<string> = new Set([...MEMOIZABLE_COMMANDS, 'dep']);
-
-/**
- * In-flight promise memo: key → shared promise for an identical read that is
- * currently executing in this process. Racing identical fetches (overlapping
- * refresh ticks, duplicate pane queries) share the SAME promise, so `wl` is
- * spawned once instead of N times. Entries are deleted when the promise
- * settles — the memo never serves a settled result, so reads that begin
- * after a DB write always spawn fresh (never stale across writes).
- */
-const inflightFetchMemo = new Map<string, Promise<string>>();
-
-function fetchMemoKey(args: string[], includeJson: boolean, dirOverride?: string): string {
-  // Include the effective worklog-dir override (per-call or module-level) so
-  // a dir change never cross-contaminates racing reads across roots.
-  return `${dirOverride ?? getWorklogDir() ?? ''}\u0000${includeJson ? '1' : '0'}\u0000${args.join('\u0000')}`;
-}
-
-/**
- * Drop all in-flight fetch memo entries (after a write or worklog-dir
- * change). Reads that started before the write keep their own result; reads
- * issued after the write will spawn fresh instead of sharing a pre-write
- * in-flight read.
- */
-export function clearFetchMemo(): void {
-  inflightFetchMemo.clear();
-  lastWorklistBundle = null;
-  inflightWorklistBundle = null;
-}
-
-/**
- * Test helper: current number of in-flight memo entries. Used to verify the
- * memo stays bounded under many concurrent distinct fetches.
- */
-export function _fetchMemoSize(): number {
-  return inflightFetchMemo.size;
-}
-
-// ── In-process SQLite reads (WL-0MV5CBQ6L005SPAG) ─────────────────────
-
-let _inProcessOpens = 0;
-let _inProcessOpenMs = 0;
-
-/** Snapshot of the open accounting since the last reset. */
-export function getInProcessOpenStats(): InProcessOpenStats {
-  return { opens: _inProcessOpens, openMs: _inProcessOpenMs };
-}
-
-/** Reset the open accounting (tests / harness). */
-export function resetInProcessOpenStats(): void {
-  _inProcessOpens = 0;
-  _inProcessOpenMs = 0;
-}
-
-/**
- * Open ONE refresh-scoped in-process connection, read-only, no DDL (F6).
- *
- * `readOnly` opens the store with SQLite's READONLY flag and skips all
- * schema/FTS DDL on an already-initialised store, so the per-refresh open is
- * pragmas-only cheap and a refresh helper can never mutate the store. The
- * open runs synchronously on the event loop within the refresh, so its cost
- * is accounted here. Any open failure throws and the caller fails open
- * (degrades to the `wl` spawn path).
- */
-function openInProcessConnection(
-  Ctor: InProcessDbCtor,
-  dir: string,
-  dbPath: string,
-): InProcessDb {
-  const startedAt = Date.now();
-  const db = new Ctor(
-    'WI',
-    dbPath,
-    join(dir, 'worklog-data.jsonl'),
-    true,
-    false,
-    undefined,
-    undefined,
-    { readOnly: true },
-  );
-  _inProcessOpens += 1;
-  _inProcessOpenMs += Math.max(0, Date.now() - startedAt);
-  return db;
-}
-
-let _dbCtorPromise: Promise<InProcessDbCtor | null> | null = null;
-
-/**
- * Lazily resolve the `@worklog/shared` WorklogDatabase constructor. The
- * dynamic import keeps the native `better-sqlite3` dependency out of the
- * plugin's import graph until a refresh actually reads in-process. Any load
- * failure (native module unavailable, incompatible runtime) resolves `null`
- * and the caller falls back to spawning `wl` (fail-open).
- */
-function loadInProcessDbCtor(): Promise<InProcessDbCtor | null> {
-  if (_dbCtorPromise === null) {
-    _dbCtorPromise = import('@worklog/shared')
-      .then((mod) => ((mod as { WorklogDatabase?: InProcessDbCtor }).WorklogDatabase) ?? null)
-      .catch(() => null);
-  }
-  return _dbCtorPromise;
-}
-
-/**
- * Run `fn` against a FRESH in-process WorklogDatabase for the current worklog
- * dir, or resolve `undefined` when no in-process read is possible (no dir
- * resolved, no SQLite file on disk, `@worklog/shared` unavailable, or the
- * read throws).
- *
- * The handle is opened per call and closed in `finally`, so a read always
- * reflects the latest committed state: the store's in-memory query cache can
- * never serve data across a refresh boundary. This is the "no stale cache
- * served or left behind" invariant for the default-view fast path
- * (WL-0MV5CBQ6L005SPAG). Callers MUST fall back to the `wl` spawn path on
- * `undefined`.
- */
-async function withInProcessDb<T>(fn: (db: InProcessDb) => T): Promise<T | undefined> {
-  const dir = getWorklogDir();
-  if (!dir) return undefined;
-  const dbPath = join(dir, 'worklog.db');
-  if (!existsSync(dbPath)) return undefined;
-
-  const Ctor = await loadInProcessDbCtor();
-  if (!Ctor) return undefined;
-
-  let db: InProcessDb | null = null;
-  try {
-    db = openInProcessConnection(Ctor, dir, dbPath);
-    return fn(db);
-  } catch {
-    // Fail-open: any open/read failure degrades to the wl spawn path.
-    return undefined;
-  } finally {
-    try {
-      db?.close();
-    } catch {
-      // ignore: closing a broken handle must not mask the result.
-    }
-  }
-}
-
-/**
- * Create an {@link InProcessRefreshScope} (WL-0MV6C6SLB005HX7B). The
- * connection is opened lazily on the scope's first read and closed by
- * {@link InProcessRefreshScope.close}; the lazy `@worklog/shared` import is
- * the same module-level `loadInProcessDbCtor` the per-call fast path uses,
- * so no new dependency or import-time cost is introduced.
- */
-export function createInProcessRefreshScope(): InProcessRefreshScope {
-  let db: InProcessDb | null = null;
-  let ctorPromise: Promise<InProcessDbCtor | null> | undefined;
-  let pendingReads = 0;
-  let closeRequested = false;
-
-  const release = (): void => {
-    const handle = db;
-    db = null;
-    ctorPromise = undefined;
-    pendingReads = 0;
-    try {
-      handle?.close();
-    } catch {
-      // ignore: closing a broken handle must not mask a read result.
-    }
-  };
-
-  return {
-    async read<T>(fn: (db: InProcessDb) => T): Promise<T | undefined> {
-      const dir = getWorklogDir();
-      if (!dir) return undefined;
-      const dbPath = join(dir, 'worklog.db');
-      if (!existsSync(dbPath)) return undefined;
-      if (ctorPromise === undefined) ctorPromise = loadInProcessDbCtor();
-
-      // Hold a read slot BEFORE any await: a close() requested while this
-      // read is pending defers the release until the read settles, so the
-      // read always runs against an open handle (doRefresh's actionable-count
-      // read is fire-and-forget and can outlive the synchronous close call).
-      pendingReads += 1;
-      try {
-        const Ctor = await ctorPromise;
-        if (!Ctor) return undefined;
-        if (!db) {
-          try {
-            db = openInProcessConnection(Ctor, dir, dbPath);
-          } catch {
-            // Fail-open: an open failure degrades to the wl spawn path.
-            return undefined;
-          }
-        }
-        try {
-          return fn(db);
-        } catch {
-          // Fail-open: any read failure degrades to the wl spawn path.
-          return undefined;
-        }
-      } finally {
-        pendingReads -= 1;
-        if (closeRequested && pendingReads === 0) release();
-      }
-    },
-    close(): void {
-      closeRequested = true;
-      if (pendingReads === 0) release();
-    },
-  };
-}
-
-/**
- * Apply the audit enrichment `wl list --json` adds (auditResult, auditedAt and
- * the stored fingerprint) to in-process items. `currentFingerprint` is
- * deliberately NOT set: deriving it requires the canonical git-based
- * fingerprint computation that only the `wl` CLI performs, and the shared
- * `isAuditFresh` predicate fails safe to the time gate when it is absent.
- * Callers therefore only use this enrichment for items WITHOUT a stored
- * fingerprint (an audited item falls back to spawning `wl` so its exact
- * fingerprint freshness is preserved).
- */
-function enrichInProcessItems(db: InProcessDb, items: any[]): WorkItem[] {
-  const auditMap = new Map(db.getAllAuditResults().map((audit) => [audit.workItemId, audit]));
-  return items.map((raw) => {
-    const item = normalizeItem(raw);
-    const audit = auditMap.get(item.id);
-    if (!audit) return item;
-    return {
-      ...item,
-      auditResult: audit.readyToClose,
-      auditedAt: audit.auditedAt ?? null,
-      fingerprint: audit.fingerprint ?? null,
-    };
-  });
-}
-
-/**
- * True when a `wl` spawn error came from the bounded execFile timeout (the
- * child was killed because it hung) rather than from the CLI rejecting the
- * invocation. A hung `wl` must not trigger the consolidated-read fail-open
- * path: retrying with the per-subset spawns would double the hang instead of
- * surfacing it (WL-0MSJNJXX2001NMHS).
- */
-function isWlTimeoutError(error: unknown): boolean {
-  const e = error as { killed?: boolean; signal?: string; code?: string; message?: string } | null;
-  if (!e) return false;
-  if (e.killed === true) return true;
-  if (e.signal === 'SIGTERM' || e.signal === 'SIGKILL') return true;
-  if (e.code === 'ETIMEDOUT') return true;
-  return /timed? ?out/i.test(e.message ?? '');
-}
-
-async function runWlInner(
-  args: string[],
-  includeJson: boolean,
-  timeoutMs?: number,
-  dirOverride?: string,
-): Promise<string> {
-  // F5 spawn cap: reads acquire a bounded-concurrency slot; a queued read
-  // releases on a microtask when a slot frees, so it never blocks the TUI
-  // event loop. Writes bypass the cap entirely (rare, user-driven).
-  const capped = WL_SPAWN_CAPPED_COMMANDS.has(args[0]);
-  let waitedMs = 0;
-  if (capped) {
-    waitedMs = await acquireWlSpawnSlot();
-  }
-  try {
-    return await runWlInnerUncapped(
-      args,
-      includeJson,
-      queuedTimeout(timeoutMs, waitedMs),
-      dirOverride,
-    );
-  } finally {
-    if (capped) releaseWlSpawnSlot();
-  }
-}
-
-/**
- * A queued read inherits the bounded-timeout budget of the refresh that
- * issued it: time spent waiting for a spawn slot counts against
- * `DEFAULT_WL_TIMEOUT_MS`, so a hung child ahead of it cannot stack a fresh
- * 60 s per queued read. F8's cap of 1 serialises reads, and without this a
- * timed-out refresh with several fan-out reads could take N x 60 s to
- * surface its failure (the guard is bounded, but the operator sees no toast
- * for minutes). Returns the caller's override unchanged when the read did
- * not queue, preserving the documented per-call timeouts.
- */
-function queuedTimeout(timeoutMs: number | undefined, waitedMs: number): number | undefined {
-  // Sub-second queue hops are normal scheduler jitter (and must not perturb
-  // the documented per-call timeout, which callers assert exactly); only a
-  // read that genuinely queued behind a long/hung spawn inherits the budget.
-  if (waitedMs < 1_000) return timeoutMs;
-  const base = timeoutMs ?? DEFAULT_WL_TIMEOUT_MS;
-  return Math.max(1, base - waitedMs);
-}
-
-async function runWlInnerUncapped(
-  args: string[],
-  includeJson: boolean,
-  timeoutMs?: number,
-  dirOverride?: string,
-): Promise<string> {
-  let lastError: unknown;
-  const execFileAsync = getExecFileAsync();
-
-  for (const binary of CLI_BINARIES) {
-    try {
-      let fullArgs: string[];
-      if (includeJson) {
-        fullArgs = [...args, '--json'];
-      } else {
-        fullArgs = args;
-      }
-
-      // Prepend --worklog-dir when set (per-call override first, then the
-      // module override — global option before the subcommand).
-      fullArgs = buildWlArgs(fullArgs, dirOverride);
-
-      // Bounded timeout: use the caller's override if supplied, otherwise
-      // apply DEFAULT_WL_TIMEOUT_MS so a hung wl process cannot block the
-      // refreshInFlight guard forever (WL-0MSJNJXX2001NMHS).
-      const timeout = timeoutMs ?? DEFAULT_WL_TIMEOUT_MS;
-
-      const result = await execFileAsync(binary, fullArgs, {
-        maxBuffer: 1024 * 1024 * 5,
-        timeout,
-      });
-      return result.stdout;
-    } catch (error: any) {
-      if (error?.code === 'ENOENT') {
-        lastError = error;
-        continue;
-      }
-      const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
-      const stdout = typeof error?.stdout === 'string' ? error.stdout.trim() : '';
-      const message = stderr || stdout || error?.message || String(error);
-
-      // Re-throw with a clean message, preserving the timeout classification
-      // so callers can distinguish "hung wl" from "wl rejected the command".
-      const wrapped = new Error(message) as Error & { wlTimeout?: boolean };
-      if (isWlTimeoutError(error)) wrapped.wlTimeout = true;
-      throw wrapped;
-    }
-  }
-
-  throw new Error(`wl CLI not found: ${String(lastError)}`);
-}
-
-async function runWl(
-  args: string[],
-  includeJson = true,
-  timeoutMs?: number,
-  dirOverride?: string,
-): Promise<string> {
-  const command = args[0];
-
-  // Writes must never be deduplicated or share pre-write read results: drop
-  // any in-flight read memo so a read issued after this write spawns fresh.
-  if (!MEMOIZABLE_COMMANDS.has(command)) {
-    if (inflightFetchMemo.size > 0) inflightFetchMemo.clear();
-    // A write also invalidates the review-queue snapshot derived from a
-    // previously fetched worklist bundle (WL-0MVI0IT4S0070G78).
-    lastWorklistBundle = null;
-    inflightWorklistBundle = null;
-    return runWlInner(args, includeJson, timeoutMs, dirOverride);
-  }
-
-  // Read: dedupe concurrent identical fetches within this process (F4).
-  const key = fetchMemoKey(args, includeJson, dirOverride);
-  const inFlight = inflightFetchMemo.get(key);
-  if (inFlight) {
-    return inFlight;
-  }
-
-  const promise = runWlInner(args, includeJson, timeoutMs, dirOverride).finally(() => {
-    // Remove on settle: the memo only dedupes CONCURRENT fetches, so a
-    // later identical read always spawns fresh (never stale across writes).
-    if (inflightFetchMemo.get(key) === promise) {
-      inflightFetchMemo.delete(key);
-    }
-  });
-
-  // Bound: evict the oldest entry when over the cap (Map preserves insertion
-  // order, so the first key is the oldest).
-  if (inflightFetchMemo.size >= MEMO_MAX_ENTRIES) {
-    const oldest = inflightFetchMemo.keys().next().value;
-    if (oldest !== undefined) {
-      inflightFetchMemo.delete(oldest);
-    }
-  }
-  inflightFetchMemo.set(key, promise);
-  return promise;
-}
+export { DEFAULT_WL_TIMEOUT_MS, clearFetchMemo, _fetchMemoSize } from './fetcher.cli.js';
+export {
+  getInProcessOpenStats,
+  resetInProcessOpenStats,
+  createInProcessRefreshScope,
+} from './fetcher.inprocess.js';
 
 // ── Public API ────────────────────────────────────────────────────────
 
@@ -578,6 +177,18 @@ let lastWorklistBundle: { dirKey: string; at: number; bundle: WorklistBundle } |
  * awaits this instead of spawning a second `wl` for the same subset.
  */
 let inflightWorklistBundle: { dirKey: string; promise: Promise<WorklistBundle> } | null = null;
+
+/**
+ * Drop both worklist-bundle caches. Registered with the `wl` CLI leaf
+ * (`./fetcher.cli.js`) as its memo-invalidation hook, so a write or a
+ * worklog-dir change invalidates the review-queue snapshot derived from a
+ * previously fetched bundle (WL-0MVI0IT4S0070G78) even though the leaf may not
+ * import this barrel (parent AC4).
+ */
+function clearWorklistBundleCaches(): void {
+  lastWorklistBundle = null;
+  inflightWorklistBundle = null;
+}
 
 /** Identity of the worklog dir a bundle was read from. */
 function worklogDirKey(): string {
