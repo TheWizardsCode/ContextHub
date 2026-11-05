@@ -135,9 +135,16 @@ import {
   getWorklogDir,
   fetchOutboundDepsForItems,
 } from './fetcher.js';
+import { isActiveBlocker } from './fetcher.blockers.js';
 import { parseMachinePaneListOutput } from './dispatcher-anchor.js';
 import { resolveHerdrBin } from './herdr-bin.js';
 import { probeClaimHolders, type ClaimHolderVerdict } from './claim-lock.js';
+
+// The active-blocker predicate moved to the fetcher family's leaf module
+// (`./fetcher.blockers.js`) so the fetch API can share it without importing
+// this module (parent WL-0MVGKH47T007GKN1 AC4). Re-exported unchanged: every
+// `import { isActiveBlocker } from './hydrator.js'` keeps working.
+export { isActiveBlocker };
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -202,11 +209,6 @@ export const ALLOWED_STAGES_BY_STATUS: Record<string, readonly string[]> = {
   completed: ['in_review', 'done'],
   'in-progress': ['intake_complete', 'plan_complete'],
 };
-
-/** Statuses considered terminal for an outbound dependency target. */
-const TERMINAL_DEP_STATUSES = new Set(['completed', 'deleted']);
-/** Stages considered terminal for an outbound dependency target. */
-const TERMINAL_DEP_STAGES = new Set(['in_review', 'done']);
 
 /** File name of the hydrator diagnostic log inside `.worklog/logs/`. */
 export const HYDRATOR_LOG_FILE = 'hydrator.log';
@@ -567,18 +569,6 @@ export async function applyActivePaneMarkers(
   }
   if (panes === null) return;
   markItemsActiveByPane(items, collectPaneWorkItemIds(panes, workspaceId));
-}
-
-/**
- * True when an outbound dependency still blocks: the target is neither
- * `completed`/`deleted` nor at a terminal stage (`in_review`/`done`).
- */
-export function isActiveBlocker(target: HydratorDepTarget): boolean {
-  const status = (target.status ?? '').toLowerCase();
-  if (TERMINAL_DEP_STATUSES.has(status)) return false;
-  const stage = (target.stage ?? '').toLowerCase();
-  if (TERMINAL_DEP_STAGES.has(stage)) return false;
-  return true;
 }
 
 /**
