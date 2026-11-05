@@ -3293,6 +3293,9 @@ describe('createDowntimeDeps getDueScheduledPrompt', () => {
     prompt: '/skill:refactor',
     intervalDays: 3,
     lastTriggeredAt: null,
+    // Absent in the file ⇒ parseScheduledPrompt normalizes it to the
+    // scheduled-prompt default (`high`, WL-0MVIDWJ090090J3Q AC3).
+    priority: 'high',
   };
 
   it('reads the config and returns the first due entry (null lastTriggeredAt = due)', async () => {

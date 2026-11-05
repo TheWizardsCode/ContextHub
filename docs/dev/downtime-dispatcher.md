@@ -1719,8 +1719,22 @@ the parent contract (WL-0MVE1NZ4J000H5NH):
   `buildDowntimeSpawnOptions`, which maps it with the downtime table and sets
   `HERDR_REQUEST_PRIORITY` beside `HERDR_RESOLVED_CWD`. Unattended work is
   therefore polite (`low` stays `low`) while `critical` work is served as
-  `high`. Scheduled prompts have no work item and get the downtime default
-  (`medium`).
+  `high`. Scheduled prompts have no work item, so they carry their own
+  per-entry `priority` field instead (WL-0MVIDWJ090090J3Q AC3):
+  `dispatchScheduledPrompt` forwards `prompt.priority` (normalized by
+  `parseScheduledPrompt`, `resolveScheduledPromptPriority`) through the same
+  `spawnAgentPane` → `buildDowntimeSpawnOptions` chain. **An absent
+  `priority` defaults to `high` for scheduled prompts** — deliberately
+  different from the downtime default (`medium`): the canonical daily
+  maintenance routines (`/skill:test` 07:00, `/skill:standup` 08:00,
+  `/skill/refactor` 09:00) must be served even during peak periods. An entry
+  that should be polite declares `low`/`medium` explicitly; `critical` is
+  mapped to `high` by the downtime table. An invalid value skips the whole
+  entry (fail-closed, logged warning), like an invalid `time`. The
+  `/skill:maintenance-routines` skill
+  ([SKILL.md](../../skill/maintenance-routines/SKILL.md)) creates and
+  reconciles those three entries (ids, `intervalDays`, `time` and `priority`)
+  in each project's `.worklog/scheduled-prompts.json`.
 - **Interactive** — the agent route resolves the dispatched item's priority
   with a bounded `wl show --json` lookup (2 s budget), maps it with the
   interactive table and passes it to `buildSendToPiArgs(...,

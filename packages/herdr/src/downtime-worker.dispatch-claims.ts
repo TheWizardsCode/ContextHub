@@ -33,6 +33,7 @@ import {
   countRunningDowntimePanes,
   paneLabelItemId,
 } from './downtime-worker.pane.js';
+import { resolveScheduledPromptPriority } from './scheduled-prompts.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type {
   DispatcherAnchor,
@@ -791,6 +792,10 @@ export async function recordDispatchEnrichmentBestEffort(
  *     marker failure ALSO aborts before the spawn (fail-closed).
  *  3. SPAWN the pane through the existing send-to-pi.sh path running the
  *     prompt text, named `Downtime <entryId>` (--no-focus, --cwd, --model).
+ *     The entry's `priority` (default `high`, see `scheduled-prompts.ts`) is
+ *     forwarded so the pane runs with `HERDR_REQUEST_PRIORITY=high` (→
+ *     `X-Priority: high`): maintenance routines must not be starved behind
+ *     peak-period contention (WL-0MVIDWJ090090J3Q AC3).
  *     A handled spawn failure appends an outcome:'spawn-failed' trace and
  *     resolves 'spawn-failed' (the outcome is NOT success); the marker and
  *     the persisted lastTriggeredAt stand (the entry is not re-selected
@@ -806,16 +811,19 @@ export async function dispatchScheduledPrompt(
     localPreference?: LocalPreference;
     /**
      * Locality-preference precedence opt-in (WL-0MVNUIW77000VYAX AC4/AC5).
-     * A scheduled prompt has no work item and therefore no priority, so the
-     * resolution yields the deployment default (`default`) or the explicit
-     * operator setting (`operator-setting`).
+     * A scheduled prompt has no WORK ITEM and therefore no work-item
+     * priority, so the locality rule yields the deployment default
+     * (`default`) or the explicit operator setting (`operator-setting`).
+     * (Its per-entry request `priority` is a separate field — see
+     * `scheduled-prompts.ts` — and does not feed the locality rule.)
      */
     localPreferenceMode?: LocalPreferenceMode;
   },
 ): Promise<DowntimeDispatchOutcome> {
   const at = new Date().toISOString();
-  // Scheduled prompts carry no priority: the rule can only leave the
-  // deployment default in place (or honour an explicit operator setting).
+  // Scheduled prompts have no WORK-ITEM priority: the locality rule can only
+  // leave the deployment default in place (or honour an explicit operator
+  // setting).
   const resolvedLocalPreference = resolveDispatchLocalPreferenceDecision(
     undefined,
     opts.localPreference,
@@ -888,6 +896,12 @@ export async function dispatchScheduledPrompt(
     model: opts.model,
     cwd: opts.cwd,
     paneName: `Downtime ${prompt.id}`,
+    // Per-entry request priority (WL-0MVIDWJ090090J3Q AC3): `high` unless the
+    // entry declares otherwise, so the maintenance routines are served during
+    // peak periods. `spawnAgentPane` forwards it to
+    // `buildDowntimeSpawnOptions` → `HERDR_REQUEST_PRIORITY` (the downtime
+    // table maps `high` → `high`, `critical` → `high`).
+    priority: resolveScheduledPromptPriority(prompt),
     ...(anchorId !== undefined ? { anchorId } : {}),
     // Scheduled/background work defaults to `remote-ok` (C4-AC1): it must
     // never queue local capacity the operator may need for interactive work.

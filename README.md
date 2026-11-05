@@ -9,6 +9,7 @@ At the heart of that orchestration is **Worklog**: a lightweight, Git-friendly i
 - **Herdr Orchestration**: Browse and select work items, dispatch Pi agent panes, track live agent status, and self-heal abandoned `in_progress` claims from a Herdr pane (see [Herdr plugin](packages/herdr/README.md))
 - **AI Agent Integration**: Pi agent plugin modules that auto-load into every session — activity indicator, session health, model/provider display, guardrails, error recovery (`/retry`), and skill-path tool (see [Pi extension](packages/tui/extensions/README.md)).
 - **Heartbeat Skill**: Automated work item monitoring via the Pi agent — run `/skill:heartbeat` to flag items needing producer review or to audit completed items for closure readiness (see [skill/heartbeat/SKILL.md](skill/heartbeat/SKILL.md)).
+- **Maintenance-Routines Skill**: Creates and maintains the daily automated routines — `/skill:test` 07:00, `/skill:standup` 08:00, `/skill:refactor` 09:00, all dispatched at high request priority — in `.worklog/scheduled-prompts.json` (see [skill/maintenance-routines/SKILL.md](skill/maintenance-routines/SKILL.md)).
 - **Hierarchical Work Items**: Parent-child relationships for organizing epics, features, and tasks
 - **Plugin System**: Extend the CLI with custom commands (see [Plugin Guide](PLUGIN_GUIDE.md))
 - **CLI + API**: Manage work items from the command line or a REST API
@@ -139,6 +140,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | Document | Description |
 |----------|-------------|
 | [Heartbeat Skill](skill/heartbeat/SKILL.md) | Automated work item monitoring and audit orchestration for the Pi agent |
+| [Maintenance-Routines Skill](skill/maintenance-routines/SKILL.md) | Creates/maintains the daily scheduled maintenance routines (test 07:00, standup 08:00, refactor 09:00) at high request priority in `.worklog/scheduled-prompts.json` |
 | [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) | Plugin development guide and API reference |
 | [LOCAL_LLM.md](LOCAL_LLM.md) | Configure local LLM providers (Ollama, Foundry) and the direct `llm.*` chat config used by `wl interview` |
 | [MULTI_PROJECT_GUIDE.md](MULTI_PROJECT_GUIDE.md) | Multi-project setup with custom prefixes and [cross-repo dependencies](MULTI_PROJECT_GUIDE.md#cross-repo-dependencies) |

@@ -1499,10 +1499,18 @@ migration needed); re-saving the file drops them.
 **Scheduled prompts (WL-0MSS1Q5ER007QDKX)** — the FIRST dispatch stage: a
 project-local config file `.worklog/scheduled-prompts.json` (provisioned by
 `wl init` from `templates/scheduled-prompts.json`, create-if-absent) carries
-periodic maintenance prompts with a best-effort frequency. The base set includes a `/skill:refactor` entry (`intervalDays: 3`,
-`lastTriggeredAt: null`) for routine maintenance, and a `/skill:standup`
-entry (`intervalDays: 1`, `time: "06:05"`, `lastTriggeredAt: null`) that
-fires daily at or after 06:05 local — the canonical daily standup prompt. Each entry has:
+periodic maintenance prompts with a best-effort frequency. The base set is
+the canonical **daily maintenance routines** (WL-0MVIDWJ090090J3Q), kept in
+step by the `/skill:maintenance-routines` skill (see the
+[maintenance-routines skill](../../skill/maintenance-routines/SKILL.md)):
+
+| id | time | intervalDays | priority |
+|---|---|---|---|
+| `/skill:test` | `07:00` | 1 | `high` |
+| `/skill:standup` | `08:00` | 1 | `high` |
+| `/skill:refactor` | `09:00` | 1 | `high` |
+
+Every entry starts with `lastTriggeredAt: null` (never run). Each entry has:
 
 - `id` — stable entry id (pane name `Downtime <id>` and rolling-log marker
   `itemId`); set it to the command itself (e.g. `/skill:refactor`) so the
@@ -1511,6 +1519,16 @@ fires daily at or after 06:05 local — the canonical daily standup prompt. Each
 - `intervalDays` — best-effort frequency in whole days,
 - `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
   (`null` = never run; a missing field is treated as due),
+- `priority` — *(optional)* the dispatch request priority
+  (`low` | `medium` | `high` | `critical`), forwarded to the pane as
+  `HERDR_REQUEST_PRIORITY` and hence the `X-Priority` provider header.
+  **An absent `priority` defaults to `high`** — not the downtime default
+  (`medium`): scheduled prompts are the project's maintenance routines and
+  must be served even during peak-period contention. An entry that should be
+  polite sets `low`/`medium` explicitly. The value is validated with the
+  other entry fields: an invalid value skips the whole entry with a logged
+  warning (fail-closed, never a crash). `critical` is served as `high` by
+  the downtime priority table.
 - `time` — *(optional)* wall-clock `HH:MM` in 24-hour format (e.g. `06:05`);
   when present the entry is due only when **both** the interval gate has
   elapsed **and** the current local time is at or after this time on the
@@ -1542,7 +1560,9 @@ effort: a dispatch may be delayed (no idle slot, cooldown, freeze) but never
 happens more often than once per interval. A due prompt dispatches a pi agent
 pane named `Downtime <id>` via the same send-to-pi.sh path as the tiers
 (`--no-focus`, `--cwd <worklog root>`, `--model <downtimeModel>`) running the
-prompt text. Multiple due entries dispatch one per idle slot in config order
+prompt text, with the entry's `priority` (default `high`) passed through
+`spawnAgentPane` → `buildDowntimeSpawnOptions` → `HERDR_REQUEST_PRIORITY`.
+Multiple due entries dispatch one per idle slot in config order
 (the single-flight guard prevents overlap).
 
 Fail-closed at every boundary: an **absent** config is an empty set (silent —
@@ -1551,7 +1571,8 @@ are synthesized), and a **malformed** config (unreadable, corrupt JSON, no
 `entries` list) is an empty set (logged error) — in both cases no scheduled
 dispatch occurs and the
 existing tiers are unaffected. Invalid entries (missing/empty id or prompt,
-missing/non-finite/≤ 0 `intervalDays`, unparseable `lastTriggeredAt`) are
+missing/non-finite/≤ 0 `intervalDays`, unparseable `lastTriggeredAt`,
+invalid `time` or `priority`) are
 skipped with a logged warning — never a crash.
 
 Before the pane spawns, `lastTriggeredAt` is persisted to the config (atomic

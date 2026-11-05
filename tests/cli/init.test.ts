@@ -419,20 +419,32 @@ describe('CLI Init Tests', () => {
       expect(fs.existsSync(configPath)).toBe(true);
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(Array.isArray(config.entries)).toBe(true);
-      // The base set starts with /skill:refactor (intervalDays 3)
-      // and /skill:standup at 06:05 (intervalDays 1, WL-0MTMN7W63001FCQR).
+      // The base set is the canonical daily maintenance-routines set
+      // (WL-0MVIDWJ090090J3Q AC4): test 07:00, standup 08:00, refactor 09:00,
+      // all daily and all dispatched at `priority: high`.
       expect(config.entries).toEqual([
         {
-          id: '/skill:refactor',
-          prompt: '/skill:refactor',
-          intervalDays: 3,
+          id: '/skill:test',
+          prompt: '/skill:test',
+          intervalDays: 1,
+          time: '07:00',
+          priority: 'high',
           lastTriggeredAt: null,
         },
         {
           id: '/skill:standup',
           prompt: '/skill:standup',
           intervalDays: 1,
-          time: '06:05',
+          time: '08:00',
+          priority: 'high',
+          lastTriggeredAt: null,
+        },
+        {
+          id: '/skill:refactor',
+          prompt: '/skill:refactor',
+          intervalDays: 1,
+          time: '09:00',
+          priority: 'high',
           lastTriggeredAt: null,
         },
       ]);

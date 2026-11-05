@@ -460,6 +460,9 @@ describe('dispatchFromCoordination', () => {
       model: 'plan',
       cwd: '/repo',
       paneName: 'Downtime /skill:refactor',
+      // Scheduled prompts dispatch at the scheduled-prompt priority default
+      // (`high`, WL-0MVIDWJ090090J3Q AC3) — the entry declares none.
+      priority: 'high',
       localPreference: 'remote-ok',
     });
     // No pre-dispatch claim and NO coordination-tier work (AC3/AC4/AC6).

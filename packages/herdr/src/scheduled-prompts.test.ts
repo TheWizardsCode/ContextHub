@@ -7,6 +7,11 @@
  * not-yet-due), absent/malformed-config fail-closed, invalid-entry
  * skipping, config-order selection, and the atomic tmp+rename persist
  * (updateScheduledPromptLastTriggered).
+ *
+ * Also covers the per-entry `priority` field (WL-0MVIDWJ090090J3Q AC3): the
+ * accepted alphabet, the `high` default for an absent value, the fail-closed
+ * rejection of an invalid value, and priority round-tripping through the
+ * atomic persist.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -24,6 +29,10 @@ import { tmpdir } from 'node:os';
 import {
   DAY_MS,
   SCHEDULED_PROMPTS_FILE,
+  SCHEDULED_PROMPT_DEFAULT_PRIORITY,
+  SCHEDULED_PROMPT_PRIORITIES,
+  isValidScheduledPromptPriority,
+  resolveScheduledPromptPriority,
   scheduledPromptsPath,
   parseScheduledPrompt,
   isValidScheduledPrompt,
@@ -47,6 +56,7 @@ const refactorPrompt: ScheduledPrompt = {
   prompt: '/skill:refactor',
   intervalDays: 3,
   lastTriggeredAt: null,
+  priority: 'high',
 };
 
 describe('scheduledPromptsPath', () => {
@@ -488,5 +498,87 @@ describe('isDueScheduledPrompt with time (WL-0MTMN7W63001FCQR AC2/AC3)', () => {
     const bad = { ...refactorPrompt, time: 'bad' } as ScheduledPrompt;
     expect(isDueScheduledPrompt(bad, Date.now())).toBe(false);
     expect(isAtOrAfterScheduledTime(bad, Date.now())).toBe(false);
+  });
+});
+
+// ── priority field (WL-0MVIDWJ090090J3Q AC3) ───────────────────────────
+
+describe('scheduled-prompt priority', () => {
+  it('defaults an absent priority to high (maintenance routines are not polite)', () => {
+    expect(SCHEDULED_PROMPT_DEFAULT_PRIORITY).toBe('high');
+    const { priority: _omit, ...legacy } = refactorPrompt;
+    const parsed = parseScheduledPrompt(legacy);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.priority).toBe('high');
+  });
+
+  it('accepts every documented priority value and preserves it', () => {
+    expect(SCHEDULED_PROMPT_PRIORITIES).toEqual(['low', 'medium', 'high', 'critical']);
+    for (const priority of SCHEDULED_PROMPT_PRIORITIES) {
+      const parsed = parseScheduledPrompt({ ...refactorPrompt, priority });
+      expect(parsed).not.toBeNull();
+      expect(parsed!.priority).toBe(priority);
+    }
+  });
+
+  it('rejects an invalid priority (fail-closed: the whole entry is skipped)', () => {
+    for (const priority of ['urgent', 'HIGH', '', 3, null, true]) {
+      expect(parseScheduledPrompt({ ...refactorPrompt, priority })).toBeNull();
+    }
+  });
+
+  it('loadScheduledPrompts skips an entry with an invalid priority and keeps the valid ones', () => {
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    const logs: string[] = [];
+    writeFileSync(
+      scheduledPromptsPath(cwd),
+      JSON.stringify({
+        entries: [
+          { ...refactorPrompt, id: 'bad', priority: 'urgent' },
+          { ...refactorPrompt, id: 'quiet', priority: 'low' },
+        ],
+      }),
+      'utf8',
+    );
+
+    const result = loadScheduledPrompts(cwd, (message) => logs.push(message));
+
+    expect(result.entries.map((entry) => entry.id)).toEqual(['quiet']);
+    expect(result.entries[0].priority).toBe('low');
+    expect(logs.join('\n')).toContain('invalid entry');
+  });
+
+  it('isValidScheduledPromptPriority mirrors the accepted alphabet', () => {
+    expect(isValidScheduledPromptPriority('high')).toBe(true);
+    expect(isValidScheduledPromptPriority('critical')).toBe(true);
+    expect(isValidScheduledPromptPriority('urgent')).toBe(false);
+    expect(isValidScheduledPromptPriority(undefined)).toBe(false);
+  });
+
+  it('resolveScheduledPromptPriority falls back to high for a directly-constructed entry', () => {
+    expect(resolveScheduledPromptPriority({ priority: 'medium' })).toBe('medium');
+    expect(resolveScheduledPromptPriority({})).toBe('high');
+    expect(resolveScheduledPromptPriority({ priority: 'urgent' as never })).toBe('high');
+  });
+
+  it('preserves the priority verbatim across a lastTriggeredAt persist', async () => {
+    const cwd = makeTempDir();
+    await saveScheduledPrompts(cwd, {
+      entries: [refactorPrompt, { ...refactorPrompt, id: 'quiet', priority: 'low' }],
+    });
+
+    const ok = await updateScheduledPromptLastTriggered(
+      cwd,
+      '/skill:refactor',
+      '2026-11-05T07:00:00.000Z',
+    );
+
+    expect(ok).toBe(true);
+    const parsed = JSON.parse(readFileSync(scheduledPromptsPath(cwd), 'utf8')) as {
+      entries: ScheduledPrompt[];
+    };
+    expect(parsed.entries.map((entry) => entry.priority)).toEqual(['high', 'low']);
+    expect(parsed.entries[0].lastTriggeredAt).toBe('2026-11-05T07:00:00.000Z');
   });
 });

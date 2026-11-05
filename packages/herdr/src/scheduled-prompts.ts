@@ -18,7 +18,13 @@
  *  - optional `time` (wall-clock `HH:MM`, e.g. `06:05`) — when present,
  *    dispatch waits until the first idle window at/after that time (local
  *    wall-clock) and the interval gate has elapsed; when absent, the
- *    existing `now - last >= intervalDays` semantics are unchanged.
+ *    existing `now - last >= intervalDays` semantics are unchanged,
+ *  - optional `priority` (`low|medium|high|critical`) — the dispatch request
+ *    priority forwarded to the pane as `HERDR_REQUEST_PRIORITY` (and hence
+ *    the `X-Priority` provider header). ABSENT defaults to `high`: the
+ *    maintenance routines must be served even during peak periods. An entry
+ *    that wants to be more polite sets `low`/`medium` explicitly
+ *    (WL-0MVIDWJ090090J3Q AC3).
  *
  * Fail-closed philosophy (mirrors settings.ts + the downtime worker): an
  * absent config is an EMPTY set (silent — absence is the expected state;
@@ -36,6 +42,26 @@ export const SCHEDULED_PROMPTS_FILE = 'scheduled-prompts.json';
 
 /** One day in milliseconds (best-effort frequency granularity is whole days). */
 export const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The request-priority alphabet a scheduled prompt may declare. */
+export type ScheduledPromptPriority = 'low' | 'medium' | 'high' | 'critical';
+
+/** Every accepted `priority` value, in dispatch-politeness order. */
+export const SCHEDULED_PROMPT_PRIORITIES: readonly ScheduledPromptPriority[] = [
+  'low',
+  'medium',
+  'high',
+  'critical',
+];
+
+/**
+ * Default dispatch priority for a scheduled prompt when the entry declares
+ * none (WL-0MVIDWJ090090J3Q AC3, producer decision Q1). Deliberately different
+ * from the downtime default (`medium`, `mapDowntimeRequestPriority(undefined)`):
+ * scheduled prompts are the project's maintenance routines (daily test,
+ * standup, refactor) and must be served even during peak periods.
+ */
+export const SCHEDULED_PROMPT_DEFAULT_PRIORITY: ScheduledPromptPriority = 'high';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -57,6 +83,12 @@ export interface ScheduledPrompt {
    * today (backward-compatible). Invalid values cause the entry to be
    * skipped (fail-closed). */
   time?: string;
+  /** Optional dispatch request priority (`low|medium|high|critical`) forwarded
+   * to the pane as `HERDR_REQUEST_PRIORITY` (→ the `X-Priority` provider
+   * header). `parseScheduledPrompt` normalizes an absent value to `high`
+   * (`SCHEDULED_PROMPT_DEFAULT_PRIORITY`); an invalid value causes the entry
+   * to be skipped (fail-closed). */
+  priority?: ScheduledPromptPriority;
 }
 
 /** Root shape of `.worklog/scheduled-prompts.json`. */
@@ -105,7 +137,12 @@ export function scheduledPromptsPath(cwd: string): string {
  *  - time, when present, must be a wall-clock `HH:MM` 24-hour time
  *    (e.g. `06:05`); an invalid value rejects the whole entry (skipped
  *    with a warning — fail-closed). When absent, the field is omitted
- *    and the due check is interval-only (backward-compatible).
+ *    and the due check is interval-only (backward-compatible),
+ *  - priority, when present, must be one of `low|medium|high|critical`; an
+ *    invalid value rejects the whole entry (skipped with a warning —
+ *    fail-closed). When absent it is normalized to `high`
+ *    (`SCHEDULED_PROMPT_DEFAULT_PRIORITY`), so every parsed entry carries a
+ *    resolved priority (WL-0MVIDWJ090090J3Q AC3).
  */
 export function parseScheduledPrompt(entry: unknown): ScheduledPrompt | null {
   if (typeof entry !== 'object' || entry === null) return null;
@@ -130,9 +167,51 @@ export function parseScheduledPrompt(entry: unknown): ScheduledPrompt | null {
     time = o.time;
   }
 
-  return time === undefined
-    ? { id: o.id, prompt: o.prompt, intervalDays: o.intervalDays, lastTriggeredAt }
-    : { id: o.id, prompt: o.prompt, intervalDays: o.intervalDays, lastTriggeredAt, time };
+  let priority: ScheduledPromptPriority;
+  if (o.priority === undefined) {
+    // Absent ⇒ the scheduled-prompt default (`high`, producer decision Q1).
+    priority = SCHEDULED_PROMPT_DEFAULT_PRIORITY;
+  } else if (typeof o.priority !== 'string' || !isValidScheduledPromptPriority(o.priority)) {
+    // Invalid value ⇒ skip the whole entry (fail-closed, like `time`).
+    return null;
+  } else {
+    priority = o.priority;
+  }
+
+  const parsed: ScheduledPrompt = {
+    id: o.id,
+    prompt: o.prompt,
+    intervalDays: o.intervalDays,
+    lastTriggeredAt,
+    priority,
+  };
+  if (time !== undefined) parsed.time = time;
+  return parsed;
+}
+
+/** Validate a scheduled-prompt `priority` value. */
+export function isValidScheduledPromptPriority(
+  value: unknown,
+): value is ScheduledPromptPriority {
+  return (
+    typeof value === 'string' &&
+    (SCHEDULED_PROMPT_PRIORITIES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Resolve the dispatch priority of a scheduled prompt: the entry's own
+ * `priority`, or `SCHEDULED_PROMPT_DEFAULT_PRIORITY` (`high`) when absent —
+ * so a directly-constructed entry (bypassing `parseScheduledPrompt`) still
+ * dispatches at the scheduled-prompt default rather than the polite downtime
+ * default.
+ */
+export function resolveScheduledPromptPriority(
+  entry: Pick<ScheduledPrompt, 'priority'>,
+): ScheduledPromptPriority {
+  return isValidScheduledPromptPriority(entry.priority)
+    ? entry.priority
+    : SCHEDULED_PROMPT_DEFAULT_PRIORITY;
 }
 
 /** Validate `HH:MM` 24-hour wall-clock time (e.g. `06:05`, `23:59`). */
@@ -276,7 +355,8 @@ export function loadScheduledPrompts(
     if (entry === null) {
       log(
         `scheduled-prompts: skipping invalid entry #${index + 1} in ${file} ` +
-          `(missing/invalid id, prompt, intervalDays, or lastTriggeredAt) — fail-closed.`,
+          `(missing/invalid id, prompt, intervalDays, lastTriggeredAt, time or ` +
+          `priority) — fail-closed.`,
       );
       continue;
     }
