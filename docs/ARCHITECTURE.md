@@ -417,7 +417,9 @@ WL-0MVVLY034000MDVA).
 
 The flat siblings `src/github-sync.ts`, `src/github-throttler.ts`,
 `src/github-metrics.ts` and `src/github-pre-filter.ts` are unrelated modules
-and are deliberately **not** part of this family.
+and are deliberately **not** part of this family. `src/github-sync.ts` is
+decomposed in its own right: see
+[GitHub Sync Module Layout](#github-sync-module-layout) below.
 
 ### Cycle-safe layering
 
@@ -460,6 +462,78 @@ symbol in its last column must really be re-exported by the barrel
 | change `gh` execution, throttling or rate-limit handling | `src/github/transport.ts` |
 | change a shared type | `src/github/types.ts` |
 | change the shared surface consumers import | `src/github.ts` (barrel) |
+
+## GitHub Sync Module Layout
+
+`src/github-sync.ts` is the stable public entry point for the worklog ⇄ GitHub
+sync flows (the `wl github import` / `wl github push` backends): a thin barrel
+of re-exports with no logic of its own. Every concern it used to contain lives
+in a focused module under `src/github-sync/`, so a comment-mapping fix does not
+require reading the import orchestrator and a progress tweak does not require
+reading the push loop (WL-0MVGKH9Z900178UF, completed by
+WL-0MW0JFBIK007E6VZ).
+
+### Module responsibilities
+
+| Module | Responsibility | Public symbols re-exported by the barrel |
+|---|---|---|
+| `src/github-sync.ts` | Public barrel: re-exports the frozen 10-symbol surface (4 values + 6 types) and documents where each concern lives. | all 10 |
+| `src/github-sync/types.ts` | Shared declarations of the flows' result, timing and progress shapes plus the label-derived field change. Declarations only — a leaf. | `SyncedItem`, `SyncErrorItem`, `GithubSyncResult`, `GithubSyncTiming`, `GithubProgress` (5 of 6 types) |
+| `src/github-sync/util.ts` | Shared pure primitives: timestamp/comment ordering, the comment-sync predicate, title shortening and the stable import comparison key. | none (internal) |
+| `src/github-sync/progress.ts` | The single progress emitter factory both flows use: items-per-second rate, ETA and throttler snapshot. | none (internal) |
+| `src/github-sync/labels.ts` | Label-derived field resolution from the label event timeline (stage/priority/status/type/risk/effort), newest-event-wins with a local tie-break. | `resolveLabelField`, `resolveAllLabelFields`, `FieldChange` (re-exported from `./types.js`) |
+| `src/github-sync/comments.ts` | worklog→GitHub comment rendering and upsert: marker-prefixed bodies, per-comment reconciliation and `githubCommentId` persistence. | none (internal) |
+| `src/github-sync/push.ts` | The push flow: issue create/update, unchanged-item skip, deleted-item guard, comment upsert and parent/child sub-issue linking, accumulating the result counters/timings. | `upsertIssuesFromWorkItems` |
+| `src/github-sync/import.ts` | The import orchestrator: owns phase order (scan → close-check → label resolution → merge → enforcement → hierarchy hints → comment import) and the result shape. | `importIssuesToWorkItems` |
+| `src/github-sync/import-hierarchy.ts` | Import scan state: issue fetch, sub-issue hierarchy maps and the parent/child hint maps shared between scan phases. | none (internal) |
+| `src/github-sync/import-close-check.ts` | The close-check pass: revisits local items carrying a `githubIssueNumber` that the listing missed and folds their state into the scan. | none (internal) |
+| `src/github-sync/import-comments.ts` | GitHub→worklog comment import: fetch filter (newly mapped or newer `updatedAt`), marker skip and comment mapping persistence. | none (internal) |
+
+### Cycle-safe layering
+
+The dependency direction is strictly one-way, so the import graph stays
+acyclic. Each arrow below is a family-module dependency; every module
+additionally imports the `../github.js` barrel and none imports the
+`../github-sync.js` barrel:
+
+```
+types · util                            (leaves)
+progress
+labels         → types
+comments       → util
+push           → comments, progress, util, types
+import-hierarchy        → progress
+import-close-check      → import-hierarchy, progress
+import-comments         → import-hierarchy, progress
+import         → labels, progress, util, import-hierarchy,
+                 import-close-check, import-comments
+src/github-sync.ts (barrel) → types, labels, push, import
+```
+
+No module under `src/github-sync/` imports `../github-sync.js` — not even
+type-only — so the barrel can never be part of a cycle.
+`tests/github-sync/split-guard.test.ts` enforces this statically, alongside the
+1,000-line ceiling (no exemptions) and the frozen public surface
+(`tests/github-sync/github-sync.split-baseline.json`).
+
+### Where to find X in the github-sync module
+
+| I want to… | Look in |
+|---|---|
+| change how work items become issues, or how pushes are ordered/skipped | `src/github-sync/push.ts` |
+| change how issue comments are rendered or reconciled | `src/github-sync/comments.ts` |
+| change the import phase order or the merge/enforcement steps | `src/github-sync/import.ts` |
+| change issue fetching, hierarchy resolution or parent/child hints | `src/github-sync/import-hierarchy.ts` |
+| change the close-check pass | `src/github-sync/import-close-check.ts` |
+| change the GitHub→worklog comment import or its fetch filter | `src/github-sync/import-comments.ts` |
+| change how labels resolve into work-item fields | `src/github-sync/labels.ts` |
+| change the progress rate/ETA/throttler snapshot | `src/github-sync/progress.ts` |
+| change a timestamp/comment helper or the import comparison key | `src/github-sync/util.ts` |
+| change a result, timing or progress shape | `src/github-sync/types.ts` |
+| change the shared surface consumers import | `src/github-sync.ts` (barrel) |
+
+See [docs/dev/github-sync-split.md](dev/github-sync-split.md) for the
+dev-facing orientation to this layout.
 
 ## Doctor Module Layout
 
