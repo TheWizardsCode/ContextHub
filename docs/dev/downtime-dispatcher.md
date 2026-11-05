@@ -82,6 +82,32 @@ Layering: extracted modules import concrete siblings (and the coordination
 primitives), never the `dispatcher-anchor.js` barrel at runtime, so the import
 graph stays acyclic.
 
+### downtime-log module layout (WL-0MVGKHFT4003X6JW)
+
+`packages/herdr/src/downtime-log.ts` is likewise a **thin barrel** — a
+module-level doc comment plus re-export statements only, re-exporting exactly
+the 54 symbols the pre-split module exported from `./downtime-log.js` (44 of
+them are actually consumed). Every behaviour lives in the sibling modules
+below; each carries a doc comment stating its single responsibility, and no
+family module exceeds 1,000 lines (enforced by
+`downtime-log.split-guard.test.ts` over the frozen surface recorded in
+`downtime-log.split-baseline.json`).
+
+| Module | Single responsibility | Key exports (consumer-facing) |
+|---|---|---|
+| `downtime-log-storage.ts` | File names, retention/rotation policy, atomic bounded JSONL append, tolerant line parsing | `DOWNTIME_LOG_FILE`, `COORDINATION_LOG_FILE`, `DOWNTIME_LOG_MAX_ENTRIES`, `COORDINATION_LOG_MAX_ENTRIES`, `resolveCoordinationLogPolicy`, `coordinationLogPolicyFromConfig`, `CoordinationLogPolicy` |
+| `downtime-log-budget.ts` | Host-budget refusal vocabulary + evidence shape (pure leaf, no imports) | `HOST_BUDGET_IMPLEMENT_REASON`, `HOST_BUDGET_AUDIT_REASON`, `HOST_BUDGET_UNKNOWN_REASON`, `HOST_BUDGET_DECISION_REASONS`, `isHostBudgetDecisionReason`, `HostBudgetEvidence` |
+| `downtime-log-coordination.ts` | Coordination/decision entry shape, its fail-closed append, the readers (current file and rotated history) and the per-hour reason tally | `CoordinationLogEntry`, `appendCoordinationLogEntry`, `readCoordinationLogEntries`, `readCoordinationLogAllEntries`, `hourlyReasonTally`, `HourlyReasonCount` |
+| `downtime-log-entries.ts` | Dispatch-log entry shapes, pane-close lifecycle entries, fail-closed appends, fail-safe reader, and the marker-vs-lifecycle predicate | `DowntimeLogEntry`, `PaneCloseLogEntry`, `PaneLifecycleOutcome`, `PaneLifecycleKind`, `appendDowntimeLogEntry`, `appendPaneCloseLogEntry`, `readDowntimeLogEntries` |
+| `downtime-log-markers.ts` | Dispatched-marker readers, staleness/stage guards, per-item attempt budget, non-terminal pane-close cooldown | `auditDispatchedItemIds`, `implementDispatchedItemIds`, `recentAuditDispatchedItemIds`, `dispatchedItemMarkers`, `markerStillExcludes`, `countAttempts`, `isNonTerminalCooldownActive`, `planDispatchedItemStages`, `intakeDispatchedItemStages` |
+| `downtime-log-recent.ts` | Read-only "recent dispatches" projection and its 4-hour UTC time blocks | `recentDispatchedItems`, `RecentDispatchRow`, `groupRecentDispatchesByTimeBlock`, `DispatchTimeBlock`, `dispatchTimeBlockLabel`, `DISPATCH_TIME_BLOCK_HOURS` |
+
+Layering: `downtime-log-storage.ts` and `downtime-log-budget.ts` are leaves;
+`downtime-log-entries.ts` builds on storage; `downtime-log-markers.ts` and
+`downtime-log-recent.ts` build on entries. No family module imports the
+`downtime-log.js` barrel, so the import graph is acyclic (asserted by
+`downtime-log.split-guard.test.ts`).
+
 ## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
 
 The downtime dispatcher does **not** maintain its own ranking. The Herdr selection list
@@ -3264,7 +3290,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
 | `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
-| `packages/herdr/src/downtime-log.ts` | Coordination/dispatch rolling logs (per worklog root, retained) |
+| `packages/herdr/src/downtime-log*.ts` | The downtime-log module family: the barrel (`downtime-log.ts`, re-exports only) over the sibling modules — storage/rotation policy and atomic append (`downtime-log-storage.ts`), host-budget refusal vocabulary (`downtime-log-budget.ts`), coordination/decision log (`downtime-log-coordination.ts`), dispatch log and pane-close entries (`downtime-log-entries.ts`), dispatched-marker readers and suppression decisions (`downtime-log-markers.ts`), recent-dispatches projection and time blocks (`downtime-log-recent.ts`) (full layout: [downtime-log module layout](#downtime-log-module-layout-wl-0mvgkhft4003x6jw)) |
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
