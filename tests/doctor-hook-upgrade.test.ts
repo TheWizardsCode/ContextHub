@@ -553,9 +553,9 @@ describe('hook-upgrade module', () => {
       const content = generateCanonicalHookContent('pre-push')!;
       // 1. The project root is pinned to the pushed tree.
       expect(content).toContain('--project-root "$repo_root"');
-      // 2. HEAD is compared with the pushed dev/main sha.
-      expect(content).toContain('is not the ref being pushed to dev/main');
-      expect(content).toContain('gated_shas');
+      // 2. The gate is bound to the pushed dev/main commit (WL-0MW2A3NAP0088IE9).
+      expect(content).toContain('--gate-commit "$gate_commit"');
+      expect(content).toContain('gated_ref_shas');
       // 3. An all-zero local sha (ref deletion) is not gated.
       expect(content).toContain('*[!0]*');
       // 4. The run is captured to a log and its tail surfaced on failure.
@@ -565,6 +565,23 @@ describe('hook-upgrade module', () => {
       expect(content).toContain('mirrored gate cache entry');
       // 6. The defensive git-dir / git-common-dir resolution.
       expect(content).toContain('mkdir -p "$main_cache"');
+    });
+
+    it('canonical pre-push binds the full-suite gate to the pushed commit', () => {
+      const content = generateCanonicalHookContent('pre-push')!;
+      // The pushed ref=sha pairs are captured while stdin is read once.
+      expect(content).toContain('gated_ref_shas="$gated_ref_shas $remote_ref=$local_sha"');
+      // A multi-commit push is refused before any suite runs.
+      expect(content).toContain(
+        'cannot evidence one suite for several pushed commits',
+      );
+      // A runner predating --gate-commit is refused with a named message.
+      expect(content).toContain('predates --gate-commit');
+      // The gate forwards the commit and the pushed tree.
+      expect(content).toContain('--project-root "$repo_root" --gate-commit "$gate_commit"');
+      // The runner's provenance is echoed, and the mirror uses its gate-root.
+      expect(content).toContain("grep '^run_tests: gate-'");
+      expect(content).toContain('mirror_suite_cache "${gate_root:-$repo_root}"');
     });
 
     it('returns content for post-checkout hook', () => {

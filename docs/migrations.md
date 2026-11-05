@@ -186,8 +186,9 @@ Examples:
 
 The committed hook scripts live in `.githooks/` and include:
 - `pre-push` — auto-syncs Worklog data before pushing, uses `--git-branch refs/worklog/data`,
-  and on a `dev`/`main` push runs the full canonical suite and **mirrors the gate run's
-  test-cache entries into the main checkout's `.worklog/cache`** (`mirror_suite_cache`).
+  and on a `dev`/`main` push runs the full canonical suite **bound to the pushed commit**
+  and mirrors the gate run's test-cache entries into the main checkout's `.worklog/cache`
+  (`mirror_suite_cache`).
   A worktree push (the `implement.py finish` path) caches under
   `<worktree git dir>/test-cache` because a worktree has no `.worklog/`; mirroring keeps the
   pushed commit's green full-suite entry visible to post-push verification and to audits.
@@ -196,14 +197,38 @@ The committed hook scripts live in `.githooks/` and include:
   of the embedded canonical template (`PRE_PUSH_HOOK_CONTENT`), so `wl doctor upgrade` never
   reports a repository that carries it as divergent (WL-0MVHP5S01006GDDV).
 
+  **The gate is bound to the pushed commit (`--gate-commit`, WL-0MW2A3NAP0088IE9).** The
+  hook captures the pushed `<ref>=<sha>` pairs while reading pre-push stdin once, forwards
+  `run_tests.py --scope full --strict-git-env --json --project-root <pushed tree>
+  --gate-commit <sha>`, and the runner resolves a **clean** checkout whose `HEAD` is exactly
+  that commit (the push cwd when it qualifies, else any clean `git worktree list` checkout),
+  refusing (exit 2) when none holds it. So a green dev/main push means the full suite ran
+  against the commit that landed, not against whatever tree the hook happened to run in.
+  The runner's `run_tests: gate-subject` / `gate-root` / `gate-verdict` / `gate-refused`
+  lines are echoed to the pusher, and the cache mirror sources from the **gate-resolved
+  root** (`run_tests: gate-root`) rather than the push cwd.
+
+  Refusal semantics, all fail-closed:
+
+  - **Several different dev/main commits in one push** are refused before any suite runs;
+    the message lists each `ref=sha` and the recovery (one commit per push). Escape hatches:
+    `TEST_SCOPE_SKIP=1` or `git push --no-verify` (explicit, not recommended).
+  - **A resolved runner that predates `--gate-commit`** is refused with a named message
+    ("the resolved run_tests.py predates --gate-commit; upgrade …"), never an argparse error.
+  - **No clean checkout holds the pushed commit** (e.g. a push from a genuinely dirty
+    tracked tree, or one whose commit only lives on another branch) is refused; `.gitignore`d
+    `.worklog/` churn never dirties a checkout, so the normal `implement.py finish` worktree
+    push and a clean main-checkout push still resolve in place.
+  - **A ref deletion** (all-zero `local_sha`) carries no commit and is not gated.
+
   `PRE_PUSH_HOOK_CONTENT` is the **single source of truth** for this hook: `wl init`,
   `wl doctor upgrade` and this repository's own `.githooks/pre-push` all emit exactly that
   text, and `tests/fixtures/pre-push-hook.expected.sh` pins the expected content so a drift
   fails a test rather than silently downgrading a project. The template also carries the
   RISE-0MVSS1KVV002TJUL improvements — `--project-root` pinned to the pushed tree, the
-  HEAD-vs-pushed-SHA warning, the ref-deletion (all-zero sha) guard, the failure log + tail,
-  and the `mirrored gate cache entry` wording — so `wl doctor upgrade` is a no-op for a
-  project that already has them (WL-0MW2N56M2004PSRP). Full contract and cache-evidence
+  ref-deletion (all-zero sha) guard, the failure log + tail — and the commit-bound gate
+  above, so `wl doctor upgrade` is a no-op for a project that already has them
+  (WL-0MW2N56M2004PSRP, WL-0MW2A3NAP0088IE9). Full contract and cache-evidence
   flow: [docs/dev/pre-push-hook.md](./dev/pre-push-hook.md).
 - `post-checkout` — auto-syncs after branch checkout; skips worktrees/temp worktrees
 - `post-merge` — wrapper that delegates to `worklog-post-pull`
