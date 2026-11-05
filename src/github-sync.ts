@@ -14,7 +14,6 @@ import {
   getIssueHierarchyAsync,
   addSubIssueLinkResult,
   addSubIssueLinkResultAsync,
-  buildWorklogCommentMarker,
   workItemToIssuePayload,
   createGithubIssueAsync,
   updateGithubIssueAsync,
@@ -22,9 +21,7 @@ import {
   listGithubIssuesAsync,
   listGithubIssueCommentsAsync,
   createGithubIssueComment,
-  createGithubIssueCommentAsync,
   updateGithubIssueComment,
-  updateGithubIssueCommentAsync,
   normalizeGithubLabelPrefix,
   issueToWorkItemFields,
   LabelEventCache,
@@ -40,10 +37,10 @@ import type { FieldChange } from './github-sync/labels.js';
 import {
   commentNeedsSync,
   maxIsoTimestamp,
-  sortCommentsByCreatedAt,
   stableItemKeyForImport,
   truncateTitle,
 } from './github-sync/util.js';
+import { upsertGithubIssueCommentsAsync } from './github-sync/comments.js';
 
 // The result/timing/progress type declarations moved to `./github-sync/types.js`
 // (WL-0MW0JF5YE008LV1R) and the label-resolution declarations to
@@ -121,18 +118,12 @@ export async function upsertIssuesFromWorkItems(
   let completed = 0;
   let skippedUpdates = 0;
 
-  const buildGithubCommentBody = (comment: Comment) => {
-    const marker = buildWorklogCommentMarker(comment.id);
-    const authorLabel = comment.author ? `**${comment.author}**` : '**worklog**';
-    const body = stripWorklogMarkers(comment.comment);
-    return `${marker}\n\n${authorLabel}\n\n${body}`.trim();
-  };
-
-    // Synchronous comment upsert helper removed. Use async helpers
-    // `upsertGithubIssueCommentsAsync` (defined below) which schedule API calls
-    // through the central throttler. The old synchronous helper used direct
-    // sync GH API helpers and could bypass throttler/concurrency limits.
-    // If synchronous behavior is required, wrap the async helper at the callsite.
+  // Comment body rendering and the GitHub comment upsert moved to
+  // `./github-sync/comments.js` (WL-0MW0JF8R6006HUA6); the push flow below
+  // still orchestrates which issues are listed and when comments are synced.
+  // Note: the old synchronous comment-upsert helper is gone — use the async
+  // helper, which schedules its API calls through the central throttler, to
+  // avoid bypassing throttler/concurrency limits.
 
 
   // Concurrency: upsert issues and comments with a bounded concurrency pool
@@ -243,7 +234,14 @@ export async function upsertIssuesFromWorkItems(
         const existingComments = await listGithubIssueCommentsAsync(config, issueNumber!);
         timing.commentListMs += Date.now() - commentListStart;
         const commentUpsertStart = Date.now();
-        const commentSummary = await upsertGithubIssueCommentsAsync(config, issueNumber, itemComments, existingComments);
+        const commentSummary = await upsertGithubIssueCommentsAsync(
+          config,
+          issueNumber,
+          itemComments,
+          existingComments,
+          persistComment,
+          onVerboseLog
+        );
         timing.commentUpsertMs += Date.now() - commentUpsertStart;
         // small yield after comment work
         if (idx % 5 === 0) await new Promise((res) => setImmediate(res));
@@ -276,66 +274,6 @@ export async function upsertIssuesFromWorkItems(
         emitProgress(onProgress, 'push', completed, items.length);
       }
     }
-  }
-
-  // Helper async versions of comment upsert and list used by the mapper
-  async function upsertGithubIssueCommentsAsync(
-    issueConfig: GithubConfig,
-    issueNumber: number,
-    itemComments: Comment[],
-    existingComments: GithubIssueComment[]
-  ): Promise<{ created: number; updated: number; latestUpdatedAt: string | null }> {
-    // Build map of existing GH comments by worklog comment id (from markers)
-    const byWorklogId = new Map<string, GithubIssueComment>();
-    for (const ghComment of existingComments) {
-      const markerId = extractWorklogCommentId(ghComment.body || undefined);
-      if (!markerId) continue;
-      if (!byWorklogId.has(markerId)) byWorklogId.set(markerId, ghComment);
-    }
-
-    let created = 0;
-    let updated = 0;
-    let latestUpdatedAt: string | null = null;
-    const sorted = [...itemComments].sort(sortCommentsByCreatedAt);
-    for (const comment of sorted) {
-      const body = buildGithubCommentBody(comment);
-      const existing = byWorklogId.get(comment.id);
-        if (existing) {
-        // If the GH comment exists, only update if body changed OR GH's updatedAt is newer than our recorded mapping
-        const bodyMatch = (existing.body || '').trim() === body.trim();
-           if (!bodyMatch) {
-           increment('api.comment.update');
-             // updateGithubIssueCommentAsync now schedules internally via the throttler
-             // (see src/github.ts). Call it directly to avoid double-scheduling.
-             const updatedComment = await updateGithubIssueCommentAsync(issueConfig, existing.id!, body);
-          // Persist mapping back to local comment
-          comment.githubCommentId = existing.id;
-          comment.githubCommentUpdatedAt = updatedComment.updatedAt;
-          if (persistComment) {
-            try { persistComment(comment); } catch (err) { if (onVerboseLog) onVerboseLog && onVerboseLog(`[persist] failed to save comment mapping for ${comment.id}: ${(err as Error).message}`); }
-          }
-          updated += 1;
-          latestUpdatedAt = maxIsoTimestamp(latestUpdatedAt, updatedComment.updatedAt);
-        }
-        continue;
-      }
-
-       // No GH comment mapping found — create a new comment
-        increment('api.comment.create');
-            // createGithubIssueCommentAsync now schedules internally via the throttler
-            // (see src/github.ts). Call it directly to avoid double-scheduling.
-            const createdComment = await createGithubIssueCommentAsync(issueConfig, issueNumber, body);
-      // Persist mapping back to local comment so future runs can directly reference by ID
-      comment.githubCommentId = createdComment.id;
-      comment.githubCommentUpdatedAt = createdComment.updatedAt;
-      if (persistComment) {
-        try { persistComment(comment); } catch (err) { if (onVerboseLog) onVerboseLog && onVerboseLog(`[persist] failed to save comment mapping for ${comment.id}: ${(err as Error).message}`); }
-      }
-      created += 1;
-      latestUpdatedAt = maxIsoTimestamp(latestUpdatedAt, createdComment.updatedAt);
-    }
-
-    return { created, updated, latestUpdatedAt };
   }
 
   // Launch upsert mappers without a local worker pool; schedule external
