@@ -84,20 +84,19 @@ try {
   // ignore failures during setup
 }
 
-// Install graceful shutdown handlers that clean up orphaned mock processes.
-// These complement the handlers already installed by cli-helpers.ts.
-// Using lazy import to avoid circular dependency at module load time;
-// the actual handlers run only when signals fire or process exits.
-import('./cli/cli-helpers.js').then(({ killTrackedProcesses, pidTrackingSet }) => {
-  const cleanup = () => {
-    if (pidTrackingSet.size > 0) {
-      killTrackedProcesses()
-    }
-  }
-  process.on('SIGTERM', cleanup)
-  process.on('SIGINT', cleanup)
-  process.on('SIGHUP', cleanup)
-  process.on('beforeExit', cleanup)
-}).catch(() => {
-  // If cli-helpers can't be loaded (e.g., non-test context), skip handlers
-})
+// ── No application or CLI-helper imports here (WL-0MW3JIYIR002RCP8) ──
+//
+// This setup module is evaluated once per worker BEFORE the test file. Any
+// application module it reaches is therefore already in the module registry
+// when that test file's hoisted `vi.mock(...)` registrations take effect, so
+// the module under test keeps its REAL binding while the test asserts on the
+// mock. The lazy `import('./cli/cli-helpers.js')` that used to install
+// shutdown handlers here reached `src/jsonl.ts` → `src/github.ts` and raced
+// the per-file mocks — intermittently breaking
+// `tests/github-sync/comments-module.test.ts` (real calls through the
+// `tests/cli/mock-bin/gh` stub, so the assertions saw 0 mock calls rather than
+// an error). `tests/cli/cli-helpers.ts` installs the same SIGTERM/SIGINT/
+// SIGHUP/beforeExit handlers itself at module load (`_installSignalHandlers`),
+// and only a file that imports it ever tracks a PID, so those handlers are not
+// needed here. `tests/unit/global-setup-isolation.test.ts` pins both halves of
+// that contract.
