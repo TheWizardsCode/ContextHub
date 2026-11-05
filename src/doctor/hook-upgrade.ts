@@ -29,7 +29,7 @@ const HOOK_NAMES = [
  * context-budget gate + scope-aware full-suite gate on dev/main pushes +
  * worktree→main test-cache mirroring + worklog sync). Embedded here (rather
  * than read from disk) so the generator works from a dist/ install; `wl init`
- * (src/commands/init.ts) imports this same constant so freshly installed hooks
+ * (src/commands/init.hooks.ts) imports this same constant so freshly installed hooks
  * never drift from the committed template (WL-0MT33QNTL006LHQA,
  * WL-0MVHP5S01006GDDV).
  *
@@ -414,7 +414,7 @@ export function detectHooksTargetDir(): string {
 
 /**
  * Generate the canonical hook content for a given hook name, matching what
- * `installCommittedHooks()` in `src/commands/init.ts` generates.
+ * `installCommittedHooks()` in `src/commands/init.hooks.ts` generates.
  *
  * Used when `core.hooksPath = .githooks` to compare committed hooks against
  * the latest template from the installed ContextHub package.
@@ -528,8 +528,8 @@ case 'post-checkout': {
 }
 
 // Reference: generateCanonicalHookContent() content matches the template
-// strings in src/commands/init.ts -> installCommittedHooks(). Any updates
-// to the hook templates in init.ts should be mirrored here.
+// strings in src/commands/init.hooks.ts -> installCommittedHooks(). Any updates
+// to the hook templates in init.hooks.ts should be mirrored here.
 
 export interface HookInfo {
   name: string;

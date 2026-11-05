@@ -15,7 +15,7 @@ read-only.
 | `.githooks/pre-push` (this repository) | The committed hook, kept byte-for-byte equal to the template. |
 | `tests/fixtures/pre-push-hook.expected.sh` | The checked-in expected text the template and the committed hook are both asserted against. |
 
-`wl init` (`src/commands/init.ts` → `installCommittedHooks()`) imports the same
+`wl init` (`src/commands/init.hooks.ts` → `installCommittedHooks()`) imports the same
 `PRE_PUSH_HOOK_CONTENT` constant, and `wl doctor upgrade` compares a project's
 committed hook against `generateCanonicalHookContent('pre-push')` — which
 returns the same constant. All three therefore emit identical text.
