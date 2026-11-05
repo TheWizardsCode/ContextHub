@@ -10,34 +10,35 @@ import { resolveWorklogDir } from '../worklog-paths.js';
 import { exportToJsonlAsync } from '../jsonl.js';
 import { PRE_PUSH_HOOK_CONTENT } from '../doctor/hook-upgrade.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, mergeAuditResults } from '../sync.js';
-import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import * as readline from 'readline';
-import { fileURLToPath } from 'url';
 import { theme } from '../theme.js';
 import {
   DEFAULT_COMMITTED_HOOKS_DIR,
-  SCHEDULED_PROMPTS_DESTINATION_FILENAME,
-  SCHEDULED_PROMPTS_TEMPLATE_RELATIVE_PATH,
   WORKFLOW_DESTINATION_FILENAME,
-  WORKFLOW_TEMPLATE_RELATIVE_PATH,
   WORKLOG_AGENT_DESTINATION_FILENAME,
-  WORKLOG_AGENT_TEMPLATE_RELATIVE_PATH,
-  WORKLOG_GITIGNORE_SECTION_END,
-  WORKLOG_GITIGNORE_SECTION_START,
-  WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH,
 } from './init.constants.js';
 import { analyzeAgentContent, normalizeContent } from './init.content.js';
+import { ensureGitignore } from './init.gitignore.js';
 import {
   normalizeInitOptions,
   type AgentTemplateAction,
   type NormalizedInitOptions,
 } from './init.options.js';
+import {
+  getSyncDefaults,
+  locateAgentTemplate,
+  locateExampleStatsPlugin,
+  locateWorkflowTemplate,
+  resolveProjectRoot,
+  resolveRepoRoot,
+} from './init.paths.js';
 import { promptYesNo } from './init.prompts.js';
+import { ensureScheduledPromptsInstalled } from './init.scheduled-prompts.js';
 import { isSorraAgentsInstalled } from './init.sorra-agents.js';
 
 export { isSorraAgentsInstalled };
@@ -45,73 +46,6 @@ export { isSorraAgentsInstalled };
 const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v3';
 const WORKLOG_POST_PULL_HOOK_MARKER = 'worklog:post-pull-hook:v1';
 const WORKLOG_POST_CHECKOUT_HOOK_MARKER = 'worklog:post-checkout-hook:v1';
-
-function ensureGitignore(options: { silent: boolean }): { updated: boolean; present: boolean; gitignorePath?: string; added?: string[]; reason?: string } {
-  let gitignorePath = path.join(process.cwd(), '.gitignore');
-
-  try {
-    const repoRoot = execSync('git rev-parse --show-toplevel', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (repoRoot) {
-      gitignorePath = path.join(repoRoot, '.gitignore');
-    }
-  } catch {
-    // Not a git repo
-  }
-
-  let existing = '';
-  try {
-    if (fs.existsSync(gitignorePath)) {
-      existing = fs.readFileSync(gitignorePath, 'utf-8');
-    }
-  } catch (e) {
-    return { updated: false, present: false, gitignorePath, reason: (e as Error).message };
-  }
-
-  if (existing && hasWorklogGitignoreSection(existing)) {
-    return { updated: false, present: fs.existsSync(gitignorePath), gitignorePath, added: [] };
-  }
-
-  const templatePath = locateGitignoreTemplate();
-  if (!templatePath) {
-    return { updated: false, present: fs.existsSync(gitignorePath), gitignorePath, reason: 'gitignore template not found' };
-  }
-
-  let templateContent = '';
-  try {
-    templateContent = fs.readFileSync(templatePath, 'utf-8');
-  } catch (e) {
-    return { updated: false, present: fs.existsSync(gitignorePath), gitignorePath, reason: (e as Error).message };
-  }
-
-  if (!templateContent.trim()) {
-    return { updated: false, present: fs.existsSync(gitignorePath), gitignorePath, reason: 'gitignore template is empty' };
-  }
-
-  const sectionLines = templateContent.split(/\r?\n/).filter(line => line.length > 0);
-
-  let out = existing;
-  if (out.length > 0 && !out.endsWith('\n')) {
-    out += '\n';
-  }
-  if (out.length > 0 && !out.endsWith('\n\n')) {
-    out += '\n';
-  }
-  if (!templateContent.endsWith('\n')) {
-    templateContent += '\n';
-  }
-  out += templateContent;
-
-  try {
-    fs.writeFileSync(gitignorePath, out, { encoding: 'utf-8' });
-  } catch (e) {
-    return { updated: false, present: fs.existsSync(gitignorePath), gitignorePath, reason: (e as Error).message };
-  }
-
-  if (!options.silent) {
-    console.log(`✓ Updated .gitignore at ${gitignorePath}`);
-  }
-  return { updated: true, present: true, gitignorePath, added: sectionLines };
-}
 
 function installPrePushHook(options: { silent: boolean }): { installed: boolean; skipped: boolean; present: boolean; hookPath?: string; reason?: string } {
   try {
@@ -434,102 +368,6 @@ function installCommittedHooks(options: { silent: boolean }): { installed: boole
   } catch (e) {
     return { installed: false, skipped: true, present: false, dirPath: dir, files: hookFiles, reason: (e as Error).message };
   }
-}
-
-function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
-  return {
-    gitRemote: config?.syncRemote || DEFAULT_GIT_REMOTE,
-    gitBranch: config?.syncBranch || DEFAULT_GIT_BRANCH,
-  };
-}
-
-function resolveRepoRoot(): string | null {
-  try {
-    const repoRoot = execSync('git rev-parse --show-toplevel', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    return repoRoot || null;
-  } catch {
-    return null;
-  }
-}
-
-function resolveProjectRoot(): string {
-  return resolveRepoRoot() || process.cwd();
-}
-
-function locateAgentTemplate(): string | null {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const packageRoot = path.resolve(moduleDir, '..', '..');
-  const candidate = path.join(packageRoot, WORKLOG_AGENT_TEMPLATE_RELATIVE_PATH);
-  if (fs.existsSync(candidate)) return candidate;
-  const projectRoot = resolveProjectRoot();
-  const repoCandidate = path.join(projectRoot, WORKLOG_AGENT_TEMPLATE_RELATIVE_PATH);
-  return fs.existsSync(repoCandidate) ? repoCandidate : null;
-}
-
-function locateExampleStatsPlugin(): string | null {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const packageRoot = path.resolve(moduleDir, '..', '..');
-  const candidate = path.join(packageRoot, 'examples', 'stats-plugin.mjs');
-  return fs.existsSync(candidate) ? candidate : null;
-}
-
-function locateWorkflowTemplate(): string | null {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const packageRoot = path.resolve(moduleDir, '..', '..');
-  const candidate = path.join(packageRoot, WORKFLOW_TEMPLATE_RELATIVE_PATH);
-  if (fs.existsSync(candidate)) return candidate;
-  const projectRoot = resolveProjectRoot();
-  const repoCandidate = path.join(projectRoot, WORKFLOW_TEMPLATE_RELATIVE_PATH);
-  return fs.existsSync(repoCandidate) ? repoCandidate : null;
-}
-
-function locateGitignoreTemplate(): string | null {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const packageRoot = path.resolve(moduleDir, '..', '..');
-  const candidate = path.join(packageRoot, WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH);
-  return fs.existsSync(candidate) ? candidate : null;
-}
-
-function locateScheduledPromptsTemplate(): string | null {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const packageRoot = path.resolve(moduleDir, '..', '..');
-  const candidate = path.join(packageRoot, SCHEDULED_PROMPTS_TEMPLATE_RELATIVE_PATH);
-  return fs.existsSync(candidate) ? candidate : null;
-}
-
-/**
- * Provision the scheduled-prompts config (WL-0MSS1Q5ER007QDKX AC1): copy
- * templates/scheduled-prompts.json into `<worklog-dir>/scheduled-prompts.json`
- * CREATE-IF-ABSENT — an existing file (user edits or runtime lastTriggeredAt
- * state) is never clobbered. A missing template is skipped (never fatal).
- */
-function ensureScheduledPromptsInstalled(options: {
-  silent: boolean;
-}): { installed: boolean; skipped: boolean; destinationPath?: string; reason?: string } {
-  const templatePath = locateScheduledPromptsTemplate();
-  if (!templatePath) {
-    return { installed: false, skipped: true, reason: 'scheduled-prompts template not found' };
-  }
-  const worklogDir = resolveWorklogDir();
-  const destinationPath = path.join(worklogDir, SCHEDULED_PROMPTS_DESTINATION_FILENAME);
-  try {
-    if (fs.existsSync(destinationPath)) {
-      // Create-if-absent: never clobber user edits or lastTriggeredAt state.
-      return { installed: false, skipped: true, reason: 'already in place', destinationPath };
-    }
-    fs.mkdirSync(worklogDir, { recursive: true });
-    fs.copyFileSync(templatePath, destinationPath);
-    if (!options.silent) {
-      console.log(`✓ Provisioned scheduled prompts at ${destinationPath}`);
-    }
-    return { installed: true, skipped: false, destinationPath };
-  } catch (e) {
-    return { installed: false, skipped: true, reason: (e as Error).message, destinationPath };
-  }
-}
-
-function hasWorklogGitignoreSection(content: string): boolean {
-  return content.includes(WORKLOG_GITIGNORE_SECTION_START) && content.includes(WORKLOG_GITIGNORE_SECTION_END);
 }
 
 type WorkflowChoice = 'none' | 'basic' | 'manual';
