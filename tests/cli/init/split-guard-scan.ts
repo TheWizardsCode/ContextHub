@@ -50,12 +50,13 @@ export const MAX_MODULE_LINES = 1000;
 /**
  * Family modules currently exempt from the size gate.
  *
- * A *shrink-only* allowlist: it may only ever lose entries. It starts with the
- * 1,521-line monolith; the finalise child empties it once `src/commands/init.ts`
- * becomes a thin barrel and every concern module is under
- * {@link MAX_MODULE_LINES}.
+ * A *shrink-only* allowlist: it may only ever lose entries. It started with the
+ * 1,521-line monolith; the finalise child (WL-0MW0KE2DO000IK63) emptied it
+ * once `src/commands/init.ts` became a thin barrel and every concern module
+ * landed under {@link MAX_MODULE_LINES}. An empty list is the contract: the
+ * size gate then covers **every** family module, the barrel included.
  */
-export const SPLIT_ALLOWLIST: readonly string[] = ['init.ts'];
+export const SPLIT_ALLOWLIST: readonly string[] = [];
 
 /** The allowlist as it stood at plan time; the live list must be a subset. */
 export const SPLIT_ALLOWLIST_CEILING: readonly string[] = ['init.ts'];

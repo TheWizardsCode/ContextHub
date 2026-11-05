@@ -43,6 +43,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 
 const WORKFLOW_MODULE = 'src/commands/init.workflow.ts';
 const SYNC_MODULE = 'src/commands/init.sync.ts';
+/** The module that owns the init flow since WL-0MW0KE2DO000IK63. */
+const REGISTER_MODULE = 'src/commands/init.register.ts';
 
 /** AC3: the only relative modules `init.workflow.ts` may reach for. */
 const WORKFLOW_ALLOWED_RELATIVE = new Set([
@@ -109,6 +111,21 @@ function declaredFunctions(source: string): string[] {
 function barrelSpecifiers(): string[] {
   return loadModuleIndex(repoRoot, ['src'])
     .byFile.get(INIT_BARREL)!
+    .imports.map((imp) => imp.specifier);
+}
+
+/** Repo-relative specifiers the barrel re-exports. */
+function barrelReexports(): string[] {
+  return loadModuleIndex(repoRoot, ['src'])
+    .byFile.get(INIT_BARREL)!
+    .reexports.map((reexport) => reexport.specifier)
+    .sort();
+}
+
+/** Repo-relative specifiers imported by the init flow module. */
+function registerSpecifiers(): string[] {
+  return loadModuleIndex(repoRoot, ['src'])
+    .byFile.get(REGISTER_MODULE)!
     .imports.map((imp) => imp.specifier);
 }
 
@@ -188,10 +205,14 @@ describe('init workflow/sync modules — live tree', () => {
     expect(declaredFunctions(workflowSource)).toEqual(
       expect.arrayContaining([...MOVED_DECLARATIONS[WORKFLOW_MODULE]]),
     );
-    // The barrel consumes the extracted modules rather than re-declaring them.
-    const specifiers = barrelSpecifiers();
+    // The init flow consumes the extracted modules rather than re-declaring
+    // them. Since WL-0MW0KE2DO000IK63 that flow lives in `init.register.ts`
+    // and the barrel only re-exports it.
+    const specifiers = registerSpecifiers();
     expect(specifiers).toContain('./init.workflow.js');
     expect(specifiers).toContain('./init.sync.js');
+    expect(barrelSpecifiers()).toEqual([]);
+    expect(barrelReexports()).toEqual(['./init.register.js', './init.sorra-agents.js']);
   });
 
   it('brings src/commands/init.ts under the maintainability ceiling (AC5)', () => {

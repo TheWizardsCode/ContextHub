@@ -615,6 +615,80 @@ named here). Behaviour is locked by the untouched
 | change JSONL → SQLite migration | `src/commands/doctor/migrate.ts` |
 | change which subcommands exist or their registration order | `src/commands/doctor.ts` |
 
+## Init Module Layout
+
+`src/commands/init.ts` is the stable public entry point for `wl init`: a thin
+barrel of re-exports with no logic of its own (its header carries the module
+map below). Command registration and the init flow live in
+`src/commands/init.register.ts`; every provisioning step lives in a
+single-concern sibling module `src/commands/init.<concern>.ts`, so a hook fix
+does not require reading the AGENTS.md install path and a `.gitignore` fix does
+not require reading the sync bootstrap (WL-0MVGKH6Z1000XWGJ, completed by
+WL-0MW0KE2DO000IK63).
+
+### Module responsibilities
+
+| Module | Responsibility | Key exports |
+|---|---|---|
+| `src/commands/init.ts` | Thin public barrel: re-exports `default register` and `isSorraAgentsInstalled`, and documents where each concern lives. | default `register`, `isSorraAgentsInstalled` |
+| `src/commands/init.register.ts` | `init` command registration (Commander options) and the already-initialised / fresh-init flow, delegating every provisioning step. | default `register` |
+| `src/commands/init.constants.ts` | Constant vocabulary shared across the family: template paths, destination filenames, markers. | `WORKLOG_*`, `WORKFLOW_*`, `CANONICAL_*`, `SCHEDULED_PROMPTS_*`, `DEFAULT_COMMITTED_HOOKS_DIR` |
+| `src/commands/init.content.ts` | AGENTS/WORKFLOW content normalisation and analysis. | `normalizeContent`, `analyzeAgentContent` |
+| `src/commands/init.options.ts` | CLI option parsing and validation. | `normalizeInitOptions`, `NormalizedInitOptions`, `AgentTemplateAction` |
+| `src/commands/init.prompts.ts` | Interactive yes/no prompt on stdin. | `promptYesNo` |
+| `src/commands/init.sorra-agents.ts` | SorraAgents global-install detection. | `isSorraAgentsInstalled` |
+| `src/commands/init.paths.ts` | Repo/project root resolution and template location. | `resolveRepoRoot`, `resolveProjectRoot`, `locateAgentTemplate`, `locateWorkflowTemplate`, `locateGitignoreTemplate`, `locateExampleStatsPlugin`, `locateScheduledPromptsTemplate`, `getSyncDefaults` |
+| `src/commands/init.gitignore.ts` | `.gitignore` Worklog-section provisioning. | `ensureGitignore`, `hasWorklogGitignoreSection` |
+| `src/commands/init.scheduled-prompts.ts` | Create-if-absent `scheduled-prompts.json` provisioning. | `ensureScheduledPromptsInstalled` |
+| `src/commands/init.hooks.ts` | Git hook installation: pre-push, post-pull wrappers and the committed `.githooks` directory. | `installPrePushHook`, `installPostPullHooks`, `installCommittedHooks` |
+| `src/commands/init.agent-template.ts` | AGENTS.md template installation (install / append / overwrite, with its prompt). | `ensureAgentTemplateInstalled`, `resolveAgentDestination` |
+| `src/commands/init.stats-plugin.ts` | Example stats-plugin installation. | `ensureStatsPluginInstalled` |
+| `src/commands/init.workflow.ts` | WORKFLOW content inlining into AGENTS.md (never a standalone file). | `promptWorkflowChoice`, `ensureWorkflowTemplateInstalled`, `insertWorkflowLoaderIntoAgents`, `WorkflowChoice` |
+| `src/commands/init.sync.ts` | One-shot init database/JSONL/git bootstrap. | `performInitSync` |
+
+### Cycle-safe layering
+
+The dependency direction is strictly bottom-up, so the import graph stays
+acyclic:
+
+```
+init.constants / init.content / init.options / init.prompts / init.sorra-agents (leaves)
+      ↓
+init.paths → init.gitignore / init.scheduled-prompts / init.stats-plugin / init.sync
+      ↓
+init.agent-template / init.workflow / init.hooks
+      ↓
+init.register.ts (command registration + init flow)
+      ↓
+src/commands/init.ts (barrel — nothing in the family imports it)
+```
+
+No `src/commands/init.*.ts` module imports the barrel at runtime (or even
+type-only), so it can never be part of a cycle.
+`tests/cli/init/split-guard.test.ts` enforces this statically, alongside the
+1,000-line ceiling with an **empty** allowlist, the frozen public surface
+(`tests/cli/init/init.split-baseline.json`) and the hook-content invariants.
+
+### Where to find X in the init module
+
+| I want to… | Look in |
+|---|---|
+| change a `wl init` flag, its options or the flow order | `src/commands/init.register.ts` |
+| change the pre-push / post-pull / committed hooks | `src/commands/init.hooks.ts` |
+| change AGENTS.md installation, append or overwrite | `src/commands/init.agent-template.ts` |
+| change WORKFLOW inlining or the workflow prompt | `src/commands/init.workflow.ts` |
+| change the `.gitignore` Worklog section | `src/commands/init.gitignore.ts` |
+| change the example stats plugin install | `src/commands/init.stats-plugin.ts` |
+| change scheduled-prompts provisioning | `src/commands/init.scheduled-prompts.ts` |
+| change the init sync bootstrap | `src/commands/init.sync.ts` |
+| change repo/project root or template lookup | `src/commands/init.paths.ts` |
+| change a template path, filename or marker | `src/commands/init.constants.ts` |
+| change content normalisation or AGENTS.md analysis | `src/commands/init.content.ts` |
+| change option validation | `src/commands/init.options.ts` |
+| change the interactive yes/no prompt | `src/commands/init.prompts.ts` |
+| change SorraAgents detection | `src/commands/init.sorra-agents.ts` |
+| change the shared surface consumers import | `src/commands/init.ts` (barrel) |
+
 ## File Structure
 
 ```

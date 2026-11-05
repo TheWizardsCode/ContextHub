@@ -149,6 +149,32 @@ describe('init split guard — live tree', () => {
     expect([...SPLIT_ALLOWLIST_CEILING]).toEqual(['init.ts']);
   });
 
+  it('empties the split allowlist once the monolith is gone (AC3/AC4)', () => {
+    // The finalise child removes the barrel's exemption: the size gate now
+    // covers every family module, `src/commands/init.ts` included.
+    expect([...SPLIT_ALLOWLIST]).toEqual([]);
+    expect(findOversizedModules(splitFamilyModules(index))).toEqual([]);
+  });
+
+  it('reduces the barrel to a thin re-export module (AC1)', () => {
+    const barrel = index.byFile.get(INIT_BARREL)!;
+    // ≤ 30 lines, no declarations, and exactly the two public re-exports.
+    expect(barrel.lineCount).toBeLessThanOrEqual(30);
+    expect([...barrel.declarations.keys()]).toEqual([]);
+    expect(barrel.localExports).toEqual([]);
+    expect(barrel.localExportClauses).toEqual([]);
+    expect(barrel.reexports.map((re) => re.specifier).sort()).toEqual([
+      './init.register.js',
+      './init.sorra-agents.js',
+    ]);
+    expect(barrel.reexports.flatMap((re) => re.names).sort()).toEqual([
+      'default',
+      'isSorraAgentsInstalled',
+    ]);
+    // The registration and flow live in their own concern module.
+    expect(index.byFile.has('src/commands/init.register.ts')).toBe(true);
+  });
+
   it('keeps the hook content in the concatenated init*.ts family (AC6)', () => {
     const familySource = readInitFamilySource(repoRoot);
     expect(findHookContentViolations(familySource)).toEqual([]);
