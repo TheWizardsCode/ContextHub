@@ -19,116 +19,32 @@ import { execSync } from 'child_process';
 import * as readline from 'readline';
 import { fileURLToPath } from 'url';
 import { theme } from '../theme.js';
-import * as os from 'os';
+import {
+  DEFAULT_COMMITTED_HOOKS_DIR,
+  SCHEDULED_PROMPTS_DESTINATION_FILENAME,
+  SCHEDULED_PROMPTS_TEMPLATE_RELATIVE_PATH,
+  WORKFLOW_DESTINATION_FILENAME,
+  WORKFLOW_TEMPLATE_RELATIVE_PATH,
+  WORKLOG_AGENT_DESTINATION_FILENAME,
+  WORKLOG_AGENT_TEMPLATE_RELATIVE_PATH,
+  WORKLOG_GITIGNORE_SECTION_END,
+  WORKLOG_GITIGNORE_SECTION_START,
+  WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH,
+} from './init.constants.js';
+import { analyzeAgentContent, normalizeContent } from './init.content.js';
+import {
+  normalizeInitOptions,
+  type AgentTemplateAction,
+  type NormalizedInitOptions,
+} from './init.options.js';
+import { promptYesNo } from './init.prompts.js';
+import { isSorraAgentsInstalled } from './init.sorra-agents.js';
+
+export { isSorraAgentsInstalled };
 
 const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v3';
 const WORKLOG_POST_PULL_HOOK_MARKER = 'worklog:post-pull-hook:v1';
 const WORKLOG_POST_CHECKOUT_HOOK_MARKER = 'worklog:post-checkout-hook:v1';
-const WORKLOG_GITIGNORE_SECTION_START = 'Worklog Specific Ignores';
-const WORKLOG_GITIGNORE_SECTION_END = '### End of Worklog Specific Ignores';
-const WORKLOG_AGENT_TEMPLATE_RELATIVE_PATH = 'templates/AGENTS.md';
-const WORKLOG_AGENT_DESTINATION_FILENAME = 'AGENTS.md';
-const WORKFLOW_TEMPLATE_RELATIVE_PATH = 'templates/WORKFLOW.md';
-const WORKFLOW_DESTINATION_FILENAME = 'WORKFLOW.md';
-const WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH = 'templates/GITIGNORE_WORKLOG.txt';
-/**
- * Marker used to detect that the canonical "Global agent guidance" reference
- * structure is already present in a project AGENTS.md. The template
- * (templates/AGENTS.md) self-references the global file, so projects that
- * install or append it must NOT duplicate the reference on re-run.
- */
-const CANONICAL_GLOBAL_REFERENCE_MARKER = '## Global agent guidance';
-const CANONICAL_GLOBAL_REFERENCE_LINE = 'Read the global agent instructions at `~/.pi/agent/AGENTS.md`';
-
-/**
- * Detect whether the SorraAgents global install is present.  The canonical
- * indicator is `~/.pi/agent/AGENTS.md` being a symlink whose resolved
- * target file name is `AGENTS_GLOBAL.md` (regardless of the symlink
- * target path).  This is the same convention used by
- * `scripts/install_pi.sh`.
- *
- * Environment variable `WL_SORRA_AGENTS_OVERRIDE` can be set to `0` or `1`
- * to force the result for testing purposes.  Any other value (including
- * unset) falls through to filesystem detection.
- */
-export function isSorraAgentsInstalled(): boolean {
-  const envOverride = process.env.WL_SORRA_AGENTS_OVERRIDE;
-  if (envOverride === '1') return true;
-  if (envOverride === '0') return false;
-  const homeDir = os.homedir();
-  const agentsMdPath = path.join(homeDir, '.pi', 'agent', 'AGENTS.md');
-  try {
-    const stat = fs.lstatSync(agentsMdPath);
-    if (!stat.isSymbolicLink()) return false;
-    const target = fs.readlinkSync(agentsMdPath);
-    // Resolve relative symlinks against the directory containing the link.
-    const resolved = path.isAbsolute(target)
-      ? target
-      : path.resolve(path.dirname(agentsMdPath), target);
-    return path.basename(resolved) === 'AGENTS_GLOBAL.md';
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1): `wl init` copies
- * templates/scheduled-prompts.json into .worklog/scheduled-prompts.json when
- * the file is absent (create-if-absent — never clobbers user edits or
- * lastTriggeredAt state). The file is consumed by the herdr downtime
- * worker's scheduled-prompts dispatch tier.
- */
-const SCHEDULED_PROMPTS_TEMPLATE_RELATIVE_PATH = 'templates/scheduled-prompts.json';
-const SCHEDULED_PROMPTS_DESTINATION_FILENAME = 'scheduled-prompts.json';
-
-const DEFAULT_COMMITTED_HOOKS_DIR = '.githooks';
-
-type NormalizedInitOptions = {
-  projectName?: string;
-  prefix?: string;
-  autoSync?: boolean;
-  agentsTemplateAction?: AgentTemplateAction;
-  workflowInline?: boolean;
-  statsPluginOverwrite: boolean;
-};
-
-function normalizeBooleanOption(value: string | undefined, flagName: string): boolean | undefined {
-  if (value === undefined) return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (['y', 'yes', 'true', '1'].includes(normalized)) return true;
-  if (['n', 'no', 'false', '0'].includes(normalized)) return false;
-  throw new Error(`Invalid value for ${flagName}. Use yes or no.`);
-}
-
-function normalizeAgentTemplateAction(value?: string): AgentTemplateAction | undefined {
-  if (!value) return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'overwrite' || normalized === 'o') return 'overwrite';
-  if (normalized === 'append' || normalized === 'a') return 'append';
-  if (normalized === 'skip' || normalized === 'm' || normalized === 'manual' || normalized === 'manage') return 'skip';
-  throw new Error('Invalid value for --agents-template. Use overwrite, append, or skip.');
-}
-
-function normalizeInitOptions(options: InitOptions): NormalizedInitOptions {
-  const projectName = options.projectName?.trim();
-  if (options.projectName !== undefined && (!projectName || projectName === '')) {
-    throw new Error('Project name is required when --project-name is provided.');
-  }
-
-  const prefix = options.prefix?.trim();
-  if (options.prefix !== undefined && (!prefix || prefix === '')) {
-    throw new Error('Issue ID prefix is required when --prefix is provided.');
-  }
-
-  return {
-    projectName,
-    prefix,
-    autoSync: normalizeBooleanOption(options.autoSync, '--auto-sync'),
-    agentsTemplateAction: normalizeAgentTemplateAction(options.agentsTemplate),
-    workflowInline: normalizeBooleanOption(options.workflowInline, '--workflow-inline'),
-    statsPluginOverwrite: normalizeBooleanOption(options.statsPluginOverwrite, '--stats-plugin-overwrite') ?? false,
-  };
-}
 
 function ensureGitignore(options: { silent: boolean }): { updated: boolean; present: boolean; gitignorePath?: string; added?: string[]; reason?: string } {
   let gitignorePath = path.join(process.cwd(), '.gitignore');
@@ -710,17 +626,6 @@ function insertWorkflowLoaderIntoAgents(agentPath: string) {
   }
 }
 
-async function promptYesNo(question: string): Promise<boolean> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => {
-    rl.question(question, answer => {
-      rl.close();
-      const t = String(answer || '').trim().toLowerCase();
-      resolve(t === 'y' || t === 'yes');
-    });
-  });
-}
-
 async function ensureStatsPluginInstalled(options: { silent: boolean; overwrite?: boolean }) {
   const templatePath = locateExampleStatsPlugin();
   if (!templatePath) return { installed: false, skipped: true, reason: 'template not found', templatePath: null, destinationPath: null };
@@ -755,31 +660,6 @@ async function ensureStatsPluginInstalled(options: { silent: boolean; overwrite?
 function resolveAgentDestination(projectRoot: string): string {
   return path.join(projectRoot, WORKLOG_AGENT_DESTINATION_FILENAME);
 }
-
-function normalizeContent(content: string): string {
-  return content.replace(/\r\n/g, '\n').trimEnd();
-}
-
-function analyzeAgentContent(existingContent: string): { hasGlobalReference: boolean; trimmed: string; eol: string; hasOnlyWhitespace: boolean } {
-  const lines = existingContent.split(/\r?\n/);
-  const firstNonEmpty = lines.find(line => line.trim().length > 0);
-  const eol = existingContent.includes('\r\n') ? '\r\n' : '\n';
-  return {
-    // Detect the canonical global-reference structure (template emits
-    // "## Global agent guidance" referencing ~/.pi/agent/AGENTS.md). Also
-    // treat the legacy pointer line as already-referenced so previously
-    // installed projects stay idempotent on re-run.
-    hasGlobalReference:
-      existingContent.includes(CANONICAL_GLOBAL_REFERENCE_MARKER) ||
-      existingContent.includes(CANONICAL_GLOBAL_REFERENCE_LINE) ||
-      firstNonEmpty?.startsWith('Follow the global AGENTS.md') === true,
-    trimmed: existingContent.trimEnd(),
-    eol,
-    hasOnlyWhitespace: firstNonEmpty === undefined
-  };
-}
-
-type AgentTemplateAction = 'overwrite' | 'append' | 'skip';
 
 async function promptAgentTemplateAction(): Promise<AgentTemplateAction> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
