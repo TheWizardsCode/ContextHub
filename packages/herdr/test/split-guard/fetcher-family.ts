@@ -144,11 +144,17 @@ export const FETCHER_CYCLE_BASELINE: readonly (readonly string[])[] = [
 /**
  * Directed edges of the recorded cycle that must stay **type-only**. An
  * extraction must not widen one into a runtime import (parent AC4).
+ *
+ * The `fetcher.ts → agent-tracker.ts` edge moved to `fetcher.types.ts`
+ * together with the type declarations that carry it (`WorkItem.agentState`),
+ * which also removed it from the cycle itself (WL-0MW08VTPK006U01L); both the
+ * historical entry and the current edge are recorded here.
  */
 export const FETCHER_TYPE_ONLY_EDGES: readonly { from: string; to: string }[] = [
   { from: 'packages/herdr/src/downtime-worker.ts', to: 'packages/herdr/src/stalled-work.ts' },
   { from: 'packages/herdr/src/fetcher.ts', to: 'packages/herdr/src/agent-tracker.ts' },
   { from: 'packages/herdr/src/smart-selection.ts', to: 'packages/herdr/src/fetcher.ts' },
+  { from: 'packages/herdr/src/fetcher.types.ts', to: 'packages/herdr/src/agent-tracker.ts' },
 ];
 
 /**

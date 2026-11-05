@@ -30,6 +30,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { getExecFileAsync } from './fetcher.js';
 import type { WorkItem } from './fetcher.js';
+import type { AgentState } from './fetcher.types.js';
 import { resolveHerdrBin } from './herdr-bin.js';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -38,8 +39,13 @@ import { resolveHerdrBin } from './herdr-bin.js';
  * Agent states mirrored from the herdr sidebar protocol
  * (packages/herdr/shared/herdr-agent-state-protocol.md): `idle`, `working`,
  * `blocked` plus the CLI-terminal `done` and the catch-all `unknown`.
+ *
+ * Declared in `fetcher.types.ts` — next to `WorkItem`, whose `agentState` field
+ * carries it — so that leaf stays free of repository imports (and therefore out
+ * of every recorded import cycle). Re-exported here unchanged so this module's
+ * public surface is untouched (WL-0MW08VTPK006U01L).
  */
-export type AgentState = 'idle' | 'working' | 'blocked' | 'done' | 'unknown';
+export type { AgentState };
 
 /** One recorded work-item ↔ pane association. */
 export interface AgentPaneEntry {
