@@ -21,6 +21,8 @@ import {
   getWorklogDir,
   setWorklogDirChangedHandler,
 } from './fetcher.args.js';
+import { acquireWlSpawnSlot, releaseWlSpawnSlot } from './fetcher.spawn-cap.js';
+import { extractItems, extractJson, normalizeItem } from './fetcher.json.js';
 import type {
   BlockerRef,
   ClaimResult,
@@ -39,8 +41,9 @@ import { isAuditFresh } from '@worklog/shared/icons';
 // ── Re-exported leaf modules (move-only split) ────────────────────────
 //
 // Consumers keep importing every symbol from `./fetcher.js`: the barrel
-// re-exports the arg/exec primitives and the pure data types from their
-// extracted leaf modules, so no consumer import path changes.
+// re-exports the arg/exec primitives, the pure data types, the spawn-cap
+// limiter and the JSON helpers from their extracted leaf modules, so no
+// consumer import path changes.
 
 export {
   formatWlError,
@@ -69,270 +72,25 @@ export type {
 // worklog-dir setters run this invalidation instead.
 setWorklogDirChangedHandler(clearFetchMemo);
 
-// ── Bounded `wl` spawn concurrency (F5 — WL-0MVJV2PC2008PY64) ────────
+// ── Bounded `wl` spawn concurrency + `wl`-payload JSON helpers ───────
+//
+// Both sections are extracted verbatim into leaf modules
+// (WL-0MW08VUKQ005BU1B): the spawn-cap limiter lives in
+// `./fetcher.spawn-cap.js` and the payload extraction/normalisation in
+// `./fetcher.json.js`. The barrel re-exports the consumer-imported symbols so
+// no consumer import path changes; the slot acquire/release primitives and
+// `normalizeItem` stay module-private surface (imported above, never
+// re-exported), which is what keeps the frozen public surface unchanged.
 
-/**
- * Maximum number of concurrent `wl` READ spawns one pane may keep in flight.
- *
- * Without a bound, a spawn-heavy refresh (fallback per-subset/per-parent
- * reads, per-edge `wl show` / `wl dep list` probes) can fan out to a dozen
- * `wl` processes at once — each peaking at ~120–145 MB on a large DB — and
- * blow past the parent epic's ≤ ~300 MB aggregate per-pane RSS ceiling
- * before concurrency ever thins out naturally. Capping concurrent reads at
- * {@link DEFAULT_WL_SPAWN_CAP} bounds the pane's aggregate spawn RSS at
- * `cap × per-spawn peak` (per-spawn peaks measured per profile/target by the
- * F1 harness and recorded in `large-db-budget.json`; the bound is documented
- * in `docs/dev/herdr-event-driven-refresh.md` § "Bounded `wl` spawn
- * concurrency (F5 — WL-0MVJV2PC2008PY64)").
- *
- * F8 (`WL-0MVKVJYV6008SL9G`) tightened the cap from 2 to 1: F7's end-to-end
- * verification measured a **cold** `wl show` peak of 144.6–175.3 MB per spawn
- * on the built CLI at full scale, so `2 × peak` (289–351 MB) could not
- * guarantee the ≤ ~300 MB ceiling. A cap of 1 bounds the worst case at one
- * spawn's peak (≤ ~176 MB) with margin, and also halves the measured
- * event-loop blocking of a spawn burst. Serialising reads costs wall time on
- * the rare fallback fan-out paths; the consolidated single-read default view
- * and the in-process expand/hydrator reads are unaffected.
- *
- * Only READ commands are capped. Writes (claims, `wl comment add`, chord
- * commands, `wl sync`) spawn immediately: they are user-driven, rare, and
- * already serialised by the CLI's own mutation lock, so queueing them behind
- * reads would add latency without bounding a real memory fan-out. `wl sync`
- * additionally keeps its own F3 isolation path (auto-sync.ts) untouched.
- *
- * The queue is promise-based and strictly FIFO: a waiter is released on a
- * microtask when a slot frees, so queued reads NEVER block the TUI event
- * loop (asserted by the F1 harness spawn-burst scenario).
- */
-export const DEFAULT_WL_SPAWN_CAP = 1;
-
-let wlSpawnCap = DEFAULT_WL_SPAWN_CAP;
-let activeWlSpawns = 0;
-let peakActiveWlSpawns = 0;
-const wlSpawnWaiters: Array<() => void> = [];
-
-/**
- * The current spawn-concurrency cap (concurrent `wl` read spawns allowed).
- * Exported so the harness/tests assert the documented bound.
- */
-export function getWlSpawnCap(): number {
-  return wlSpawnCap;
-}
-
-/**
- * Override the cap (a positive integer). The harness uses this to prove the
- * enforcement is the documented constant even when a test changes it. Values
- * below 1 are rejected — the documented bound must stay meaningful.
- */
-export function setWlSpawnCap(cap: number): void {
-  if (!Number.isInteger(cap) || cap < 1) {
-    throw new Error(`wl spawn cap must be a positive integer (got ${String(cap)})`);
-  }
-  wlSpawnCap = cap;
-}
-
-/** Restore the documented default cap (test teardown / harness reset). */
-export function resetWlSpawnCap(): void {
-  wlSpawnCap = DEFAULT_WL_SPAWN_CAP;
-}
-
-/** Test helper: current semaphore state (cap, active, peak, queued waiters). */
-export function _wlSpawnStats(): {
-  cap: number;
-  active: number;
-  peak: number;
-  queued: number;
-} {
-  return {
-    cap: wlSpawnCap,
-    active: activeWlSpawns,
-    peak: peakActiveWlSpawns,
-    queued: wlSpawnWaiters.length,
-  };
-}
-
-/** Test helper: clear the semaphore counters (per-test isolation). */
-export function _resetWlSpawnStats(): void {
-  activeWlSpawns = 0;
-  peakActiveWlSpawns = 0;
-  wlSpawnWaiters.length = 0;
-}
-
-/**
- * Reserve a spawn slot, waiting FIFO when the cap is reached. Never blocks.
- *
- * Returns how long the caller waited (ms) so a queued read can inherit the
- * timeout budget of the refresh that issued it — see {@link queuedTimeout}.
- */
-async function acquireWlSpawnSlot(): Promise<number> {
-  const grab = (): void => {
-    activeWlSpawns += 1;
-    if (activeWlSpawns > peakActiveWlSpawns) peakActiveWlSpawns = activeWlSpawns;
-  };
-  if (activeWlSpawns < wlSpawnCap) {
-    grab();
-    return 0;
-  }
-  const queuedAt = Date.now();
-  await new Promise<void>((resolve) => {
-    wlSpawnWaiters.push(() => {
-      grab();
-      resolve();
-    });
-  });
-  return Date.now() - queuedAt;
-}
-
-/** Free a slot and hand it to the oldest waiter (FIFO, on a microtask). */
-function releaseWlSpawnSlot(): void {
-  activeWlSpawns -= 1;
-  const next = wlSpawnWaiters.shift();
-  if (next !== undefined) {
-    queueMicrotask(next);
-  }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────
-
-/**
- * Extract the first complete JSON object from a string that may contain
- * leading/trailing non-JSON text (e.g., log output mixed with JSON).
- */
-/**
- * Extract the first complete JSON object from a string that may contain
- * leading/trailing non-JSON text (e.g., log output mixed with JSON).
- * Exported for use by the downtime worker's review-queue gate.
- */
-export function extractJson(raw: string): unknown {
-  const start = raw.indexOf('{');
-  if (start < 0) throw new Error('No JSON object in output');
-
-  const trimmed = raw.trim();
-  // Try full parse first
-  const lastCloseBrace = trimmed.lastIndexOf('}');
-  if (lastCloseBrace > trimmed.lastIndexOf('"')) {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      // fall through
-    }
-  }
-
-  // Manual brace counting
-  let depth = 0;
-  let inString = false;
-  for (let i = start; i < raw.length; i += 1) {
-    const c = raw[i];
-    if (c === '"') {
-      let backslashes = 0;
-      for (let j = i - 1; j >= start && raw[j] === '\\'; j -= 1) {
-        backslashes += 1;
-      }
-      if (backslashes % 2 === 0) {
-        inString = !inString;
-      }
-    }
-    if (!inString) {
-      if (c === '{') depth += 1;
-      if (c === '}') depth -= 1;
-      if (depth === 0) {
-        return JSON.parse(raw.slice(start, i + 1));
-      }
-    }
-  }
-  throw new Error('Unterminated JSON object in output');
-}
-
-/**
- * Normalize a raw work item from the wl API into a consistent WorkItem.
- */
-function normalizeItem(raw: any): WorkItem {
-  return {
-    id: String(raw?.id ?? ''),
-    title: String(raw?.title ?? 'Untitled'),
-    status: String(raw?.status ?? 'unknown'),
-    priority: raw?.priority ? String(raw.priority) : undefined,
-    stage: raw?.stage ? String(raw.stage) : undefined,
-    parentId: raw?.parentId != null ? String(raw.parentId) : undefined,
-    risk: raw?.risk ? String(raw.risk) : undefined,
-    effort: raw?.effort ? String(raw.effort) : undefined,
-    description: raw?.description ? String(raw.description) : undefined,
-    tags: Array.isArray(raw?.tags) ? raw.tags.map(String) : undefined,
-    issueType: raw?.issueType ? String(raw.issueType) : undefined,
-    githubIssueNumber: raw?.githubIssueNumber ? String(raw.githubIssueNumber) : undefined,
-    childCount: raw?.childCount !== undefined ? Number(raw.childCount) : undefined,
-    createdAt: raw?.createdAt ? String(raw.createdAt) : undefined,
-    updatedAt: raw?.updatedAt ? String(raw.updatedAt) : undefined,
-    group: raw?.group !== undefined ? Number(raw.group) : undefined,
-    groupLabel: raw?.groupLabel ? String(raw.groupLabel) : undefined,
-    needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
-    deletedBy: raw?.deletedBy ? String(raw.deletedBy) : undefined,
-    assignee: raw?.assignee ? String(raw.assignee) : undefined,
-    auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
-    auditedAt: raw?.auditedAt == null ? (raw?.auditedAt as null | undefined) : String(raw.auditedAt),
-    fingerprint: raw?.fingerprint == null ? (raw?.fingerprint as null | undefined) : String(raw.fingerprint),
-    currentFingerprint: raw?.currentFingerprint == null ? (raw?.currentFingerprint as null | undefined) : String(raw.currentFingerprint),
-  };
-}
-
-/**
- * Extract work items from a wl CLI response, handling different response
- * shapes (direct array, { workItems: [...] }, { results: [...] }).
- */
-/**
- * Extract work items from a wl CLI response, handling different response
- * shapes (direct array, { workItems: [...] }, { results: [...] }).
- * Exported for use by the downtime worker's review-queue gate.
- */
-export function extractItems(payload: unknown): WorkItem[] {
-  if (Array.isArray(payload)) {
-    return payload.map(normalizeItem);
-  }
-
-  if (payload && typeof payload === 'object') {
-    const obj = payload as Record<string, unknown>;
-
-    // Check `results` FIRST — when wl next is called with -n (count) the
-    // response includes both an empty `workItems: []` AND a populated
-    // `results` array. Order matters here.
-    if (Array.isArray(obj.results) && obj.results.length > 0) {
-      return (obj.results as any[])
-        .map((entry: any) => {
-          const item = entry?.workItem;
-          if (!item) return null;
-          if (entry.group !== undefined) item.group = entry.group;
-          if (entry.groupLabel !== undefined) item.groupLabel = entry.groupLabel;
-          return normalizeItem(item);
-        })
-        .filter(Boolean) as WorkItem[];
-    }
-
-    // Check `workItems` next — from wl list
-    if (Array.isArray(obj.workItems) && obj.workItems.length > 0) {
-      return (obj.workItems as any[]).map(normalizeItem);
-    }
-
-    // Single item under { workItem: {...} } — from wl next (no -n) or wl show
-    if (obj && typeof obj === 'object' && obj.workItem && typeof obj.workItem === 'object') {
-      return [normalizeItem(obj.workItem)];
-    }
-
-    // Direct single item: { id: "...", title: "..." }
-    if (obj.id) {
-      return [normalizeItem(obj)];
-    }
-
-    // Fallback: results might be empty but still present
-    if (Array.isArray(obj.results)) {
-      return [];
-    }
-    if (Array.isArray(obj.workItems)) {
-      return [];
-    }
-  }
-
-  return [];
-}
+export {
+  DEFAULT_WL_SPAWN_CAP,
+  getWlSpawnCap,
+  setWlSpawnCap,
+  resetWlSpawnCap,
+  _wlSpawnStats,
+  _resetWlSpawnStats,
+} from './fetcher.spawn-cap.js';
+export { extractJson, extractItems } from './fetcher.json.js';
 
 // ── CLI execution ─────────────────────────────────────────────────────
 
