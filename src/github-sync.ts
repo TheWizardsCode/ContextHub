@@ -36,56 +36,25 @@ import throttler from './github-throttler.js';
 import { increment, snapshot, diff } from './github-metrics.js';
 import { mergeWorkItems } from './sync.js';
 
-export interface SyncedItem {
-  action: 'created' | 'updated' | 'closed';
-  id: string;
-  title: string;
-  issueNumber: number;
-}
+// The result/timing/progress type declarations moved to `./github-sync/types.js`;
+// re-exporting them here keeps all of them importable from `'./github-sync.js'`
+// unchanged (WL-0MW0JF5YE008LV1R). The local `import type` below supplies the
+// names the flow functions still declared in this module use.
+export type {
+  SyncedItem,
+  SyncErrorItem,
+  GithubSyncResult,
+  GithubSyncTiming,
+  GithubProgress,
+  FieldChange,
+} from './github-sync/types.js';
 
-export interface SyncErrorItem {
-  id: string;
-  title: string;
-  error: string;
-}
-
-export interface GithubSyncResult {
-  updated: number;
-  created: number;
-  closed: number;
-  skipped: number;
-  errors: string[];
-  syncedItems: SyncedItem[];
-  errorItems: SyncErrorItem[];
-  commentsCreated?: number;
-  commentsUpdated?: number;
-}
-
-export interface GithubSyncTiming {
-  totalMs: number;
-  upsertMs: number;
-  commentListMs: number;
-  commentUpsertMs: number;
-  hierarchyCheckMs: number;
-  hierarchyLinkMs: number;
-  hierarchyVerifyMs: number;
-}
-
-export interface GithubProgress {
-  phase: 'push' | 'import' | 'close-check' | 'hierarchy' | 'comments' | 'saving';
-  current: number;
-  total: number;
-  // items per second (measured since the first event for this phase)
-  rate?: number;
-  // estimated milliseconds remaining (null when not measurable)
-  etaMs?: number | null;
-  // short human note (e.g., push batch details or throttler snapshot)
-  note?: string;
-  // last error message observed for diagnostics
-  lastError?: string | null;
-  // optional throttler snapshot
-  throttler?: { active: number; queueLength: number; tokens?: number; rate?: number; burst?: number; concurrency?: number } | null;
-}
+import type {
+  GithubSyncResult,
+  GithubSyncTiming,
+  GithubProgress,
+  FieldChange,
+} from './github-sync/types.js';
 
 export async function upsertIssuesFromWorkItems(
   items: WorkItem[],
@@ -576,19 +545,6 @@ export async function upsertIssuesFromWorkItems(
   // additional properties on timing so callers (CLI) can log them.
   (timing as any).__metrics = metricDiff;
   return { updatedItems, result, timing };
-}
-
-/**
- * Represents a field that was changed during import label resolution.
- * Used for audit logging and JSON output.
- */
-export interface FieldChange {
-  workItemId: string;
-  field: string;
-  oldValue: string;
-  newValue: string;
-  source: 'github-label';
-  timestamp: string;
 }
 
 /**
