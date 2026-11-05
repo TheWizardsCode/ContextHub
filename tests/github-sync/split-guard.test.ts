@@ -231,7 +231,9 @@ describe('github-sync split guard — live tree', () => {
       findAllowlistViolations(GITHUB_SYNC_SPLIT_ALLOWLIST, GITHUB_SYNC_SPLIT_ALLOWLIST_CEILING),
     ).toEqual([]);
     expect([...GITHUB_SYNC_SPLIT_ALLOWLIST_CEILING]).toEqual(['github-sync.ts']);
-    expect([...GITHUB_SYNC_SPLIT_ALLOWLIST]).toEqual(['github-sync.ts']);
+    // The push-flow child (WL-0MW0JF9QG008E791) dropped the barrel under the
+    // ceiling, so the shrink-only entry was removed and no exemption remains.
+    expect([...GITHUB_SYNC_SPLIT_ALLOWLIST]).toEqual([]);
   });
 
   it('exempts the monolith while in flight but no stale allowlist entry lingers', () => {
@@ -589,11 +591,16 @@ describe('github-sync split guard — gates fail on broken input', () => {
     expect(hasLeadingJsDoc('/** */\nexport const x = 1;\n')).toBe(false);
   });
 
-  it('exempts the oversized allowlisted barrel from the header gate only', () => {
+  it('covers every family module with the JSDoc gate once the allowlist is empty', () => {
+    // The push-flow child (WL-0MW0JF9QG008E791) dropped the barrel under the
+    // ceiling and so removed the last size exemption: module size no longer
+    // exempts anything from the header gate, oversized or not.
+    expect([...GITHUB_SYNC_SPLIT_ALLOWLIST]).toEqual([]);
+
     const oversized = indexFromSources({ [GITHUB_SYNC_BARREL]: lines(MAX_MODULE_LINES + 1) });
-    expect(
-      githubSyncFamilyModulesRequiringJsDoc(oversized).map((m) => m.file),
-    ).toEqual([]);
+    expect(githubSyncFamilyModulesRequiringJsDoc(oversized).map((m) => m.file)).toEqual([
+      GITHUB_SYNC_BARREL,
+    ]);
 
     const shrunk = indexFromSources({ [GITHUB_SYNC_BARREL]: lines(MAX_MODULE_LINES) });
     expect(githubSyncFamilyModulesRequiringJsDoc(shrunk).map((m) => m.file)).toEqual([
@@ -604,8 +611,8 @@ describe('github-sync split guard — gates fail on broken input', () => {
       [GITHUB_SYNC_BARREL]: lines(MAX_MODULE_LINES + 1),
       'src/github-sync/push.ts': `export const x = 1;\n`,
     });
-    // Family modules that are not the allowlisted barrel are always covered.
     expect(githubSyncFamilyModulesRequiringJsDoc(extracted).map((m) => m.file)).toEqual([
+      GITHUB_SYNC_BARREL,
       'src/github-sync/push.ts',
     ]);
   });

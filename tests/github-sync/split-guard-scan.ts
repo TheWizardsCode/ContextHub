@@ -108,12 +108,13 @@ export const BASELINE_PATH = 'tests/github-sync/github-sync.split-baseline.json'
 /**
  * Family modules currently exempt from the size gate (AC4).
  *
- * A *shrink-only* allowlist: it may only ever lose entries. It starts with the
- * 1,339-line monolith and each extraction child shrinks the barrel; the barrel
- * close-out child removes the entry once `src/github-sync.ts` is a thin
- * re-export façade. No other module may ever be added.
+ * A *shrink-only* allowlist: it may only ever lose entries. It started with
+ * the 1,339-line monolith; the push-flow child (WL-0MW0JF9QG008E791) dropped
+ * `src/github-sync.ts` to 663 lines, so the entry is now stale and has been
+ * removed — every family module must stay under {@link MAX_MODULE_LINES} with
+ * no exemptions. No other module may ever be added.
  */
-export const GITHUB_SYNC_SPLIT_ALLOWLIST: readonly string[] = ['github-sync.ts'];
+export const GITHUB_SYNC_SPLIT_ALLOWLIST: readonly string[] = [];
 
 /**
  * The allowlist as it stood at plan time. {@link GITHUB_SYNC_SPLIT_ALLOWLIST}
