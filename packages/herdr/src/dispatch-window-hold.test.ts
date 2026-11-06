@@ -189,6 +189,37 @@ describe('assigneeHoldBannerText / assigneeHoldStatusText — copy (AC1/AC2)', (
   });
 });
 
+describe('summariseDispatchWindowHold — the dispatcher claim is not a hold (WL-0MW51OB1Y0073TLG)', () => {
+  /** A dispatchable item carrying the downtime dispatcher's own claim. */
+  const claimedByDispatcher = (id: string): DowntimeItemInfo => held(id, 'dispatcher');
+
+  it('counts a window of dispatcher claims as dispatchable, never as held', () => {
+    const summary = summariseDispatchWindowHold(
+      [claimedByDispatcher('A'), claimedByDispatcher('B')],
+      { windowSize: 2 },
+    );
+
+    expect(summary.dispatchableCount).toBe(2);
+    expect(summary.heldCount).toBe(0);
+    expect(summary.heldAssignees).toEqual([]);
+    expect(summary.allHeld).toBe(false);
+    expect(assigneeHoldBannerText(summary)).toBeNull();
+    expect(assigneeHoldStatusText(summary)).toBeNull();
+  });
+
+  it('never names `dispatcher` in a mixed window', () => {
+    const summary = summariseDispatchWindowHold(
+      [claimedByDispatcher('A'), held('B', 'Map')],
+      { windowSize: 2 },
+    );
+
+    expect(summary.dispatchableCount).toBe(1);
+    expect(summary.heldCount).toBe(1);
+    expect(summary.gatedCount).toBe(0);
+    expect(summary.heldAssignees).toEqual(['Map']);
+  });
+});
+
 describe('summariseDispatchWindowHold — strictly read-only (AC4)', () => {
   it('mutates neither the items nor their dispatchability', () => {
     const items = [...allHeldWindow(3), dispatchable('FREE')];

@@ -27,6 +27,10 @@ import {
   resolveInteractiveDispatchPriority,
   setHostCpuSamplerForTests,
 } from './index.js';
+// The downtime dispatcher claims with its own identity (WL-0MW51OB1Y0073TLG,
+// child WL-0MW55V9BT004TMYI): these suites model the dispatcher deps, so they
+// pass DISPATCHER_ASSIGNEE rather than the `Map` producer sentinel.
+import { DISPATCHER_ASSIGNEE } from './index.claim.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
 import { readActiveAuditMarker, isHostAuditActive } from './machine-coordination.js';
 import {
@@ -1249,7 +1253,7 @@ describe('createDowntimeDeps', () => {
       return Promise.resolve({ stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' });
     });
     setExecFileAsync(mockExec as never);
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
 
     await deps.getHerdrListHead('/repo');
     await deps.getHerdrListHead('/repo', 60);
@@ -1299,7 +1303,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextItem('intake_complete', '/repo');
 
     expect(mockExec).toHaveBeenCalledWith(
@@ -1326,7 +1330,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextItem('idea', '/repo');
 
     // selectNextCandidate: open-status guard + sortIndex ascending (wl next
@@ -1357,7 +1361,7 @@ describe('createDowntimeDeps', () => {
       JSON.stringify({ itemId: 'WL-ONCE', kind: 'plan', stage: 'intake_complete', dispatchedAt: '2026-01-01T00:00:00.000Z' }),
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextItem('intake_complete', cwd);
 
     // The marked candidate is excluded; the next one is selected.
@@ -1375,7 +1379,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
     setWorklogDir('/home/user/projects/SorraAgents/.worklog');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextItem('intake_complete', '/repo');
 
     // The global option must appear BEFORE the subcommand, exactly as the
@@ -1404,13 +1408,13 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextItem('idea', '/repo')).toEqual({ ok: true, candidate: null });
   });
 
   it('getNextItem fails closed ({ok:false}) when wl errors', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextItem('idea', '/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
@@ -1421,7 +1425,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getNextItem('intake_complete', '/repo');
 
     // AC1: the invocation must carry the bounded timeout so a hung wl child
@@ -1446,7 +1450,7 @@ describe('createDowntimeDeps', () => {
           }),
       );
       setExecFileAsync(hungExec as never);
-      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
 
       const resultPromise = deps.getNextItem('idea', '/repo');
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS - 1);
@@ -1482,7 +1486,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextAuditCandidate('/repo');
 
     // AC1 (WL-0MSTLFW14000KPEC): the audit tier must request --root-only so
@@ -1518,7 +1522,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextAuditCandidate('/repo');
 
     // AC1/AC3: the invocation MUST carry --root-only — without it, a child
@@ -1573,7 +1577,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextAuditCandidate('/repo');
 
     // The query must stay root-only...
@@ -1600,13 +1604,13 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: true, candidate: null });
   });
 
   it('getNextAuditCandidate resolves ok:false when wl errors (a strike, never a null empty tier)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
@@ -1617,7 +1621,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getNextAuditCandidate('/repo');
 
     // AC1: the audit-tier invocation must carry the bounded timeout too.
@@ -1638,7 +1642,7 @@ describe('createDowntimeDeps', () => {
           }),
       );
       setExecFileAsync(hungExec as never);
-      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
 
       const resultPromise = deps.getNextAuditCandidate('/repo');
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS);
@@ -1652,7 +1656,7 @@ describe('createDowntimeDeps', () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false, error: 'audit parse error' });
   });
 
@@ -1683,7 +1687,7 @@ describe('createDowntimeDeps', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextAuditCandidate(cwd);
     expect(result).toEqual({ ok: true, candidate: { id: 'WL-OTHER', title: 'fresh slot', stage: 'audit' } });
   });
@@ -1710,7 +1714,7 @@ describe('createDowntimeDeps', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextAuditCandidate(cwd);
     expect(result).toEqual({ ok: true, candidate: { id: 'WL-PLANNED', title: 'planned before', stage: 'audit' } });
   });
@@ -1731,7 +1735,7 @@ describe('createDowntimeDeps', () => {
 
     // cwd with no .worklog/downtime-dispatches.log at all.
     const cwd = makeTempDir();
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextAuditCandidate(cwd);
     expect(result).toEqual({ ok: true, candidate: { id: 'WL-FRESHWORKLOG', title: 'fresh worklog', stage: 'audit' } });
   });
@@ -1758,7 +1762,7 @@ describe('createDowntimeDeps', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextAuditCandidate(cwd);
     expect(result).toEqual({ ok: true, candidate: { id: 'WL-OK', title: 'ok item', stage: 'audit' } });
   });
@@ -1781,7 +1785,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getAuditCandidateScope('WL-LEAF', '/repo');
 
     // Per-root targeting (WL-0MTQ14W7L003II5A): the candidate lives in ITS
@@ -1807,7 +1811,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await expect(deps.getAuditCandidateScope('WL-EPIC', '/repo')).resolves.toEqual({
       ok: true,
       scope: 'parent',
@@ -1821,7 +1825,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getAuditCandidateScope('WL-X', '/repo');
 
     // Same bounded-timeout discipline as the other wl-backed deps
@@ -1833,7 +1837,7 @@ describe('createDowntimeDeps', () => {
 
   it('getAuditCandidateScope fails closed on a wl error — a missing lookup never relaxes the gate', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
 
     const result = await deps.getAuditCandidateScope('WL-X', '/repo');
 
@@ -1847,7 +1851,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(
       vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' }) as never,
     );
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
 
     const result = await deps.getAuditCandidateScope('WL-X', '/repo');
 
@@ -1869,7 +1873,7 @@ describe('createDowntimeDeps', () => {
         stderr: '',
       }) as never,
     );
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
 
     const result = await deps.getAuditCandidateScope('WL-CHILD', '/repo');
 
@@ -1896,7 +1900,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextImplementCandidate('/repo');
 
     // The invocation must carry the risk/effort filters and a generous batch
@@ -1925,7 +1929,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getNextImplementCandidate('/repo');
 
     const [, args] = mockExec.mock.calls[0];
@@ -1948,13 +1952,13 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
   });
 
   it('getNextImplementCandidate fails closed (null) when wl errors', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
   });
 
@@ -1962,7 +1966,7 @@ describe('createDowntimeDeps', () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextImplementCandidate('/repo')).toBeNull();
   });
 
@@ -1973,7 +1977,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getNextImplementCandidate('/repo');
 
     const [, , options] = mockExec.mock.calls[0];
@@ -2002,7 +2006,7 @@ describe('createDowntimeDeps', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextImplementCandidate(cwd);
     expect(result).toEqual({ id: 'WL-FRESH', title: 'fresh slot', stage: 'implement' });
   });
@@ -2028,7 +2032,7 @@ describe('createDowntimeDeps', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextImplementCandidate(cwd);
     expect(result).toEqual({ id: 'WL-IMP', title: 'implementable', stage: 'implement' });
   });
@@ -2047,7 +2051,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const cwd = makeTempDir(); // no .worklog/downtime-dispatches.log
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextImplementCandidate(cwd);
     expect(result).toEqual({ id: 'WL-FRESHWORKLOG', title: 'fresh worklog', stage: 'implement' });
   });
@@ -2060,7 +2064,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
     setWorklogDir('/home/user/projects/SorraAgents/.worklog');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getNextImplementCandidate('/repo');
 
     expect(mockExec).toHaveBeenCalledWith(
@@ -2091,7 +2095,7 @@ describe('createDowntimeDeps', () => {
     ]);
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextCriticalCandidate('/repo');
 
     // The critical lookup must NOT be stage-gated: every open critical
@@ -2113,7 +2117,7 @@ describe('createDowntimeDeps', () => {
     ]);
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getNextCriticalCandidate('/repo');
 
     const [, args] = mockExec.mock.calls[0];
@@ -2132,7 +2136,7 @@ describe('createDowntimeDeps', () => {
     ]);
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextCriticalCandidate('/repo');
 
     // The plan_complete critical is above the risk cap → never
@@ -2158,7 +2162,7 @@ describe('createDowntimeDeps', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextCriticalCandidate(cwd);
 
     // WL-CRIT-ONCE was dispatched for /skill:intake at idea and is still at
@@ -2183,7 +2187,7 @@ describe('createDowntimeDeps', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextCriticalCandidate(cwd);
 
     // Marked at intake_complete, now at plan_complete → released.
@@ -2200,7 +2204,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const cwd = makeTempDir(); // no .worklog/downtime-dispatches.log
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextCriticalCandidate(cwd);
     expect(result).toEqual({
       ok: true,
@@ -2215,13 +2219,13 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: true, candidate: null });
   });
 
   it('getNextCriticalCandidate fails closed ({ok:false}) on wl error (never a silent empty)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
@@ -2229,7 +2233,7 @@ describe('createDowntimeDeps', () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false, error: 'critical parse error' });
   });
 
@@ -2240,7 +2244,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getNextCriticalCandidate('/repo');
 
     const [, , options] = mockExec.mock.calls[0];
@@ -2255,7 +2259,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
     setWorklogDir('/home/user/projects/SorraAgents/.worklog');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.getNextCriticalCandidate('/repo');
 
     expect(mockExec).toHaveBeenCalledWith(
@@ -2293,7 +2297,7 @@ describe('createDowntimeDeps', () => {
     );
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextCriticalCandidate('/repo');
 
     // The dep queries the candidate's edges with `wl dep list`, then
@@ -2335,7 +2339,7 @@ describe('createDowntimeDeps', () => {
     );
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextCriticalCandidate('/repo');
 
     expect(result).toEqual({ ok: true, candidate: null });
@@ -2357,7 +2361,7 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getNextCriticalCandidate('/repo');
 
     // A dependency look-up failure must NOT look like an empty tier — it
@@ -2428,7 +2432,7 @@ describe('createDowntimeDeps', () => {
       .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:pTEST' });
     const deps = createDowntimeDeps(
       '/path/to/send-to-pi.sh',
-      'Map',
+      DISPATCHER_ASSIGNEE,
       spawnFn,
       anchorResolver as never,
       undefined,
@@ -2475,7 +2479,7 @@ describe('createDowntimeDeps', () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'intake_complete' });
 
     expect(mockExec).toHaveBeenCalledWith(
@@ -2486,7 +2490,7 @@ describe('createDowntimeDeps', () => {
         '--status',
         'in_progress',
         '--assignee',
-        'Map',
+        DISPATCHER_ASSIGNEE,
         '--if-status',
         'open',
         '--if-stage',
@@ -2504,7 +2508,7 @@ describe('createDowntimeDeps', () => {
       .mockRejectedValue(new Error('{"success":false,"error":"stale","message":"Conditional update skipped"}'));
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'idea' });
 
     expect(result).toEqual({ ok: false, reason: 'stale', error: '{"success":false,"error":"stale","message":"Conditional update skipped"}' });
@@ -2513,7 +2517,7 @@ describe('createDowntimeDeps', () => {
   it('claimItem resolves error (a strike) when wl fails for any other reason', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'idea' });
 
     expect(result).toEqual({ ok: false, reason: 'error', error: 'wl boom' });
@@ -2521,7 +2525,7 @@ describe('createDowntimeDeps', () => {
 
   it('spawnAgentPane spawns send-to-pi.sh with the derived pane name and args', async () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE, spawnFn);
 
     await deps.spawnAgentPane('Run /skill:plan WL-ABC — Some task.', {
       model: 'plan',
@@ -2548,7 +2552,7 @@ describe('createDowntimeDeps', () => {
 
   it('spawnAgentPane derives the intake pane name from the prompt', async () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE, spawnFn);
 
     await deps.spawnAgentPane('Run /skill:intake WL-DEF — An idea.', {
       model: 'plan',
@@ -2564,7 +2568,7 @@ describe('createDowntimeDeps', () => {
 
   it('spawnAgentPane derives the audit pane name from the prompt', async () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE, spawnFn);
 
     await deps.spawnAgentPane('Run /skill:audit WL-AUD — Audit me.', {
       model: 'plan',
@@ -2580,7 +2584,7 @@ describe('createDowntimeDeps', () => {
 
   it('spawnAgentPane honours an explicit paneName (scheduled prompts run as Downtime <id>)', async () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE, spawnFn);
 
     await deps.spawnAgentPane('/skill:refactor', {
       model: 'plan',
@@ -2669,7 +2673,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     setExecFileAsync(mockExec as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getActiveAudit(cwd);
 
     // maxAudit defaults to 1 → the legacy single-flight token is preserved.
@@ -2703,7 +2707,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     setExecFileAsync(mockExec as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getActiveAudit(cwd);
 
     // One of two permitted audits is running: this tick may dispatch the second.
@@ -2730,7 +2734,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     setExecFileAsync(mockExec as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getActiveAudit(cwd);
 
     expect(result).toEqual({
@@ -2752,7 +2756,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     setExecFileAsync(mockExec as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getActiveAudit(cwd);
 
     // The kill switch reports the same token at every live count, with 0/0.
@@ -2773,7 +2777,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getActiveAudit(cwd);
 
     expect(result).toEqual({
@@ -2816,7 +2820,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getActiveAudit(cwd);
 
     expect(result).toEqual({ ok: true, active: true, source: 'per-worklog' });
@@ -2842,7 +2846,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     setExecFileAsync(mockExec as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const result = await deps.getActiveAudit(cwd);
 
     // No in_progress item either → no active audit, and source is the
@@ -2857,7 +2861,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordDispatch({
       itemId: 'WL-AUD',
       kind: 'audit',
@@ -2885,7 +2889,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     ).toBe(true);
     expect(freshCount('audit')).toMatchObject({ ok: true, count: 1 });
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordPaneClose(
       {
         entryType: 'pane-close',
@@ -2912,7 +2916,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     writeLegacyMarker(coordinationDir, 'older-instance');
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     for (const kind of ['audit', 'plan'] as const) {
       await deps.recordPaneClose(
         {
@@ -2953,7 +2957,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     ];
     expect(liveCount('implement', livePanes)).toMatchObject({ ok: true, count: 1 });
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordPaneClose(
       {
         entryType: 'pane-close',
@@ -2980,7 +2984,7 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     writeLegacyMarker(coordinationDir, 'older-instance');
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordDispatchFailure({
       itemId: 'WL-AUD',
       kind: 'audit',
@@ -3011,7 +3015,7 @@ describe('createDowntimeDeps recordDispatch', () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordDispatch({
       itemId: 'WL-ABC',
       kind: 'plan',
@@ -3044,7 +3048,7 @@ describe('createDowntimeDeps recordDispatch', () => {
     setExecFileAsync(mockExec as never);
     setWorklogDir('/home/user/projects/SorraAgents/.worklog');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordDispatch({
       itemId: 'SA-ABC',
       kind: 'plan',
@@ -3077,7 +3081,7 @@ describe('createDowntimeDeps recordDispatch', () => {
     setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordDispatch({
       itemId: 'WL-ABC',
       kind: 'intake',
@@ -3097,7 +3101,7 @@ describe('createDowntimeDeps recordDispatch', () => {
   it('resolves true even when wl comment add fails (comment is not the marker)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const cwd = makeTempDir();
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
 
     // The comment write failing must NOT abort the dispatch — the rolling-log
     // marker is the dispatch-suppression source. The log write succeeds, so
@@ -3120,7 +3124,7 @@ describe('createDowntimeDeps recordDispatch', () => {
     const cwd = makeTempDir();
     writeFileSync(join(cwd, '.worklog'), 'not a directory', 'utf8');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await expect(
       deps.recordDispatch({
         itemId: 'WL-ABC',
@@ -3136,7 +3140,7 @@ describe('createDowntimeDeps recordDispatch', () => {
     setExecFileAsync(mockExec as never);
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordDispatch({
       itemId: '/skill:refactor',
       kind: 'scheduled',
@@ -3169,7 +3173,7 @@ describe('createDowntimeDeps recordError', () => {
   it('writes a JSONL entry to the rolling downtime log under the cwd', async () => {
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordError({
       cwd,
       at: '2026-01-01T00:00:00.000Z',
@@ -3188,7 +3192,7 @@ describe('createDowntimeDeps recordError', () => {
     const cwd = makeTempDir();
     writeFileSync(join(cwd, '.worklog'), 'not a directory', 'utf8');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await expect(
       deps.recordError({ cwd, at: '2026-01-01T00:00:00.000Z', message: 'boom' }),
     ).resolves.toBeUndefined();
@@ -3206,7 +3210,7 @@ describe('createDowntimeDeps recordDispatchFailure', () => {
   it('writes an outcome:spawn-failed JSONL entry with the error trace under the cwd', async () => {
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordDispatchFailure({
       itemId: 'WL-ABC',
       kind: 'plan',
@@ -3238,7 +3242,7 @@ describe('createDowntimeDeps recordDispatchFailure', () => {
   it('records the exit-code trace for a non-zero script exit', async () => {
     const cwd = makeTempDir();
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await deps.recordDispatchFailure({
       itemId: 'WL-ABC',
       kind: 'implement',
@@ -3257,7 +3261,7 @@ describe('createDowntimeDeps recordDispatchFailure', () => {
     const cwd = makeTempDir();
     writeFileSync(join(cwd, '.worklog'), 'not a directory', 'utf8');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await expect(
       deps.recordDispatchFailure({
         itemId: 'WL-ABC',
@@ -3307,7 +3311,7 @@ describe('createDowntimeDeps getDueScheduledPrompt', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const due = await deps.getDueScheduledPrompt(cwd);
 
     expect(due).toEqual(refactor);
@@ -3329,13 +3333,13 @@ describe('createDowntimeDeps getDueScheduledPrompt', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getDueScheduledPrompt(cwd)).toBeNull();
   });
 
   it('returns null for an absent config (fail-closed, logged)' , async () => {
     const cwd = makeTempDir();
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getDueScheduledPrompt(cwd)).toBeNull();
   });
 
@@ -3344,7 +3348,7 @@ describe('createDowntimeDeps getDueScheduledPrompt', () => {
     mkdirSync(join(cwd, '.worklog'), { recursive: true });
     writeFileSync(scheduledPromptsPath(cwd), '{broken json', 'utf8');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getDueScheduledPrompt(cwd)).toBeNull();
   });
 
@@ -3362,7 +3366,7 @@ describe('createDowntimeDeps getDueScheduledPrompt', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(await deps.getDueScheduledPrompt(cwd)).toEqual(refactor);
   });
 });
@@ -3392,7 +3396,7 @@ describe('createDowntimeDeps recordScheduledPromptTrigger', () => {
       'utf8',
     );
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await expect(deps.recordScheduledPromptTrigger(cwd, '/skill:refactor', at)).resolves.toBe(true);
 
     const parsed = JSON.parse(readFileSync(scheduledPromptsPath(cwd), 'utf8')) as {
@@ -3406,7 +3410,7 @@ describe('createDowntimeDeps recordScheduledPromptTrigger', () => {
 
   it('resolves false when the config is absent or malformed (fail-closed, never throws)', async () => {
     const cwd = makeTempDir();
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await expect(deps.recordScheduledPromptTrigger(cwd, '/skill:refactor', at)).resolves.toBe(false);
 
     mkdirSync(join(cwd, '.worklog'), { recursive: true });
@@ -3419,7 +3423,7 @@ describe('createDowntimeDeps recordScheduledPromptTrigger', () => {
     mkdirSync(join(cwd, '.worklog'), { recursive: true });
     writeFileSync(scheduledPromptsPath(cwd), JSON.stringify({ entries: [refactor] }), 'utf8');
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     await expect(deps.recordScheduledPromptTrigger(cwd, 'nope', at)).resolves.toBe(false);
   });
 });
@@ -3588,7 +3592,7 @@ describe('createDowntimeDeps rotation wiring (WL-0MSSRED76008LGB6)', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     // Cursor 1 % 2 = 1 → selects WL-B first
     const result = await deps.getNextItem('intake_complete', cwd);
     expect(result).toEqual({
@@ -3613,7 +3617,7 @@ describe('createDowntimeDeps rotation wiring (WL-0MSSRED76008LGB6)', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const first = await deps.getNextItem('intake_complete', cwd);
     expect(first.ok && first.candidate?.id).toBe('WL-A'); // cursor 0 % 2 = 0
 
@@ -3839,7 +3843,7 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
   }
 
   it('createDowntimeDeps wires the scan and resume seams', () => {
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     expect(typeof deps.scanStalledPanes).toBe('function');
     expect(typeof deps.resumeStalledPane).toBe('function');
   });
@@ -3896,7 +3900,7 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const out = await deps.scanStalledPanes!(root, {
       enabled: true,
       frozen: false,
@@ -3921,7 +3925,7 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
     });
     setExecFileAsync(mockExec as never);
 
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const out = await deps.resumeStalledPane!(
       {
         pane: {
@@ -3965,7 +3969,7 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
   it('production scan degrades to no candidates when the pane list is unparseable', async () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: '<unparseable>', stderr: '' });
     setExecFileAsync(mockExec as never);
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
     const out = await deps.scanStalledPanes!('/leader/root', {
       enabled: true,
       frozen: false,

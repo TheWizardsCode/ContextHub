@@ -1069,6 +1069,51 @@ describe('runCoordinationCheckIn empty-offer attribution (WL-0MVR8FKMU009XTED)',
       .map((entry) => entry as unknown as Record<string, unknown>);
   }
 
+  it('dispatcher-claimed items are never attributed to all-window-items-held (WL-0MW51OB1Y0073TLG)', async () => {
+    // The downtime dispatcher claims the items it auto-dispatches. That claim
+    // means "an agent is on it", so it must not be reported as a scheduling
+    // hold: a window refused for another reason stays all-window-items-gated.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-dispatcher-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({
+              id: 'WL-D1',
+              stage: 'idea',
+              status: 'completed',
+              assignee: 'dispatcher',
+            }),
+            headItem({
+              id: 'WL-D2',
+              stage: 'idea',
+              status: 'completed',
+              assignee: 'dispatcher',
+            }),
+          ],
+        }),
+      });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-D1', root)] });
+      const result = await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+      });
+      expect(result.offered).toBe(null);
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied.length).toBeGreaterThan(0);
+        const last = emptied[emptied.length - 1];
+        expect(last.reason).toBe('all-window-items-gated');
+        expect(last.dominantGate).toBe('not-dispatchable');
+        expect(last.heldAssignees).toBeUndefined();
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('AC5: a fully-held window yields all-window-items-held with the observed sentinel', async () => {
     const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-held-'));
     try {
