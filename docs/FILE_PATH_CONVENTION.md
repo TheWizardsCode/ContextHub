@@ -124,10 +124,21 @@ Section exists but no valid paths:
 `wl next -n N` displays groups in this order (WL-0MSAK8YLB0025EGW):
 
 1. **Critical Group N** — `critical` priority items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
-2. **Group N** — non-critical `plan_complete` + `intake_complete` items partitioned by file-path conflicts. Within each group, `plan_complete` items appear first, then `intake_complete` items (no headings between sub-groups), each sorted by priority (high → medium → low). The same within-group stage sub-sort applies inside each `Critical Group N`.
+2. **Group N** — non-critical `plan_complete` + `intake_complete` items partitioned by file-path conflicts. Within each group, items sort by **priority first (high → medium → low)**, then by stage sub-order (`plan_complete` → `intake_complete` → remaining, no headings between sub-groups), then by id. The same within-group ordering applies inside each `Critical Group N`.
 3. **Idea** — single group, sorted by priority.
 4. **Other** — single group for all remaining items (safety net for unknown/custom stages and stale stage/status combinations; empty for all canonical stages in the default selection list).
 5. **In Review** — single group (last).
+
+### Grouping stability
+
+The grouping is **content-deterministic** (WL-0MVVLBTTP003Y4XO): before the greedy first-fit packing runs, the input items are canonicalised by a purely content-derived key — priority (high → medium → low) → stage sub-order → id. Timestamps are never part of the key, so an item only changes group when a material input changes:
+
+| Material (may move the item) | Non-material (never moves the item) |
+|---|---|
+| The `**Key Files:**` section | `updatedAt` (comments, audit runs) |
+| `priority` | The order the database returns items in |
+| `stage` / `status` | Description prose outside the Key Files section |
+| The item set (item added/removed) | Audit result fields (`auditResult`, `auditedAt`) |
 
 ### Programmatic Access
 

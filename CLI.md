@@ -934,18 +934,21 @@ When `-n > 1`, `wl next` automatically groups items into parallel-safe groups ba
 The grouping algorithm uses a greedy first-fit strategy:
 
 1. Extract file paths from each item's description using a `**Key Files:**` section convention (see [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) for the full specification).
-2. **Critical priority items** are partitioned first into `Critical Group N` file-path conflict groups at the very top.
-3. Non-critical items with stage `in_progress`, `plan_complete`, or `intake_complete` are partitioned into `Group N` file-path conflict groups.
-4. `idea` items are placed together in a single "Idea" group.
-5. Items with unknown/custom stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting). This is a safety net for unknown/custom stages; it is empty for all canonical stages in the default selection list.
-6. `in_review` items are placed in a single "In Review" group, last.
+2. **Canonicalise the input order** before packing, using a purely content-derived key: priority (high → medium → low) → stage sub-order (`plan_complete` → `intake_complete` → remaining) → id. Timestamps (`updatedAt`) are never part of the key, so packing is order-independent (WL-0MVVLBTTP003Y4XO).
+3. **Critical priority items** are partitioned first into `Critical Group N` file-path conflict groups at the very top.
+4. Non-critical items with stage `in_progress`, `plan_complete`, or `intake_complete` are partitioned into `Group N` file-path conflict groups.
+5. `idea` items are placed together in a single "Idea" group.
+6. Items with unknown/custom stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting). This is a safety net for unknown/custom stages; it is empty for all canonical stages in the default selection list.
+7. `in_review` items are placed in a single "In Review" group, last.
 
 The group display order is:
 1. **Critical Group N** — critical items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
-2. **Group N** — in_progress + plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, `in_progress` items appear first, then `plan_complete`, then `intake_complete` items (no headings between the sub-groups), each sub-group sorted by priority (high → medium → low). The same within-group stage sub-sort applies inside each Critical Group N.
+2. **Group N** — in_progress + plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, items sort by **priority first (high → medium → low)**, then by the stage sub-order (`in_progress` → `plan_complete` → `intake_complete` → remaining, with no headings between the sub-groups), then by id. The same within-group ordering applies inside each Critical Group N.
 3. **Idea** — single group, sorted by priority.
 4. **Other** — single group for items with unknown/custom stages.
 5. **In Review** — single group (last).
+
+**Stability.** Grouping is a content-deterministic function of the item set: the same items with the same key files, priority and stage/status always land in the same groups, regardless of the order the database happened to return them in. An item only changes group when a material input changes — its `**Key Files:**` section, its priority, its stage/status, or the item set itself (an item added or removed). Comment or audit churn (`updatedAt`) never moves an item, and within a group priorities never interleave (every high item ranks ahead of every medium item, which ranks ahead of every low item).
 
 In JSON output (`--json` with `-n > 1`), each result entry includes a `group` field (integer, 1-indexed) indicating the group assignment.
 

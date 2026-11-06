@@ -2420,10 +2420,28 @@ at a glance; every other heading keeps the plain bold/stage-coloured style
 regardless of collapse state. Stage changes re-group items on the next
 refresh. Non-critical actively-worked items (`status = in-progress`) join
 the file-path-partitioned `Group N` lists alongside
-`plan_complete`/`intake_complete` items and sort ahead of them
-(actively-worked items first); "Other" remains only as a safety net for
+`plan_complete`/`intake_complete` items and, at equal priority, sort ahead of
+them; "Other" remains only as a safety net for
 unknown/custom stages (including the removed `in_progress`/`completed`
 stage values), so legacy rows still render deterministically.
+
+### Grouping stability (WL-0MVVLBTTP003Y4XO)
+
+Grouping is a **content-deterministic** function of the item set. Before the
+greedy first-fit packing runs, the selected items are canonicalised by a
+purely content-derived key — priority (high → medium → low) → stage sub-order →
+id. Timestamps are never part of the key, so a comment, an audit run or any
+other `updatedAt` churn cannot move an item between groups; only a material
+change can (its `**Key Files:**` section, its priority, its stage/status, or
+the item set itself).
+
+Within every group (including `Critical Group N` and `Group N`) the sort is
+**priority first** — every high-priority item ranks ahead of every
+medium-priority item, which ranks ahead of every low-priority item — then the
+stage sub-order (actively-worked → `plan_complete` → `intake_complete` →
+remaining), then `id` as a deterministic tie-break. Priority was the secondary
+key before this change, so a low-priority actively-worked item no longer
+outranks a high-priority `plan_complete` item.
 
 **In Review** items are sorted within the group by priority first, then by a
 deterministic **6-bucket audit predicate** (WL-0MSLPM5ZB003TADT):

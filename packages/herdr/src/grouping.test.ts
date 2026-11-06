@@ -16,12 +16,25 @@ import {
   assignItemGroups,
   regroupWorkItems,
   compareGroupableItems,
+  compareGroupingContentKey,
+  groupItemsByFilePaths,
   extractFilePaths,
   inReviewBucket,
   compareInReviewItems,
   type GroupableItem,
 } from './grouping.js';
 import type { WorkItem } from './fetcher.js';
+
+/** Every ordering of `items` (all permutations) — used by the stability tests. */
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items.slice()];
+  const result: T[][] = [];
+  items.forEach((item, index) => {
+    const rest = [...items.slice(0, index), ...items.slice(index + 1)];
+    for (const tail of permutations(rest)) result.push([item, ...tail]);
+  });
+  return result;
+}
 
 /**
  * Build a minimal WorkItem.
@@ -76,7 +89,10 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
     }
   });
 
-  it('sorts within a group by stage sub-order then priority', () => {
+  it('sorts within a group by priority first, then stage sub-order (WL-0MVVLBTTP003Y4XO)', () => {
+    // Priority became the primary key: every high item ranks ahead of every
+    // medium item, which ranks ahead of every low item. The stage sub-order is
+    // the secondary key (it decides ties inside a priority band).
     const items: GroupableItem[] = [
       { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
       { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
@@ -84,7 +100,7 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
       { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
+    expect(sorted.map(i => i.id)).toEqual(['P-high', 'I-high', 'P-med', 'I-low']);
   });
 
   it('never places canonical stages in "Other" (plan_complete + intake_complete join Group N)', () => {
@@ -103,15 +119,15 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
     expect(unknown.get('WL-x')!.groupLabel).toBe('Other');
   });
 
-  it('sorts plan_complete items before intake_complete within a group (stage sub-order)', () => {
+  it('breaks a same-priority tie by stage sub-order (plan_complete before intake_complete)', () => {
     const items: GroupableItem[] = [
-      { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
-      { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
-      { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
       { id: 'I-high', stage: 'intake_complete', filePaths: [], priority: 'high' },
+      { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
+      { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
+      { id: 'P-low', stage: 'plan_complete', filePaths: [], priority: 'low' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
+    expect(sorted.map(i => i.id)).toEqual(['P-high', 'I-high', 'P-low', 'I-low']);
   });
 
   it('places actively-worked items (status in-progress) in Group N (WL-0MUY1CSQG007TCYX)', () => {
@@ -125,15 +141,26 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
     expect(groups.get('WL-active')!.group).toBeLessThan(groups.get('WL-idea')!.group);
   });
 
-  it('sorts actively-worked items before plan_complete and intake_complete within a group', () => {
+  it('sorts actively-worked items before plan_complete and intake_complete within the same priority band', () => {
     const items: GroupableItem[] = [
       { id: 'WL-intake', stage: 'intake_complete', filePaths: [], priority: 'high' },
       { id: 'WL-plan', stage: 'plan_complete', filePaths: [], priority: 'high' },
-      { id: 'WL-active', status: 'in-progress', stage: 'plan_complete', filePaths: [], priority: 'low' },
+      { id: 'WL-active', status: 'in-progress', stage: 'plan_complete', filePaths: [], priority: 'high' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    // Actively-worked first, even at lower priority than the plan/intake rows.
+    // Priority first (WL-0MVVLBTTP003Y4XO): inside the same priority band the
+    // actively-worked sub-order still leads.
     expect(sorted.map(i => i.id)).toEqual(['WL-active', 'WL-plan', 'WL-intake']);
+  });
+
+  it('does not let the actively-worked sub-order outrank a higher priority (WL-0MVVLBTTP003Y4XO)', () => {
+    const items: GroupableItem[] = [
+      { id: 'WL-active-low', status: 'in-progress', stage: 'plan_complete', filePaths: [], priority: 'low' },
+      { id: 'WL-plan-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
+      { id: 'WL-plan-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual(['WL-plan-high', 'WL-plan-med', 'WL-active-low']);
   });
 
   it('treats the removed in_progress stage as Other (fail-soft legacy rows)', () => {
@@ -142,6 +169,131 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
       3,
     );
     expect(groups.get('WL-legacy')!.groupLabel).toBe('Other');
+  });
+});
+
+describe('grouping stability — content-deterministic grouping (WL-0MVVLBTTP003Y4XO)', () => {
+  /**
+   * A set whose greedy first-fit packing genuinely depends on the input order
+   * when it is *not* canonicalised: with A→x, B→x+y, C→y, feeding A,B,C puts
+   * A and C together in group 1, while feeding B,A,C puts A and C together in
+   * group 2. Canonicalisation must erase that difference.
+   */
+  const conflictSet: GroupableItem[] = [
+    { id: 'WL-A', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'medium' },
+    { id: 'WL-B', stage: 'plan_complete', filePaths: ['src/x.ts', 'src/y.ts'], priority: 'medium' },
+    { id: 'WL-C', stage: 'plan_complete', filePaths: ['src/y.ts'], priority: 'medium' },
+  ];
+
+  it('packs the same item set into the same groups for every input order', () => {
+    const reference = groupItemsByFilePaths(conflictSet, 3);
+    expect(reference.get('WL-A')).toBe(1);
+    expect(reference.get('WL-B')).toBe(2);
+    expect(reference.get('WL-C')).toBe(1);
+    for (const permuted of permutations(conflictSet)) {
+      expect(groupItemsByFilePaths(permuted, 3)).toEqual(reference);
+    }
+  });
+
+  it('assignItemGroups assigns identical groups and labels for every input order', () => {
+    const items: GroupableItem[] = [
+      ...conflictSet,
+      { id: 'WL-D', stage: 'intake_complete', filePaths: [], priority: 'high' },
+      { id: 'WL-E', stage: 'idea', filePaths: ['src/z.ts'], priority: 'low' },
+      { id: 'WL-F', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'critical' },
+      { id: 'WL-G', stage: 'in_review', filePaths: [], priority: 'medium' },
+    ];
+    const reference = assignItemGroups(items, 3);
+    for (const permuted of permutations(items)) {
+      const got = assignItemGroups(permuted, 3);
+      expect(got.size).toBe(reference.size);
+      for (const [id, assignment] of reference) {
+        expect(got.get(id)).toEqual(assignment);
+      }
+    }
+  });
+
+  it('never changes group membership when only updatedAt changes (comment/audit churn)', () => {
+    const reference = assignItemGroups(conflictSet, 3);
+    const churned = conflictSet.map((item, index) => ({
+      ...item,
+      // A stationary item can gain a comment or an audit result at any time.
+      updatedAt: `2026-01-0${index + 1}T00:00:00.000Z`,
+      auditedAt: index % 2 === 0 ? `2026-01-0${index + 1}T00:00:00.000Z` : null,
+      auditResult: index % 2 === 0,
+    }));
+    expect(assignItemGroups(churned, 3)).toEqual(reference);
+  });
+
+  it('regroupWorkItems renders the same order for every input order and updatedAt set', () => {
+    const merged: WorkItem[] = [
+      makeItem('WL-NEXT-1', { stage: 'plan_complete', priority: 'high' }),
+      makeItem('WL-ACTIVE', { stage: 'plan_complete', priority: 'high', status: 'in-progress' }),
+      makeItem('WL-NEXT-2', { stage: 'intake_complete', priority: 'low' }),
+      makeItem('WL-REVIEW', { stage: 'in_review', priority: 'medium' }),
+      makeItem('WL-IDEA', { stage: 'idea', priority: 'low' }),
+    ];
+    const render = (items: WorkItem[]): string[] =>
+      regroupWorkItems(items, 3).map(i => `${i.id}|${i.group}|${i.groupLabel}`);
+    const reference = render(merged);
+    for (const permuted of permutations(merged)) {
+      const churned = permuted.map((item, index) => ({
+        ...item,
+        updatedAt: `2026-02-1${index}T00:00:00.000Z`,
+      }));
+      expect(render(churned)).toEqual(reference);
+    }
+  });
+
+  it('moves an item between groups only when a material input changes (key files)', () => {
+    const before: GroupableItem[] = [
+      { id: 'WL-A', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'medium' },
+      { id: 'WL-B', stage: 'plan_complete', filePaths: ['src/y.ts'], priority: 'medium' },
+    ];
+    expect(assignItemGroups(before, 3).get('WL-B')!.groupLabel).toBe('Group 1');
+    const after = before.map(item =>
+      item.id === 'WL-B' ? { ...item, filePaths: ['src/x.ts'] } : item,
+    );
+    expect(assignItemGroups(after, 3).get('WL-B')!.groupLabel).toBe('Group 2');
+  });
+
+  it('moves an item into the Critical group when its priority becomes critical (material change)', () => {
+    const before: GroupableItem[] = [
+      { id: 'WL-A', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'high' },
+    ];
+    expect(assignItemGroups(before, 3).get('WL-A')!.groupLabel).toBe('Group 1');
+    const after = before.map(item => ({ ...item, priority: 'critical' }));
+    expect(assignItemGroups(after, 3).get('WL-A')!.groupLabel).toBe('Critical Group 1');
+  });
+
+  it('compareGroupingContentKey is a pure function of priority, stage sub-order and id', () => {
+    const base: GroupableItem = {
+      id: 'WL-A',
+      stage: 'plan_complete',
+      filePaths: [],
+      priority: 'high',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    // Same content, different timestamps → equal keys (timestamps are not an input).
+    expect(compareGroupingContentKey(base, { ...base, updatedAt: '2030-01-01T00:00:00.000Z' })).toBe(0);
+    // Priority dominates stage.
+    expect(
+      compareGroupingContentKey(
+        { ...base, id: 'WL-Z', priority: 'high', stage: 'intake_complete' },
+        { ...base, id: 'WL-A', priority: 'medium', stage: 'plan_complete' },
+      ),
+    ).toBeLessThan(0);
+    // Stage sub-order breaks a same-priority tie.
+    expect(
+      compareGroupingContentKey(
+        { ...base, id: 'WL-Z', stage: 'plan_complete' },
+        { ...base, id: 'WL-A', stage: 'intake_complete' },
+      ),
+    ).toBeLessThan(0);
+    // Id breaks a full tie.
+    expect(
+      compareGroupingContentKey({ ...base, id: 'WL-A' }, { ...base, id: 'WL-B' }),
+    ).toBeLessThan(0);
   });
 });
 
@@ -240,7 +392,7 @@ describe('regroupWorkItems — merged-list regression (WL-0MSAK8YLB0025EGW)', ()
     expect(order.indexOf('WL-idea')).toBeLessThan(order.indexOf('WL-R'));
   });
 
-  it('treats status=in-progress as Group N and orders it first (WL-0MUY1CSQG007TCYX)', () => {
+  it('treats status=in-progress as Group N and orders it by priority within the group (WL-0MUY1CSQG007TCYX, WL-0MVVLBTTP003Y4XO)', () => {
     const merged: WorkItem[] = [
       makeItem('WL-plan', { stage: 'plan_complete', priority: 'high' }),
       makeItem('WL-active', { stage: 'plan_complete', priority: 'low', status: 'in-progress' }),
@@ -249,7 +401,20 @@ describe('regroupWorkItems — merged-list regression (WL-0MSAK8YLB0025EGW)', ()
     const regrouped = regroupWorkItems(merged, 3);
     expect(regrouped.find(i => i.id === 'WL-active')!.groupLabel).toBe('Group 1');
     expect(regrouped.find(i => i.id === 'WL-plan')!.groupLabel).toBe('Group 1');
+    // Priority is the primary within-group key, so the high plan item leads the
+    // low actively-worked one; the actively-worked sub-order only decides ties.
+    expect(regrouped[0].id).toBe('WL-plan');
+  });
+
+  it('orders a same-priority Group N by the actively-worked sub-order first', () => {
+    const merged: WorkItem[] = [
+      makeItem('WL-plan', { stage: 'plan_complete', priority: 'high' }),
+      makeItem('WL-active', { stage: 'plan_complete', priority: 'high', status: 'in-progress' }),
+      makeItem('WL-idea', { stage: 'idea', priority: 'low' }),
+    ];
+    const regrouped = regroupWorkItems(merged, 3);
     expect(regrouped[0].id).toBe('WL-active');
+    expect(regrouped[1].id).toBe('WL-plan');
   });
 });
 
