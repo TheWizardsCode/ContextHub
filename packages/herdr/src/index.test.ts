@@ -3819,10 +3819,19 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
     }
   });
 
-  // Hyphen-free prefix so the pi session-path encoding (which replaces `/`
-  // with `-`) round-trips unambiguously back to this root.
+  // The pi session-path encoding replaces every `/` with `-`, so a decode
+  // round-trip can only be asserted for a HYPHEN-FREE root. `tmpdir()` is not
+  // guaranteed hyphen-free — the test skill's runner injects
+  // `/var/tmp/pi-test-<uid>` (WL-0MW5C6XS00071DWN) — so the fixture re-creates
+  // the randomly-suffixed directory at a hyphen-stripped path instead of
+  // inheriting the ambient TMPDIR verbatim.
   function makeRoot(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'stallroot'));
+    const created = mkdtempSync(join(tmpdir(), 'stallroot'));
+    const dir = created.replace(/-/g, '');
+    if (dir !== created) {
+      mkdirSync(dir, { recursive: true });
+      rmSync(created, { recursive: true, force: true });
+    }
     mkdirSync(join(dir, '.worklog'), { recursive: true });
     writeFileSync(join(dir, '.worklog', 'initialized'), '');
     tempDirs.push(dir);
@@ -3973,6 +3982,31 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
     const sessionPath = `/home/pi/.pi/agent/sessions/--${encoded}--/log.jsonl`;
     const pane: HerdrPaneRecord = { paneId: 'p', agentSession: { value: sessionPath } as never };
     expect(defaultStalledPaneRootResolver(pane, '/fallback')).toBe(root);
+  });
+
+  // Regression (WL-0MW5C6XS00071DWN): the fixture used to inherit the ambient
+  // `tmpdir()` verbatim, so a hyphenated TMPDIR (the test skill's runner
+  // injects `/var/tmp/pi-test-<uid>`) broke the lossy pi session-path
+  // encoding and turned BOTH round-trip assertions above red for an
+  // environment-only reason. `makeRoot()` must deliver a hyphen-free root
+  // whatever TMPDIR says.
+  it('keeps the fixture root hyphen-free when TMPDIR itself contains a hyphen', () => {
+    const savedTmpdir = process.env.TMPDIR;
+    const hyphenatedTmpdir = mkdtempSync(join(tmpdir(), 'pi-test-'));
+    const strippedTmpdir = hyphenatedTmpdir.replace(/-/g, '');
+    process.env.TMPDIR = hyphenatedTmpdir;
+    try {
+      const root = makeRoot();
+      expect(root).not.toContain('-');
+      const encoded = root.replace(/^\//, '').split('/').join('-');
+      const sessionPath = `/home/pi/.pi/agent/sessions/--${encoded}--/log.jsonl`;
+      expect(worklogRootFromPiSessionPath(sessionPath)).toBe(root);
+    } finally {
+      if (savedTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmpdir;
+      try { rmSync(hyphenatedTmpdir, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { rmSync(strippedTmpdir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   });
 });
 
