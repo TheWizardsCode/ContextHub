@@ -938,7 +938,9 @@ wl update <id> --assignee <agent> --if-status completed --if-stage in_review --i
   (`--assignee "" --if-assignee <agent>`), so the item can never be stranded
   off the review queue.
 - Assignee-based scheduling hold: `classifyItemForDispatch` and every tier's
-  `select*` helper exclude items with a non-empty assignee, and the parse
+  `select*` helper exclude items with a non-empty assignee **other than the
+  dispatcher's own `dispatcher` claim** (see [Dispatcher claim
+  identity](#dispatcher-claim-identity-wl-0mw51ob1y0073tlg)), and the parse
   helpers (`parseShowItemOutput`, `parseAuditCandidatesOutput`,
   `parseNextCandidatesOutput`, `parseImplementCandidatesOutput`,
   `parseCriticalCandidatesOutput`) carry the field so the exclusion holds at
@@ -948,6 +950,42 @@ Every OTHER tier keeps the legacy status-flip claim
 (`--status in_progress` + the tier's status/stage CAS), and its rollback
 keeps the legacy status restore guarded by `--if-status in_progress`.
 
+### Dispatcher claim identity (WL-0MW51OB1Y0073TLG)
+
+The downtime dispatcher claims every item it auto-dispatches — at every tier
+(audit, implement, plan, intake, risk-effort) — with its own identity,
+**`dispatcher`** (`DISPATCHER_ASSIGNEE`), never with the producer sentinel
+`Map` (`AGENT_ASSIGNEE`). Both constants are defined once in
+`packages/herdr/src/assignee-identities.ts`; the interactive agent-command
+claim (`claimItemForAgentCommand`) keeps claiming `Map`.
+
+Why the two must differ:
+
+- `Map` is the producer's **scheduling hold**: sessions preserve it at exit,
+  `wl next` skips it, and the shared Python release predicate
+  (`skill/shared/claim_release.py` → `should_release_assignee`) never releases
+  it. A dispatcher claim parked on `Map` is therefore indistinguishable from a
+  deliberate producer hold, so an auto-dispatched item whose session ends
+  without completing it is stranded forever (observed on WL-0MVR8GDJ3008WY3Y).
+- `dispatcher` is an **agent claim**: it means "an agent is on it". It is
+  released on every terminal outcome, the TTL stale-claim reaper
+  (`reap_stale_claims`) reaps it when the session dies, and it is **not** a
+  scheduling hold.
+
+Consequences (each covered by a test):
+
+| Surface | Behaviour for a `dispatcher` claim |
+|---|---|
+| `isAssigneeHeld` (`downtime-worker.selection.ts`) | `false` — the item stays a dispatch candidate |
+| `classifyItemForDispatch` (`downtime-worker.gates.ts`) | no `assignee-hold` gate |
+| `classifyWindowHold` / `heldAssigneesOf` | never counted, never named |
+| all-held banner / coordination `all-window-items-held` | not triggered by a dispatcher claim |
+| `[<assignee>]` title prefix | still shown (a fact about the item, not a hold) |
+
+Double dispatch is still impossible: the claim flips the item to
+`in_progress` (or, on the audit tier, is CAS-guarded on `--if-assignee ""`) and
+the tier's dispatched marker excludes it for the marker lifetime.
+
 ### Producer-hold sentinel (WL-0MV85WDOM007BKF8)
 
 The **scheduling-hold convention**: a non-empty `assignee` means the item is
@@ -956,13 +994,16 @@ tier's `select*` helper exclude it, and the audit claim's `--if-assignee ""`
 CAS fails stale on it. Assigning an item therefore *pauses its automatic
 scheduling*, with no magic DB flag involved.
 
+The one non-empty assignee that is **not** a hold is the downtime dispatcher's
+own claim, `dispatcher` (see below).
+
 The per-item **producer pause switch** is assigning the item to the
-producer's wl identity. The reserved sentinel is
-`PRODUCER_HOLD_ASSIGNEE` (`'Map'`, the producer's wl identity), recognised
-by `isProducerHold()`. Because the value is self-describing, the ship
-release gate can key on it: an item assigned to the producer means "the
-producer owns it" and is not shippable until it has a passing audit
-(epic WL-0MV82CHGQ000HAZZ Q2; re-homed ship gate — SA-tracked).
+producer's wl identity. The reserved sentinel is `AGENT_ASSIGNEE` (`'Map'`,
+the producer's wl identity, defined once next to `DISPATCHER_ASSIGNEE` in
+`packages/herdr/src/assignee-identities.ts`). Because the value is
+self-describing, the ship release gate can key on it: an item assigned to the
+producer means "the producer owns it" and is not shippable until it has a
+passing audit (epic WL-0MV82CHGQ000HAZZ Q2; re-homed ship gate — SA-tracked).
 
 Rules:
 

@@ -2188,12 +2188,17 @@ consumers keep their child-inclusive semantics.
 `assignee` doubles as the **scheduling hold**: a non-empty assignee means the
 item is deliberately parked and is never auto-dispatched at any tier
 (the producer sentinel is `wl update <id> --assignee Map`; clear it with
-`--assignee ""`). The refusal used to be completely silent, so a root whose
+`--assignee ""`). The one exception is the downtime dispatcher's own
+`dispatcher` claim (`DISPATCHER_ASSIGNEE`): it is an agent claim — released at
+session end, reaped when orphaned — so it never parks an item and is never
+named by the hold surface below (WL-0MW51OB1Y0073TLG; see
+[downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#dispatcher-claim-identity-wl-0mw51ob1y0073tlg)).
+The refusal used to be completely silent, so a root whose
 entire dispatch window was parked looked exactly like an empty or broken
 backlog. The worklist now surfaces it (WL-0MVR8FN1D002SCIR):
 
 - **Header count (AC1)** — while any item in the dispatch window carries a
-  non-empty assignee, the header names how many and which sentinel(s):
+  scheduling hold, the header names how many and which sentinel(s):
   `[held: 30 by Map]`.
 - **All-held warning (AC2)** — when the window has **zero** dispatchable items
   *solely* because of assignee holds, an amber banner reads
