@@ -100,6 +100,33 @@ Apply non-interactively (for CI or automation):
 wl doctor upgrade --confirm
 ```
 
+### Drift-resistant writes (connect-time column repair)
+
+Opening a database also checks that every column the current code requires is
+present, and adds any missing column with additive-only, idempotent DDL
+(`REQUIRED_COLUMNS` in `packages/shared/src/persistent-store.ts`). This is what
+keeps core writes working on a database that is behind the installed build but
+repairable — most importantly `wl update --audit-text`, which otherwise fails
+with `table audit_results has no column named fingerprint` and leaves the audit
+result unpersisted (the 2026-11-06 AI_Hell release failure).
+
+The repair is deliberately narrow:
+
+- it only ever **adds** a nullable column, never drops or rewrites data;
+- it does **not** claim the current schema — `metadata.schemaVersion` stays at
+  its recorded value, so the `schemaVersion=X but the application expects Y`
+  notice keeps appearing until `wl doctor upgrade --confirm` brings the
+  database to HEAD. Seeing both the notice and a successful write is expected.
+- once the repair has added a column it records the same metadata sentinel the
+  equivalent migration uses, so the two paths converge.
+
+Regression guard: `tests/cli/update-audit-text-schema-drift.test.ts` drives the
+real `wl update --audit-text` command — and the `wl audit-set` →
+`wl update --audit-text` sequence the audit skill's persister uses — against a
+`schemaVersion=8` database whose `audit_results.fingerprint` column has been
+dropped. Both tests fail if the connect-time repair is removed
+(WL-0MW56RBFD003J5WB, AH-0MW4W2CAJ000NUJZ).
+
 ### Pruning deleted items (`wl doctor prune`)
 
 Remove soft-deleted work items older than a threshold:
