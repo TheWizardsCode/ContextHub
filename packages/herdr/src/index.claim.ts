@@ -28,6 +28,7 @@ import {
   DOWNTIME_WL_TIMEOUT_MS,
   type CriticalCandidate,
 } from './downtime-worker.js';
+import { AGENT_ASSIGNEE } from './assignee-identities.js';
 
 /**
  * Claim identity for INTERACTIVE agent commands: the plugin claims the item
@@ -39,31 +40,12 @@ import {
  * hold in place — `wl next`, the dispatch gates and the stale-claim reaper all
  * respect it. Interactive agent claims therefore keep `Map` exactly as it was.
  *
- * Do NOT use this constant for the downtime dispatcher: an auto-dispatched
- * claim parked on the producer sentinel is indistinguishable from a producer
- * hold and strands the item forever (WL-0MW51OB1Y0073TLG). Use
- * {@link DISPATCHER_ASSIGNEE} there.
+ * Both identities are DEFINED ONCE in `./assignee-identities.ts` (a leaf
+ * module) so `downtime-worker.selection.ts` can consume them without a runtime
+ * cycle; this module re-exports them for its own dispatch paths and the
+ * existing test surface (WL-0MW55V8PA000CD6P).
  */
-const AGENT_ASSIGNEE = 'Map';
-
-/**
- * Claim identity for the DOWNTIME DISPATCHER (`createDowntimeDeps` →
- * `deps.claimItem`), across every dispatch tier (audit, implement, plan,
- * intake, risk-effort).
- *
- * The dispatcher is an AGENT actively working an item, never the producer
- * parking one, so it must not claim with the `Map` producer sentinel: the
- * shared Python release predicate (`should_release_assignee`,
- * `release_session_claim`, `reap_stale_claims`) treats `Map` as a protected
- * producer hold and would preserve/reap-skip it, so auto-dispatched work would
- * disappear from dispatch (WL-0MW51OB1Y0073TLG). `dispatcher` is a releasable
- * agent claim: released on every terminal outcome and not treated as a
- * scheduling hold, while `Map` stays sacrosanct.
- *
- * Both identities are defined once, here, so they cannot drift back into one
- * value.
- */
-const DISPATCHER_ASSIGNEE = 'dispatcher';
+export { AGENT_ASSIGNEE, DISPATCHER_ASSIGNEE } from './assignee-identities.js';
 
 /**
  * Claim the work-item referenced by an agent command (set its status to
@@ -170,9 +152,6 @@ async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<Criti
 // Exported for the barrel's internal dispatch paths only (index.ts
 // `createDowntimeDeps` / main()); never re-exported by the barrel — they
 // stay out of the consumed public surface (same pattern as
-// `notifyBackgroundFailure` in index.background.ts).
-export {
-  AGENT_ASSIGNEE,
-  DISPATCHER_ASSIGNEE,
-  fetchCriticalBlockers,
-};
+// `notifyBackgroundFailure` in index.background.ts). The values themselves are
+// defined once in `./assignee-identities.ts` and re-exported above.
+export { fetchCriticalBlockers };
