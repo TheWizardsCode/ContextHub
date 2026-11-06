@@ -249,11 +249,15 @@ export {
 // `notifyBackgroundFailure` value import; AC6 — the claim module imports
 // only concrete siblings). Re-exported so the barrel keeps the surface
 // index.test.ts/claim.test.ts import (`claimItemForAgentCommand`,
-// `resolveInteractiveDispatchPriority`); `AGENT_ASSIGNEE` and
-// `fetchCriticalBlockers` stay OUT of the consumed public surface.
+// `resolveInteractiveDispatchPriority`); `AGENT_ASSIGNEE`,
+// `DISPATCHER_ASSIGNEE` and `fetchCriticalBlockers` stay OUT of the consumed
+// public surface. The two claim identities are deliberately distinct
+// (WL-0MW55V82X009JYRV): interactive agent commands claim `Map`
+// (AGENT_ASSIGNEE, the producer sentinel), the downtime dispatcher claims
+// `dispatcher` (DISPATCHER_ASSIGNEE, a releasable claim).
 
 import {
-  AGENT_ASSIGNEE,
+  DISPATCHER_ASSIGNEE,
   claimItemForAgentCommand,
   fetchCriticalBlockers,
   resolveInteractiveDispatchPriority,
@@ -1586,7 +1590,15 @@ export async function main(): Promise<void> {
   // change applies on restart, exactly like the poller). Fail-open by
   // construction: an older proxy answers 404 → the client resolves null and
   // dispatch behaves exactly as before.
-  const downtimeDeps = createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE);
+  // Dispatcher claim identity (WL-0MW55V82X009JYRV): the downtime dispatcher
+  // is an AGENT working the item, so it claims as `dispatcher` — a releasable
+  // claim, released on every terminal outcome and never treated as a
+  // scheduling hold. It must NOT use `AGENT_ASSIGNEE` (`Map`), the producer
+  // sentinel: a `Map` claim is preserved at session exit and skipped by the
+  // stale-claim reaper, which strands auto-dispatched items forever
+  // (WL-0MW51OB1Y0073TLG). Interactive agent commands keep claiming `Map`
+  // via `claimItemForAgentCommand`.
+  const downtimeDeps = createDowntimeDeps(SEND_TO_PI_SCRIPT, DISPATCHER_ASSIGNEE);
   downtimeDeps.reserveLocalCapacity = createLocalReserver(runSettings.downtimeProxyUrl);
 
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({

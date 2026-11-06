@@ -9,9 +9,9 @@
  * `packages/herdr/src/index.ts` (move-only, WL-0MVOA0ODW002W5C4, parent
  * WL-0MVGKGFFN009UCM6); the barrel re-exports the consumed symbols
  * (`claimItemForAgentCommand`, `resolveInteractiveDispatchPriority`) while
- * `AGENT_ASSIGNEE` and `fetchCriticalBlockers` stay out of the consumed
- * public surface, value-imported by the barrel only for its internal
- * dispatch paths (createDowntimeDeps / main()).
+ * `AGENT_ASSIGNEE`, `DISPATCHER_ASSIGNEE` and `fetchCriticalBlockers` stay out
+ * of the consumed public surface, value-imported by the barrel only for its
+ * internal dispatch paths (createDowntimeDeps / main()).
  */
 
 import { extractWorkItemId } from './index.pane-capture.js';
@@ -30,11 +30,40 @@ import {
 } from './downtime-worker.js';
 
 /**
- * Assignee used when the plugin claims a work-item (sets status to
- * in_progress) before dispatching an agent command. Matches the agent
- * handle used across the worklog (see AGENTS.md claim pattern).
+ * Claim identity for INTERACTIVE agent commands: the plugin claims the item
+ * (sets status to in_progress) as `Map` before the agent pane is spawned.
+ *
+ * `Map` is the worklog PRODUCER-HOLD sentinel (see AGENTS.md claim pattern and
+ * the SorraAgents-side `skill/shared/claim_release.py` predicate): a session
+ * that ends while the item still carries `Map` leaves a DELIBERATE producer
+ * hold in place — `wl next`, the dispatch gates and the stale-claim reaper all
+ * respect it. Interactive agent claims therefore keep `Map` exactly as it was.
+ *
+ * Do NOT use this constant for the downtime dispatcher: an auto-dispatched
+ * claim parked on the producer sentinel is indistinguishable from a producer
+ * hold and strands the item forever (WL-0MW51OB1Y0073TLG). Use
+ * {@link DISPATCHER_ASSIGNEE} there.
  */
 const AGENT_ASSIGNEE = 'Map';
+
+/**
+ * Claim identity for the DOWNTIME DISPATCHER (`createDowntimeDeps` →
+ * `deps.claimItem`), across every dispatch tier (audit, implement, plan,
+ * intake, risk-effort).
+ *
+ * The dispatcher is an AGENT actively working an item, never the producer
+ * parking one, so it must not claim with the `Map` producer sentinel: the
+ * shared Python release predicate (`should_release_assignee`,
+ * `release_session_claim`, `reap_stale_claims`) treats `Map` as a protected
+ * producer hold and would preserve/reap-skip it, so auto-dispatched work would
+ * disappear from dispatch (WL-0MW51OB1Y0073TLG). `dispatcher` is a releasable
+ * agent claim: released on every terminal outcome and not treated as a
+ * scheduling hold, while `Map` stays sacrosanct.
+ *
+ * Both identities are defined once, here, so they cannot drift back into one
+ * value.
+ */
+const DISPATCHER_ASSIGNEE = 'dispatcher';
 
 /**
  * Claim the work-item referenced by an agent command (set its status to
@@ -142,4 +171,8 @@ async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<Criti
 // `createDowntimeDeps` / main()); never re-exported by the barrel — they
 // stay out of the consumed public surface (same pattern as
 // `notifyBackgroundFailure` in index.background.ts).
-export { AGENT_ASSIGNEE, fetchCriticalBlockers };
+export {
+  AGENT_ASSIGNEE,
+  DISPATCHER_ASSIGNEE,
+  fetchCriticalBlockers,
+};
