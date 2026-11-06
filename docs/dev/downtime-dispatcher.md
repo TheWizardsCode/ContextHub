@@ -49,7 +49,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
-| `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota` |
+| `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota` |
 | `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `readAuditBudgetState`, `confirmHostDispatch`, `releaseHostDispatch` |
 | `host-dispatch-budget.interactive.ts` | User-fired over-quota gate half: tier detection and prompt-then-claim (F4) | `budgetKindForAgentCommand`, `prepareInteractiveAgentDispatch` |
 | `host-budget-dialog.ts` | Pure bottom-anchored over-quota dialog + the renderer↔awaiter prompt host (F4) | `formatHostBudgetDialog`, `overlayHostBudgetDialog`, `createHostBudgetPromptHost` |
@@ -2174,6 +2174,31 @@ limiter, and the budget can only ever *reduce* concurrency below what those
 gates would admit. A budget refusal is also not capacity starvation
 (`capacity-starvation.ts` stays untouched), because an operator-imposed stop
 is not a saturated model.
+
+**Release points and the dead-pane sweep (WL-0MW5KC8J300942EA).** A
+ledger entry is released (removed) at every point the dispatch it represents
+ends:
+
+- **dispatch abort paths** — claim rollback, local-capacity reservation
+  refusal, host-budget refusal itself, marker-write failure and spawn failure
+  all release the entry immediately (`releaseHostDispatch` in
+  `downtime-worker.dispatch-claims.ts`);
+- **pane close** — the reaper releases the item's entry right after it closes
+  that pane (`ReaperDeps.releasePaneBudget`), for both `implement` and
+  `audit`;
+- **staleness** — the ledger's own 2 h heartbeat-staleness reap remains the
+  final backstop.
+
+A pane can still be closed *outside* those paths (the operator closes it in
+herdr, a session crashes, the window is torn down). Because the audit tier
+counts fresh entries **without** a live-pane requirement, such a dead entry
+would otherwise hold `maxAudit` until the 2 h window expired — the 2026-11-06
+incident. The reaper therefore runs one **dead-pane sweep** per pass
+(`sweepClosedPanes`) with the pane list it already read: any **confirmed**
+entry (non-empty `paneId`) whose pane is absent from that trusted list is
+reaped regardless of heartbeat freshness. Entries with no `paneId` (the
+reserve→spawn window) are retained, and a failed/unparseable pane read never
+sweeps (a synthetic empty list would over-reap and over-admit).
 
 **Audit-cap unification (the choice, recorded).** The hard-coded host-wide
 audit cap of 1 — the `active-audit` marker in `machine-coordination.ts` — is

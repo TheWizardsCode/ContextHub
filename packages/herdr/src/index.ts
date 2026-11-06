@@ -70,6 +70,7 @@ import {
   releaseHostDispatch as releaseHostBudgetDispatch,
   type HostBudgetLivePane,
 } from './host-dispatch-budget.admission.js';
+import { sweepClosedPanes } from './host-dispatch-budget.js';
 // User-fired (interactive) host-budget gate (WL-0MVXY0Z93002HKCZ F4): the
 // counterpart of the dispatcher's admission. At/over cap it asks first — with
 // the bottom-anchored dialog the worklist renders — and only a deliberate
@@ -1291,6 +1292,17 @@ export function createDowntimeDeps(
         // on an unreadable directory.
         hasRecentFileModifications: (pane) =>
           dirHasRecentModifications(pane.foregroundCwd ?? pane.cwd),
+        // Host-wide dispatch budget (WL-0MW5KC8J300942EA): a pane the reaper
+        // closes gives its machine-wide ledger slot back immediately, and the
+        // once-per-run sweep drops CONFIRMED entries whose pane the trusted
+        // pane read no longer lists (operator/herdr close, crashed session).
+        // Both are best-effort — the reaper wraps them fail-open.
+        releasePaneBudget: async (pane) => {
+          if (pane.itemId !== '') releaseHostBudgetDispatch(pane.itemId);
+        },
+        sweepBudgetLedger: async (panes) => {
+          sweepClosedPanes(panes.map((pane) => ({ paneId: pane.paneId })));
+        },
       });
       const result = await runScheduledPaneClose(
         deps,

@@ -505,6 +505,21 @@ export interface HerdrReaperIo {
    * loop (the reaper wraps it fail-open).
    */
   recordDispatchedPaneOutcome?(pane: PaneStatus): Promise<void>;
+  /**
+   * Host-wide dispatch-budget release (WL-0MW5KC8J300942EA): called once per
+   * pane after a successful close so the pane's machine-scoped ledger entry is
+   * released immediately. Idempotent and best-effort (the reaper wraps it
+   * fail-open). Absent → legacy callers skip the release.
+   */
+  releasePaneBudget?(pane: PaneStatus): Promise<void>;
+  /**
+   * Dead-pane ledger sweep (WL-0MW5KC8J300942EA): called once per reaper run
+   * with the RAW parsed pane list of that run. Receives `ParsedHerdrPane[]`
+   * (not the session-filtered `PaneStatus[]`) so a dispatch pane whose session
+   * file is unreadable is still treated as live and never over-reaped. Absent
+   * → legacy callers skip the sweep.
+   */
+  sweepBudgetLedger?(panes: readonly ParsedHerdrPane[]): Promise<void>;
   /** Clock (injectable for tests). */
   now?(): number;
 }
@@ -519,6 +534,11 @@ export interface HerdrReaperIo {
  */
 export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
   const now = io.now ?? (() => Date.now());
+  // Trusted live-pane snapshot for the budget sweep (WL-0MW5KC8J300942EA):
+  // populated only by a pane read that actually parsed, so a failed/unreadable
+  // read never sweeps the ledger (which would over-admit). Kept as the RAW
+  // parsed list, not the session-filtered one.
+  let lastParsedPanes: ParsedHerdrPane[] | null = null;
 
   return {
     async listPanes(): Promise<PaneStatus[]> {
@@ -526,10 +546,15 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
       try {
         raw = await io.listPanesRaw();
       } catch {
+        lastParsedPanes = null;
         return []; // fail-closed: no evidence, no action
       }
       const panes = parseHerdrPaneCloseList(raw);
-      if (panes === null) return [];
+      if (panes === null) {
+        lastParsedPanes = null;
+        return [];
+      }
+      lastParsedPanes = panes;
 
       const result: PaneStatus[] = [];
       for (const pane of panes) {
@@ -619,6 +644,18 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
     async recordDispatchedPaneOutcome(pane: PaneStatus): Promise<void> {
       if (typeof io.recordDispatchedPaneOutcome !== 'function') return;
       await io.recordDispatchedPaneOutcome(pane);
+    },
+
+    async releasePaneBudget(pane: PaneStatus): Promise<void> {
+      if (typeof io.releasePaneBudget !== 'function') return;
+      await io.releasePaneBudget(pane);
+    },
+
+    async sweepBudgetLedger(): Promise<void> {
+      if (typeof io.sweepBudgetLedger !== 'function') return;
+      // Untrusted read (failed/unparseable) → never sweep.
+      if (lastParsedPanes === null) return;
+      await io.sweepBudgetLedger(lastParsedPanes);
     },
 
     terminateProcessGroup,

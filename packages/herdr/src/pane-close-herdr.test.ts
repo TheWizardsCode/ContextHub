@@ -572,3 +572,83 @@ describe('dirHasRecentModifications', () => {
     }
   });
 });
+
+// ── Host-budget release + dead-pane sweep wiring (WL-0MW5KC8J300942EA) ──
+
+describe('createHerdrReaperDeps — budget release and dead-pane sweep', () => {
+  const rawOnePane = JSON.stringify({
+    panes: [
+      {
+        pane_id: 'w1:p1',
+        label: 'Downtime triggered audit Foo - WL-0ABC123',
+        agent: 'pi',
+        agent_status: 'idle',
+        agent_session: { value: '/tmp/nonexistent-but-mapped.jsonl' },
+      },
+    ],
+  });
+
+  it('forwards releasePaneBudget to the injected io seam', async () => {
+    const releasePaneBudget = vi.fn().mockResolvedValue(undefined);
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(rawOnePane),
+      closePane: vi.fn().mockResolvedValue(true),
+      releasePaneBudget,
+    });
+    const [pane] = await deps.listPanes();
+    await deps.releasePaneBudget?.(pane);
+    expect(releasePaneBudget).toHaveBeenCalledWith(pane);
+  });
+
+  it('forwards the RAW parsed panes to the sweep after a trusted read', async () => {
+    const sweepBudgetLedger = vi.fn().mockResolvedValue(undefined);
+    const raw = JSON.stringify({
+      panes: [
+        // A pi dispatch pane with a session.
+        {
+          pane_id: 'w1:p1',
+          label: 'Downtime triggered audit Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_session: { value: '/tmp/nonexistent-but-mapped.jsonl' },
+        },
+        // A pi pane whose session file is absent: filtered out of PaneStatus,
+        // but it is still a LIVE pane and must reach the sweep list.
+        { pane_id: 'w1:p2', label: 'Downtime triggered plan Bar - WL-0DEF456', agent: 'pi' },
+      ],
+    });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn().mockResolvedValue(true),
+      sweepBudgetLedger,
+    });
+    await deps.listPanes();
+    await deps.sweepBudgetLedger?.([]);
+    expect(sweepBudgetLedger).toHaveBeenCalledTimes(1);
+    const forwarded = sweepBudgetLedger.mock.calls[0][0] as { paneId: string }[];
+    expect(forwarded.map((p) => p.paneId).sort()).toEqual(['w1:p1', 'w1:p2']);
+  });
+
+  it('does NOT sweep when the pane read failed (untrusted list)', async () => {
+    const sweepBudgetLedger = vi.fn().mockResolvedValue(undefined);
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockRejectedValue(new Error('herdr down')),
+      closePane: vi.fn().mockResolvedValue(true),
+      sweepBudgetLedger,
+    });
+    await deps.listPanes();
+    await deps.sweepBudgetLedger?.([]);
+    expect(sweepBudgetLedger).not.toHaveBeenCalled();
+  });
+
+  it('does NOT sweep when the pane list is unparseable (untrusted list)', async () => {
+    const sweepBudgetLedger = vi.fn().mockResolvedValue(undefined);
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue('not json at all'),
+      closePane: vi.fn().mockResolvedValue(true),
+      sweepBudgetLedger,
+    });
+    await deps.listPanes();
+    await deps.sweepBudgetLedger?.([]);
+    expect(sweepBudgetLedger).not.toHaveBeenCalled();
+  });
+});

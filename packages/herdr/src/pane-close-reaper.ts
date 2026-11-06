@@ -43,6 +43,25 @@ export interface ReaperDeps {
    * → legacy callers skip the outcome record entirely.
    */
   recordDispatchedPaneOutcome?(pane: PaneStatus): Promise<void>;
+  /**
+   * Host-wide dispatch-budget release (WL-0MW5KC8J300942EA): called once per
+   * pane AFTER a successful close so the pane's machine-scoped ledger entry is
+   * released immediately — a closed audit pane must not hold `maxAudit` for
+   * the remainder of the 2 h staleness window. Idempotent and best-effort:
+   * the caller wraps it fail-open, so a release failure never changes the
+   * close outcome. Absent → legacy callers skip the release entirely.
+   */
+  releasePaneBudget?(pane: PaneStatus): Promise<void>;
+  /**
+   * Dead-pane ledger sweep (WL-0MW5KC8J300942EA): called ONCE per reaper run
+   * with the panes it listed, so CONFIRMED ledger entries whose pane is absent
+   * are reaped even when no close path released them (operator/herdr close, a
+   * crashed session). The production wiring only forwards a TRUSTED pane list
+   * (see `createHerdrReaperDeps`), so a failed read never sweeps. Fail-open:
+   * a sweep failure must never change the reaper outcome. Absent → legacy
+   * callers skip the sweep entirely.
+   */
+  sweepBudgetLedger?(panes: readonly PaneStatus[]): Promise<void>;
 }
 
 /**
@@ -338,7 +357,16 @@ export async function runReaper(
         if (pane.pid) {
           await deps.terminateProcessGroup(pane.pid, { graceMs: 5_000 });
         }
-        await deps.closePane(pane.id);
+        // A close that RESOLVES with `{ success: false }` did not close the
+        // pane. Honour it before anything acts on `success`: the host-budget
+        // release below must never give a slot back for a pane that is still
+        // live (WL-0MW5KC8J300942EA), and the ledger row must not claim a
+        // close.
+        const closeResult = await deps.closePane(pane.id);
+        if (closeResult.success === false) {
+          success = false;
+          error = closeResult.error ?? 'close failed';
+        }
       } catch (err) {
         success = false;
         error = err instanceof Error ? err.message : String(err);
@@ -356,6 +384,17 @@ export async function runReaper(
         // fail-open: observability must never break the close loop
         console.error(
           `reaper: route-outcome record failed for ${pane.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      // Host-wide dispatch budget (WL-0MW5KC8J300942EA): a closed pane gives
+      // its machine-wide slot back immediately, whatever the lifecycle
+      // outcome. Best-effort and fail-open — a release failure never blocks
+      // the close loop and the dead-pane sweep below is the backstop.
+      try {
+        await deps.releasePaneBudget?.(pane);
+      } catch (err) {
+        console.error(
+          `reaper: budget release failed for ${pane.id}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
@@ -376,6 +415,22 @@ export async function runReaper(
 
     if (options.ledgerPath) {
       writeLedgerRow(options.ledgerPath, result);
+    }
+  }
+
+  // Host-wide dispatch budget (WL-0MW5KC8J300942EA): ONE dead-pane sweep per
+  // run, using the pane list this pass already read. Panes this pass closed
+  // are covered by the per-pane release above; this sweep catches entries
+  // whose pane was closed outside every release path (operator/herdr close, a
+  // crashed session). Never in a dry run (a report-only pass must not mutate
+  // the ledger). Fail-open: a sweep failure never changes the result.
+  if (!options.dryRun) {
+    try {
+      await deps.sweepBudgetLedger?.(panes);
+    } catch (err) {
+      console.error(
+        `reaper: budget ledger sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
