@@ -178,6 +178,9 @@ tmp/
 test-timings.json
 __pycache__/
 
+# Agent-created skill/shared symlink (untracked, agent-created infra; see WL-0MV28X3BT0079JM3)
+skill/shared
+
 # Effort-and-risk skill output dumps written to repo root
 final-WL-*.json
 
