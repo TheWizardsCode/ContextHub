@@ -5,12 +5,8 @@
  * The tests execute the committed hook in a throwaway git repo with a stubbed
  * `run_tests.py`, asserting that:
  *  - the runner is invoked with the canonical flags (`--scope full
- *    --strict-git-env --json --project-root <pushed tree> --gate-commit <sha>`)
- *    on `refs/heads/dev` and `refs/heads/main` pushes;
- *  - the gate is bound to the pushed commit (`--gate-commit`), the runner's
- *    `run_tests: gate-*` provenance is echoed, and a multi-commit push is
- *    refused before any suite runs;
- *  - a runner that predates `--gate-commit` is refused with a named message;
+ *    --strict-git-env --project-root <pushed tree> --json`) on
+ *    `refs/heads/dev` and `refs/heads/main` pushes;
  *  - a non-zero runner exit blocks the push and its output is tailed;
  *  - `TEST_SCOPE_SKIP=1` bypasses the gate;
  *  - feature-branch, tag and `refs/worklog/data` pushes run no tests;
@@ -18,14 +14,16 @@
  *  - a missing runner hard-fails rather than silently skipping;
  *  - the gate runs even when the worklog-sync bypass is set (the stdin is read
  *    once, before the sync section);
+ *  - the checked-out HEAD is compared with the pushed dev/main sha and a
+ *    mismatch is warned about;
  *  - a worktree gate run's cache entry is mirrored into the main checkout
- *    from the gate-resolved root (`run_tests: gate-root`), not the push cwd
- *    (SA-0MVTFMB7K002Y1F3, WL-0MW2A3NAP0088IE9).
+ *    (SA-0MVTFMB7K002Y1F3).
  *
- * The backported behaviours (`--project-root`, deletion guard, failure log +
- * tail) come from RISE-0MVSS1KVV002TJUL via WL-0MW2N56M2004PSRP; the
- * commit-bound gate (`--gate-commit`, multi-commit refusal, gate-root mirror)
- * is WL-0MW2A3NAP0088IE9.
+ * The backported behaviours (`--project-root`, HEAD-vs-pushed-SHA warning,
+ * deletion guard, failure log + tail, `mirrored gate cache entry` wording) come
+ * from RISE-0MVSS1KVV002TJUL via WL-0MW2N56M2004PSRP: the embedded template now
+ * reproduces `tce-the-rising`'s committed hook byte-for-byte, so
+ * `wl doctor upgrade` no longer downgrades it.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -49,27 +47,14 @@ function realGitPath(): string {
     .join(path.delimiter);
 }
 
-/**
- * Stub runner: records its argv and exits with `STUB_TEST_EXIT` (default 0).
- *
- * The literal `--gate-commit` in this source satisfies the hook's capability
- * pre-check. `STUB_GATE_SUBJECT` / `STUB_GATE_ROOT` make it emit the runner's
- * `run_tests: gate-*` provenance on stderr, exactly as the real runner does.
- */
-const STUB_RUNNER = `# Stub run_tests.py: supports --gate-commit (capability pre-check marker).
-import os
+/** Stub runner: records its argv and exits with `STUB_TEST_EXIT` (default 0). */
+const STUB_RUNNER = `import os
 import sys
 
 log = os.environ.get("STUB_TEST_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(" ".join(sys.argv[1:]) + "\\n")
-subject = os.environ.get("STUB_GATE_SUBJECT")
-if subject:
-    print("run_tests: gate-subject " + subject, file=sys.stderr)
-root = os.environ.get("STUB_GATE_ROOT")
-if root:
-    print("run_tests: gate-root " + root, file=sys.stderr)
 marker = os.environ.get("STUB_STDOUT_MARKER")
 if marker:
     print(marker)
@@ -185,19 +170,7 @@ function runHook(
   overrides: NodeJS.ProcessEnv = {},
   localSha?: string,
 ): HookResult {
-  return runHookStdin(
-    repo,
-    `refs/heads/local ${localSha ?? repo.head} ${remoteRef} def456\n`,
-    overrides,
-  );
-}
-
-/** Run the committed hook with an explicit pre-push stdin payload. */
-function runHookStdin(
-  repo: HookRepo,
-  stdin: string,
-  overrides: NodeJS.ProcessEnv = {},
-): HookResult {
+  const stdin = `refs/heads/local ${localSha ?? repo.head} ${remoteRef} def456\n`;
   const home = makeTempDir('prepush-home-');
 
   const result = childProcess.spawnSync('sh', [HOOK_PATH], {
@@ -238,7 +211,7 @@ describe.skipIf(process.platform === 'win32')(
 
       expect(result.status).toBe(0);
       expect(result.invocations).toEqual([
-        `--scope full --strict-git-env --json --project-root ${repo.dir} --gate-commit ${repo.head}`,
+        `--scope full --strict-git-env --project-root ${repo.dir} --json`,
       ]);
       expect(result.stderr).toContain('full-suite gate for a dev/main push');
     });
@@ -251,7 +224,6 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.status).toBe(0);
       expect(result.invocations).toHaveLength(1);
       expect(result.invocations[0]).toContain('--scope full');
-      expect(result.invocations[0]).toContain(`--gate-commit ${repo.head}`);
     });
 
     it('pins the project root to the pushed tree (--project-root)', () => {
@@ -309,7 +281,6 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.status).toBe(0);
       expect(result.invocations).toHaveLength(1);
       expect(result.invocations[0]).toContain('--scope full');
-      expect(result.invocations[0]).toContain(`--gate-commit ${repo.head}`);
     });
 
     it('does not run the runner for a feature-branch push', () => {
@@ -352,57 +323,22 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.invocations).toHaveLength(0);
     });
 
-    it('echoes the runner gate provenance (gate-subject / gate-root)', () => {
+    it('warns when the checked-out HEAD is not the pushed dev/main ref', () => {
       const repo = createHookRepo();
-      const result = runHook(repo, 'refs/heads/dev', {
-        STUB_GATE_SUBJECT: `head=${repo.head}`,
-        STUB_GATE_ROOT: repo.dir,
-      });
+      const result = runHook(repo, 'refs/heads/dev', {}, 'a'.repeat(40));
 
       expect(result.status).toBe(0);
-      // The runner's gate-provenance lines are surfaced to the pusher.
-      expect(result.stderr).toContain('run_tests: gate-subject');
-      expect(result.stderr).toContain('run_tests: gate-root');
-      expect(result.stderr).toContain(repo.dir);
+      expect(result.stderr).toContain('is not the ref being pushed to dev/main');
+      // The gate still runs: it describes the checked-out tree.
+      expect(result.invocations).toHaveLength(1);
     });
 
-    it('refuses a push carrying two different dev/main commits', () => {
+    it('does not warn when the pushed ref is the checked-out commit', () => {
       const repo = createHookRepo();
-      const stdin =
-        `refs/heads/local ${repo.head} refs/heads/dev def456\n` +
-        `refs/heads/local ${'a'.repeat(40)} refs/heads/main def456\n`;
-      const result = runHookStdin(repo, stdin);
-
-      expect(result.status).not.toBe(0);
-      // Refused before any suite runs, naming both refs and the recovery.
-      expect(result.invocations).toHaveLength(0);
-      expect(result.stderr).toContain(
-        'cannot evidence one suite for several pushed commits',
-      );
-      expect(result.stderr).toContain(`refs/heads/dev ${repo.head}`);
-      expect(result.stderr).toContain(`refs/heads/main ${'a'.repeat(40)}`);
-      expect(result.stderr).toContain('TEST_SCOPE_SKIP=1');
-      expect(result.stderr).toContain('git push --no-verify');
-    });
-
-    it('refuses a runner that predates --gate-commit with a named message', () => {
-      const repo = createHookRepo();
-      // A stub with no --gate-commit capability: the hook must refuse with an
-      // actionable message, never surface an argparse error.
-      const runner = path.join(
-        repo.dir,
-        'skill',
-        'test',
-        'scripts',
-        'run_tests.py',
-      );
-      fs.writeFileSync(runner, 'import sys\nsys.exit(0)\n');
       const result = runHook(repo, 'refs/heads/dev');
 
-      expect(result.status).not.toBe(0);
-      expect(result.invocations).toHaveLength(0);
-      expect(result.stderr).toContain('predates --gate-commit');
-      expect(result.stderr).toContain('Upgrade the framework skills');
+      expect(result.status).toBe(0);
+      expect(result.stderr).not.toContain('is not the ref being pushed to dev/main');
     });
 
     it('hard-fails when run_tests.py cannot be found', () => {
@@ -434,13 +370,8 @@ describe('pre-push gate documentation (WL-0MVHP5S01006GDDV)', () => {
   });
 });
 
-/**
- * Stub runner that writes a gate cache entry the way `run_tests.py` does.
- * The `--gate-commit` marker satisfies the hook's capability pre-check;
- * `STUB_GATE_ROOT` makes it report the checkout the gate resolved.
- */
-const MIRROR_RUNNER = `# Stub run_tests.py: supports --gate-commit.
-import os
+/** Stub runner that writes a gate cache entry the way `run_tests.py` does. */
+const MIRROR_RUNNER = `import os
 import pathlib
 import subprocess
 import sys
@@ -458,10 +389,6 @@ if cache_name:
     entry = pathlib.Path(git_dir) / "test-cache" / cache_name
     entry.mkdir(parents=True, exist_ok=True)
     (entry / "result.json").write_text('{"status": "green"}', encoding="utf-8")
-
-root = os.environ.get("STUB_GATE_ROOT")
-if root:
-    print("run_tests: gate-root " + root, file=sys.stderr)
 
 sys.exit(int(os.environ.get("STUB_TEST_EXIT", "0")))
 `;
@@ -529,37 +456,6 @@ describe.skipIf(process.platform === 'win32')(
       );
       expect(fs.readFileSync(mirrored, 'utf8')).toBe('{"status": "green"}');
       expect(result.stderr).toContain('mirrored gate cache entry entry-abc');
-    });
-
-    it('mirrors from the gate-resolved root, not the push cwd', () => {
-      const repo = createMirrorRepo();
-      // The gate resolved a different checkout than the push cwd: its cache
-      // entry is what must be mirrored into the main cache.
-      const otherRoot = path.join(repo.dir, 'other-checkout');
-      const otherEntry = path.join(
-        otherRoot,
-        '.worklog',
-        'cache',
-        'entry-gate',
-        'result.json',
-      );
-      fs.mkdirSync(path.dirname(otherEntry), { recursive: true });
-      fs.writeFileSync(otherEntry, '{"status":"green"}');
-
-      const result = runHook(repo, 'refs/heads/dev', {
-        STUB_GATE_ROOT: otherRoot,
-      });
-
-      expect(result.status).toBe(0);
-      const mirrored = path.join(
-        repo.dir,
-        '.worklog',
-        'cache',
-        'entry-gate',
-        'result.json',
-      );
-      expect(fs.readFileSync(mirrored, 'utf8')).toBe('{"status":"green"}');
-      expect(result.stderr).toContain('mirrored gate cache entry entry-gate');
     });
 
     it('leaves a cache entry the main checkout already holds untouched', () => {

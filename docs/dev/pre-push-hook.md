@@ -31,34 +31,23 @@ that project — the regression WL-0MW2N56M2004PSRP fixes.
 The canonical text reproduces, byte-for-byte, the hook `tce-the-rising`
 committed under **RISE-0MVSS1KVV002TJUL**:
 
-1. **`--project-root` + `--gate-commit`** — the runner is invoked as
-   `run_tests.py --scope full --strict-git-env --json --project-root "$repo_root"
-   --gate-commit "$gate_commit"`, so the gate is bound to the *pushed commit*:
-   the runner resolves a clean checkout whose `HEAD` is exactly that commit
-   (the push cwd when it qualifies, else any clean `git worktree list`
-   checkout) and refuses (exit 2) when none holds it. So "the dev push
-   succeeded" means the suite ran against what landed (SA-0MVTRBT50005DUEH,
-   WL-0MW2A3NAP0088IE9).
-2. **Multi-commit refusal** — one suite can evidence one commit, so a push
-   carrying several different `dev`/`main` commits is refused *before* any
-   suite runs, listing each `ref=sha` and the recovery (one commit per push;
-   escape hatches `TEST_SCOPE_SKIP=1` / `git push --no-verify`).
-3. **Unsupported-runner pre-check** — a resolved runner that predates
-   `--gate-commit` is refused with a named upgrade message, never an argparse
-   error.
-4. **Ref-deletion guard** — an all-zero `local_sha` means "delete this ref":
+1. **`--project-root`** — the runner is invoked as
+   `run_tests.py --scope full --strict-git-env --project-root "$repo_root" --json`,
+   so a linked-worktree push gates the *pushed tree* rather than whatever
+   checkout the hook happens to run from.
+2. **HEAD-vs-pushed-SHA warning** — when the checked-out `HEAD` is not the
+   sha being pushed to `dev`/`main`, the hook warns
+   `"… is not the ref being pushed to dev/main"`, so cache evidence is never
+   silently attributed to the wrong commit.
+3. **Ref-deletion guard** — an all-zero `local_sha` means "delete this ref":
    there is no tree to test, so the suite is skipped.
-5. **Failure log + tail** — the runner's `--json` output and stderr are
-   captured to a temp log and its last 40 lines are tailed to stderr on
-   failure, then the log is removed.
-6. **Gate provenance echo** — the runner's `run_tests: gate-*` lines
-   (`gate-subject`, `gate-root`, `gate-verdict`, `gate-refused`) are echoed to
-   the pusher, so the validated checkout and executed-vs-cached is visible.
-7. **Cache-mirror wording + gate-root source** — a successful mirror prints
+4. **Failure log + tail** — the runner's `--json` output is captured to a temp
+   log and its last 40 lines are tailed to stderr on failure, then the log is
+   removed.
+5. **Cache-mirror wording** — a successful mirror prints
    `pre-push: mirrored gate cache entry …`; the external contract tests assert
-   that substring. The mirror sources from the gate-resolved root
-   (`run_tests: gate-root`) rather than the push cwd.
-8. **Defensive cache plumbing** — `git rev-parse --absolute-git-dir` /
+   that substring.
+6. **Defensive cache plumbing** — `git rev-parse --absolute-git-dir` /
    `--git-common-dir` are resolved with presence checks in every branch, a
    relative common dir is resolved with `$(cd "$wt_root" && pwd)`, and the main
    cache directory is created (`mkdir -p`) when absent. Mirroring stays
@@ -97,9 +86,8 @@ existing entry is never overwritten (SA-0MVTFMB7K002Y1F3, WL-0MV20XXWE00466FP).
 ## Tests
 
 - `tests/pre-push-hook-gate.test.ts` — executes the committed hook end-to-end
-  in throwaway git repositories (which refs gate, `--project-root`,
-  `--gate-commit`, the multi-commit refusal, the unsupported-runner refusal,
-  the deletion guard, the failure tail, the gate-root mirror
+  in throwaway git repositories (which refs gate, `--project-root`, the
+  HEAD-mismatch warning, the deletion guard, the failure tail, the mirror
   wording and fail-softness, bypasses, runner resolution).
 - `tests/doctor-hook-upgrade.test.ts` — asserts the embedded template and the
   committed hook both equal the checked-in fixture, and that the backported

@@ -5,8 +5,7 @@
 #    when the startup context surface exceeds committed thresholds.
 # 3. Scope-aware full-suite gate (RISE-0MVSS1KVV002TJUL): run the FULL suite
 #    (run_tests.py --scope full) for a push targeting refs/heads/dev or
-#    refs/heads/main, bound to the pushed commit (--gate-commit,
-#    SA-0MVTRBT50005DUEH), and refuse the push when it is not green. This hook is
+#    refs/heads/main, and refuse the push when it is not green. This hook is
 #    the repository's integration checkpoint — implement.py finish validates
 #    changed scope only, so the full suite first runs here
 #    (SA-0MVECQUGF0064U81). The gate produces the full-suite cache entry the
@@ -31,13 +30,11 @@ set -e
 #
 # need_full_suite: at least one ref targets dev/main and is not a deletion
 #   (a ref deletion has an all-zero local sha, so there is no tree to test).
-# gated_ref_shas: the <ref>=<sha> pairs the full-suite gate is bound to
-#   (the pushed commit is the gate's subject, SA-0MVTRBT50005DUEH).
 # skip_worklog_sync: the push carries refs/worklog/data (the sync's own ref;
 #   syncing while pushing it would loop).
 need_full_suite=0
 skip_worklog_sync=0
-gated_ref_shas=""
+gated_shas=""
 while read local_ref local_sha remote_ref remote_sha; do
   [ -n "$remote_ref" ] || continue
   case "$remote_ref" in
@@ -46,7 +43,7 @@ while read local_ref local_sha remote_ref remote_sha; do
         # All zeros means "delete this ref": nothing to test.
         *[!0]*)
           need_full_suite=1
-          gated_ref_shas="$gated_ref_shas $remote_ref=$local_sha"
+          gated_shas="$gated_shas $local_sha"
           ;;
       esac
       ;;
@@ -162,12 +159,6 @@ mirror_suite_cache() {
 # evidence, so the gate always runs scope=full. No timeout or concurrency
 # mechanism is introduced here: run_tests.py applies .pi/test-config.json's
 # timeoutPerCommand per command and acquires the shared host test semaphore.
-#
-# The gate is bound to the pushed commit (SA-0MVTRBT50005DUEH): the runner is
-# given --gate-commit <sha>, resolves a clean checkout whose HEAD is exactly
-# that commit (the push cwd when it qualifies, else any clean `git worktree
-# list` checkout), and refuses when none holds it. So "the dev push
-# succeeded" means the full suite ran against the commit that landed.
 if [ "$need_full_suite" = "1" ] && [ "$TEST_SCOPE_SKIP" != "1" ]; then
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   runner=""
@@ -188,69 +179,37 @@ if [ "$need_full_suite" = "1" ] && [ "$TEST_SCOPE_SKIP" != "1" ]; then
     exit 1
   fi
 
-  # The gate binds its verdict to one commit, so a runner predating
-  # --gate-commit cannot be used: refuse with an actionable message instead of
-  # letting argparse fail the push opaquely (AC3).
-  if ! grep -q -- "--gate-commit" "$runner" 2>/dev/null; then
-    echo "ERROR: the resolved run_tests.py predates --gate-commit." >&2
-    echo "  Runner: $runner" >&2
-    echo "  The dev/main full-suite gate must bind to the pushed commit." >&2
-    echo "  Upgrade the framework skills (scripts/install_pi.sh) or the repo-local runner." >&2
-    echo "  Set TEST_SCOPE_SKIP=1 to bypass (not recommended)." >&2
-    exit 1
-  fi
-
-  # One suite can evidence one commit. A push carrying several different
-  # dev/main commits would need a run per commit (the gate must not run more
-  # than one full suite), so refuse and let the pusher split the push (AC2).
-  gate_commit=""
-  for entry in $gated_ref_shas; do
-    entry_sha="${entry#*=}"
-    if [ -z "$gate_commit" ]; then
-      gate_commit="$entry_sha"
-    elif [ "$gate_commit" != "$entry_sha" ]; then
-      echo "ERROR: pre-push gate cannot evidence one suite for several pushed commits." >&2
-      echo "  pushed:" >&2
-      for ref_entry in $gated_ref_shas; do
-        echo "    ${ref_entry%%=*} ${ref_entry#*=}" >&2
-      done
-      echo "  The full-suite gate runs at most one suite and binds it to one commit." >&2
-      echo "  Recovery: push the dev/main refs one at a time (one commit per push)." >&2
-      echo "  Escape hatch (explicit, not recommended): TEST_SCOPE_SKIP=1 or git push --no-verify." >&2
-      exit 1
+  # The gate tests the tree that is checked out, so warn loudly when no gated
+  # ref matches HEAD (e.g. `git push origin other-branch:dev`): the run still
+  # gates, but its verdict — and the cache evidence it mirrors — describe the
+  # checked-out tree, not the pushed commit.
+  head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+  head_pushed=0
+  for sha in $gated_shas; do
+    if [ "$sha" = "$head_sha" ]; then
+      head_pushed=1
     fi
   done
-
-  gate_err="${TMPDIR:-/tmp}/rise-pre-push-test-gate.$$.err"
-  echo "pre-push: full-suite gate for a dev/main push — running run_tests.py --scope full --strict-git-env --gate-commit $gate_commit" >&2
-  # `set -e` is disabled for commands in an `if` condition: the gate's own
-  # non-zero exit is a verdict, not a hook failure, so it is classified below.
-  if python3 "$runner" --scope full --strict-git-env --json \
-    --project-root "$repo_root" --gate-commit "$gate_commit" \
-    >"$gate_err" 2>&1; then
-    gate_status=0
-  else
-    gate_status=$?
+  if [ "$head_pushed" != "1" ]; then
+    echo "WARNING: the checked-out HEAD ($head_sha) is not the ref being pushed to dev/main." >&2
+    echo "  The gate and its cache evidence describe the checked-out tree; check out the" >&2
+    echo "  pushed commit to produce evidence for that commit." >&2
   fi
-  # Surface the runner's gate provenance/refusal lines: which state was
-  # validated, and executed-vs-cached (AC3/AC4).
-  grep '^run_tests: gate-' "$gate_err" >&2 || true
-  if [ "$gate_status" -eq 0 ]; then
+
+  echo "pre-push: full-suite gate for a dev/main push — running run_tests.py --scope full --strict-git-env" >&2
+  gate_log="${TMPDIR:-/tmp}/rise-pre-push-test-gate.$$.json"
+  if python3 "$runner" --scope full --strict-git-env --project-root "$repo_root" --json >"$gate_log"; then
     echo "pre-push: full suite green (cached runs make repeat pushes cheap)" >&2
-    # Mirror the cache of the checkout the gate actually resolved (it may be a
-    # worktree other than this one) into the main checkout's cache (AC4).
-    gate_root="$(sed -n 's/^run_tests: gate-root //p' "$gate_err" | head -1)"
-    mirror_suite_cache "${gate_root:-$repo_root}"
-    rm -f "$gate_err"
+    rm -f "$gate_log"
+    mirror_suite_cache "$repo_root"
   else
     echo "ERROR: Full test suite failed — pushes to dev/main require a green suite." >&2
-    echo "  gated commit: $gate_commit${gated_ref_shas:+ (from:$gated_ref_shas)}" >&2
-    if [ -s "$gate_err" ]; then
+    if [ -s "$gate_log" ]; then
       echo "--- run_tests.py output (tail) ---" >&2
-      tail -n 40 "$gate_err" >&2 || true
+      tail -n 40 "$gate_log" >&2 || true
       echo "--- end of run_tests.py output ---" >&2
     fi
-    rm -f "$gate_err"
+    rm -f "$gate_log"
     echo "  Run: python3 \"$runner\" --scope full  (or implement.py finish) and fix the failures." >&2
     echo "  Set TEST_SCOPE_SKIP=1 to bypass (not recommended)." >&2
     exit 1
