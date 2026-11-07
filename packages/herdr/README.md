@@ -453,7 +453,15 @@ dispatches; the other herdr instances coordinate instead of polling:
   (`~/.herdr/downtime/downtime-dispatch-anchor.json`). Resolution is
   fail-closed (never another project's tab, never the leader's pane): a
   null/failed resolution reports `anchor-unavailable` (no dispatch this
-  cycle). Scheduled prompts (no work-item id) keep the `Dispatcher` anchor.
+  cycle) and rolls the CAS claim back. **Placement is resolved late**
+  (WL-0MW5JE0SZ0057K30): after the CAS claim, the reservation gate and the
+  host-budget admission, immediately before the marker write — provisioning
+  the item tab any earlier left an orphaned empty pane whenever a gate
+  refused the tick. Once a tab does exist, every remaining pre-spawn abort
+  (marker-write failure, spawn failure) closes its placeholder root pane
+  fail-safely (a reused tab's live pane and unknown liveness are left open),
+  so a dispatch that never runs a command leaves no pane behind. Scheduled
+  prompts (no work-item id) keep the `Dispatcher` anchor.
   See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn).
 - **Stalled-work scan and resume (WL-0MUYMBSA90092QV2)** — before selecting a
@@ -1255,6 +1263,12 @@ Semantics:
 - **No focus stealing** — item tabs are created with `--no-focus` and the
   existing no-focus dispatch default is preserved, so the selection list
   keeps the keyboard focus.
+- **No orphaned pane on a refused dispatch** — an agent dispatch provisions
+  its item tab only **after** the host-budget gate has admitted it
+  (`resolveInteractiveItemAnchorAfterAdmission`, WL-0MW5JE0SZ0057K30), so
+  cancelling the over-quota dialog leaves no empty tab behind; a background
+  (`open_pane: false`) dispatch provisions none either. The shell/command
+  routes have no admission gate and resolve the anchor directly.
 
 See [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#interactive-dispatch-pane-placement-wl-0muyi3jao002btnl)
 for the implementation-level detail and the automated-vs-interactive

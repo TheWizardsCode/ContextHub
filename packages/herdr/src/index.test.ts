@@ -253,6 +253,14 @@ type InteractiveAnchorHelpers = {
     deps?: DispatcherAnchorDeps,
     onCreate?: (anchor: ItemTabAnchor) => void,
   ) => Promise<ItemTabAnchor | null>;
+  resolveInteractiveItemAnchorAfterAdmission?: (
+    admitted: boolean,
+    cwd: string,
+    workspaceId: string,
+    itemId: string | undefined,
+    deps?: DispatcherAnchorDeps,
+    onCreate?: (anchor: ItemTabAnchor) => void,
+  ) => Promise<ItemTabAnchor | null>;
 };
 
 async function loadInteractiveAnchorHelpers(): Promise<InteractiveAnchorHelpers> {
@@ -539,6 +547,90 @@ describe('resolveInteractiveItemAnchor (AC3/AC5)', () => {
     const got = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps, onCreate);
     expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
     expect(onCreate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admission-gated interactive provisioning (WL-0MW5JE0SZ0057K30)
+//
+// The interactive agent dispatch used to provision the item-ID tab BEFORE the
+// host-budget dialog, so a cancel left an orphaned empty pane in a fresh item
+// tab. The helper must therefore be a hard no-op unless the dispatch was
+// admitted (`admitted === false`) or carries no work-item id.
+// ---------------------------------------------------------------------------
+
+describe('resolveInteractiveItemAnchorAfterAdmission (WL-0MW5JE0SZ0057K30)', () => {
+  let coordDir: string;
+  let savedCoord: string | undefined;
+
+  beforeEach(() => {
+    coordDir = mkdtempSync(join(tmpdir(), 'interactive-admission-'));
+    savedCoord = process.env.HERDR_COORDINATION_DIR;
+    process.env.HERDR_COORDINATION_DIR = coordDir;
+  });
+
+  afterEach(() => {
+    if (savedCoord === undefined) delete process.env.HERDR_COORDINATION_DIR;
+    else process.env.HERDR_COORDINATION_DIR = savedCoord;
+    try { rmSync(coordDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('provisions NOTHING when the dispatch was refused (cancelled)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeInteractiveAnchorDeps({ createTab });
+
+    const got = await helpers.resolveInteractiveItemAnchorAfterAdmission!(
+      false,
+      '/repo',
+      'w9',
+      'WL-ABC',
+      deps,
+    );
+
+    expect(got).toBeNull();
+    // The tab (and therefore herdr's placeholder root pane) was never created.
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it('provisions the item tab once the dispatch is admitted', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeInteractiveAnchorDeps({ createTab });
+
+    const got = await helpers.resolveInteractiveItemAnchorAfterAdmission!(
+      true,
+      '/repo',
+      'w9',
+      'WL-ABC',
+      deps,
+    );
+
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(createTab).toHaveBeenCalledWith('w9', 'WL-ABC');
+  });
+
+  it('provisions NOTHING for a command with no work-item id', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const createTab = vi.fn();
+    const deps = makeInteractiveAnchorDeps({ createTab });
+
+    const got = await helpers.resolveInteractiveItemAnchorAfterAdmission!(
+      true,
+      '/repo',
+      'w9',
+      undefined,
+      deps,
+    );
+
+    expect(got).toBeNull();
+    expect(createTab).not.toHaveBeenCalled();
   });
 });
 

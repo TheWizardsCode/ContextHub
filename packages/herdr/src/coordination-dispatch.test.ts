@@ -112,6 +112,9 @@ function makeCoordinationDeps(overrides: Partial<DowntimeWorkerDeps> = {}): Down
     spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
     recordDispatch: vi.fn().mockResolvedValue(true),
     recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
+    // Claim rollback (WL-0MT32F908002YFFA / WL-0MW5JE0SZ0057K30): placement
+    // runs after the claim, so an anchor-unavailable abort rolls it back.
+    rollbackClaim: vi.fn().mockResolvedValue(true),
     recordError: vi.fn().mockResolvedValue(undefined),
     getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
     recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
@@ -367,7 +370,11 @@ describe('dispatchFromCoordination', () => {
     const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
-    expect(deps.claimItem).not.toHaveBeenCalled();
+    // Placement now runs AFTER the CAS claim (WL-0MW5JE0SZ0057K30): the item
+    // is claimed, then rolled back on the anchor failure so it stays
+    // re-selectable. No pane is ever created.
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     // The offer stays in the file (anchor failure is transient, not stale).
     expect(getEntry(testDir, 'inst-1')).not.toBe(null);

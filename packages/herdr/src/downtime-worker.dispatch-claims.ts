@@ -3,9 +3,11 @@
  * spawn pipeline a dispatch runs once a candidate is selected.
  *
  * Single responsibility: run ONE already-selected candidate (or one due
- * scheduled prompt) through the fixed, fail-closed pipeline — placement
- * resolution, CAS claim, local-capacity reservation, marker write before
- * spawn, spawn, claim rollback on failure, best-effort post-spawn enrichment.
+ * scheduled prompt) through the fixed, fail-closed pipeline — CAS claim,
+ * local-capacity reservation, host-budget admission, placement resolution and
+ * item-tab provisioning, marker write before spawn, spawn, claim rollback on
+ * failure, placeholder root-pane cleanup on abort, best-effort post-spawn
+ * enrichment.
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  * Moved verbatim out of `downtime-worker.ts` by WL-0MVLII0NO007JJBA (extract
@@ -30,17 +32,15 @@ import { buildDowntimePrompt } from './downtime-worker.prompts.js';
 import { TIER_EXPECTED } from './downtime-worker.gates.js';
 import {
   DOWNTIME_PANE_LABEL_PREFIX,
-  countRunningDowntimePanes,
   paneLabelItemId,
 } from './downtime-worker.pane.js';
 import { resolveScheduledPromptPriority } from './scheduled-prompts.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
-import type {
-  DispatcherAnchor,
-  DispatcherPrefixTabAnchor,
-  ItemTabAnchor,
-  ProjectWorkspaceTarget,
-} from './dispatcher-anchor.js';
+import type { DispatcherAnchor } from './dispatcher-anchor.js';
+import {
+  closePlaceholderRootPaneBestEffort,
+  resolveDispatchPlacement,
+} from './downtime-worker.dispatch-placement.js';
 import type {
   DowntimeDispatchDeps,
   DowntimeDispatchOutcome,
@@ -100,11 +100,52 @@ async function releaseHostBudgetForFailure(
 }
 
 /**
- * Dispatch one already-selected candidate through the fixed pipeline:
- * project-workspace anchor resolution → CAS claim → marker write (before
- * spawn) → spawn.
+ * Abort a dispatch whose placement anchor could not be provisioned
+ * (WL-0MW5JE0SZ0057K30).
  *
- *  - Project workspace + item-ID tab (WL-0MU321YK70035AYT): BEFORE the claim,
+ * Placement/provisioning runs AFTER the CAS claim and AFTER host-budget
+ * admission (so a refused tick can never leave an orphaned placeholder pane),
+ * which means an `anchor-unavailable` failure now happens on an item that is
+ * already claimed. This restores the pre-claim fail-safe semantics exactly:
+ *
+ *  - the host-budget reservation is released (a dispatch that never spawns
+ *    must not hold a machine slot);
+ *  - the CAS claim is rolled back to its pre-claim status+stage so the item is
+ *    re-selectable on the next idle period;
+ *  - a granted local-capacity ticket is recorded released/expired (single-use
+ *    — never reused, never leaked).
+ *
+ * Fail-closed: a failed rollback leaves the item claimed (no worse than the
+ * pre-fix state) and is reported in `error`; the outcome is never success.
+ */
+async function abortForAnchorUnavailable(
+  deps: DowntimeDispatchDeps,
+  kind: DowntimeSkillKind,
+  itemId: string,
+  claimExpected: DowntimeClaimExpected,
+  cwd: string,
+  reservation: DowntimeReservationEvidence | undefined,
+): Promise<DowntimeDispatchOutcome> {
+  const releasedReservation: DowntimeReservationEvidence | undefined =
+    reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
+  await releaseHostBudgetForFailure(deps, kind, itemId, cwd);
+  const rollbackOk = await rollbackClaimForFailure(deps, itemId, claimExpected, cwd);
+  return {
+    dispatched: false,
+    reason: 'anchor-unavailable',
+    ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
+    ...(rollbackOk ? {} : { error: 'claim rollback failed after anchor-unavailable' }),
+  };
+}
+
+/**
+ * Dispatch one already-selected candidate through the fixed pipeline:
+ * CAS claim → local-capacity reservation → host-budget admission →
+ * project-workspace/item-tab placement → marker write (before spawn) → spawn.
+ *
+ *  - Project workspace + item-ID tab (WL-0MU321YK70035AYT): AFTER the CAS
+ *    claim and AFTER host-budget admission (WL-0MW5JE0SZ0057K30 — so a gate
+ *    that refuses the tick can never leave an orphaned placeholder pane),
  *    resolve the candidate's project workspace from `opts.cwd` via
  *    `deps.resolveProjectWorkspace`, ensure/reuse the tab labelled with the
  *    exact work-item id via `deps.getItemTabAnchor`, and forward that tab's
@@ -115,7 +156,9 @@ async function releaseHostBudgetForFailure(
  *    machine-wide `deps.getDispatcherAnchor` (AC4). A null/failed
  *    project-workspace resolution does not abort when a fallback is wired;
  *    a failed item-tab provision aborts with reason 'anchor-unavailable' —
- *    never the leader's pane and never another project's workspace.
+ *    never the leader's pane and never another project's workspace — and the
+ *    claim is rolled back (plus the host-budget entry/ticket released) like
+ *    every other pre-spawn abort, so the item is never left stranded.
  *  - Claim (compare-and-swap): exactly one concurrent pane wins; a loser
  *    (or a wl claim failure) ABORTS the dispatch — no pane, no marker, no
  *    success record. A lost race resolves reason 'claim-failed' (neutral,
@@ -172,105 +215,6 @@ export async function dispatchClaimedTier(
     opts.localPreferenceMode,
   );
   const localPreference = resolvedLocalPreference?.preference ?? opts.localPreference;
-  // Placement precedence (AC1, WL-0MUR5FUWD00024XN): resolve the anchor
-  // BEFORE the claim so a provisioning failure degrades to "no dispatch this
-  // cycle" (F1 AC6 — caller fail-safe) without claiming/marking an item that
-  // can never spawn a pane. The precedence is:
-  //   (a) project workspace + item-ID tab (primary);
-  //   (b) per-prefix Dispatcher tab (fallback when no project workspace
-  //       resolves);
-  //   (c) legacy single Dispatcher anchor.
-  // Absent deps (legacy/test callers) → no anchor, legacy current-pane
-  // behavior.
-  let anchorId: string | undefined;
-  // True when `anchorId` is a tab root pane (a project item tab or a
-  // per-prefix Dispatcher tab). Tab roots are provisioned with herdr's
-  // initial root pane (an empty bash pane) which is only needed as the split
-  // anchor for the FIRST dispatch — after the dispatch pane spawns it is
-  // closed so the tab shows only the productive pane. The legacy Dispatcher
-  // fallback anchor is deliberately exempt: its root pane is the persisted
-  // dispatch anchor and closing it would trigger a blank re-provision loop.
-  let anchorIsTabRoot = false;
-  // Extract the work-item id prefix (e.g. `WL-0MTO…` → `WL`, `TCE-…` → `TCE`).
-  const prefix = candidate.id.split('-', 1)[0];
-
-  // ── Primary path: project workspace + item-ID tab (WL-0MU321YK70035AYT) ─
-  // Resolve the candidate's project workspace from its worklog root, ensure/
-  // reuse a tab labelled with the exact work-item id, and anchor the pane to
-  // that tab's root pane. This is the PRIMARY placement path: when a project
-  // plugin pane resolves for the root, the Dispatcher workspace is NOT used
-  // (AC2/AC3). A null resolution falls through to the per-prefix fallback.
-  if (typeof deps.resolveProjectWorkspace === 'function') {
-    let projectTarget: ProjectWorkspaceTarget | null = null;
-    try {
-      projectTarget = await deps.resolveProjectWorkspace(opts.cwd);
-    } catch {
-      projectTarget = null; // fail-closed on any resolver error
-    }
-    if (projectTarget !== null && typeof deps.getItemTabAnchor === 'function') {
-      let tabAnchor: ItemTabAnchor | null = null;
-      try {
-        tabAnchor = await deps.getItemTabAnchor(opts.cwd, projectTarget.workspaceId, candidate.id);
-      } catch {
-        tabAnchor = null; // fail-closed
-      }
-      if (tabAnchor === null) {
-        // The workspace resolved but its item tab could not be provisioned:
-        // fail closed rather than place a project pane in the Dispatcher
-        // workspace (never a wrong placement).
-        return { dispatched: false, reason: 'anchor-unavailable' };
-      }
-      anchorId = tabAnchor.paneId;
-      anchorIsTabRoot = true;
-    }
-  }
-
-  // ── Fallback: per-prefix tab in Dispatcher workspace (AC3) ────────────
-  // Reached only when no project workspace resolved for the item's root.
-  // When wired, the per-prefix resolver REPLACES the legacy single anchor —
-  // a null/failed resolution is 'anchor-unavailable' (no dispatch this
-  // cycle) and NEVER falls back to the legacy Dispatcher anchor or the
-  // leader's pane (constraint: fail-safe, never a wrong-tab placement).
-  if (anchorId === undefined && typeof deps.getDispatcherTabAnchor === 'function') {
-    if (!prefix) {
-      // No prefix extractable (empty/invalid id) → cannot route by prefix.
-      return { dispatched: false, reason: 'anchor-unavailable' };
-    }
-    let prefixAnchor: DispatcherPrefixTabAnchor | null = null;
-    try {
-      prefixAnchor = await deps.getDispatcherTabAnchor(opts.cwd, prefix);
-    } catch {
-      prefixAnchor = null; // fail-closed
-    }
-    if (prefixAnchor === null) {
-      return { dispatched: false, reason: 'anchor-unavailable' };
-    }
-    anchorId = prefixAnchor.paneId;
-    // Per-prefix Dispatcher tabs use herdr's initial root pane as anchor.
-    anchorIsTabRoot = true;
-  }
-
-  // ── Fallback: legacy Dispatcher single anchor (AC4) ───────────────────
-  // When this dep IS wired, a null/failed resolution fails closed
-  // ('anchor-unavailable') — never a current-pane placement. When it is NOT
-  // wired (pre-C0 / legacy/test callers), no anchor is set and the spawn
-  // uses the legacy current-pane behaviour.
-  if (anchorId === undefined && typeof deps.getDispatcherAnchor === 'function') {
-    let anchor: DispatcherAnchor | null = null;
-    try {
-      anchor = await deps.getDispatcherAnchor(opts.cwd);
-    } catch {
-      anchor = null; // fail-closed on any anchor error
-    }
-    if (anchor === null) {
-      return { dispatched: false, reason: 'anchor-unavailable' };
-    }
-    anchorId = anchor.paneId;
-    // The legacy Dispatcher anchor is NOT a tab root — it is the persisted
-    // dispatch pane and must never be closed.
-    anchorIsTabRoot = false;
-  }
-
   // Cross-root claim (WL-0MTQ14W7L003II5A): opts.cwd is the item's worklog
   // root — the coordination leader passes the OFFER's root so the CAS claim
   // lands in the item's own database (never the leader's module override).
@@ -452,6 +396,30 @@ export async function dispatchClaimedTier(
     }
   }
 
+  // ── Placement: project workspace + item-ID tab, then the fallbacks ──────
+  // Resolved HERE — after the CAS claim, the local-capacity reservation gate
+  // and the host-budget admission, and immediately before the marker write
+  // (WL-0MW5JE0SZ0057K30): provisioning the item-ID tab any earlier left an
+  // orphaned placeholder pane whenever one of those gates refused the tick (an
+  // empty pane in a fresh item tab with no command ever run). Precedence and
+  // fail-closed rules live in `resolveDispatchPlacement`; the F3 contract is
+  // unchanged (admission still happens once, after the claim and before the
+  // marker/spawn).
+  //
+  // A provisioning failure now happens on an already-claimed item, so it rolls
+  // the claim back (and releases the host-budget entry/ticket) through
+  // `abortForAnchorUnavailable` — the same invariants as every other pre-spawn
+  // abort, so no orphaned `in_progress` item is left behind.
+  const placement = await resolveDispatchPlacement(deps, {
+    cwd: opts.cwd,
+    itemId: candidate.id,
+  });
+  if (!placement.ok) {
+    return abortForAnchorUnavailable(deps, kind, candidate.id, expected, opts.cwd, reservation);
+  }
+  const anchorId = placement.anchorId;
+  const anchorIsTabRoot = placement.anchorIsTabRoot;
+
   let marked = false;
   // Capture ONE timestamp shared by the success marker and its post-spawn
   // enrichment entry (WL-0MUBVL251006JAQ0 / F6 AC6.2) so the marker readers
@@ -524,6 +492,15 @@ export async function dispatchClaimedTier(
     const releasedReservation: DowntimeReservationEvidence | undefined =
       reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
     const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
+    // Placeholder root-pane cleanup (WL-0MW5JE0SZ0057K30, defence in depth):
+    // the item tab WAS provisioned above, but no pane will ever use it. Close
+    // the empty root pane (fail-safe — a reused tab's live anchor survives)
+    // so the abandoned tab is not left showing a blank pane.
+    await closePlaceholderRootPaneBestEffort(deps, {
+      cwd: opts.cwd,
+      anchorId,
+      anchorIsTabRoot,
+    });
     if (!rollbackOk) {
       // The item was already moved by a concurrent agent/human — nothing
       // to roll back; report marker-write-failed so the caller can fall
@@ -575,6 +552,15 @@ export async function dispatchClaimedTier(
     // Host-budget release (F3 AC3): the pane never appeared, so the reserved
     // slot is given back before the (long) failure-trace path below.
     await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
+    // Placeholder root-pane cleanup (WL-0MW5JE0SZ0057K30, defence in depth):
+    // the item tab was provisioned but the split failed, so the blank root
+    // pane is the only thing left in the tab. Close it (fail-safe — a live
+    // anchor is never closed) before the failure-trace path returns.
+    await closePlaceholderRootPaneBestEffort(deps, {
+      cwd: opts.cwd,
+      anchorId,
+      anchorIsTabRoot,
+    });
     // The granted ticket could not be forwarded to a pane: it is single-use,
     // so it is DROPPED here (the next idle period asks for a fresh one) and
     // recorded as released/expired — never leaked or reused.
@@ -652,40 +638,14 @@ export async function dispatchClaimedTier(
   // productive pane. Only ever close a ROOT pane: an anchor pane already
   // carrying a downtime dispatch label is a live agent session and must stay
   // open. Best-effort — cleanup must never block or fail the dispatch
-  // outcome.
-  if (
-    anchorIsTabRoot &&
-    anchorId !== undefined &&
-    typeof deps.closePane === 'function'
-  ) {
-    try {
-      // Fail-safe: close the anchor unless liveness POSITIVELY confirms it is
-      // a live downtime dispatch pane. The check must use the running DOWNTIME
-      // pane ids (`paneIds`), NEVER the full machine-wide pane set (`records`
-      // contains the anchor itself, so checking it would suppress every
-      // close — the WL-0MU2EOHK900425VU audit regression). A `records`-only
-      // payload is filtered to downtime panes via `countRunningDowntimePanes`.
-      // When liveness cannot be confirmed (query failed/absent) the anchor is
-      // left open (fail-safe), so a live agent pane is never closed.
-      let confirmedRootPane = false;
-      if (typeof deps.getRunningDowntimePanes === 'function') {
-        const running = await deps.getRunningDowntimePanes(opts.cwd);
-        if (running.ok) {
-          const liveIds = Array.isArray(running.paneIds)
-            ? running.paneIds
-            : running.records !== undefined
-              ? countRunningDowntimePanes(running.records)
-              : null;
-          if (liveIds !== null) confirmedRootPane = !liveIds.includes(anchorId);
-        }
-      }
-      if (confirmedRootPane) {
-        await deps.closePane(anchorId, opts.cwd);
-      }
-    } catch {
-      // fail-open: root-pane cleanup must never block the dispatch outcome
-    }
-  }
+  // outcome. Shared with the pre-spawn abort paths (marker-write failure,
+  // spawn failure) by `closePlaceholderRootPaneBestEffort`
+  // (WL-0MW5JE0SZ0057K30).
+  await closePlaceholderRootPaneBestEffort(deps, {
+    cwd: opts.cwd,
+    anchorId,
+    anchorIsTabRoot,
+  });
 
   // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6 AC6.2/AC6.3): best-effort
   // resolve the spawned pane's id and append a second log entry that copies

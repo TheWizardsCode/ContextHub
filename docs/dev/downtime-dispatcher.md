@@ -37,7 +37,8 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
 | `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
 | `downtime-worker.dispatch-cpu-gate.ts` | Host-CPU dispatch gate (host-utilisation seam) | `CPU_SATURATED_REASON` |
-| `downtime-worker.dispatch-claims.ts` | The claim → marker → spawn pipeline for one selected candidate | *(internal to the dispatch entry)* |
+| `downtime-worker.dispatch-claims.ts` | The claim → reservation → admission → placement → marker → spawn pipeline for one selected candidate | *(internal to the dispatch entry)* |
+| `downtime-worker.dispatch-placement.ts` | Dispatch pane placement resolution (project workspace + item-ID tab, per-prefix tab, legacy anchor) and the fail-safe placeholder root-pane cleanup | *(internal to the dispatch entry)* |
 | `downtime-worker.dispatch-contract.ts` | The dispatch pipeline's dependency boundary + event/outcome types | `DowntimeDispatchEvent`, `DowntimeErrorEvent`, … |
 | `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
 | `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
@@ -1499,6 +1500,15 @@ path). The machine-wide `Dispatcher` workspace is only the fail-closed
 `dispatchClaimedTier` evaluates placement in this precedence order
 (WL-0MUR5FUWD00024XN AC1):
 
+> **Placement runs late in the pipeline (WL-0MW5JE0SZ0057K30).** The order is
+> CAS claim → local-capacity reservation gate → host-budget admission →
+> **placement resolution / item-ID tab provisioning** → marker write → spawn.
+> Provisioning a tab is what creates herdr's empty placeholder root pane, so
+> it must happen only once the dispatch is admitted: a refused tick (claim
+> lost, reservation refusal, host-budget refusal) must leave **no** pane on
+> screen. The F3 contract is unchanged — host-budget admission still happens
+> once, after the CAS claim and before the marker/spawn.
+
 1. **Project workspace + item-ID tab** — `resolveProjectWorkspace` resolves
    the herdr plugin pane whose logical root equals the item's worklog root
    `R`, then `getItemTabAnchor` ensures/reuses the tab labelled with the exact
@@ -1512,7 +1522,11 @@ path). The machine-wide `Dispatcher` workspace is only the fail-closed
 A `null`/failed project-workspace resolution does **not** abort when a
 fallback is wired; a project workspace that resolves but whose item-ID tab
 cannot be provisioned aborts with `anchor-unavailable` (never a wrong
-placement). An empty/unparseable per-prefix likewise fails closed. The
+placement). An empty/unparseable per-prefix likewise fails closed. Because
+placement now runs after the CAS claim, an `anchor-unavailable` abort also
+**rolls the claim back** and releases the host-budget entry/ticket (see
+[no orphaned pane](#no-orphaned-placeholder-pane-wl-0mw5je0sz0057k30)) — the
+item is never left stranded `in_progress`. The
 resolved anchor is forwarded as `--anchor <rootPaneId>` to `send-to-pi.sh`
 (`herdr pane split --pane <anchor>`), `--no-focus` preserved; the new pane's
 `workspace_id` is the project workspace (or `Dispatcher` fallback) and its
@@ -1521,7 +1535,9 @@ resolved anchor is forwarded as `--anchor <rootPaneId>` to `send-to-pi.sh`
 #### Project workspace + item-ID tab (primary path, WL-0MU321YK70035AYT)
 
 Invariant: for a `dispatchClaimedTier` spawn of `<PREFIX>-<hash>` whose
-worklog root is `R`:
+worklog root is `R` (steps 1–2 run after the CAS claim, the reservation gate
+and the host-budget admission, immediately before the marker write —
+WL-0MW5JE0SZ0057K30):
 
 1. **Project-workspace resolution** — `resolveProjectWorkspace(cwd, deps, R)`
    enumerates the machine-wide `herdr pane list`, keeps only plugin panes
@@ -1560,6 +1576,52 @@ worklog root is `R`:
 When the workspace resolves but the item-ID tab cannot be provisioned, the
 dispatch fails closed with `anchor-unavailable` — it never places the pane in
 the `Dispatcher` workspace (WL-0MU321YK70035AYT).
+
+#### No orphaned placeholder pane (WL-0MW5JE0SZ0057K30)
+
+**Guarantee:** a dispatch that never runs a command leaves no pane behind.
+The defect this closes: the item-ID tab (and herdr's empty placeholder root
+pane) used to be provisioned *before* the host-budget admission, while the
+root-pane cleanup only ran *after* a confirmed spawn — so a refused tick left
+an empty pane in a fresh item tab (the 2026-11-06 evidence `w3G:p1BK` in tab
+`MS-0MW3LTMHT001PRDT` and `w57:pCV` in tab `SA-0MVXUGXS5006M3HF`, both
+completed/in_review audit candidates refused by the audit cap).
+
+Two mechanisms, in this order of preference:
+
+1. **Never provision before admission.** `resolveDispatchPlacement` (in
+   `downtime-worker.dispatch-placement.ts`) runs after the CAS claim, the
+   reservation gate and the host-budget admission, and immediately before the
+   marker write. A claim loss, a reservation refusal, a TTL-below-bound
+   reservation or a host-budget refusal therefore returns **before any tab is
+   created** — there is no pane to leak. This covers the automated dispatcher's
+   `implement` and `audit` tiers alike.
+2. **Defence in depth on the aborts that DID provision.** Once the item tab
+   exists, every remaining pre-spawn abort closes the placeholder root pane via
+   `closePlaceholderRootPaneBestEffort`: marker-write failure
+   (`marker-write-failed` / `claim-rolled-back`), spawn failure
+   (`spawn-failed`), and the `anchor-unavailable` rollback path. The same
+   cleanup also runs after a successful spawn (the original
+   WL-0MU2EOHK900425VU behaviour).
+
+The cleanup is **fail-safe** and **fail-open**:
+
+- the anchor is closed only when liveness POSITIVELY confirms it is not a live
+  **downtime** pane (`paneIds`, or `records` filtered through
+  `countRunningDowntimePanes`) — a reused tab's live dispatch pane is never
+  closed, and unavailable liveness (query failed/absent) leaves the anchor
+  open;
+- a failed liveness query or a throwing `closePane` is swallowed: cleanup never
+  changes the dispatch outcome, never throws, and never turns a neutral refusal
+  into a strike;
+- the retained single `Dispatcher` anchor is deliberately exempt (`anchorIsTabRoot
+  = false`): closing it would trigger the stale-detection re-provision loop.
+
+Because placement now happens on an already-claimed item, an
+`anchor-unavailable` failure rolls the claim back to its pre-claim
+status+stage, releases the host-budget entry and records a granted
+reservation ticket as released/expired (`abortForAnchorUnavailable`) — the same
+invariants as the marker/spawn abort paths.
 
 #### Per-prefix tabs in the Dispatcher workspace (fallback, C1, WL-0MTRQT482001SNXC)
 
@@ -1721,6 +1783,12 @@ Lifecycle (`packages/herdr/src/index.ts`; shared anchor helper in
    when this call actually provisioned the tab — the create-vs-reuse signal
    consumed by step 4. **Any** resolution/creation error returns `null`
    (fail-open).
+   **Ordering (WL-0MW5JE0SZ0057K30):** on the **agent** route the anchor is
+   resolved only after `prepareInteractiveAgentDispatch` has decided (via
+   `resolveInteractiveItemAnchorAfterAdmission`, which is a hard no-op when the
+   dispatch was refused/cancelled), so cancelling the host-budget dialog can
+   never leave an empty item tab behind; the shell/command-output routes have
+   no admission gate and resolve the anchor directly in their branch.
 3. **Anchor forwarding** — the item-tab anchor is resolved once per dispatch
    and forwarded to both channels by the arg builders:
    `buildSendToPiArgs(..., anchor)` and `buildRunInPaneArgs(..., anchor)`
@@ -1757,6 +1825,15 @@ for both placements; only the workspace choice, failure semantics and
 root-pane liveness source differ. The automated path checks the running
 **downtime** pane ids for its cleanup liveness; the interactive path checks
 the live **tracked pi/shell** panes (step 4).
+
+**No orphaned pane on a refused dispatch (WL-0MW5JE0SZ0057K30).** Because the
+item tab is provisioned only after the host-budget gate admits an agent
+dispatch, a dialog **cancel** (or an over-quota refusal) leaves **no** pane:
+`resolveInteractiveItemAnchorAfterAdmission(false, …)` returns before touching
+`herdr tab list`/`herdr tab create`. The cancel return still calls the
+fail-safe root-pane cleanup as defence in depth — a harmless no-op while no
+anchor was created. Background (`open_pane: false`) dispatches never provision
+a tab either: they carry no pane to place.
 
 
 ### Request priority (`X-Priority`) on dispatched panes
@@ -3823,6 +3900,10 @@ trace.
   item-ID-tab placement for worklist dispatch (both channels) and its
   fail-safe placeholder root-pane cleanup* (documented in *Interactive
   dispatch pane placement* above)
+- Work item: **WL-0MW5JE0SZ0057K30** *Dispatcher opening a pane but not
+  executing a command* — late placement (after host-budget admission) and
+  placeholder root-pane cleanup on every pre-spawn abort (documented in *No
+  orphaned placeholder pane* above)
 - Work item: **WL-0MUMA5OMH0024PN1** *When dispatching a new workload first
   scan all workspaces and panes for stalled work* (+ its children
   WL-0MUYMBK6H005PY16 settings / WL-0MUYMBMCG000Z4WP pane-record enrichment /

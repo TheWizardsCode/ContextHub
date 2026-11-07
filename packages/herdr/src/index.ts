@@ -296,6 +296,7 @@ import {
   defaultInteractiveClosePane,
   defaultInteractiveLiveTrackedPanesResolver,
   resolveInteractiveItemAnchor,
+  resolveInteractiveItemAnchorAfterAdmission,
   resolveInteractiveWorkspaceId,
 } from './index.interactive.js';
 
@@ -303,6 +304,7 @@ export {
   closeInteractiveTabRootPane,
   defaultInteractiveLiveTrackedPanesResolver,
   resolveInteractiveItemAnchor,
+  resolveInteractiveItemAnchorAfterAdmission,
   resolveInteractiveWorkspaceId,
 } from './index.interactive.js';
 
@@ -1782,21 +1784,32 @@ export async function main(): Promise<void> {
         // `undefined`, so the scripts keep today's current-pane split (AC5).
         const interactiveItemId = shouldOpenPane ? extractWorkItemId(command) : undefined;
         // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF, AC7): populated only
-        // when resolveInteractiveItemAnchor PROVISIONED the item tab. A reused
-        // tab leaves this null, so a reused live anchor is never considered
-        // for cleanup. Combined with the fail-safe liveness gate below, a live
-        // pane is never closed.
+        // when the item tab is PROVISIONED. A reused tab leaves this null, so a
+        // reused live anchor is never considered for cleanup. Combined with the
+        // fail-safe liveness gate below, a live pane is never closed.
         let createdItemTabAnchor: ItemTabAnchor | null = null;
-        const interactiveAnchor =
-          interactiveItemId !== undefined
-            ? await resolveInteractiveItemAnchor(
-                targetCwd,
-                resolveInteractiveWorkspaceId(process.env) ?? '',
-                interactiveItemId,
-                undefined,
-                (anchor) => { createdItemTabAnchor = anchor; },
-              )
-            : null;
+        const onCreateItemTabAnchor = (anchor: ItemTabAnchor): void => {
+          createdItemTabAnchor = anchor;
+        };
+        // The anchor is resolved per dispatch, but NEVER before the dispatch
+        // is admitted (WL-0MW5JE0SZ0057K30): provisioning the item tab up
+        // front left an orphaned placeholder pane whenever the host-budget
+        // gate refused the tick. The agent route resolves it after
+        // `prepareInteractiveAgentDispatch` decides (via
+        // `resolveInteractiveItemAnchorAfterAdmission`); the shell/plain routes
+        // have no admission gate and resolve it directly in their branch.
+        const interactiveWorkspaceId = resolveInteractiveWorkspaceId(process.env) ?? '';
+        const resolveInteractiveAnchorForShellRoute =
+          async (): Promise<ItemTabAnchor | null> =>
+            interactiveItemId !== undefined
+              ? resolveInteractiveItemAnchor(
+                  targetCwd,
+                  interactiveWorkspaceId,
+                  interactiveItemId,
+                  undefined,
+                  onCreateItemTabAnchor,
+                )
+              : null;
         // Fail-safe placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF, AC7):
         // only ever runs after a CONFIRMED successful split (the spawning
         // script writes its pane-id file right after the split) and only when
@@ -1846,7 +1859,12 @@ export async function main(): Promise<void> {
           });
           if (!budgetPreparation.proceed) {
             // Cancel: no claim, no pane, no background dispatch, no ledger
-            // entry. The item stays exactly as it was.
+            // entry. The item stays exactly as it was. The item-ID tab was
+            // NOT provisioned (the anchor is resolved only after this gate,
+            // WL-0MW5JE0SZ0057K30), so no placeholder pane can be orphaned;
+            // the cleanup call is retained as defence in depth (a no-op
+            // because `createdItemTabAnchor` is still null).
+            await runInteractiveRootPaneCleanup();
             return;
           }
           // Request priority (WL-0MVE1NZ4J000H5NH AC2): resolve the
@@ -1883,6 +1901,20 @@ export async function main(): Promise<void> {
             );
             return;
           }
+          // Interactive item-ID tab placement (WL-0MUYI3JAO002BTNL): resolve
+          // ONLY now — after the host-budget gate has admitted this dispatch
+          // (WL-0MW5JE0SZ0057K30) and after the background (no-pane) branch
+          // above has returned, so a refused or pane-less dispatch can never
+          // leave an empty placeholder tab behind. Fail-open: any failure
+          // yields `null` → the legacy current-pane split.
+          const interactiveAnchor = await resolveInteractiveItemAnchorAfterAdmission(
+            budgetPreparation.proceed,
+            targetCwd,
+            interactiveWorkspaceId,
+            interactiveItemId,
+            undefined,
+            onCreateItemTabAnchor,
+          );
           // Agent-pane association capture (WL-0MSBQUJQX005RAT9): when the
           // command carries a work-item ID, ask send-to-pi.sh to write the
           // new pane ID to a temp file (--pane-id-file) right after the split
@@ -1995,6 +2027,7 @@ export async function main(): Promise<void> {
           const shellPaneName = buildShellPaneTitle(clean, paneTitle, shellItemId);
           // Split-confirmation channel for the cleanup below: only requested
           // when a fresh item tab needs its placeholder root pane closed.
+          const interactiveAnchor = await resolveInteractiveAnchorForShellRoute();
           const shellPaneIdFile = createdItemTabAnchor
             ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}-shell.json`)
             : undefined;
@@ -2044,6 +2077,7 @@ export async function main(): Promise<void> {
             return;
           }
           const plainItemId = extractWorkItemId(command);
+          const interactiveAnchor = await resolveInteractiveAnchorForShellRoute();
           const plainPaneIdFile = createdItemTabAnchor
             ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}-shell.json`)
             : undefined;

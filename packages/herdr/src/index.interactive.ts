@@ -110,6 +110,43 @@ export async function resolveInteractiveItemAnchor(
 }
 
 /**
+ * Resolve (or create) the item-ID tab anchor for a dispatch that has already
+ * been ADMITTED (WL-0MW5JE0SZ0057K30).
+ *
+ * The interactive agent dispatch provisions its item tab only once the
+ * host-budget gate has decided: provisioning before the gate left an orphaned
+ * placeholder pane in a fresh item tab whenever the operator cancelled the
+ * over-quota dialog (no command ever ran in it). This helper encodes that
+ * ordering as one call site: `admitted === false` returns `null` immediately,
+ * WITHOUT touching the anchor machinery (no `herdr tab list`, no
+ * `herdr tab create`), so a refused dispatch can never create a pane.
+ *
+ * `admitted === true` defers to {@link resolveInteractiveItemAnchor} and keeps
+ * its fail-open contract unchanged (a provisioning failure yields `null` so the
+ * caller falls back to the current-pane split).
+ *
+ * @param admitted The dispatch-admission verdict (false = refused/cancelled).
+ * @param cwd - Worklog root used for the coordination directory.
+ * @param workspaceId - Host workspace (see {@link resolveInteractiveWorkspaceId}).
+ * @param itemId - Exact work-item ID used as the tab label (absent → `null`).
+ * @param deps - Injectable herdr deps; production builds real ones.
+ * @param onCreate Optional create-vs-reuse observer (see
+ *   {@link resolveInteractiveItemAnchor}).
+ */
+export async function resolveInteractiveItemAnchorAfterAdmission(
+  admitted: boolean,
+  cwd: string,
+  workspaceId: string,
+  itemId: string | undefined,
+  deps?: DispatcherAnchorDeps,
+  onCreate?: (anchor: ItemTabAnchor) => void,
+): Promise<ItemTabAnchor | null> {
+  if (!admitted) return null;
+  if (itemId === undefined) return null;
+  return resolveInteractiveItemAnchor(cwd, workspaceId, itemId, deps, onCreate);
+}
+
+/**
  * Liveness dependency for {@link closeInteractiveTabRootPane}: the ids of
  * panes currently hosting a TRACKED pi/shell session, or `{ok:false}` when
  * the probe cannot be answered (unknown → the caller leaves the pane open).
