@@ -764,9 +764,8 @@ export default function register(ctx: PluginContext): void {
   githubCommand
     .command('delegate <id>')
     .description('Delegate a work item to GitHub Copilot coding agent')
-    .option('--force', 'Bypass do-not-delegate tag guard rail', false)
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action(async (id: string, options: { force?: boolean; prefix?: string }) => {
+    .action(async (id: string, options: { prefix?: string }) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       const isJsonMode = utils.isJsonMode();
@@ -822,7 +821,6 @@ export default function register(ctx: PluginContext): void {
           db,
           githubConfig,
           normalizedId,
-          { force: options.force },
         );
       } catch (error) {
         const message = `Delegation failed: ${(error as Error).message}`;
@@ -844,11 +842,11 @@ export default function register(ctx: PluginContext): void {
 
       if (!result.success) {
         // Map helper error keys to CLI output
-        if (result.error === 'do-not-delegate') {
-          const message = `Work item ${normalizedId} has a "do-not-delegate" tag. Use --force to override.`;
+        if (result.error === 'held-by-assignee') {
+          const message = result.message ?? `Work item ${normalizedId} is held by an assignee. Delegation refused.`;
           output.error(message, {
             success: false,
-            error: 'do-not-delegate',
+            error: 'held-by-assignee',
             workItemId: normalizedId,
           });
           process.exit(1);
