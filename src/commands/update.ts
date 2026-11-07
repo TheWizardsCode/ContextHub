@@ -47,7 +47,6 @@ export default function register(ctx: PluginContext): void {
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--audit-file <file>', 'Read audit text from a file')
     .option('--audit-fingerprint <fingerprint>', 'Content fingerprint for freshness gate when persisting audit (WL-0MUBVH5S0008NQ9K)')
-    .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after the update')
     .option('--re-sort-sync', 'Force a synchronous re-sort after the update', false)
@@ -56,14 +55,14 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync'
+        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync'
       ];
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
@@ -206,17 +205,6 @@ export default function register(ctx: PluginContext): void {
         else if (falsy.includes(raw)) needsProducerReviewCandidate = false;
         else {
           output.error(`Invalid value for --needs-producer-review: ${options.needsProducerReview}`, { success: false, error: 'invalid-arg' });
-          process.exit(1);
-        }
-      }
-
-      let doNotDelegateRaw: string | undefined;
-      if (hasProvided('doNotDelegate')) {
-        doNotDelegateRaw = String(options.doNotDelegate).toLowerCase();
-        const truthy = ['true', 'yes', '1'];
-        const falsy = ['false', 'no', '0'];
-        if (!truthy.includes(doNotDelegateRaw) && !falsy.includes(doNotDelegateRaw)) {
-          output.error(`Invalid value for --do-not-delegate: ${options.doNotDelegate}`, { success: false, error: 'invalid-arg' });
           process.exit(1);
         }
       }
@@ -485,25 +473,6 @@ export default function register(ctx: PluginContext): void {
               }
             }
           }
-        }
-
-        // Handle do-not-delegate per-id
-        if (doNotDelegateRaw !== undefined) {
-          const current = db.get(normalizedId);
-          if (!current) {
-            const message = `Work item not found: ${normalizedId}`;
-            results.push({ id: normalizedId, success: false, error: message });
-            continue;
-          }
-          const baseTags: string[] = updates.tags !== undefined ? updates.tags : (current.tags || []);
-          const truthy = ['true', 'yes', '1'];
-          let newTags: string[];
-          if (truthy.includes(doNotDelegateRaw)) {
-            newTags = Array.from(new Set([...baseTags, 'do-not-delegate']));
-          } else {
-            newTags = baseTags.filter(t => t !== 'do-not-delegate');
-          }
-          updates.tags = newTags;
         }
 
         if (process.env.WL_DEBUG_SQL_BINDINGS) {
