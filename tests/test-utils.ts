@@ -238,7 +238,6 @@ export function createTuiTestContext(options?: { prefix?: string }) {
         deleteReason: '',
         risk: String(item.risk ?? ''),
         effort: String(item.effort ?? ''),
-        doNotDelegate: Boolean(item.doNotDelegate ?? false),
       };
       items.set(id, newItem);
       return newItem;
@@ -403,9 +402,8 @@ export function createTuiTestContext(options?: { prefix?: string }) {
   };
 
   // Simple runner that invokes a registered command handler with a
-  // parsed `options` object. Supports long-form flags like
-  // `--do-not-delegate true` and converts kebab-case to camelCase to
-  // match commander behaviour in the real code.
+  // parsed `options` object. Supports long-form flags and converts
+  // kebab-case to camelCase to match commander behaviour in the real code.
   function kebabToCamel(s: string) {
     return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
   }

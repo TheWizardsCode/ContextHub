@@ -1,9 +1,8 @@
 /**
  * Unit tests for the delegate subcommand guard rails:
- * - do-not-delegate tag check
+ * - non-empty assignee (scheduling hold) check
  * - children warning
  * - invalid/missing work item ID
- * - --force bypass
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -86,7 +85,7 @@ function createDelegateTestContext() {
       description: (_d: string) => builder,
       alias: (_a: string) => builder,
       option: (spec: string, _desc?: string, defaultVal?: any) => {
-        // Parse option name from spec (e.g., '--force' -> 'force', '--prefix <prefix>' -> 'prefix')
+        // Parse option name from spec (e.g., '--prefix <prefix>' -> 'prefix')
         const match = spec.match(/--([a-z-]+)/);
         if (match) {
           const camelKey = match[1].replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase());
@@ -273,21 +272,34 @@ describe('delegate subcommand guard rails', () => {
     expect(t.errorOutput[0].data.success).toBe(false);
   });
 
-  it('exits with error when work item has do-not-delegate tag and no --force', async () => {
-    const id = t.makeItem({ tags: ['do-not-delegate'] });
+  it('exits with error when work item has a non-empty assignee (held)', async () => {
+    const id = t.makeItem({ assignee: 'Map' });
     await expect(t.runDelegate(id)).rejects.toThrow('process.exit(1)');
     expect(t.errorOutput).toHaveLength(1);
-    expect(t.errorOutput[0].msg).toContain('do-not-delegate');
-    expect(t.errorOutput[0].data.error).toBe('do-not-delegate');
+    expect(t.errorOutput[0].msg).toContain('Map');
+    expect(t.errorOutput[0].data.error).toBe('held-by-assignee');
   });
 
-  it('proceeds when work item has do-not-delegate tag with --force', async () => {
-    const id = t.makeItem({ tags: ['do-not-delegate'], githubIssueNumber: 42 });
-    // Should not throw for the do-not-delegate guard; may still proceed to push+assign
-    await t.runDelegate(id, { force: true });
-    expect(t.consoleMessages.some(m => m.includes('--force'))).toBe(true);
-    // Should not have the do-not-delegate error
-    expect(t.errorOutput.filter(e => e.data?.error === 'do-not-delegate')).toHaveLength(0);
+  it('proceeds when work item has an empty assignee', async () => {
+    const id = t.makeItem({ assignee: '', githubIssueNumber: 42 });
+    // Should not throw for the assignee guard; may still proceed to push+assign
+    await t.runDelegate(id);
+    // Should not have the held-by-assignee error
+    expect(t.errorOutput.filter(e => e.data?.error === 'held-by-assignee')).toHaveLength(0);
+  });
+
+  it('proceeds when work item has no assignee field', async () => {
+    const id = t.makeItem({ githubIssueNumber: 42 });
+    delete t.items.get(id).assignee;
+    await t.runDelegate(id);
+    expect(t.errorOutput.filter(e => e.data?.error === 'held-by-assignee')).toHaveLength(0);
+  });
+
+  it('delegates normally when item still carries an inert do-not-delegate tag but has an empty assignee', async () => {
+    const id = t.makeItem({ tags: ['do-not-delegate'], assignee: '', githubIssueNumber: 42 });
+    await t.runDelegate(id);
+    // The tag is inert: delegation must not be refused
+    expect(t.errorOutput.filter(e => e.data?.error === 'held-by-assignee')).toHaveLength(0);
   });
 
   it('warns about children in non-interactive mode and proceeds', async () => {
