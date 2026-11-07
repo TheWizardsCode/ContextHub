@@ -283,7 +283,7 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag).
 
 > **Soft-delete guard (SA-0MUJBLZC60085DI9):** a soft-deleted item (non-empty `deletedBy`) cannot be updated — `wl update` rejects it per-id with error `deleted-item` and a message naming the item, and exits non-zero. This prevents a stale status/stage update from resurrecting a deleted item for the dispatcher to re-select. An explicit change to the delete-attribution fields themselves (`--deleted-by` / `--delete-reason`) is still permitted.
 
@@ -318,11 +318,11 @@ wl update WL-ABC123 -s in-progress -a "bob"
 wl update WL-ABC123 --risk High --effort XS
 ```
 
-New: toggle the do-not-delegate tag (prevents automation from auto-assigning the item):
+New: **delegation hold via `assignee`**. A non-empty `assignee` means the item is held and must not be delegated automatically; an empty assignee means the item is delegate-eligible. Set `--assignee <holder>` to hold, and clear with `--assignee ""` to release:
 
 ```sh
-wl update WL-ABC123 --do-not-delegate true   # add tag
-wl update WL-ABC123 --do-not-delegate false  # remove tag
+wl update WL-ABC123 --assignee Map          # hold (prevents automation from auto-assigning the item)
+wl update WL-ABC123 --assignee ""           # release the hold
 ```
 
 Conditional updates (compare-and-swap guards):
@@ -1231,7 +1231,7 @@ Subcommands:
    - `--force` — **Deprecated** alias for `--all`. Bypass the pre-filter and process all work items regardless of whether they changed since the last push.
    - `--no-update-timestamp` — Do not write the repository last-push timestamp after a successful push. Use this when you want to run a push but avoid advancing the "last pushed" watermark.
 - `import` — Import updates from GitHub Issues. Options: `--repo <owner/name>`, `--label-prefix <prefix>`, `--since <ISO timestamp>`, `--create-new`, `--prefix <prefix>`.
-- `delegate <id>` — Delegate a work item to GitHub Copilot. Pushes the item to GitHub, assigns the resulting issue to `@copilot`, and updates local status/assignee. Options: `--repo <owner/name>`, `--label-prefix <prefix>`, `--force` (override the `do-not-delegate` tag). In the TUI, press **g** on a focused item for the same flow with a confirmation modal.
+- `delegate <id>` — Delegate a work item to GitHub Copilot. Pushes the item to GitHub, assigns the resulting issue to `@copilot`, and updates local status/assignee. Options: `--repo <owner/name>`, `--label-prefix <prefix>`. Delegation is refused when the item has a non-empty `assignee` (the scheduling hold): release it with `wl update <id> --assignee ""` first. In the TUI, press **g** on a focused item for the same flow with a confirmation modal.
 
 Examples:
 
