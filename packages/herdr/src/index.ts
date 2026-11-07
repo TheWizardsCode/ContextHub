@@ -1808,6 +1808,7 @@ export async function main(): Promise<void> {
                   interactiveItemId,
                   undefined,
                   onCreateItemTabAnchor,
+                  'left-of-extensions',
                 )
               : null;
         // Fail-safe placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF, AC7):
@@ -1914,6 +1915,7 @@ export async function main(): Promise<void> {
             interactiveItemId,
             undefined,
             onCreateItemTabAnchor,
+            'left-of-extensions',
           );
           // Agent-pane association capture (WL-0MSBQUJQX005RAT9): when the
           // command carries a work-item ID, ask send-to-pi.sh to write the

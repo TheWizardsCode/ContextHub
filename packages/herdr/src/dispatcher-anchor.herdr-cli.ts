@@ -22,6 +22,9 @@
  */
 
 import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { execFile as _execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolveHerdrBin } from './herdr-bin.js';
@@ -99,6 +102,11 @@ export function createDispatcherAnchorDeps(
     listTabs: (workspaceId: string) => listTabsInWorkspace(cwd, workspaceId, herdrBin),
     createTab: (workspaceId: string, label: string) =>
       createTabInWorkspace(cwd, workspaceId, label, herdrBin),
+    // The socket API `tab.move` keys on the globally-unique tab id, so the
+    // workspace id is not needed here (kept in the dep signature so every call
+    // site is uniform).
+    moveTab: (_workspaceId: string, tabId: string, insertIndex: number) =>
+      moveTabInWorkspace(tabId, insertIndex),
     listPanes: (workspaceId: string) => listPanesInWorkspace(cwd, workspaceId, herdrBin),
     listMachinePanes: () => listMachinePanes(cwd, herdrBin),
     getPaneProcessInfo: (paneId: string) => getPaneProcessInfo(cwd, paneId, herdrBin),
@@ -287,4 +295,125 @@ export async function createTabInWorkspace(
     return null;
   }
   return parsed;
+}
+
+/**
+ * Default herdr socket path: `HERDR_SOCKET_PATH`, else
+ * `$XDG_CONFIG_HOME/herdr/herdr.sock`, else `~/.config/herdr/herdr.sock`
+ * (matching `events.ts`). Resolved per call so tests can set the env.
+ */
+export function resolveHerdrSocketPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const explicit = env.HERDR_SOCKET_PATH?.trim();
+  if (explicit) return explicit;
+  const base =
+    env.XDG_CONFIG_HOME?.trim() || path.join(os.homedir(), '.config');
+  return path.join(base, 'herdr', 'herdr.sock');
+}
+
+/**
+ * Send exactly one newline-delimited JSON-RPC 2.0 request over the herdr
+ * Unix socket and resolve the success flag (herdr handles one request per
+ * connection — see `events.ts`).
+ *
+ * Fail-open: never throws. A connection error, timeout, malformed frame or
+ * JSON-RPC `error` payload all resolve `{ ok: false }`.
+ *
+ * Exported for tests (a fake Unix-socket server can pin the exact frame and
+ * the error handling without spawning a real herdr).
+ */
+export async function sendHerdrSocketRequest(
+  method: string,
+  params: Record<string, unknown>,
+  socketPath: string = resolveHerdrSocketPath(),
+  timeoutMs = 5000,
+): Promise<{ ok: boolean; raw: string }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = '';
+    const id = `wlp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const finish = (ok: boolean, raw: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { client.destroy(); } catch { /* ignore */ }
+      resolve({ ok, raw });
+    };
+    const client = net.connect({ path: socketPath });
+    const timer = setTimeout(() => finish(false, ''), timeoutMs);
+    client.on('connect', () => {
+      try {
+        client.write(
+          `${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`,
+        );
+      } catch {
+        finish(false, '');
+      }
+    });
+    client.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      const line = buffer.slice(0, newline);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        finish(false, line);
+        return;
+      }
+      const record = parsed as { error?: unknown };
+      finish(record.error === undefined, line);
+    });
+    client.on('error', () => finish(false, buffer));
+    client.on('close', () => {
+      if (!settled) {
+        // Server closed before framing a response. A one-line body may still
+        // be a complete frame if the connection was half-closed.
+        const line = buffer.split('\n')[0];
+        if (line) {
+          try {
+            const record = JSON.parse(line) as { error?: unknown };
+            finish(record.error === undefined, line);
+            return;
+          } catch { /* fall through */ }
+        }
+        finish(false, buffer);
+      }
+    });
+  });
+}
+
+/**
+ * Move a tab within its workspace to `insertIndex` via the herdr socket API
+ * (`tab.move`). Returns `true` on success, `false` on any socket failure.
+ *
+ * Herdr 0.9.5 exposes no `tab move` CLI subcommand, so the repositioning goes
+ * straight to the socket (`tab.move` params: `{ tab_id, insert_index }`).
+ * Used for left-of-extensions tab placement (WL-0MVZ88G51004IYHW): after an
+ * interactive dispatch creates a tab at the right end, this moves it to sit
+ * immediately left of the extensions/Worklog tab.
+ *
+ * Fail-open: never throws; returns `false` on any failure so the caller can
+ * leave the tab at its default right position.
+ */
+export async function moveTabInWorkspace(
+  tabId: string,
+  insertIndex: number,
+  socketPath: string = resolveHerdrSocketPath(),
+): Promise<boolean> {
+  if (tabId === '' || !Number.isInteger(insertIndex) || insertIndex < 0) {
+    return false;
+  }
+  try {
+    const res = await sendHerdrSocketRequest(
+      'tab.move',
+      { tab_id: tabId, insert_index: insertIndex },
+      socketPath,
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
 }

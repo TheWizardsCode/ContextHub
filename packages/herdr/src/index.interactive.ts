@@ -29,6 +29,7 @@ import {
   createDispatcherAnchorDeps,
   type DispatcherAnchorDeps,
   type ItemTabAnchor,
+  type PlacementMode,
 } from './dispatcher-anchor.js';
 import { getExecFileAsync } from './fetcher.js';
 import { resolveHerdrBin } from './herdr-bin.js';
@@ -82,6 +83,10 @@ export function resolveInteractiveWorkspaceId(
  * returns `null` so the caller falls back to the current-pane split instead
  * of dropping the operator's dispatch. Never throws.
  *
+ * When `placementMode` is `'left-of-extensions'`, a freshly created tab is
+ * moved left of the extensions/Worklog tab (WL-0MVZ88G51004IYHW). Reused
+ * tabs are never moved. The default is `'right'` (no repositioning).
+ *
  * @param cwd - Worklog root used for the coordination directory.
  * @param workspaceId - Host workspace (see {@link resolveInteractiveWorkspaceId}).
  * @param itemId - Exact work-item ID used as the tab label.
@@ -90,6 +95,7 @@ export function resolveInteractiveWorkspaceId(
  *   {@link resolveItemTabAnchor} (`getItemTabAnchor`): invoked only when this
  *   call provisioned the tab. The interactive dispatch path uses it to gate
  *   the fail-safe placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF, AC7).
+ * @param placementMode Where to place a freshly created tab.
  * @returns The resolved tab anchor, or `null` on any failure/empty input.
  */
 export async function resolveInteractiveItemAnchor(
@@ -98,12 +104,13 @@ export async function resolveInteractiveItemAnchor(
   itemId: string,
   deps?: DispatcherAnchorDeps,
   onCreate?: (anchor: ItemTabAnchor) => void,
+  placementMode?: PlacementMode,
 ): Promise<ItemTabAnchor | null> {
   try {
     if (workspaceId === '' || itemId === '') return null;
     const anchorDeps =
       deps ?? createDispatcherAnchorDeps(cwd, resolveHerdrBin());
-    return await resolveItemTabAnchor(cwd, anchorDeps, workspaceId, itemId, onCreate);
+    return await resolveItemTabAnchor(cwd, anchorDeps, workspaceId, itemId, onCreate, placementMode);
   } catch {
     return null;
   }
@@ -132,6 +139,7 @@ export async function resolveInteractiveItemAnchor(
  * @param deps - Injectable herdr deps; production builds real ones.
  * @param onCreate Optional create-vs-reuse observer (see
  *   {@link resolveInteractiveItemAnchor}).
+ * @param placementMode Where to place a freshly created tab (default `'right'`).
  */
 export async function resolveInteractiveItemAnchorAfterAdmission(
   admitted: boolean,
@@ -140,10 +148,11 @@ export async function resolveInteractiveItemAnchorAfterAdmission(
   itemId: string | undefined,
   deps?: DispatcherAnchorDeps,
   onCreate?: (anchor: ItemTabAnchor) => void,
+  placementMode?: PlacementMode,
 ): Promise<ItemTabAnchor | null> {
   if (!admitted) return null;
   if (itemId === undefined) return null;
-  return resolveInteractiveItemAnchor(cwd, workspaceId, itemId, deps, onCreate);
+  return resolveInteractiveItemAnchor(cwd, workspaceId, itemId, deps, onCreate, placementMode);
 }
 
 /**

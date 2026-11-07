@@ -1249,6 +1249,19 @@ Semantics:
   under the coordination lock with a double-check, and a second dispatch for
   the same workspace + item adds a pane to the existing tab rather than
   creating a duplicate.
+- **Placement: left of the Worklog/extensions tab** (WL-0MVZ88G51004IYHW) —
+  herdr's `tab create` appends a new tab at the right end of the tab row.
+  For a **freshly created** interactive item tab, the plugin then repositions
+  it immediately to the **left of the extensions/Worklog tab** (the tab that
+  hosts the `Work Items` plugin pane, or failing that a tab labelled
+  `Worklog`). Repositioning goes through the herdr socket API `tab.move`
+  (`insert_index` = the extensions tab's index) because herdr 0.9.5 has no
+  `tab move` CLI subcommand. This is **fail-open**: if the extensions tab
+  cannot be resolved (absent, ambiguous, unreadable) or the move fails, the
+  tab simply stays at herdr's default right-side position — the dispatch is
+  never blocked or dropped. **Adopted (reused) tabs are never moved** — a
+  reused tab's position is the operator's own arrangement. Automated
+  (downtime dispatcher) tabs keep today's right-side placement unchanged.
 - **No-ID panes unchanged** — commands with no work-item association (the
   unbound **Open Pi Agent** action, the `P n` blank-prompt session, generic
   commands) still split the current pane in the current tab.

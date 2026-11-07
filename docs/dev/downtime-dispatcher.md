@@ -1835,6 +1835,39 @@ fail-safe root-pane cleanup as defence in depth — a harmless no-op while no
 anchor was created. Background (`open_pane: false`) dispatches never provision
 a tab either: they carry no pane to place.
 
+**Tab placement — left of the Worklog/extensions tab
+(WL-0MVZ88G51004IYHW).** herdr's `tab create` always appends a new tab at the
+**right end** of the workspace tab row, so a freshly provisioned interactive
+item tab would otherwise appear far from the Worklog/extensions tab it
+belongs beside. After a **fresh** interactive tab is created (the
+create-vs-reuse `onCreate` signal), the plugin repositions it immediately to
+the **left of the extensions/Worklog tab**:
+
+- **Extensions-tab resolution** (`resolveExtensionsTab`) is deterministic and
+  fail-open: it first looks for a tab hosting a pane labelled `Work Items`
+  (`PLUGIN_PANE_LABEL`, read from the machine-wide `herdr pane list`, which
+  is the only output carrying pane labels), then falls back to a tab labelled
+  exactly `Worklog`. A single match wins; **none** or **multiple** ambiguous
+  matches resolve to `null`.
+- **Repositioning** uses the herdr **socket API** `tab.move`
+  (`{ tab_id, insert_index }`) — herdr 0.9.5 exposes no `tab move` CLI
+  subcommand — with `insert_index` = the extensions tab's index
+  (`moveTabInWorkspace` → `sendHerdrSocketRequest`). The newline-delimited
+  JSON-RPC Unix socket is `HERDR_SOCKET_PATH` (default
+  `~/.config/herdr/herdr.sock`).
+- **Fail-open at every boundary** (`applyPlacementMode`): unresolved or
+  ambiguous extensions tab, an absent transport, a socket error, a JSON-RPC
+  `error` payload or a timeout all leave the tab at its default right-side
+  position. The dispatch is never blocked, dropped or placed in a wrong
+  workspace.
+- **Only fresh tabs move.** Adopted/reused tabs are never repositioned —
+  their position is the operator's own arrangement.
+- **The automated downtime dispatcher is unchanged** — its tabs (project
+  item-ID tabs and the per-prefix `Dispatcher` workspace tabs) keep today's
+  right-side placement; the `placement` mode defaults to `right` and only the
+  interactive call sites (`index.ts` → `resolveInteractiveItemAnchor*`) pass
+  `'left-of-extensions'`.
+
 
 ### Request priority (`X-Priority`) on dispatched panes
 

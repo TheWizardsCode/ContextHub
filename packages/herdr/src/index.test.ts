@@ -252,6 +252,7 @@ type InteractiveAnchorHelpers = {
     itemId: string,
     deps?: DispatcherAnchorDeps,
     onCreate?: (anchor: ItemTabAnchor) => void,
+    placementMode?: string,
   ) => Promise<ItemTabAnchor | null>;
   resolveInteractiveItemAnchorAfterAdmission?: (
     admitted: boolean,
@@ -260,6 +261,7 @@ type InteractiveAnchorHelpers = {
     itemId: string | undefined,
     deps?: DispatcherAnchorDeps,
     onCreate?: (anchor: ItemTabAnchor) => void,
+    placementMode?: string,
   ) => Promise<ItemTabAnchor | null>;
 };
 
@@ -547,6 +549,83 @@ describe('resolveInteractiveItemAnchor (AC3/AC5)', () => {
     const got = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps, onCreate);
     expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
     expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  // Left-of-extensions placement (WL-0MVZ88G51004IYHW): operator-created tabs
+  // land immediately left of the Worklog/extensions tab; dispatcher tabs stay
+  // right; fail-open at every boundary.
+  it('left-of-extensions: a fresh interactive tab is moved to the extensions tab index', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const moveTab = vi.fn(async () => true);
+    const deps = makeInteractiveAnchorDeps({
+      moveTab,
+      listTabs: async () => [
+        { tabId: 'w9:tWorklog', label: 'Worklog' },
+        { tabId: 'w9:tDrop', label: 'Downtime' },
+      ],
+      listMachinePanes: async () => [
+        { paneId: 'w9:pB', workspaceId: 'w9', tabId: 'w9:tWorklog', label: 'Work Items', focused: false },
+      ],
+    });
+    const got = await helpers.resolveInteractiveItemAnchor!(
+      '/repo', 'w9', 'WL-ABC', deps, undefined, 'left-of-extensions',
+    );
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(moveTab).toHaveBeenCalledTimes(1);
+    expect(moveTab).toHaveBeenCalledWith('w9', 'w9:tWL-ABC', 0);
+  });
+
+  it('left-of-extensions: a reused interactive tab is NEVER moved', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const moveTab = vi.fn(async () => true);
+    const deps = makeInteractiveAnchorDeps({
+      moveTab,
+      listTabs: async () => [{ tabId: 'w9:tWL-ABC', label: 'WL-ABC' }],
+      listPanes: async () => [{ paneId: 'w9:tWL-ABC:p1', tabId: 'w9:tWL-ABC' }],
+    });
+    const got = await helpers.resolveInteractiveItemAnchor!(
+      '/repo', 'w9', 'WL-ABC', deps, undefined, 'left-of-extensions',
+    );
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(moveTab).not.toHaveBeenCalled();
+  });
+
+  it('default placement (right): an interactive anchor without a placement mode is NOT moved', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const moveTab = vi.fn(async () => true);
+    const deps = makeInteractiveAnchorDeps({ moveTab });
+    const got = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps);
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(moveTab).not.toHaveBeenCalled();
+  });
+
+  it('fail-open: extensions tab unavailable → fresh tab stays, dispatch anchor still returned', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const moveTab = vi.fn(async () => true);
+    const deps = makeInteractiveAnchorDeps({
+      moveTab,
+      listTabs: async () => [{ tabId: 'w9:tDrop', label: 'Downtime' }],
+      listMachinePanes: async () => [],
+    });
+    const got = await helpers.resolveInteractiveItemAnchor!(
+      '/repo', 'w9', 'WL-ABC', deps, undefined, 'left-of-extensions',
+    );
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(moveTab).not.toHaveBeenCalled();
+  });
+
+  it('fail-open: moveTab failure → fresh tab stays at default right position', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const moveTab = vi.fn(async () => false);
+    const deps = makeInteractiveAnchorDeps({
+      moveTab,
+      listTabs: async () => [{ tabId: 'w9:tWorklog', label: 'Worklog' }],
+      listMachinePanes: async () => [],
+    });
+    const got = await helpers.resolveInteractiveItemAnchor!(
+      '/repo', 'w9', 'WL-ABC', deps, undefined, 'left-of-extensions',
+    );
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
   });
 });
 
