@@ -50,7 +50,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
-| `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota` |
+| `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota`, `reduceAuditDisplayCounts` |
 | `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `readAuditBudgetState`, `confirmHostDispatch`, `releaseHostDispatch` |
 | `host-dispatch-budget.interactive.ts` | User-fired over-quota gate half: tier detection and prompt-then-claim (F4) | `budgetKindForAgentCommand`, `prepareInteractiveAgentDispatch` |
 | `host-budget-dialog.ts` | Pure bottom-anchored over-quota dialog + the renderer↔awaiter prompt host (F4) | `formatHostBudgetDialog`, `overlayHostBudgetDialog`, `createHostBudgetPromptHost` |
@@ -2309,6 +2309,27 @@ entry (non-empty `paneId`) whose pane is absent from that trusted list is
 reaped regardless of heartbeat freshness. Entries with no `paneId` (the
 reserve→spawn window) are retained, and a failed/unparseable pane read never
 sweeps (a synthetic empty list would over-reap and over-admit).
+
+**The header's audit count is pane-aware (WL-0MW8D4UQH002TWJV).** Admission
+keeps the marker's liveness-free rule on purpose (a slot is held from dispatch
+until a release point or staleness). The **display** does not: the worklist
+header's `audit n/max` uses `reduceAuditDisplayCounts` (through the single
+read-only `readHostBudgetStatus` reader), which excludes a fresh **confirmed**
+entry whose `paneId` is absent from the trusted live pane list. A pane closed
+outside the release paths therefore stops being reported immediately — the
+header shows `audit 0/1` as soon as the audit pane is gone, instead of a
+phantom slot for the remainder of the 2 h window.
+
+- Unconfirmed entries (no `paneId`, the reserve→spawn window) still count while
+  fresh, so a just-reserved audit is not hidden.
+- An absent live-pane list falls back to the marker-compatible freshness rule
+  (the display cannot distinguish "gone" from "unknown", and it never invents
+  a zero).
+- The display path remains strictly read-only: it never reaps or rewrites the
+  ledger (the sweep/staleness release owns cleanup).
+- This deliberately diverges from **admission**, which continues to count a
+  dead entry until it is released or reaped; the divergence is display-only and
+  cannot admit work.
 
 **Audit-cap unification (the choice, recorded).** The hard-coded host-wide
 audit cap of 1 — the `active-audit` marker in `machine-coordination.ts` — is

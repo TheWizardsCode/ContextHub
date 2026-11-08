@@ -494,6 +494,55 @@ export function reduceMarkerCounts(
 }
 
 /**
+ * Reduce a ledger for the AUDIT tier's DISPLAY count — pane-aware
+ * (WL-0MW8D4UQH002TWJV).
+ *
+ * The audit tier's ADMISSION rule is deliberately marker-compatible: it
+ * counts every fresh entry and ignores pane liveness ({@link reduceMarkerCounts}),
+ * so a slot is held from dispatch until an explicit release point or the 2 h
+ * staleness window. That is correct for admission, but wrong for the header: a
+ * CONFIRMED entry whose pane has closed is a dead audit, and the display must
+ * not claim it is still in flight for the rest of the staleness window.
+ *
+ * Display rule for a fresh entry:
+ *  - no `paneId` (reserve→spawn window, no pane evidence yet) → counted;
+ *  - `paneId` present in the trusted live-pane set → counted;
+ *  - `paneId` present but absent from the trusted live-pane set → NOT counted.
+ * Stale entries are excluded exactly as {@link reduceMarkerCounts} excludes
+ * them. The `implement` count is always 0 here — callers pair this reduction
+ * with {@link reduceLedgerCounts} for that tier.
+ *
+ * Pure and non-mutating: the display path NEVER reaps or rewrites the ledger
+ * (unlike {@link freshCount}), so `retained`/`reaped` are reported for symmetry
+ * only. `livePaneIds` MUST come from a trusted pane read; the caller decides
+ * what to do when it has no pane list (see `readHostBudgetStatus`).
+ */
+export function reduceAuditDisplayCounts(
+  entries: readonly HostBudgetEntry[],
+  livePaneIds: ReadonlySet<string>,
+  now: number,
+  staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
+): HostBudgetReduction {
+  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const retained: HostBudgetEntry[] = [];
+  const reaped: HostBudgetEntry[] = [];
+  for (const entry of entries) {
+    const confirmed =
+      typeof entry.paneId === 'string' && entry.paneId.length > 0;
+    const stale = isEntryStale(entry, now, staleWindowMs);
+    const deadConfirmed =
+      confirmed && !livePaneIds.has(entry.paneId as string);
+    if (stale || deadConfirmed) {
+      reaped.push(entry);
+      continue;
+    }
+    retained.push(entry);
+    if (entry.kind === 'audit') counts.audit += 1;
+  }
+  return { counts, retained, reaped };
+}
+
+/**
  * Reduce a ledger by dropping CONFIRMED entries whose pane has closed
  * (WL-0MW5KC8J300942EA).
  *

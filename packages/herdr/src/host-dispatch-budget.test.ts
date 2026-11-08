@@ -39,6 +39,7 @@ import {
   readBudget,
   readBudgetConfig,
   reap,
+  reduceAuditDisplayCounts,
   reduceClosedPaneSweep,
   reduceLedgerCounts,
   reduceMarkerCounts,
@@ -343,6 +344,58 @@ describe('reduceMarkerCounts (pure marker-semantics reduction)', () => {
       heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS).toISOString(),
     });
     expect(reduceMarkerCounts([boundary], NOW).counts.audit).toBe(0);
+  });
+});
+
+describe('reduceAuditDisplayCounts (pane-aware audit DISPLAY reduction)', () => {
+  const entry = (overrides: Partial<HostBudgetEntry>): HostBudgetEntry =>
+    makeBudgetEntry(overrides) as HostBudgetEntry;
+  const live = livePaneIdSet([{ paneId: 'p1' }]);
+
+  it('excludes a fresh confirmed entry whose pane is gone, and counts live + unconfirmed', () => {
+    const entries = [
+      // Confirmed + dead pane: the audit has closed — must not display.
+      entry({ kind: 'audit', itemId: 'WL-DEAD', paneId: 'p-gone' }),
+      // Confirmed + live pane: displayed.
+      entry({ kind: 'audit', itemId: 'WL-LIVE', paneId: 'p1' }),
+      // Unconfirmed (reserve→spawn window): displayed while fresh.
+      entry({ kind: 'audit', itemId: 'WL-SPAWNING' }),
+      // Stale: never displayed, even with a live pane.
+      entry({
+        kind: 'audit',
+        itemId: 'WL-STALE',
+        paneId: 'p1',
+        heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS).toISOString(),
+      }),
+    ];
+    const reduction = reduceAuditDisplayCounts(entries, live, NOW);
+    expect(reduction.counts).toEqual({ implement: 0, audit: 2 });
+    expect(reduction.retained.map((e) => e.itemId)).toEqual(['WL-LIVE', 'WL-SPAWNING']);
+    expect(reduction.reaped.map((e) => e.itemId)).toEqual(['WL-DEAD', 'WL-STALE']);
+  });
+
+  it('never counts the implement tier (the display pairs it with reduceLedgerCounts)', () => {
+    const entries = [entry({ kind: 'implement', itemId: 'WL-IMPL', paneId: 'p1' })];
+    expect(reduceAuditDisplayCounts(entries, live, NOW).counts).toEqual({
+      implement: 0,
+      audit: 0,
+    });
+  });
+
+  it('treats an age of exactly the stale window as stale', () => {
+    const boundary = entry({
+      kind: 'audit',
+      itemId: 'WL-BOUNDARY',
+      paneId: 'p1',
+      heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS).toISOString(),
+    });
+    expect(reduceAuditDisplayCounts([boundary], live, NOW).counts.audit).toBe(0);
+  });
+
+  it('does not mutate its input', () => {
+    const entries = [entry({ kind: 'audit', itemId: 'WL-A', paneId: 'p-gone' })];
+    reduceAuditDisplayCounts(entries, live, NOW);
+    expect(entries).toHaveLength(1);
   });
 });
 
