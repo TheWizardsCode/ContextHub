@@ -378,6 +378,9 @@ export function deleteWorkItem(
   // Recursively delete all descendants first (children, grandchildren, etc.)
   if (recursive) {
     const descendants = hooks.getDescendants(id);
+    // Effective reason for the parent itself: the caller's explicit reason
+    // wins, otherwise a pre-set reason on the parent is preserved.
+    const parentReason = opts?.deleteReason || item.deleteReason || '';
     // Delete from leaf to root so parent-child relationships are handled
     // in reverse depth order (descendants sorted deepest-first)
     const deepestFirst = [...descendants].sort((a, b) => {
@@ -386,7 +389,19 @@ export function deleteWorkItem(
       return depthB - depthA;
     });
     for (const descendant of deepestFirst) {
-      deleteSingle(ctx, hooks, descendant.id, opts);
+      // Attribute each descendant distinctly (AC4): the cascade source id is
+      // always recorded, so a swept child is distinguishable from an item
+      // deliberately retired in its own right. Prefer an explicit caller
+      // reason, then the descendant's own pre-existing reason, then the
+      // parent's effective reason.
+      const inherited = opts?.deleteReason || descendant.deleteReason || parentReason || '';
+      const cascadeReason = inherited
+        ? `cascade from ${id}: ${inherited}`
+        : `cascade from ${id}`;
+      deleteSingle(ctx, hooks, descendant.id, {
+        deletedBy: opts?.deletedBy,
+        deleteReason: cascadeReason,
+      });
     }
   }
 

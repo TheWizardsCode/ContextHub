@@ -23,6 +23,14 @@
  * parent and one of its descendants are both listed in the same invocation,
  * the descendant is reported as `skipped`/`already deleted` rather than
  * producing a hard error.
+ *
+ * Delete attribution (WL-0MW8078CA006Q2P7): `--reason <text>` records why the
+ * item was retired. When omitted, a pre-set `deleteReason` is preserved; when
+ * neither exists the reason stays empty rather than being fabricated, so the
+ * merge gate (`isAttributedDelete()`) never mistakes an intent-less delete for
+ * a deliberate one. Recursive deletes prefix each descendant's reason with
+ * `cascade from <parent-id>`, distinguishing a swept child from an item
+ * retired in its own right.
  */
 
 import type { PluginContext } from '../plugin-types.js';
@@ -46,10 +54,12 @@ interface DeleteResult {
   deletedWorkItem?: WorkItem;
   /** Whether recursive deletion was applied to this id. */
   recursive?: boolean;
+  /** The applied deletion reason for this id (empty for an unreasoned delete). */
+  deleteReason?: string;
   /** Number of descendants removed along with this id. */
   deletedDescendantsCount?: number;
-  /** The descendants removed along with this id. */
-  deletedDescendants?: Array<{ id: string; title: string }>;
+  /** The descendants removed along with this id, each with its cascade attribution. */
+  deletedDescendants?: Array<{ id: string; title: string; deleteReason?: string }>;
   /** True when the id was a no-op (duplicate or already deleted). */
   skipped?: boolean;
   /** Why the id was skipped. */
@@ -65,6 +75,7 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-recursive', 'Delete only the specified items, leaving children orphaned')
     .option('--no-sync', 'Skip auto-sync after deletion')
+    .option('--reason <reason>', 'Reason for deletion (stored as deleteReason attribution)')
     .action(async (ids: string[], options: DeleteOptions & { sync?: boolean }) =>
       withStoreMutationLock(dataPath, async () => {
       utils.requireInitialized();
@@ -79,7 +90,24 @@ export default function register(ctx: PluginContext): void {
       // delete-side protection only propagates ATTRIBUTED deletes over a live
       // remote item — an unattributed delete would silently fail to propagate.
       const deletedBy = await getConfiguredUserEmail();
-      const deleteReason = 'deleted via wl delete';
+      // AC3 (WL-0MW8078CA006Q2P7): do NOT fabricate a default deleteReason.
+      // When no --reason is supplied we pass `undefined` so the DB layer's
+      // fallback (`|| item.deleteReason`) becomes reachable — pre-set reasons
+      // survive and unreasoned deletes store empty, which `isAttributedDelete`
+      // correctly refuses to treat as deliberate intent (the fabricated
+      // "deleted via wl delete" string was the root bug).
+      const reasonProvided = typeof options.reason === 'string';
+      const deleteReason = reasonProvided ? String(options.reason).trim() || undefined : undefined;
+
+      if (reasonProvided && !deleteReason) {
+        const message = 'Error: --reason must be a non-empty string';
+        if (isJsonMode) {
+          output.json({ success: false, error: message });
+        } else {
+          console.error(message);
+        }
+        process.exit(1);
+      }
 
       const results: DeleteResult[] = [];
       const seen = new Set<string>();
@@ -121,6 +149,7 @@ export default function register(ctx: PluginContext): void {
             deletedId: normalizedId,
             deletedWorkItem: existing,
             recursive,
+            deleteReason: existing.deleteReason ?? '',
             message: `Skipped work item: ${normalizedId} (already deleted)`,
           });
           continue;
@@ -131,6 +160,10 @@ export default function register(ctx: PluginContext): void {
         const childrenCount = children.length;
 
         const deleted = db.delete(idLookup, recursive, { deletedBy, deleteReason });
+        // Re-read the persisted item so the reported reason is the value the
+        // merge layer will actually see (explicit reason, preserved pre-set
+        // reason, or empty for an unreasoned delete).
+        const appliedReason = deleted ? db.get(idLookup)?.deleteReason ?? deleteReason ?? '' : undefined;
         if (!deleted) {
           const message = `Work item not found: ${normalizedId}`;
           results.push({ id: normalizedId, success: false, error: message, message });
@@ -147,10 +180,15 @@ export default function register(ctx: PluginContext): void {
           deletedId: normalizedId,
           deletedWorkItem: existing,
           recursive,
+          deleteReason: appliedReason,
         };
         if (childrenCount > 0) {
           result.deletedDescendantsCount = childrenCount;
-          result.deletedDescendants = children.map(c => ({ id: c.id, title: c.title }));
+          result.deletedDescendants = children.map(c => ({
+            id: c.id,
+            title: c.title,
+            deleteReason: db.get(c.id)?.deleteReason ?? '',
+          }));
         }
         results.push(result);
       }
@@ -173,6 +211,9 @@ export default function register(ctx: PluginContext): void {
               deletedWorkItem: r.deletedWorkItem,
               recursive: r.recursive ?? recursive,
             };
+            // Echo the applied reason per id (AC1). Unreasoned deletes report
+            // an empty string, never a fabricated default.
+            if (r.deleteReason !== undefined) jsonOut.deleteReason = r.deleteReason;
             if (r.skipped) jsonOut.skipped = true;
             if (r.skippedReason) jsonOut.skippedReason = r.skippedReason;
             if (r.deletedDescendantsCount !== undefined) {
