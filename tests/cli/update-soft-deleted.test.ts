@@ -19,6 +19,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+// Consumer-facing import: the shared predicate is published via the
+// `@worklog/shared/predicates` subpath (not the frozen root entry).
+import { isSoftDeleted } from '@worklog/shared/predicates';
 import {
   cliPath,
   execAsync,
@@ -133,5 +136,29 @@ describe('wl update refuses to resurrect a soft-deleted work item', () => {
     expect(deleted?.error).toBe('deleted-item');
     // The live item really moved.
     expect((await showItem(liveId)).status).toBe('in-progress');
+  });
+});
+
+// ── WL-0MW7S20IC001F3AP: shared soft-delete predicate quadrants ──────────
+//
+// The single predicate that reconciles the read (visibility) and write
+// (mutability) paths. These pin all four status × deletedBy quadrants through
+// the consumer-facing `@worklog/shared/predicates` subpath so a future change
+// to either path cannot silently re-diverge.
+describe('shared isSoftDeleted predicate quadrants (WL-0MW7S20IC001F3AP)', () => {
+  it('status=deleted + deletedBy empty → soft-deleted', () => {
+    expect(isSoftDeleted({ status: 'deleted', deletedBy: '' })).toBe(true);
+  });
+
+  it('status=deleted + deletedBy set → soft-deleted', () => {
+    expect(isSoftDeleted({ status: 'deleted', deletedBy: 'user@example.com' })).toBe(true);
+  });
+
+  it('status=live + deletedBy set → soft-deleted (the reconciliation case)', () => {
+    expect(isSoftDeleted({ status: 'completed', deletedBy: 'user@example.com' })).toBe(true);
+  });
+
+  it('status=live + deletedBy empty → NOT soft-deleted', () => {
+    expect(isSoftDeleted({ status: 'open', deletedBy: '' })).toBe(false);
   });
 });
