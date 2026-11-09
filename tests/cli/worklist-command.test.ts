@@ -403,14 +403,14 @@ describe('wl worklist / wl next exclude soft-deleted rows (WL-0MW7S20IC001F3AP)'
     return entries.map((e) => e?.workItem?.id ?? e?.id).filter(Boolean) as string[];
   }
 
-  it.fails('wl next does not return a live row that retains a non-empty deletedBy', async () => {
+  it('wl next does not return a live row that retains a non-empty deletedBy', async () => {
     const id = await createAttributedOpen('Attributed next candidate');
     const { stdout } = await execAsync(`tsx ${cliPath} --json next -n 10`);
     const payload = JSON.parse(stdout);
     expect(subsetIds(payload.results ?? payload.workItems ?? [])).not.toContain(id);
   });
 
-  it.fails('no worklist subset returns a live row that retains a non-empty deletedBy', async () => {
+  it('no worklist subset returns a live row that retains a non-empty deletedBy', async () => {
     const id = await createAttributedOpen('Attributed worklist row');
     const payload = await worklist();
     expect(payload.success).toBe(true);

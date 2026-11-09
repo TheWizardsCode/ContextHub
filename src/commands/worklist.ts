@@ -52,6 +52,9 @@ import { resolveWorklogDir } from '../worklog-paths.js';
 import { createHierarchyOrderComparator } from './helpers.js';
 import { createListEnricher } from '../list-enrichment.js';
 import { selectBrowseFeed, type BrowseFeedEntry } from '../worklist-selection.js';
+// Shared soft-delete predicate (WL-0MW7S20IC001F3AP): the mandatory list
+// subsets are release-gate feeds and must agree with `wl list` / `wl update`.
+import { isSoftDeleted } from '@worklog/shared/predicates';
 
 /** Default number of browse-feed items returned (`-n/--number`). */
 export const WORKLIST_DEFAULT_BROWSE_COUNT = 20;
@@ -143,6 +146,10 @@ export default function register(ctx: PluginContext): void {
       // is materialised once instead of once per subset.
       const hierarchyComparator = createHierarchyOrderComparator(db);
       const order = (items: WorkItem[]): WorkItem[] => items.slice().sort(hierarchyComparator);
+      // Exclude soft-deleted rows (status=deleted OR non-empty deletedBy) from
+      // every subset — one shared definition with `wl list` / `wl update`
+      // (WL-0MW7S20IC001F3AP). The browse feed inherits this via filterCandidates.
+      const liveOnly = (items: WorkItem[]): WorkItem[] => items.filter(item => !isSoftDeleted(item));
 
       // Each subset is enriched exactly as `wl list --json` enriches its
       // items (audit verdict, canonical fingerprints, child count). The Herdr
@@ -152,10 +159,10 @@ export default function register(ctx: PluginContext): void {
       // all four subsets.
       const enricher = createListEnricher(db);
 
-      const critical = enricher.enrich(order(db.list(WORKLIST_LIST_SUBSET_QUERIES.critical)));
-      const reviewQueue = enricher.enrich(order(db.list(WORKLIST_LIST_SUBSET_QUERIES.reviewQueue)));
-      const inProgressRoots = enricher.enrich(order(db.list(WORKLIST_LIST_SUBSET_QUERIES.inProgressRoots)));
-      const blockedRoots = enricher.enrich(order(db.list(WORKLIST_LIST_SUBSET_QUERIES.blockedRoots)));
+      const critical = enricher.enrich(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.critical))));
+      const reviewQueue = enricher.enrich(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.reviewQueue))));
+      const inProgressRoots = enricher.enrich(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.inProgressRoots))));
+      const blockedRoots = enricher.enrich(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.blockedRoots))));
 
       // The browse feed is the *same* selection `wl next -n <count>
       // --include-in-progress --include-blocked --no-re-sort` performs, minus
