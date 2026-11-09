@@ -417,7 +417,9 @@ WL-0MVVLY034000MDVA).
 
 The flat siblings `src/github-sync.ts`, `src/github-throttler.ts`,
 `src/github-metrics.ts` and `src/github-pre-filter.ts` are unrelated modules
-and are deliberately **not** part of this family.
+and are deliberately **not** part of this family. `src/github-sync.ts` is
+decomposed in its own right: see
+[GitHub Sync Module Layout](#github-sync-module-layout) below.
 
 ### Cycle-safe layering
 
@@ -460,6 +462,78 @@ symbol in its last column must really be re-exported by the barrel
 | change `gh` execution, throttling or rate-limit handling | `src/github/transport.ts` |
 | change a shared type | `src/github/types.ts` |
 | change the shared surface consumers import | `src/github.ts` (barrel) |
+
+## GitHub Sync Module Layout
+
+`src/github-sync.ts` is the stable public entry point for the worklog ⇄ GitHub
+sync flows (the `wl github import` / `wl github push` backends): a thin barrel
+of re-exports with no logic of its own. Every concern it used to contain lives
+in a focused module under `src/github-sync/`, so a comment-mapping fix does not
+require reading the import orchestrator and a progress tweak does not require
+reading the push loop (WL-0MVGKH9Z900178UF, completed by
+WL-0MW0JFBIK007E6VZ).
+
+### Module responsibilities
+
+| Module | Responsibility | Public symbols re-exported by the barrel |
+|---|---|---|
+| `src/github-sync.ts` | Public barrel: re-exports the frozen 10-symbol surface (4 values + 6 types) and documents where each concern lives. | all 10 |
+| `src/github-sync/types.ts` | Shared declarations of the flows' result, timing and progress shapes plus the label-derived field change. Declarations only — a leaf. | `SyncedItem`, `SyncErrorItem`, `GithubSyncResult`, `GithubSyncTiming`, `GithubProgress` (5 of 6 types) |
+| `src/github-sync/util.ts` | Shared pure primitives: timestamp/comment ordering, the comment-sync predicate, title shortening and the stable import comparison key. | none (internal) |
+| `src/github-sync/progress.ts` | The single progress emitter factory both flows use: items-per-second rate, ETA and throttler snapshot. | none (internal) |
+| `src/github-sync/labels.ts` | Label-derived field resolution from the label event timeline (stage/priority/status/type/risk/effort), newest-event-wins with a local tie-break. | `resolveLabelField`, `resolveAllLabelFields`, `FieldChange` (re-exported from `./types.js`) |
+| `src/github-sync/comments.ts` | worklog→GitHub comment rendering and upsert: marker-prefixed bodies, per-comment reconciliation and `githubCommentId` persistence. | none (internal) |
+| `src/github-sync/push.ts` | The push flow: issue create/update, unchanged-item skip, deleted-item guard, comment upsert and parent/child sub-issue linking, accumulating the result counters/timings. | `upsertIssuesFromWorkItems` |
+| `src/github-sync/import.ts` | The import orchestrator: owns phase order (scan → close-check → label resolution → merge → enforcement → hierarchy hints → comment import) and the result shape. | `importIssuesToWorkItems` |
+| `src/github-sync/import-hierarchy.ts` | Import scan state: issue fetch, sub-issue hierarchy maps and the parent/child hint maps shared between scan phases. | none (internal) |
+| `src/github-sync/import-close-check.ts` | The close-check pass: revisits local items carrying a `githubIssueNumber` that the listing missed and folds their state into the scan. | none (internal) |
+| `src/github-sync/import-comments.ts` | GitHub→worklog comment import: fetch filter (newly mapped or newer `updatedAt`), marker skip and comment mapping persistence. | none (internal) |
+
+### Cycle-safe layering
+
+The dependency direction is strictly one-way, so the import graph stays
+acyclic. Each arrow below is a family-module dependency; every module
+additionally imports the `../github.js` barrel and none imports the
+`../github-sync.js` barrel:
+
+```
+types · util                            (leaves)
+progress
+labels         → types
+comments       → util
+push           → comments, progress, util, types
+import-hierarchy        → progress
+import-close-check      → import-hierarchy, progress
+import-comments         → import-hierarchy, progress
+import         → labels, progress, util, import-hierarchy,
+                 import-close-check, import-comments
+src/github-sync.ts (barrel) → types, labels, push, import
+```
+
+No module under `src/github-sync/` imports `../github-sync.js` — not even
+type-only — so the barrel can never be part of a cycle.
+`tests/github-sync/split-guard.test.ts` enforces this statically, alongside the
+1,000-line ceiling (no exemptions) and the frozen public surface
+(`tests/github-sync/github-sync.split-baseline.json`).
+
+### Where to find X in the github-sync module
+
+| I want to… | Look in |
+|---|---|
+| change how work items become issues, or how pushes are ordered/skipped | `src/github-sync/push.ts` |
+| change how issue comments are rendered or reconciled | `src/github-sync/comments.ts` |
+| change the import phase order or the merge/enforcement steps | `src/github-sync/import.ts` |
+| change issue fetching, hierarchy resolution or parent/child hints | `src/github-sync/import-hierarchy.ts` |
+| change the close-check pass | `src/github-sync/import-close-check.ts` |
+| change the GitHub→worklog comment import or its fetch filter | `src/github-sync/import-comments.ts` |
+| change how labels resolve into work-item fields | `src/github-sync/labels.ts` |
+| change the progress rate/ETA/throttler snapshot | `src/github-sync/progress.ts` |
+| change a timestamp/comment helper or the import comparison key | `src/github-sync/util.ts` |
+| change a result, timing or progress shape | `src/github-sync/types.ts` |
+| change the shared surface consumers import | `src/github-sync.ts` (barrel) |
+
+See [docs/dev/github-sync-split.md](dev/github-sync-split.md) for the
+dev-facing orientation to this layout.
 
 ## Doctor Module Layout
 
@@ -540,6 +614,80 @@ named here). Behaviour is locked by the untouched
 | change `**Key Files:**` checking or placeholders | `src/commands/doctor/file-paths.ts` |
 | change JSONL → SQLite migration | `src/commands/doctor/migrate.ts` |
 | change which subcommands exist or their registration order | `src/commands/doctor.ts` |
+
+## Init Module Layout
+
+`src/commands/init.ts` is the stable public entry point for `wl init`: a thin
+barrel of re-exports with no logic of its own (its header carries the module
+map below). Command registration and the init flow live in
+`src/commands/init.register.ts`; every provisioning step lives in a
+single-concern sibling module `src/commands/init.<concern>.ts`, so a hook fix
+does not require reading the AGENTS.md install path and a `.gitignore` fix does
+not require reading the sync bootstrap (WL-0MVGKH6Z1000XWGJ, completed by
+WL-0MW0KE2DO000IK63).
+
+### Module responsibilities
+
+| Module | Responsibility | Key exports |
+|---|---|---|
+| `src/commands/init.ts` | Thin public barrel: re-exports `default register` and `isSorraAgentsInstalled`, and documents where each concern lives. | default `register`, `isSorraAgentsInstalled` |
+| `src/commands/init.register.ts` | `init` command registration (Commander options) and the already-initialised / fresh-init flow, delegating every provisioning step. | default `register` |
+| `src/commands/init.constants.ts` | Constant vocabulary shared across the family: template paths, destination filenames, markers. | `WORKLOG_*`, `WORKFLOW_*`, `CANONICAL_*`, `SCHEDULED_PROMPTS_*`, `DEFAULT_COMMITTED_HOOKS_DIR` |
+| `src/commands/init.content.ts` | AGENTS/WORKFLOW content normalisation and analysis. | `normalizeContent`, `analyzeAgentContent` |
+| `src/commands/init.options.ts` | CLI option parsing and validation. | `normalizeInitOptions`, `NormalizedInitOptions`, `AgentTemplateAction` |
+| `src/commands/init.prompts.ts` | Interactive yes/no prompt on stdin. | `promptYesNo` |
+| `src/commands/init.sorra-agents.ts` | SorraAgents global-install detection. | `isSorraAgentsInstalled` |
+| `src/commands/init.paths.ts` | Repo/project root resolution and template location. | `resolveRepoRoot`, `resolveProjectRoot`, `locateAgentTemplate`, `locateWorkflowTemplate`, `locateGitignoreTemplate`, `locateExampleStatsPlugin`, `locateScheduledPromptsTemplate`, `getSyncDefaults` |
+| `src/commands/init.gitignore.ts` | `.gitignore` Worklog-section provisioning. | `ensureGitignore`, `hasWorklogGitignoreSection` |
+| `src/commands/init.scheduled-prompts.ts` | Create-if-absent `scheduled-prompts.json` provisioning. | `ensureScheduledPromptsInstalled` |
+| `src/commands/init.hooks.ts` | Git hook installation: pre-push, post-pull wrappers and the committed `.githooks` directory. | `installPrePushHook`, `installPostPullHooks`, `installCommittedHooks` |
+| `src/commands/init.agent-template.ts` | AGENTS.md template installation (install / append / overwrite, with its prompt). | `ensureAgentTemplateInstalled`, `resolveAgentDestination` |
+| `src/commands/init.stats-plugin.ts` | Example stats-plugin installation. | `ensureStatsPluginInstalled` |
+| `src/commands/init.workflow.ts` | WORKFLOW content inlining into AGENTS.md (never a standalone file). | `promptWorkflowChoice`, `ensureWorkflowTemplateInstalled`, `insertWorkflowLoaderIntoAgents`, `WorkflowChoice` |
+| `src/commands/init.sync.ts` | One-shot init database/JSONL/git bootstrap. | `performInitSync` |
+
+### Cycle-safe layering
+
+The dependency direction is strictly bottom-up, so the import graph stays
+acyclic:
+
+```
+init.constants / init.content / init.options / init.prompts / init.sorra-agents (leaves)
+      ↓
+init.paths → init.gitignore / init.scheduled-prompts / init.stats-plugin / init.sync
+      ↓
+init.agent-template / init.workflow / init.hooks
+      ↓
+init.register.ts (command registration + init flow)
+      ↓
+src/commands/init.ts (barrel — nothing in the family imports it)
+```
+
+No `src/commands/init.*.ts` module imports the barrel at runtime (or even
+type-only), so it can never be part of a cycle.
+`tests/cli/init/split-guard.test.ts` enforces this statically, alongside the
+1,000-line ceiling with an **empty** allowlist, the frozen public surface
+(`tests/cli/init/init.split-baseline.json`) and the hook-content invariants.
+
+### Where to find X in the init module
+
+| I want to… | Look in |
+|---|---|
+| change a `wl init` flag, its options or the flow order | `src/commands/init.register.ts` |
+| change the pre-push / post-pull / committed hooks | `src/commands/init.hooks.ts` |
+| change AGENTS.md installation, append or overwrite | `src/commands/init.agent-template.ts` |
+| change WORKFLOW inlining or the workflow prompt | `src/commands/init.workflow.ts` |
+| change the `.gitignore` Worklog section | `src/commands/init.gitignore.ts` |
+| change the example stats plugin install | `src/commands/init.stats-plugin.ts` |
+| change scheduled-prompts provisioning | `src/commands/init.scheduled-prompts.ts` |
+| change the init sync bootstrap | `src/commands/init.sync.ts` |
+| change repo/project root or template lookup | `src/commands/init.paths.ts` |
+| change a template path, filename or marker | `src/commands/init.constants.ts` |
+| change content normalisation or AGENTS.md analysis | `src/commands/init.content.ts` |
+| change option validation | `src/commands/init.options.ts` |
+| change the interactive yes/no prompt | `src/commands/init.prompts.ts` |
+| change SorraAgents detection | `src/commands/init.sorra-agents.ts` |
+| change the shared surface consumers import | `src/commands/init.ts` (barrel) |
 
 ## File Structure
 
@@ -664,7 +812,7 @@ sync succeeded within the freshness window (`heartbeatTtlMs`).
 
 ### In-process fetch memoization (F4, herdr fetcher)
 
-`packages/herdr/src/fetcher.ts` dedupes concurrent identical `runWl` READ
+`packages/herdr/src/fetcher.cli.ts` dedupes concurrent identical `runWl` READ
 fetches within one pane process via an in-flight promise memo keyed by
 (worklog-dir, args, json-mode): racing refresh ticks that issue the same
 query spawn `wl` once and share the result. Writes are never memoized — a
@@ -724,6 +872,7 @@ console.log(summariseSpawnRecords(process.env.WL_SPAWN_COUNT_FILE!));
 - Missing/`true`/stale audits receive no boost. Freshness is delegated to the single shared predicate `isAuditFresh` (`packages/shared/src/icons.ts`); the ordering tier passes no fingerprints, so the one-sided fallback time gate applies — fresh iff `auditedAt > updatedAt - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s), i.e. an audit at or after the content timestamp is fresh, and an audit older than a later content edit is stale. There is no competing `auditedAt`-vs-`updatedAt` comparison anywhere in the ordering/audit path (the shared `isAuditNotReadyFresh` predicate lives in `packages/shared/src/database/audit.ts`; WL-0MUBVH7ZR009PP80).
 - The same tier is enforced in `packages/shared/src/database/sort.ts` in `sortItemsByScore`/`computeScore` (batch audit `Map<id,AuditResult>` + tiered comparator) and in `selectBySortIndex` both when all `sortIndex` coincide (before effective-priority/age) and when they diverge (tier prefix before `sortIndex`), so `wl next --no-re-sort` and `wl next --json` preserve boosted order without requiring a prior `reSort`. The audit-map builder the tier consumes lives in `packages/shared/src/database/audit.ts`.
 - `src/commands/grouping.ts` Critical Group placement is unchanged by design.
+- **Grouping is content-deterministic (WL-0MVVLBTTP003Y4XO).** `groupItemsByFilePaths` canonicalises its input before the greedy first-fit packing, using a purely content-derived key (`compareGroupingContentKey`): priority (high → medium → low) → stage sub-order (`plan_complete` → `intake_complete` → remaining) → id. No timestamp participates, so the packing result — and therefore each item's `group`/`groupLabel` — depends only on the item set and its content. The input order fluctuates with `updatedAt` churn (comments, audit runs), which used to make the same item set pack into different groups on each refresh. Within-group ordering (`compareGroupableItems`) is now **priority first**, then the stage sub-order, then `id`; the `in_review` 6-bucket comparator is unchanged and remains priority-first. The Herdr plugin's self-contained mirror (`packages/herdr/src/grouping.ts`) applies the identical rules and must stay in sync.
 
 ## Future Considerations
 

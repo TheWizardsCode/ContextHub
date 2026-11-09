@@ -195,6 +195,16 @@ The committed hook scripts live in `.githooks/` and include:
   copy is fail-soft (a copy failure warns and never blocks the push). This behaviour is part
   of the embedded canonical template (`PRE_PUSH_HOOK_CONTENT`), so `wl doctor upgrade` never
   reports a repository that carries it as divergent (WL-0MVHP5S01006GDDV).
+
+  `PRE_PUSH_HOOK_CONTENT` is the **single source of truth** for this hook: `wl init`,
+  `wl doctor upgrade` and this repository's own `.githooks/pre-push` all emit exactly that
+  text, and `tests/fixtures/pre-push-hook.expected.sh` pins the expected content so a drift
+  fails a test rather than silently downgrading a project. The template also carries the
+  RISE-0MVSS1KVV002TJUL improvements — `--project-root` pinned to the pushed tree, the
+  HEAD-vs-pushed-SHA warning, the ref-deletion (all-zero sha) guard, the failure log + tail,
+  and the `mirrored gate cache entry` wording — so `wl doctor upgrade` is a no-op for a
+  project that already has them (WL-0MW2N56M2004PSRP). Full contract and cache-evidence
+  flow: [docs/dev/pre-push-hook.md](./dev/pre-push-hook.md).
 - `post-checkout` — auto-syncs after branch checkout; skips worktrees/temp worktrees
 - `post-merge` — wrapper that delegates to `worklog-post-pull`
 - `post-rewrite` — wrapper that delegates to `worklog-post-pull`

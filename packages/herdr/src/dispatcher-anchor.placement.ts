@@ -41,6 +41,7 @@ import type {
   PaneProcessInfo,
   ItemTabAnchor,
   ProjectWorkspaceTarget,
+  PlacementMode,
 } from './dispatcher-anchor.contract.js';
 import { parseProcEnviron } from './dispatcher-anchor.cli-parsers.js';
 import {
@@ -185,6 +186,7 @@ export async function getItemTabAnchor(
   workspaceId: string,
   itemId: string,
   onCreate?: (anchor: ItemTabAnchor) => void,
+  placementMode: PlacementMode = 'right',
 ): Promise<ItemTabAnchor | null> {
   if (workspaceId === '' || itemId === '') return null;
   const dir = getMachineCoordinationDir();
@@ -232,6 +234,9 @@ export async function getItemTabAnchor(
         // fail-open: an observer error never breaks tab provisioning
       }
     }
+    // Placement: move freshly created tab per placementMode (fail-open).
+    // Only applies to fresh creates — adopted tabs are never moved.
+    await applyPlacementMode(cwd, deps, workspaceId, placementMode, anchor.tabId);
     return anchor;
   } finally {
     release();
@@ -274,4 +279,115 @@ async function resolveItemTab(
     return { status: 'found', tabId: match.tabId, paneId: resolution.paneId };
   }
   return { status: 'none' };
+}
+
+// ── Extensions/Worklog tab resolution (left-of-extensions placement) ───
+
+/**
+ * Resolve the index of the extensions/Worklog tab in `workspaceId`.
+ *
+ * Strategy (deterministic, fail-open):
+ *  1. List tabs in the workspace.
+ *  2. Strategy 1 — a tab hosting a pane labelled `PLUGIN_PANE_LABEL`
+ *     (`Work Items`), discovered via the machine-wide `pane list` (the only
+ *     herdr output that carries pane labels) filtered to this workspace.
+ *  3. Strategy 2 — a tab labelled exactly `Worklog` (the common
+ *     human-readable name set by `open-worklog-tab.sh`).
+ *  4. If exactly one tab matches a strategy, return its index. Ambiguity
+ *     (>=2 candidate tabs) or a failed read falls to the next strategy /
+ *     `null` — never guess.
+ *
+ * Returns `null` when the tab cannot be resolved (no match, ambiguous,
+ * CLI failure) — the caller then leaves the tab at its default position
+ * (fail-open, WL-0MVZ88G51004IYHW).
+ */
+export async function resolveExtensionsTab(
+  cwd: string,
+  deps: DispatcherAnchorDeps,
+  workspaceId: string,
+): Promise<number | null> {
+  const listTabsFn =
+    deps.listTabs ?? ((ws: string) => listTabsInWorkspace(cwd, ws));
+  let tabs: DispatcherTabInfo[] | null;
+  try {
+    tabs = await listTabsFn(workspaceId);
+  } catch {
+    return null;
+  }
+  if (tabs === null || tabs.length === 0) return null;
+
+  // Strategy 1: a tab hosting a pane labelled PLUGIN_PANE_LABEL. Only the
+  // machine-wide `pane list` carries pane labels, so use it and filter to
+  // this workspace (a project workspace may share the machine pane list).
+  const listAllPanes = deps.listMachinePanes ?? (() => listMachinePanes(cwd));
+  let allPanes: MachinePaneInfo[] | null;
+  try {
+    allPanes = await listAllPanes();
+  } catch {
+    allPanes = null;
+  }
+  if (allPanes !== null) {
+    const pluginTabIds = new Set<string>();
+    for (const pane of allPanes) {
+      if (pane.workspaceId !== workspaceId) continue;
+      if (pane.label !== PLUGIN_PANE_LABEL) continue;
+      pluginTabIds.add(pane.tabId);
+    }
+    if (pluginTabIds.size === 1) {
+      const tabId = [...pluginTabIds][0];
+      const idx = tabs.findIndex((tab) => tab.tabId === tabId);
+      if (idx >= 0) return idx;
+    }
+    // >=2 distinct plugin-pane tabs is AMBIGUOUS: never guess (even when a
+    // unique `Worklog` label exists). Fail open (WL-0MVZ88G51004IYHW).
+    if (pluginTabIds.size > 1) return null;
+    // 0 matches → fall through to strategy 2 (absent plugin pane).
+  }
+
+  // Strategy 2: a tab labelled exactly `Worklog`.
+  const worklogMatches = tabs.filter((tab) => tab.label === 'Worklog');
+  if (worklogMatches.length === 1) {
+    return tabs.findIndex((tab) => tab.label === 'Worklog');
+  }
+
+  // Ambiguous, absent, or unreadable — fail open (leave tab at default).
+  return null;
+}
+
+/**
+ * After creating a tab for an interactive dispatch, move it left of the
+ * extensions/Worklog tab.
+ *
+ * Uses the placement mode to decide whether repositioning is needed:
+ *  - `right` — no repositioning (default, dispatcher behaviour).
+ *  - `left-of-extensions` — resolve the extensions tab and `tab.move`
+ *    the new tab to its index (immediately left of it).
+ *
+ * Fail-open at every boundary: if the extensions tab cannot be resolved,
+ * or the move fails, the tab stays at its default position. The dispatch
+ * is never blocked.
+ *
+ * Returns `true` if the tab was moved, `false` otherwise.
+ */
+export async function applyPlacementMode(
+  cwd: string,
+  deps: DispatcherAnchorDeps,
+  workspaceId: string,
+  placementMode: PlacementMode,
+  tabId: string,
+): Promise<boolean> {
+  if (placementMode === 'right') return false;
+
+  const index = await resolveExtensionsTab(cwd, deps, workspaceId);
+  if (index === null) return false; // fail-open: can't resolve extensions tab
+
+  const moveTabFn = deps.moveTab;
+  if (typeof moveTabFn !== 'function') return false; // missing dep → fail-open
+
+  try {
+    const ok = await moveTabFn(workspaceId, tabId, index);
+    return ok;
+  } catch {
+    return false; // fail-open: move error → leave tab where it is
+  }
 }

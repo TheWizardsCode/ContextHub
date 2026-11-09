@@ -121,17 +121,20 @@ export const DISPATCHER_ANCHOR_RUNTIME_CYCLE_BASELINE: readonly (readonly string
  * creation; every one of them must keep compiling with **no import edits**).
  *
  * The parent plan counted "12 importing files (9 production + 3 test)"; the
- * live tree has **10** files with a static import — 7 production, 3 test — and
+ * live tree has **11** files with a static import — 8 production, 3 test — and
  * the difference is stale prose, not a missing importer (the two extra
  * mentions of `./dispatcher-anchor.js` are documentation comments in
  * `index.anchor-resolvers.ts` / `index.interactive.ts`). The gate records what
  * the parser actually finds; a genuinely new consumer must be deliberately
- * added here.
+ * added here. `downtime-worker.dispatch-placement.ts` was added deliberately
+ * (WL-0MW5JE0SZ0057K30): the dispatch placement resolution moved out of
+ * `downtime-worker.dispatch-claims.ts` and imports the anchor types only.
  */
 export const KNOWN_CONSUMER_FILES: readonly string[] = [
   'packages/herdr/src/dispatcher-anchor.test.ts',
   'packages/herdr/src/downtime-worker.dispatch-claims.ts',
   'packages/herdr/src/downtime-worker.dispatch-contract.ts',
+  'packages/herdr/src/downtime-worker.dispatch-placement.ts',
   'packages/herdr/src/downtime-worker.worker-contract.ts',
   'packages/herdr/src/hydrator.ts',
   'packages/herdr/src/index.anchor-resolvers.ts',

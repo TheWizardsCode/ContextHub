@@ -70,6 +70,7 @@ import {
   releaseHostDispatch as releaseHostBudgetDispatch,
   type HostBudgetLivePane,
 } from './host-dispatch-budget.admission.js';
+import { sweepClosedPanes } from './host-dispatch-budget.js';
 // User-fired (interactive) host-budget gate (WL-0MVXY0Z93002HKCZ F4): the
 // counterpart of the dispatcher's admission. At/over cap it asks first — with
 // the bottom-anchored dialog the worklist renders — and only a deliberate
@@ -249,11 +250,15 @@ export {
 // `notifyBackgroundFailure` value import; AC6 — the claim module imports
 // only concrete siblings). Re-exported so the barrel keeps the surface
 // index.test.ts/claim.test.ts import (`claimItemForAgentCommand`,
-// `resolveInteractiveDispatchPriority`); `AGENT_ASSIGNEE` and
-// `fetchCriticalBlockers` stay OUT of the consumed public surface.
+// `resolveInteractiveDispatchPriority`); `AGENT_ASSIGNEE`,
+// `DISPATCHER_ASSIGNEE` and `fetchCriticalBlockers` stay OUT of the consumed
+// public surface. The two claim identities are deliberately distinct
+// (WL-0MW55V82X009JYRV): interactive agent commands claim `Map`
+// (AGENT_ASSIGNEE, the producer sentinel), the downtime dispatcher claims
+// `dispatcher` (DISPATCHER_ASSIGNEE, a releasable claim).
 
 import {
-  AGENT_ASSIGNEE,
+  DISPATCHER_ASSIGNEE,
   claimItemForAgentCommand,
   fetchCriticalBlockers,
   resolveInteractiveDispatchPriority,
@@ -291,6 +296,7 @@ import {
   defaultInteractiveClosePane,
   defaultInteractiveLiveTrackedPanesResolver,
   resolveInteractiveItemAnchor,
+  resolveInteractiveItemAnchorAfterAdmission,
   resolveInteractiveWorkspaceId,
 } from './index.interactive.js';
 
@@ -298,6 +304,7 @@ export {
   closeInteractiveTabRootPane,
   defaultInteractiveLiveTrackedPanesResolver,
   resolveInteractiveItemAnchor,
+  resolveInteractiveItemAnchorAfterAdmission,
   resolveInteractiveWorkspaceId,
 } from './index.interactive.js';
 
@@ -1287,6 +1294,17 @@ export function createDowntimeDeps(
         // on an unreadable directory.
         hasRecentFileModifications: (pane) =>
           dirHasRecentModifications(pane.foregroundCwd ?? pane.cwd),
+        // Host-wide dispatch budget (WL-0MW5KC8J300942EA): a pane the reaper
+        // closes gives its machine-wide ledger slot back immediately, and the
+        // once-per-run sweep drops CONFIRMED entries whose pane the trusted
+        // pane read no longer lists (operator/herdr close, crashed session).
+        // Both are best-effort — the reaper wraps them fail-open.
+        releasePaneBudget: async (pane) => {
+          if (pane.itemId !== '') releaseHostBudgetDispatch(pane.itemId);
+        },
+        sweepBudgetLedger: async (panes) => {
+          sweepClosedPanes(panes.map((pane) => ({ paneId: pane.paneId })));
+        },
       });
       const result = await runScheduledPaneClose(
         deps,
@@ -1586,7 +1604,15 @@ export async function main(): Promise<void> {
   // change applies on restart, exactly like the poller). Fail-open by
   // construction: an older proxy answers 404 → the client resolves null and
   // dispatch behaves exactly as before.
-  const downtimeDeps = createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE);
+  // Dispatcher claim identity (WL-0MW55V82X009JYRV): the downtime dispatcher
+  // is an AGENT working the item, so it claims as `dispatcher` — a releasable
+  // claim, released on every terminal outcome and never treated as a
+  // scheduling hold. It must NOT use `AGENT_ASSIGNEE` (`Map`), the producer
+  // sentinel: a `Map` claim is preserved at session exit and skipped by the
+  // stale-claim reaper, which strands auto-dispatched items forever
+  // (WL-0MW51OB1Y0073TLG). Interactive agent commands keep claiming `Map`
+  // via `claimItemForAgentCommand`.
+  const downtimeDeps = createDowntimeDeps(SEND_TO_PI_SCRIPT, DISPATCHER_ASSIGNEE);
   downtimeDeps.reserveLocalCapacity = createLocalReserver(runSettings.downtimeProxyUrl);
 
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
@@ -1758,21 +1784,33 @@ export async function main(): Promise<void> {
         // `undefined`, so the scripts keep today's current-pane split (AC5).
         const interactiveItemId = shouldOpenPane ? extractWorkItemId(command) : undefined;
         // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF, AC7): populated only
-        // when resolveInteractiveItemAnchor PROVISIONED the item tab. A reused
-        // tab leaves this null, so a reused live anchor is never considered
-        // for cleanup. Combined with the fail-safe liveness gate below, a live
-        // pane is never closed.
+        // when the item tab is PROVISIONED. A reused tab leaves this null, so a
+        // reused live anchor is never considered for cleanup. Combined with the
+        // fail-safe liveness gate below, a live pane is never closed.
         let createdItemTabAnchor: ItemTabAnchor | null = null;
-        const interactiveAnchor =
-          interactiveItemId !== undefined
-            ? await resolveInteractiveItemAnchor(
-                targetCwd,
-                resolveInteractiveWorkspaceId(process.env) ?? '',
-                interactiveItemId,
-                undefined,
-                (anchor) => { createdItemTabAnchor = anchor; },
-              )
-            : null;
+        const onCreateItemTabAnchor = (anchor: ItemTabAnchor): void => {
+          createdItemTabAnchor = anchor;
+        };
+        // The anchor is resolved per dispatch, but NEVER before the dispatch
+        // is admitted (WL-0MW5JE0SZ0057K30): provisioning the item tab up
+        // front left an orphaned placeholder pane whenever the host-budget
+        // gate refused the tick. The agent route resolves it after
+        // `prepareInteractiveAgentDispatch` decides (via
+        // `resolveInteractiveItemAnchorAfterAdmission`); the shell/plain routes
+        // have no admission gate and resolve it directly in their branch.
+        const interactiveWorkspaceId = resolveInteractiveWorkspaceId(process.env) ?? '';
+        const resolveInteractiveAnchorForShellRoute =
+          async (): Promise<ItemTabAnchor | null> =>
+            interactiveItemId !== undefined
+              ? resolveInteractiveItemAnchor(
+                  targetCwd,
+                  interactiveWorkspaceId,
+                  interactiveItemId,
+                  undefined,
+                  onCreateItemTabAnchor,
+                  'left-of-extensions',
+                )
+              : null;
         // Fail-safe placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF, AC7):
         // only ever runs after a CONFIRMED successful split (the spawning
         // script writes its pane-id file right after the split) and only when
@@ -1822,7 +1860,12 @@ export async function main(): Promise<void> {
           });
           if (!budgetPreparation.proceed) {
             // Cancel: no claim, no pane, no background dispatch, no ledger
-            // entry. The item stays exactly as it was.
+            // entry. The item stays exactly as it was. The item-ID tab was
+            // NOT provisioned (the anchor is resolved only after this gate,
+            // WL-0MW5JE0SZ0057K30), so no placeholder pane can be orphaned;
+            // the cleanup call is retained as defence in depth (a no-op
+            // because `createdItemTabAnchor` is still null).
+            await runInteractiveRootPaneCleanup();
             return;
           }
           // Request priority (WL-0MVE1NZ4J000H5NH AC2): resolve the
@@ -1859,6 +1902,21 @@ export async function main(): Promise<void> {
             );
             return;
           }
+          // Interactive item-ID tab placement (WL-0MUYI3JAO002BTNL): resolve
+          // ONLY now — after the host-budget gate has admitted this dispatch
+          // (WL-0MW5JE0SZ0057K30) and after the background (no-pane) branch
+          // above has returned, so a refused or pane-less dispatch can never
+          // leave an empty placeholder tab behind. Fail-open: any failure
+          // yields `null` → the legacy current-pane split.
+          const interactiveAnchor = await resolveInteractiveItemAnchorAfterAdmission(
+            budgetPreparation.proceed,
+            targetCwd,
+            interactiveWorkspaceId,
+            interactiveItemId,
+            undefined,
+            onCreateItemTabAnchor,
+            'left-of-extensions',
+          );
           // Agent-pane association capture (WL-0MSBQUJQX005RAT9): when the
           // command carries a work-item ID, ask send-to-pi.sh to write the
           // new pane ID to a temp file (--pane-id-file) right after the split
@@ -1971,6 +2029,7 @@ export async function main(): Promise<void> {
           const shellPaneName = buildShellPaneTitle(clean, paneTitle, shellItemId);
           // Split-confirmation channel for the cleanup below: only requested
           // when a fresh item tab needs its placeholder root pane closed.
+          const interactiveAnchor = await resolveInteractiveAnchorForShellRoute();
           const shellPaneIdFile = createdItemTabAnchor
             ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}-shell.json`)
             : undefined;
@@ -2020,6 +2079,7 @@ export async function main(): Promise<void> {
             return;
           }
           const plainItemId = extractWorkItemId(command);
+          const interactiveAnchor = await resolveInteractiveAnchorForShellRoute();
           const plainPaneIdFile = createdItemTabAnchor
             ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}-shell.json`)
             : undefined;

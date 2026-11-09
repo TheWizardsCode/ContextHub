@@ -104,7 +104,7 @@ describe('dispatcher-anchor split guard — live tree', () => {
   it('keeps every baseline symbol exported by the barrel (public surface)', () => {
     const baseline = readDispatcherAnchorBaseline(repoRoot);
 
-    expect(exported.size).toBe(32);
+    expect(exported.size).toBe(38);
     // A lost re-export is exactly the failure a move-only split invites.
     expect(findMissingExports(baseline.symbols, exported)).toEqual([]);
   });
@@ -207,8 +207,8 @@ describe('dispatcher-anchor split guard — live tree', () => {
 describe('dispatcher-anchor split baseline', () => {
   const baseline = readDispatcherAnchorBaseline(repoRoot);
 
-  it('records the frozen 32-symbol surface, sorted and deduplicated', () => {
-    expect(baseline.symbols).toHaveLength(32);
+  it('records the frozen 38-symbol surface, sorted and deduplicated', () => {
+    expect(baseline.symbols).toHaveLength(38);
     expect(baseline.symbols).toEqual([...baseline.symbols].sort());
     expect(new Set(baseline.symbols).size).toBe(baseline.symbols.length);
     for (const symbol of baseline.symbols) expect(symbol).toMatch(/^[\w$]+$/);
@@ -221,9 +221,9 @@ describe('dispatcher-anchor split baseline', () => {
     ]);
     expect(kinds.size).toBe(baseline.symbols.length);
     expect([...kinds.keys()].sort()).toEqual(baseline.symbols);
-    // 5 constants + 17 functions are values; 10 interfaces/types are types.
-    expect(baseline.valueSymbols).toHaveLength(22);
-    expect(baseline.typeSymbols).toHaveLength(10);
+    // 5 constants + 22 functions are values; 11 interfaces/types are types.
+    expect(baseline.valueSymbols).toHaveLength(27);
+    expect(baseline.typeSymbols).toHaveLength(11);
   });
 
   it('records provenance that makes the baseline reproducible', () => {

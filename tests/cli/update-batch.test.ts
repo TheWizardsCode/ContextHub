@@ -467,40 +467,6 @@ describe('update batch behaviour', () => {
   // Edge cases
   // =======================================================================
   describe('edge cases', () => {
-    it('should handle update with do-not-delegate across multiple ids', async () => {
-      const id1 = await createItem();
-      const id2 = await createItem();
-
-      const { stdout } = await execAsync(
-        `tsx ${cliPath} --json update ${id1} ${id2} --do-not-delegate true`
-      );
-
-      const result = JSON.parse(stdout);
-      expect(result.success).toBe(true);
-      expect(result.results).toHaveLength(2);
-      for (const r of result.results) {
-        expect(r.success).toBe(true);
-        expect(r.workItem.tags).toContain('do-not-delegate');
-      }
-    });
-
-    it('should handle removing do-not-delegate across multiple ids', async () => {
-      const id1 = await createItem('--tags "do-not-delegate"');
-      const id2 = await createItem('--tags "do-not-delegate"');
-
-      const { stdout } = await execAsync(
-        `tsx ${cliPath} --json update ${id1} ${id2} --do-not-delegate false`
-      );
-
-      const result = JSON.parse(stdout);
-      expect(result.success).toBe(true);
-      expect(result.results).toHaveLength(2);
-      for (const r of result.results) {
-        expect(r.success).toBe(true);
-        expect(r.workItem.tags).not.toContain('do-not-delegate');
-      }
-    });
-
     it('should handle batch update with issue-type flag', async () => {
       const id1 = await createItem();
       const id2 = await createItem();

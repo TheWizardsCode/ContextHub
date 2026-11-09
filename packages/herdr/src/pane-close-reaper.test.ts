@@ -821,3 +821,88 @@ describe('reaper — reuses extractFinalAssistantText (AC6)', () => {
     expect(results[0].decision.reasonCode).toBe('active');
   });
 });
+
+// ── Host-budget release + dead-pane sweep (WL-0MW5KC8J300942EA) ───────
+
+describe('reaper — host dispatch-budget release and dead-pane sweep', () => {
+  /** A pane the classifier closes (finished marker, dead agent). */
+  function closablePane(overrides: Partial<PaneStatus> = {}): PaneStatus {
+    return pane({
+      kind: 'plan',
+      lastAssistantText: 'Done\n\n</end_session>',
+      agentProcessAlive: false,
+      idleMs: 120_000,
+      ...overrides,
+    });
+  }
+
+  it('releases the closed pane budget once, after a successful close', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closablePane({ id: 'p-1', itemId: 'WL-A' })];
+    const deps = { ...makeDeps(panes), releasePaneBudget: vi.fn().mockResolvedValue(undefined) };
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.releasePaneBudget).toHaveBeenCalledTimes(1);
+    expect(deps.releasePaneBudget).toHaveBeenCalledWith(panes[0]);
+  });
+
+  it('does NOT release on a dry run (nothing was closed)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closablePane()];
+    const deps = { ...makeDeps(panes), releasePaneBudget: vi.fn().mockResolvedValue(undefined) };
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, dryRun: true });
+    expect(deps.releasePaneBudget).not.toHaveBeenCalled();
+  });
+
+  it('does NOT release when the close failed', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closablePane()];
+    const deps = {
+      ...makeDeps(panes, { success: false }),
+      releasePaneBudget: vi.fn().mockResolvedValue(undefined),
+    };
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.releasePaneBudget).not.toHaveBeenCalled();
+  });
+
+  it('swallows a throwing release and keeps the close outcome', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closablePane()];
+    const deps = {
+      ...makeDeps(panes),
+      releasePaneBudget: vi.fn().mockRejectedValue(new Error('ledger down')),
+    };
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(results[0].success).toBe(true);
+  });
+
+  it('sweeps the ledger once per run with the panes it listed (even when none closed)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({ kind: 'plan', lastAssistantText: 'Still working.', agentProcessAlive: true, idleMs: 1_000 })];
+    const deps = { ...makeDeps(panes), sweepBudgetLedger: vi.fn().mockResolvedValue(undefined) };
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.sweepBudgetLedger).toHaveBeenCalledTimes(1);
+    expect(deps.sweepBudgetLedger).toHaveBeenCalledWith(panes);
+  });
+
+  it('swallows a throwing sweep and keeps the run result', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closablePane()];
+    const deps = {
+      ...makeDeps(panes),
+      sweepBudgetLedger: vi.fn().mockRejectedValue(new Error('ledger down')),
+    };
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+  });
+
+  it('does NOT sweep on a dry run (report-only passes never mutate the ledger)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const deps = {
+      ...makeDeps([closablePane()]),
+      sweepBudgetLedger: vi.fn().mockResolvedValue(undefined),
+    };
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, dryRun: true });
+    expect(deps.sweepBudgetLedger).not.toHaveBeenCalled();
+  });
+});

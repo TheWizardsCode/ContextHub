@@ -25,7 +25,7 @@
  * grouping duplication noted in grouping.ts) is the only one remaining.
  */
 
-import type { WorkItem } from './fetcher.js';
+import type { WorkItem } from './fetcher.types.js';
 
 /**
  * Returns true when an item is part of the mandatory set that must always

@@ -38,6 +38,7 @@ export type {
   DispatcherAnchor, DispatcherAnchorDeps, DispatcherPaneInfo,
   DispatcherPrefixTabAnchor, DispatcherTabAnchors, DispatcherTabInfo,
   ItemTabAnchor, MachinePaneInfo, PaneProcessInfo, ProjectWorkspaceTarget,
+  PlacementMode,
 } from './dispatcher-anchor.contract.js';
 
 export {
@@ -47,12 +48,14 @@ export {
 export {
   createDispatcherAnchorDeps, listMachinePanes, getPaneProcessInfo,
   readProcEnvironFile, listTabsInWorkspace, listPanesInWorkspace,
-  createTabInWorkspace,
+  createTabInWorkspace, moveTabInWorkspace, sendHerdrSocketRequest,
+  resolveHerdrSocketPath,
 } from './dispatcher-anchor.herdr-cli.js';
 
 export {
   getDispatcherAnchor, getDispatcherTabAnchor,
 } from './dispatcher-anchor.tab-anchors.js';
 export {
-  resolveProjectWorkspace, getItemTabAnchor,
+  resolveProjectWorkspace, getItemTabAnchor, resolveExtensionsTab,
+  applyPlacementMode,
 } from './dispatcher-anchor.placement.js';

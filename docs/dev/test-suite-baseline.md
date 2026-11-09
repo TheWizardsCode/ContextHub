@@ -767,8 +767,7 @@ host-load-sensitive and compare only reports taken in the same conditions.
 
 `pytest -q -r a --disable-warnings` (via `run_tests.py --suite pytest`):
 **167 tests, 162 passed / 5 failed, 101–103 s**. The 5 failures are
-pre-existing skill-behaviour drift (`tests/skill/heartbeat/`,
-`skill/pane-triage/tests/`), confirmed identical on a clean tree with these
+pre-existing skill-behaviour drift (`skill/pane-triage/tests/`), confirmed identical on a clean tree with these
 changes stashed, and are tracked in WL-0MVH2T0ZV006KIOU. No Python test is
 ≥5 s, so no optimisation was needed and pytest is unchanged.
 
@@ -1252,6 +1251,36 @@ npx vitest run tests/scripts/install-herdr.test.ts \
   -t 'migrates a legacy open-worklist binding in-place to the new action'
 ```
 
+## Global setup isolation: no application imports (WL-0MW3JIYIR002RCP8)
+
+`tests/setup-tests.ts` runs once per vitest worker **before** the test file.
+Whatever it evaluates is in the module registry by the time that file's
+hoisted `vi.mock(...)` registrations apply, so a module under test reached
+through the setup keeps its **real** binding while the test asserts on the
+mock.
+
+That is how `tests/github-sync/comments-module.test.ts` flaked (3 of its 7
+tests failing with `expected "vi.fn()" to be called 1 times, but got 0 times`
+while the identical file passed when run alone): the setup's lazy
+`import('./cli/cli-helpers.js')` reached `src/jsonl.ts` → `src/github.ts`, the
+**real** `createGithubIssueCommentAsync` ran (through the
+`tests/cli/mock-bin/gh` stub, so the promise resolved instead of throwing),
+and the assertions against the mock saw zero calls. The floating import raced
+the per-file module graph, so it only bit intermittently — typically in
+full-suite runs under load.
+
+**Fix.** The setup no longer preloads `tests/cli/cli-helpers.js`. Its shutdown
+handlers were already redundant: `tests/cli/cli-helpers.ts` installs the same
+SIGTERM/SIGINT/SIGHUP/beforeExit cleanup itself at module load
+(`_installSignalHandlers`), and only a file that imports it can track a PID.
+The setup is now a leaf of the harness graph — `vitest`, `path`/`fs`, the
+`child_process` mock store and PATH setup only.
+
+**Regression guard.** `tests/unit/global-setup-isolation.test.ts` asserts the
+setup imports no application/CLI module and that importing `cli-helpers`
+still installs the shutdown handler, so re-adding the preload fails a test
+instead of reintroducing the flake.
+
 ## Related
 
 - Parent epic: WL-0MV28X3BT0079JM3 — Deduplicate legacy `test/` vs `tests/`
@@ -1293,3 +1322,6 @@ npx vitest run tests/scripts/install-herdr.test.ts \
   [Test-suite parallelism: maxWorkers 4 → 6](#test-suite-parallelism-maxworkers-4--6-wl-0mvhvztya003tnn0)
 - Dead top-level `singleFork` key removal (adjacent):
   WL-0MVHVZDPT005KDQK
+- Global setup isolation / github-sync comment mock flake
+  (`tests/github-sync/comments-module.test.ts`): WL-0MW3JIYIR002RCP8 — see
+  [Global setup isolation](#global-setup-isolation-no-application-imports-wl-0mw3jiyir002rcp8)

@@ -9,7 +9,23 @@
 
 import { describe, it, expect } from 'vitest';
 import { extractFilePaths } from '../src/commands/helpers.js';
-import { groupItemsByFilePaths, assignItemGroups, compareGroupableItems } from '../src/commands/grouping.js';
+import {
+  groupItemsByFilePaths,
+  assignItemGroups,
+  compareGroupableItems,
+  compareGroupingContentKey,
+} from '../src/commands/grouping.js';
+
+/** Every ordering of `items` (all permutations) — used by the stability tests. */
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items.slice()];
+  const result: T[][] = [];
+  items.forEach((item, index) => {
+    const rest = [...items.slice(0, index), ...items.slice(index + 1)];
+    for (const tail of permutations(rest)) result.push([item, ...tail]);
+  });
+  return result;
+}
 
 // ── File path extraction ──────────────────────────────────────────────
 
@@ -271,6 +287,109 @@ describe('groupItemsByFilePaths', () => {
     const groups = groupItemsByFilePaths(items, 1);
     expect(groups.get('WL-1')).toBe(1);
     expect(groups.get('WL-2')).toBe(1);  // all in group 1 since no conflict
+  });
+});
+
+// ── Grouping stability (WL-0MVVLBTTP003Y4XO) ──────────────────────────
+
+/**
+ * A set whose greedy first-fit packing genuinely depends on the input order
+ * when it is *not* canonicalised: with A→x, B→x+y, C→y, feeding A,B,C puts A
+ * and C together in group 1, while feeding B,A,C puts A and C together in
+ * group 2. Canonicalisation must erase that difference.
+ */
+const conflictingSet = [
+  { id: 'WL-A', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'medium' },
+  { id: 'WL-B', stage: 'plan_complete', filePaths: ['src/x.ts', 'src/y.ts'], priority: 'medium' },
+  { id: 'WL-C', stage: 'plan_complete', filePaths: ['src/y.ts'], priority: 'medium' },
+];
+
+describe('grouping stability — content-deterministic grouping', () => {
+  it('packs the same item set into the same groups for every input order', () => {
+    const reference = groupItemsByFilePaths(conflictingSet, 3);
+    expect(reference.get('WL-A')).toBe(1);
+    expect(reference.get('WL-B')).toBe(2);
+    expect(reference.get('WL-C')).toBe(1);
+    for (const permuted of permutations(conflictingSet)) {
+      expect(groupItemsByFilePaths(permuted, 3)).toEqual(reference);
+    }
+  });
+
+  it('assignItemGroups assigns identical groups and labels for every input order', () => {
+    const items = [
+      ...conflictingSet,
+      { id: 'WL-D', stage: 'intake_complete', filePaths: [], priority: 'high' },
+      { id: 'WL-E', stage: 'idea', filePaths: ['src/z.ts'], priority: 'low' },
+      { id: 'WL-F', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'critical' },
+      { id: 'WL-G', stage: 'in_review', filePaths: [], priority: 'medium' },
+    ];
+    const reference = assignItemGroups(items, 3);
+    for (const permuted of permutations(items)) {
+      const got = assignItemGroups(permuted, 3);
+      expect(got.size).toBe(reference.size);
+      for (const [id, assignment] of reference) {
+        expect(got.get(id)).toEqual(assignment);
+      }
+    }
+  });
+
+  it('never changes group membership when only updatedAt changes (comment/audit churn)', () => {
+    const reference = assignItemGroups(conflictingSet, 3);
+    const churned = conflictingSet.map((item, index) => ({
+      ...item,
+      // A stationary item can gain a comment or an audit result at any time.
+      updatedAt: `2026-01-0${index + 1}T00:00:00.000Z`,
+      auditedAt: index % 2 === 0 ? `2026-01-0${index + 1}T00:00:00.000Z` : null,
+      auditResult: index % 2 === 0,
+    }));
+    expect(assignItemGroups(churned, 3)).toEqual(reference);
+  });
+
+  it('moves an item between groups only when a material input changes (key files)', () => {
+    const before = [
+      { id: 'WL-A', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'medium' },
+      { id: 'WL-B', stage: 'plan_complete', filePaths: ['src/y.ts'], priority: 'medium' },
+    ];
+    expect(assignItemGroups(before, 3).get('WL-B')!.groupLabel).toBe('Group 1');
+    const after = before.map(item =>
+      item.id === 'WL-B' ? { ...item, filePaths: ['src/x.ts'] } : item,
+    );
+    expect(assignItemGroups(after, 3).get('WL-B')!.groupLabel).toBe('Group 2');
+  });
+
+  it('moves an item into the Critical group when its priority becomes critical (material change)', () => {
+    const before = [{ id: 'WL-A', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'high' }];
+    expect(assignItemGroups(before, 3).get('WL-A')!.groupLabel).toBe('Group 1');
+    const after = before.map(item => ({ ...item, priority: 'critical' }));
+    expect(assignItemGroups(after, 3).get('WL-A')!.groupLabel).toBe('Critical Group 1');
+  });
+
+  it('compareGroupingContentKey is a pure function of priority, stage sub-order and id', () => {
+    const base = {
+      id: 'WL-A',
+      stage: 'plan_complete',
+      filePaths: [] as string[],
+      priority: 'high',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    // Same content, different timestamps → equal keys (timestamps are not an input).
+    expect(compareGroupingContentKey(base, { ...base, updatedAt: '2030-01-01T00:00:00.000Z' })).toBe(0);
+    // Priority dominates stage.
+    expect(
+      compareGroupingContentKey(
+        { ...base, id: 'WL-Z', priority: 'high', stage: 'intake_complete' },
+        { ...base, id: 'WL-A', priority: 'medium', stage: 'plan_complete' },
+      ),
+    ).toBeLessThan(0);
+    // Stage sub-order breaks a same-priority tie.
+    expect(
+      compareGroupingContentKey(
+        { ...base, id: 'WL-Z', stage: 'plan_complete' },
+        { ...base, id: 'WL-A', stage: 'intake_complete' },
+      ),
+    ).toBeLessThan(0);
+    // Id breaks a full tie.
+    expect(compareGroupingContentKey({ ...base, id: 'WL-A' }, { ...base, id: 'WL-B' })).toBeLessThan(0);
   });
 });
 
@@ -541,7 +660,7 @@ describe('compareGroupableItems — within-group ordering', () => {
     expect(compareGroupableItems(b, a)).toBeGreaterThan(0);
   });
 
-  it('sorts a mixed plan+intake group: plan_complete first then intake_complete, each by priority', () => {
+  it('sorts a mixed plan+intake group by priority first, then stage sub-order (WL-0MVVLBTTP003Y4XO)', () => {
     const items = [
       { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
       { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
@@ -549,20 +668,35 @@ describe('compareGroupableItems — within-group ordering', () => {
       { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
+    // Priority is the primary key, so all high items precede all medium items,
+    // which precede all low items; the stage sub-order decides ties.
+    expect(sorted.map(i => i.id)).toEqual(['P-high', 'I-high', 'P-med', 'I-low']);
   });
 
-  it('sorts plan_complete first, then intake_complete, then remaining (WL-0MTQZ7HZY: in_progress is remaining)', () => {
+  it('sorts plan_complete first, then intake_complete, then remaining — within one priority band (WL-0MTQZ7HZY)', () => {
     const items = [
-      { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
-      { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
+      { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'high' },
+      { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'high' },
       { id: 'IP-high', stage: 'in_progress', filePaths: [], priority: 'high' },
-      { id: 'IP-low', stage: 'in_progress', filePaths: [], priority: 'low' },
+      { id: 'IP-low', stage: 'in_progress', filePaths: [], priority: 'high' },
       { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
     // WL-0MTQZ7HZY: in_progress is Remaining (order 3), so plan_complete (0) < intake_complete (1) < remaining (3)
     expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-low', 'IP-high', 'IP-low']);
+  });
+
+  it('ranks every high-priority item ahead of every medium item, and medium ahead of low (WL-0MVVLBTTP003Y4XO)', () => {
+    const items = [
+      { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
+      { id: 'I-high', stage: 'intake_complete', filePaths: [], priority: 'high' },
+      { id: 'D-high', stage: 'done', filePaths: [], priority: 'high' },
+      { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
+      { id: 'I-med', stage: 'intake_complete', filePaths: [], priority: 'medium' },
+      { id: 'P-low', stage: 'plan_complete', filePaths: [], priority: 'low' },
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual(['P-high', 'I-high', 'D-high', 'P-med', 'I-med', 'P-low']);
   });
 
   it('sorts a critical group with the same stage sub-sort (WL-0MTQZ7HZY: in_progress is remaining)', () => {

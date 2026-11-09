@@ -346,6 +346,7 @@ describe('dispatch scheduled-prompts tier', () => {
     prompt: '/skill:refactor',
     intervalDays: 3,
     lastTriggeredAt: null,
+    priority: 'high',
   };
 
   it('dispatches a due scheduled prompt FIRST (before audit/implement/plan/intake)', async () => {
@@ -385,6 +386,9 @@ describe('dispatch scheduled-prompts tier', () => {
       model: 'plan',
       cwd: '/repo',
       paneName: 'Downtime /skill:refactor',
+      // The entry's dispatch priority (WL-0MVIDWJ090090J3Q AC3) is forwarded
+      // to the pane → `HERDR_REQUEST_PRIORITY` → `X-Priority`.
+      priority: 'high',
       localPreference: 'remote-ok',
     });
     // No pre-dispatch claim — there is no work item (AC4).
@@ -481,6 +485,35 @@ describe('dispatch scheduled-prompts tier', () => {
         localPreference: 'local-preferred',
         localPreferenceReason: 'operator-setting',
       }),
+    );
+  });
+
+  it('WL-0MVIDWJ090090J3Q AC3: forwards the entry priority to the pane spawn', async () => {
+    for (const priority of ['low', 'medium', 'high', 'critical'] as const) {
+      const deps = makeDeps({
+        getDueScheduledPrompt: vi.fn().mockResolvedValue({ ...duePrompt, priority }),
+      });
+
+      await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        '/skill:refactor',
+        expect.objectContaining({ priority }),
+      );
+    }
+  });
+
+  it('WL-0MVIDWJ090090J3Q AC3: an entry without a priority dispatches at high, not the downtime medium', async () => {
+    const { priority: _omit, ...legacy } = duePrompt;
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(legacy),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      '/skill:refactor',
+      expect.objectContaining({ priority: 'high' }),
     );
   });
 

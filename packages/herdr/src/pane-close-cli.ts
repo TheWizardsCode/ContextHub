@@ -30,6 +30,8 @@ import {
   parsePaneProcessInfo,
 } from './pane-close-herdr.js';
 import { resolveHerdrBin } from './herdr-bin.js';
+import { releaseHostDispatch } from './host-dispatch-budget.admission.js';
+import { sweepClosedPanes } from './host-dispatch-budget.js';
 import type { ReaperDeps } from './pane-close-reaper.js';
 import { runReaperCli } from './pane-close-reaper.js';
 
@@ -117,6 +119,16 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
       } catch {
         return false; // fail-closed: a failed close is recorded, never thrown
       }
+    },
+    // Host-wide dispatch budget (WL-0MW5KC8J300942EA): a closed pane releases
+    // its machine-scoped ledger slot, and the once-per-run sweep drops
+    // CONFIRMED entries whose pane the trusted read no longer lists. Both are
+    // best-effort and never change the reaper outcome.
+    releasePaneBudget: async (pane) => {
+      if (pane.itemId !== '') releaseHostDispatch(pane.itemId);
+    },
+    sweepBudgetLedger: async (parsedPanes) => {
+      sweepClosedPanes(parsedPanes.map((pane) => ({ paneId: pane.paneId })));
     },
     invokingPaneId,
     // Item lookup (parent AC2/AC6): producer-review flag + work-item stage.

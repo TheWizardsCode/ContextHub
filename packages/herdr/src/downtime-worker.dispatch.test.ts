@@ -281,7 +281,11 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
-    expect(deps.claimItem).not.toHaveBeenCalled();
+    // Provisioning now runs AFTER the CAS claim (WL-0MW5JE0SZ0057K30), so the
+    // claim exists and must be rolled back — the item is never stranded
+    // `in_progress` with no pane and no marker.
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalled();
     expect(deps.recordDispatch).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
@@ -461,7 +465,10 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
-    expect(deps.claimItem).not.toHaveBeenCalled();
+    // Claimed before placement now → rollback keeps the item re-selectable
+    // (WL-0MW5JE0SZ0057K30).
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalled();
     expect(deps.recordDispatch).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
@@ -476,7 +483,8 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
-    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalled();
   });
 });
 
@@ -605,7 +613,8 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
-    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalled();
     expect(deps.recordDispatch).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
@@ -621,7 +630,8 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
-    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalled();
     expect(deps.recordDispatch).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
@@ -660,7 +670,8 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
-    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalled();
   });
 
   it('legacy wiring: without the per-prefix dep the item-ID tab path is used (backward compat)', async () => {

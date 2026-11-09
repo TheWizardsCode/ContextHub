@@ -92,15 +92,36 @@ preserved). The file is consumed by the herdr plugin's downtime worker:
 the worker dispatches each due prompt's text in a pi agent pane during
 local-LLM idle time on a best-effort cadence (WL-0MSS1Q5ER007QDKX).
 
-The base set provisioned on a fresh init:
+The base set provisioned on a fresh init is the canonical **daily
+maintenance-routines** set (WL-0MVIDWJ090090J3Q), which the
+`/skill:maintenance-routines` skill keeps in step
+([SKILL.md](skill/maintenance-routines/SKILL.md)):
 
 ```json
 {
   "entries": [
     {
+      "id": "/skill:test",
+      "prompt": "/skill:test",
+      "intervalDays": 1,
+      "time": "07:00",
+      "priority": "high",
+      "lastTriggeredAt": null
+    },
+    {
+      "id": "/skill:standup",
+      "prompt": "/skill:standup",
+      "intervalDays": 1,
+      "time": "08:00",
+      "priority": "high",
+      "lastTriggeredAt": null
+    },
+    {
       "id": "/skill:refactor",
       "prompt": "/skill:refactor",
-      "intervalDays": 3,
+      "intervalDays": 1,
+      "time": "09:00",
+      "priority": "high",
       "lastTriggeredAt": null
     }
   ]
@@ -116,6 +137,14 @@ Each entry carries:
 - `prompt` — any text the pi agent pane can run (e.g. `/skill:refactor`),
 - `intervalDays` — best-effort frequency in whole days (a delayed dispatch
   never fires more often than the frequency),
+- `time` — *(optional)* wall-clock `HH:MM`; the entry is due only at/after
+  that local time once the interval has elapsed,
+- `priority` — *(optional)* `low` | `medium` | `high` | `critical`: the
+  dispatch request priority, conveyed to the pane as
+  `HERDR_REQUEST_PRIORITY` (→ the `X-Priority` provider request header).
+  **Absent defaults to `high`** so scheduled maintenance sessions are served
+  even during peak periods; set `low`/`medium` on an entry that should be
+  polite. An invalid value skips the whole entry (fail-closed, logged).
 - `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
   (`null` = never run; missing is treated as due).
 

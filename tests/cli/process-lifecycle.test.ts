@@ -15,6 +15,29 @@ async function isAlive(pid: number): Promise<boolean> {
 }
 
 /**
+ * Wait until *predicate* returns true or *timeoutMs* elapses, polling every
+ * *intervalMs*.  Returns the predicate's last truthy result or *null*.
+ *
+ * Replaces a bare `setTimeout` with a bounded poll so the caller asserts
+ * behaviour ("PID has been registered") rather than guessing at timing
+ * ("900 ms should be enough").
+ */
+async function pollUntilTrue(
+  predicate: () => boolean | null,
+  timeoutMs = 10_000,
+  intervalMs = 25,
+): Promise<ReturnType<typeof predicate>> {
+  const deadline = Date.now() + timeoutMs
+  let last: boolean | null = null
+  while (Date.now() < deadline) {
+    last = predicate()
+    if (last) return last
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+  return last
+}
+
+/**
  * Return the PID of the first process whose command line EXACTLY matches the
  * pattern AND belongs to the given process group (pgid). Scoping the lookup
  * to our own spawned process group makes the assertion deterministic even
@@ -251,7 +274,14 @@ describe('orphaned process prevention (WL-0MSB447TJ000R3N8)', () => {
 
     const promise = execAsync('sleep 0.3 && sleep 30', { timeout: 30000 })
     promise.catch(() => {})
-    await new Promise((r) => setTimeout(r, 900))
+
+    // Wait until the PID is registered (bounded poll) instead of guessing
+    // at a fixed sleep duration that flakes under host contention.
+    await pollUntilTrue(
+      () => (pidTrackingSet.size > 0 ? true : null),
+      10_000,  // generous bound — far exceeds 900 ms
+      25,      // poll interval
+    )
 
     expect(pidTrackingSet.size).toBeGreaterThan(0)
 

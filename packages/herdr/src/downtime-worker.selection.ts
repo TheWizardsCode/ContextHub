@@ -23,6 +23,7 @@
  */
 
 import { isAuditFresh } from '@worklog/shared/icons';
+import { isDispatcherAssignee } from './assignee-identities.js';
 import type { CoordinationEntry } from './coordination.js';
 import { DOWNTIME_AUDIT_RECENCY_WINDOW_MS } from './downtime-worker.constants.js';
 import { criticalSkillKind, type CriticalCandidate } from './downtime-worker.parsers.js';
@@ -77,13 +78,24 @@ export function isSoftDeleted(
  * (`--if-assignee ""`), so a held item would fail stale there anyway; this
  * helper excludes it up front at every selection path. Blank/absent values
  * mean the item is free to claim.
+ *
+ * The downtime dispatcher's `dispatcher` claim is NOT a hold
+ * (WL-0MW51OB1Y0073TLG): it means an agent is on the item right now, so the
+ * item must stay dispatchable once that claim is released and must never be
+ * counted in an all-held window. Only the producer sentinel (`Map`) and other
+ * agent/producer identities are scheduling holds. The identity is defined once
+ * in `assignee-identities.ts` (`isDispatcherAssignee`) so a typo cannot turn
+ * the claim back into a hold.
  */
 export function isAssigneeHeld(
   item: { assignee?: string | null } | null | undefined,
 ): boolean {
   if (item === null || item === undefined) return false;
   const assignee = item.assignee;
-  return typeof assignee === 'string' && assignee.trim() !== '';
+  if (typeof assignee !== 'string') return false;
+  const trimmed = assignee.trim();
+  if (trimmed === '') return false;
+  return !isDispatcherAssignee(trimmed);
 }
 
 // ── Window-hold classification (WL-0MVR8FKMU009XTED / WL-0MVR8FN1D002SCIR) ──
@@ -94,7 +106,12 @@ export function isAssigneeHeld(
 // import back into the selection module (split-family import-cycle gate,
 // WL-0MVF3F9A7000HKP7).
 
-/** Distinct non-empty assignees of the given items, sorted, deduplicated. */
+/** Distinct non-empty assignees of the given items, sorted, deduplicated.
+ *
+ * Only scheduling holds are reported (`isAssigneeHeld`): the downtime
+ * dispatcher's `dispatcher` claim is an agent claim, never a hold, so an
+ * all-held window never names it (WL-0MW51OB1Y0073TLG).
+ */
 export function heldAssigneesOf(
   items: ReadonlyArray<{ assignee?: string | null }>,
 ): string[] {
@@ -110,7 +127,10 @@ export function heldAssigneesOf(
  * non-empty `assignee`? Returns the sentinel values observed so the caller
  * can name them (`Map`, …) without re-deriving the buckets.
  *
- * An empty window is NOT "fully held" — that is `empty-window`.
+ * An empty window is NOT "fully held" — that is `empty-window`. Neither is a
+ * window whose only non-empty assignees are the downtime dispatcher's
+ * `dispatcher` claims: those are agent claims, not holds
+ * (WL-0MW51OB1Y0073TLG).
  */
 export function classifyWindowHold(
   items: ReadonlyArray<{ assignee?: string | null }>,

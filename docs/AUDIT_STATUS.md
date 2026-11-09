@@ -71,7 +71,7 @@ wl show SA-123 --json
 
 ## Auto-revert on "not ready to close" verdict
 
-When an item in `in_review` (status `completed`) receives a **not-ready-to-close** verdict, it is automatically reverted to status `open` / stage `plan_complete` so it drops out of the ready-to-close queue (heartbeat/release tooling) and returns to the planning queue for further work. The item's priority is preserved.
+When an item in `in_review` (status `completed`) receives a **not-ready-to-close** verdict, it is automatically reverted to status `open` / stage `plan_complete` so it drops out of the ready-to-close queue (release tooling) and returns to the planning queue for further work. The item's priority is preserved.
 
 Triggers (both produce the same behavior):
 
@@ -268,7 +268,7 @@ recency policy) read `activityAt`.
 
 ## Canonical Source of Truth
 
-The `audit_results` row is the **sole consumer** of the audit verdict. No flow parses audit-content comments: heartbeat, ship gate, TUI, and implement all read `auditResult`/`auditedAt` from the record. Audit verdicts duplicated into work-item comments are deprecated/legacy and must not be added by audit flows. (Comment writes no longer affect freshness — they bump `activityAt`, not `updatedAt` — but the duplicated verdict still misleads human readers, so the record remains the only supported place for it.)
+The `audit_results` row is the **sole consumer** of the audit verdict. No flow parses audit-content comments: ship gate, TUI, and implement all read `auditResult`/`auditedAt` from the record. Audit verdicts duplicated into work-item comments are deprecated/legacy and must not be added by audit flows. (Comment writes no longer affect freshness — they bump `activityAt`, not `updatedAt` — but the duplicated verdict still misleads human readers, so the record remains the only supported place for it.)
 
 ## Operational Notes
 

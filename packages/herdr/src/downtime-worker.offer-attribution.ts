@@ -47,7 +47,10 @@ export type DispatchGateToken =
   | 'soft-deleted'
   /** `needsProducerReview` is set. */
   | 'producer-review'
-  /** A non-empty `assignee` scheduling hold (producer sentinel `Map` …). */
+  /**
+   * A scheduling hold: a non-empty `assignee` that is not the downtime
+   * dispatcher's own `dispatcher` claim (producer sentinel `Map` …).
+   */
   | 'assignee-hold'
   /** Status/stage shape is not dispatchable at any tier. */
   | 'not-dispatchable'
@@ -102,7 +105,7 @@ export type ClassifyGateToken =
 export type EmptyOfferReason =
   /** The Herdr head lookup returned no items at all. */
   | 'empty-window'
-  /** Every item in the window was rejected SOLELY by a non-empty assignee. */
+  /** Every item in the window was rejected SOLELY by a scheduling hold. */
   | 'all-window-items-held'
   /** Items were rejected by other gates; `dominantGate` names the leader. */
   | 'all-window-items-gated'

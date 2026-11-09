@@ -9,15 +9,15 @@ Read the global agent instructions at `~/.pi/agent/AGENTS.md` — they define th
 The assignee field doubles as the scheduling hold. Implement/plan/intake tiers
 claim with a status flip (`wl update <id> --status in_progress --assignee
 <agent>`); the herdr **audit tier** claims **status-neutrally** — assignee CAS
-only (`wl update <id> --assignee <agent> --if-status completed --if-stage
-in_review --if-assignee ""`), so the item stays `completed`/`in_review`. A
-non-empty assignee is an intentional hold from auto-dispatch (producer sentinel
-`wl update <id> --assignee Map`; clear `--assignee ""` to release); claims
-clear the assignee on session end. An all-held dispatch window is surfaced
-**read-only** in the worklist (header count + warning banner; never clears a
-hold, never changes dispatch — WL-0MVR8FN1D002SCIR). See
-[docs/dev/downtime-dispatcher.md](./docs/dev/downtime-dispatcher.md) and the
-global instructions (`~/.pi/agent/AGENTS.md`).
+only (`--assignee <agent> --if-status completed --if-stage in_review
+--if-assignee ""`), so it stays `completed`/`in_review`. Only a non-empty
+assignee other than the dispatcher's own `dispatcher` claim is a hold (that
+claim is an agent claim, released at session end). The producer sentinel is
+`wl update <id> --assignee Map`; `--assignee ""` releases any claim. An all-held dispatch window is surfaced **read-only** in the worklist
+(header count + banner; never clears a hold, never changes dispatch —
+WL-0MVR8FN1D002SCIR). See
+[docs/dev/downtime-dispatcher.md](./docs/dev/downtime-dispatcher.md) and
+`~/.pi/agent/AGENTS.md`.
 
 ### Architecture Notes for Agents
 

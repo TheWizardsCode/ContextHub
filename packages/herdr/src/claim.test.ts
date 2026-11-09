@@ -9,7 +9,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { extractWorkItemId, claimItemForAgentCommand } from './index.js';
+import { createDowntimeDeps, extractWorkItemId, claimItemForAgentCommand } from './index.js';
+import { AGENT_ASSIGNEE, DISPATCHER_ASSIGNEE } from './index.claim.js';
 import {
   claimWorkItem,
   rollbackClaimWorkItem,
@@ -374,6 +375,10 @@ describe('claimItemForAgentCommand (onCommand seam)', () => {
     expect(callArgs).toContain('WL-0MS9NPHQU005Y3VE');
     expect(callArgs).toContain('--status');
     expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('in_progress');
+    // An interactive agent claim keeps the `Map` producer sentinel — it is
+    // NOT the downtime dispatcher identity (WL-0MW55V82X009JYRV AC2).
+    expect(callArgs[callArgs.indexOf('--assignee') + 1]).toBe(AGENT_ASSIGNEE);
+    expect(callArgs[callArgs.indexOf('--assignee') + 1]).toBe('Map');
   });
 
   it('skips the wl update (no error) when the command has no work-item ID', async () => {
@@ -403,5 +408,44 @@ describe('claimItemForAgentCommand (onCommand seam)', () => {
       expect.stringContaining('Failed to set WL-0MS9NPHQU005Y3VE'),
     );
     stderrSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dispatcher claim identity vs producer sentinel (WL-0MW55V82X009JYRV)
+// ---------------------------------------------------------------------------
+
+describe('dispatcher claim identity (WL-0MW55V82X009JYRV)', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+  });
+
+  afterEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+  });
+
+  // The collision this item fixes: one `Map` constant served BOTH the
+  // interactive agent claim and the downtime dispatcher claim, so an
+  // auto-dispatched claim was indistinguishable from a producer hold.
+  it('defines a single dispatcher identity distinct from the Map producer sentinel', () => {
+    expect(DISPATCHER_ASSIGNEE).toBe('dispatcher');
+    expect(AGENT_ASSIGNEE).toBe('Map');
+    expect(DISPATCHER_ASSIGNEE).not.toBe(AGENT_ASSIGNEE);
+  });
+
+  it('claims a downtime dispatch with DISPATCHER_ASSIGNEE (releasable claim, not a producer hold)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({ stdout: '{"success":true}', stderr: '' });
+    setExecFileAsync(mockFn as any);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+    const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'intake_complete' });
+
+    expect(result).toEqual({ ok: true });
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs[callArgs.indexOf('--assignee') + 1]).toBe('dispatcher');
+    // The producer sentinel must never appear on a dispatcher claim.
+    expect(callArgs[callArgs.indexOf('--assignee') + 1]).not.toBe('Map');
   });
 });

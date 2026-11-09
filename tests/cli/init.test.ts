@@ -298,6 +298,34 @@ describe('CLI Init Tests', () => {
     }
   }, 45000);
 
+  // WL-0MW2N56M2004PSRP: the committed `.githooks/` wrappers are checked in and
+  // shared across clones, so they must be portable (`$(dirname "$0")`) — an
+  // absolute path makes `wl doctor upgrade` report them outdated immediately
+  // after `wl init`, which is the same generation-site drift that made the
+  // upgrade downgrade a project's improved pre-push hook.
+  it('should write portable .githooks post-merge/post-rewrite wrappers matching the canonical template', async () => {
+    const tempDir = createTempDir();
+    try {
+      await initRepo(tempDir);
+
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Wrapper Test" --prefix WRAP --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`,
+        { cwd: tempDir }
+      );
+
+      const { generateCanonicalHookContent } = await import('../../src/doctor/hook-upgrade.js');
+      for (const name of ['post-merge', 'post-rewrite']) {
+        const hook = fs.readFileSync(path.join(tempDir, '.githooks', name), 'utf-8');
+        expect(hook).toBe(generateCanonicalHookContent(name));
+        expect(hook).toContain('exec "$(dirname "$0")/worklog-post-pull" "$@"');
+        // No absolute path: the wrapper must work in every clone.
+        expect(hook).not.toContain(tempDir);
+      }
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  }, 45000);
+
   // ---------------------------------------------------------------------
   // Standalone workflow behavior (AC3 of WL-0MSIXMKOX0052514): without a
   // SorraAgents global install, wl init's N/B/M workflow choices must keep
@@ -391,20 +419,32 @@ describe('CLI Init Tests', () => {
       expect(fs.existsSync(configPath)).toBe(true);
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(Array.isArray(config.entries)).toBe(true);
-      // The base set starts with /skill:refactor (intervalDays 3)
-      // and /skill:standup at 06:05 (intervalDays 1, WL-0MTMN7W63001FCQR).
+      // The base set is the canonical daily maintenance-routines set
+      // (WL-0MVIDWJ090090J3Q AC4): test 07:00, standup 08:00, refactor 09:00,
+      // all daily and all dispatched at `priority: high`.
       expect(config.entries).toEqual([
         {
-          id: '/skill:refactor',
-          prompt: '/skill:refactor',
-          intervalDays: 3,
+          id: '/skill:test',
+          prompt: '/skill:test',
+          intervalDays: 1,
+          time: '07:00',
+          priority: 'high',
           lastTriggeredAt: null,
         },
         {
           id: '/skill:standup',
           prompt: '/skill:standup',
           intervalDays: 1,
-          time: '06:05',
+          time: '08:00',
+          priority: 'high',
+          lastTriggeredAt: null,
+        },
+        {
+          id: '/skill:refactor',
+          prompt: '/skill:refactor',
+          intervalDays: 1,
+          time: '09:00',
+          priority: 'high',
           lastTriggeredAt: null,
         },
       ]);

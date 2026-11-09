@@ -13,6 +13,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -20,6 +21,10 @@ import {
   getDispatcherTabAnchor,
   getItemTabAnchor,
   resolveProjectWorkspace,
+  resolveExtensionsTab,
+  applyPlacementMode,
+  moveTabInWorkspace,
+  resolveHerdrSocketPath,
   createDispatcherAnchorDeps,
   DISPATCHER_ANCHOR_FILE,
   DISPATCHER_TAB_ANCHORS_FILE,
@@ -458,6 +463,7 @@ function makeTabDeps(over: ResolverOverrides & {
   listTabs?: DispatcherAnchorDeps['listTabs'];
   createTab?: DispatcherAnchorDeps['createTab'];
   listPanes?: DispatcherAnchorDeps['listPanes'];
+  moveTab?: DispatcherAnchorDeps['moveTab'];
 } = {}): DispatcherAnchorDeps {
   return {
     createWorkspace: over.createWorkspace ?? (async () => ({ workspaceId: 'wD', paneId: 'wD:p1' })),
@@ -465,6 +471,7 @@ function makeTabDeps(over: ResolverOverrides & {
     listTabs: over.listTabs ?? (async () => [] as DispatcherTabInfo[]),
     createTab: over.createTab ?? (async (ws: string, label: string) => ({ tabId: `${ws}:t${label}`, paneId: `${ws}:t${label}:p1` })),
     listPanes: over.listPanes ?? (async () => [] as DispatcherPaneInfo[]),
+    ...(over.moveTab ? { moveTab: over.moveTab } : {}),
     ...(over.listMachinePanes ? { listMachinePanes: over.listMachinePanes } : {}),
     ...(over.getPaneProcessInfo ? { getPaneProcessInfo: over.getPaneProcessInfo } : {}),
     ...(over.readProcEnviron ? { readProcEnviron: over.readProcEnviron } : {}),
@@ -621,6 +628,227 @@ describe('getItemTabAnchor ACs (AC2/AC5)', () => {
     process.env.HERDR_COORDINATION_DIR = fileAsDir;
     const deps = makeTabDeps();
     expect(await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC')).toBeNull();
+  });
+});
+
+// ── resolveExtensionsTab (WL-0MVZ88G51004IYHW) ───────────────────────────
+
+function makeExtensionsDeps(over: {
+  listTabs?: DispatcherAnchorDeps['listTabs'];
+  listMachinePanes?: DispatcherAnchorDeps['listMachinePanes'];
+} = {}): DispatcherAnchorDeps {
+  return {
+    createWorkspace: async () => ({ workspaceId: 'wD', paneId: 'wD:p1' }),
+    isPaneAlive: async () => true,
+    listTabs: over.listTabs ?? (async () => [] as DispatcherTabInfo[]),
+    ...(over.listMachinePanes ? { listMachinePanes: over.listMachinePanes } : {}),
+  } as DispatcherAnchorDeps;
+}
+
+function workItemsPane(over: Partial<MachinePaneInfo> = {}): MachinePaneInfo {
+  return {
+    paneId: 'wC:pB',
+    workspaceId: 'wC',
+    tabId: 'wC:t1',
+    label: PLUGIN_PANE_LABEL,
+    focused: false,
+    ...over,
+  };
+}
+
+describe('resolveExtensionsTab (left-of-extensions placement)', () => {
+  it('returns the index of the tab hosting a Work Items pane (strategy 1)', async () => {
+    const deps = makeExtensionsDeps({
+      listTabs: async () => [
+        { tabId: 'wC:t1', label: 'Worklog' },
+        { tabId: 'wC:t2', label: 'WL-ABC' },
+        { tabId: 'wC:t3', label: 'Downtime' },
+      ],
+      listMachinePanes: async () => [workItemsPane()],
+    });
+    expect(await resolveExtensionsTab('/repo', deps, 'wC')).toBe(0);
+  });
+
+  it('falls back to a tab labelled exactly Worklog when no Work Items pane exists (strategy 2)', async () => {
+    const deps = makeExtensionsDeps({
+      listTabs: async () => [
+        { tabId: 'wC:tOther', label: 'Editor' },
+        { tabId: 'wC:tWorklog', label: 'Worklog' },
+        { tabId: 'wC:tLast', label: 'Downtime' },
+      ],
+      listMachinePanes: async () => [],
+    });
+    expect(await resolveExtensionsTab('/repo', deps, 'wC')).toBe(1);
+  });
+
+  it('fail-open: no Work Items pane and no Worklog tab → null', async () => {
+    const deps = makeExtensionsDeps({
+      listTabs: async () => [
+        { tabId: 'wC:tA', label: 'Editor' },
+        { tabId: 'wC:tB', label: 'Downtime' },
+      ],
+      listMachinePanes: async () => [],
+    });
+    expect(await resolveExtensionsTab('/repo', deps, 'wC')).toBeNull();
+  });
+
+  it('fail-open: ambiguous (2 tabs host Work Items panes) → null, never guesses', async () => {
+    const deps = makeExtensionsDeps({
+      listTabs: async () => [
+        { tabId: 'wC:tA', label: 'Worklog' },
+        { tabId: 'wC:tB', label: 'Other' },
+      ],
+      listMachinePanes: async () => [
+        workItemsPane({ tabId: 'wC:tA' }),
+        workItemsPane({ tabId: 'wC:tB' }),
+      ],
+    });
+    expect(await resolveExtensionsTab('/repo', deps, 'wC')).toBeNull();
+  });
+
+  it('fail-open: unreadable machine pane list falls through to strategy 2', async () => {
+    const deps = makeExtensionsDeps({
+      listTabs: async () => [
+        { tabId: 'wC:tOther', label: 'Editor' },
+        { tabId: 'wC:tWorklog', label: 'Worklog' },
+      ],
+      listMachinePanes: async () => null,
+    });
+    expect(await resolveExtensionsTab('/repo', deps, 'wC')).toBe(1);
+  });
+
+  it('fail-open: unreadable tab list → null', async () => {
+    const deps = makeExtensionsDeps({ listTabs: async () => null });
+    expect(await resolveExtensionsTab('/repo', deps, 'wC')).toBeNull();
+  });
+});
+
+// ── applyPlacementMode (WL-0MVZ88G51004IYHW) ─────────────────────────────
+
+describe('applyPlacementMode (left-of-extensions placement)', () => {
+  it("placement 'right' (default) never repositions (dispatcher behaviour unchanged)", async () => {
+    const moveTab = vi.fn(async () => true);
+    const deps = makeTabDeps({
+      moveTab,
+      listTabs: async () => [{ tabId: 'wC:t1', label: 'Worklog' }],
+      listMachinePanes: async () => [],
+    });
+    expect(await applyPlacementMode('/repo', deps, 'wC', 'right', 'wC:tItem')).toBe(false);
+    expect(moveTab).not.toHaveBeenCalled();
+  });
+
+  it("placement 'left-of-extensions' moves the tab to the extensions tab's index", async () => {
+    const moveTab = vi.fn(async () => true);
+    const deps = makeTabDeps({
+      moveTab,
+      listTabs: async () => [
+        { tabId: 'wC:t1', label: 'Worklog' },
+        { tabId: 'wC:t2', label: 'Editor' },
+      ],
+      listMachinePanes: async () => [workItemsPane({ tabId: 'wC:t1' })],
+    });
+    const ok = await applyPlacementMode('/repo', deps, 'wC', 'left-of-extensions', 'wC:tItem');
+    expect(ok).toBe(true);
+    expect(moveTab).toHaveBeenCalledTimes(1);
+    expect(moveTab).toHaveBeenCalledWith('wC', 'wC:tItem', 0);
+  });
+
+  it('fail-open: extensions tab unresolvable → no move, no throw', async () => {
+    const moveTab = vi.fn(async () => true);
+    const deps = makeTabDeps({
+      moveTab,
+      listTabs: async () => [{ tabId: 'wC:tA', label: 'Editor' }],
+      listMachinePanes: async () => [],
+    });
+    expect(await applyPlacementMode('/repo', deps, 'wC', 'left-of-extensions', 'wC:tItem')).toBe(false);
+    expect(moveTab).not.toHaveBeenCalled();
+  });
+
+  it('fail-open: moveTab dep absent (legacy/test caller) → no move, no throw', async () => {
+    const deps = makeTabDeps(); // no moveTab
+    expect(await applyPlacementMode('/repo', deps, 'wC', 'left-of-extensions', 'wC:tItem')).toBe(false);
+  });
+
+  it('fail-open: moveTab returns false (CLI failure) → stays at default position', async () => {
+    const deps = makeTabDeps({
+      moveTab: async () => false,
+      listTabs: async () => [{ tabId: 'wC:t1', label: 'Worklog' }],
+      listMachinePanes: async () => [],
+    });
+    expect(await applyPlacementMode('/repo', deps, 'wC', 'left-of-extensions', 'wC:tItem')).toBe(false);
+  });
+
+  it('fail-open: moveTab throws → swallowed, no throw, no move', async () => {
+    const deps = makeTabDeps({
+      moveTab: async () => { throw new Error('rpc boom'); },
+      listTabs: async () => [{ tabId: 'wC:t1', label: 'Worklog' }],
+      listMachinePanes: async () => [],
+    });
+    expect(await applyPlacementMode('/repo', deps, 'wC', 'left-of-extensions', 'wC:tItem')).toBe(false);
+  });
+});
+
+// ── getItemTabAnchor left-of-extensions placement ────────────────────────
+
+describe('getItemTabAnchor placement mode (WL-0MVZ88G51004IYHW)', () => {
+  it('left-of-extensions: interactive dispatch creates a fresh tab AND moves it left of the extensions tab', async () => {
+    const moveTab = vi.fn(async () => true);
+    const deps = makeTabDeps({
+      moveTab,
+      listTabs: async () => [
+        { tabId: 'wC:tWorklog', label: 'Worklog' },
+        { tabId: 'wC:tEditor', label: 'Editor' },
+      ],
+      listMachinePanes: async () => [workItemsPane({ tabId: 'wC:tWorklog' })],
+    });
+    const got = await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC', undefined, 'left-of-extensions');
+    expect(got).toEqual({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+    expect(moveTab).toHaveBeenCalledTimes(1);
+    expect(moveTab).toHaveBeenCalledWith('wC', 'wC:tWL-ABC', 0);
+  });
+
+  it('default (right): dispatcher-style creation does NOT reposition the fresh tab', async () => {
+    const moveTab = vi.fn(async () => true);
+    const deps = makeTabDeps({ moveTab });
+    const got = await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC');
+    expect(got).toEqual({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+    expect(moveTab).not.toHaveBeenCalled();
+  });
+
+  it('reuse semantics: an existing item-ID tab is adopted WITHOUT being moved', async () => {
+    const moveTab = vi.fn(async () => true);
+    const deps = makeTabDeps({
+      moveTab,
+      listTabs: async () => [{ tabId: 'wC:tWL-ABC', label: 'WL-ABC' }],
+      listPanes: async () => [{ paneId: 'wC:tWL-ABC:p1', tabId: 'wC:tWL-ABC' }],
+      isPaneAlive: async () => true,
+    });
+    const got = await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC', undefined, 'left-of-extensions');
+    expect(got).toEqual({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+    expect(moveTab).not.toHaveBeenCalled();
+  });
+
+  it('fail-open: extensions tab unresolvable → fresh tab stays right, anchor still returned', async () => {
+    const moveTab = vi.fn(async () => true);
+    const deps = makeTabDeps({
+      moveTab,
+      listTabs: async () => [{ tabId: 'wC:tEditor', label: 'Editor' }],
+      listMachinePanes: async () => [],
+    });
+    const got = await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC', undefined, 'left-of-extensions');
+    expect(got).toEqual({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+    expect(moveTab).not.toHaveBeenCalled();
+  });
+
+  it('fail-open: moveTab fails → fresh tab stays right, anchor still returned, dispatch not blocked', async () => {
+    const moveTab = vi.fn(async () => false);
+    const deps = makeTabDeps({
+      moveTab,
+      listTabs: async () => [{ tabId: 'wC:tWorklog', label: 'Worklog' }],
+      listMachinePanes: async () => [],
+    });
+    const got = await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC', undefined, 'left-of-extensions');
+    expect(got).toEqual({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
   });
 });
 
@@ -907,5 +1135,100 @@ describe('createDispatcherAnchorDeps.movePaneToNewTab', () => {
     );
     const deps = createDispatcherAnchorDeps(tmpDir, binPath);
     expect(await deps.getPaneProcessInfo!('wC:pB')).toEqual({ shellPid: '4242' });
+  });
+
+  // moveTabInWorkspace (WL-0MVZ88G51004IYHW): repositioning fresh interactive
+  // tabs via the herdr socket API `tab.move` with `insert_index`. Herdr
+  // 0.9.5 has NO `tab move` CLI subcommand, so the call goes straight to the
+  // newline-delimited JSON-RPC Unix socket; these are integration tests
+  // against a fake socket server that pins the exact frame and fail-open
+  // handling.
+  type FakeSocket = {
+    moveTab: (tabId: string, insertIndex: number) => Promise<boolean>;
+    received: string[];
+    close: () => Promise<void>;
+  };
+
+  async function withFakeSocket(
+    handler: (socket: net.Socket, requestId: string) => void,
+  ): Promise<FakeSocket> {
+    const sockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-sock-'));
+    const sockPath = path.join(sockDir, 'herdr.sock');
+    const received: string[] = [];
+    const server = net.createServer((socket) => {
+      let buffer = '';
+      socket.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf8');
+        const newline = buffer.indexOf('\n');
+        if (newline < 0) return;
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        received.push(line);
+        const frame = JSON.parse(line) as { id: string };
+        handler(socket, frame.id);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+    return {
+      moveTab: (tabId: string, insertIndex: number) =>
+        moveTabInWorkspace(tabId, insertIndex, sockPath),
+      received,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.close(() => {
+            try { fs.rmSync(sockDir, { recursive: true, force: true }); } catch { /* ignore */ }
+            resolve();
+          });
+        }),
+    };
+  }
+
+  it('moveTabInWorkspace frames a `tab.move` JSON-RPC request with {tab_id, insert_index}', async () => {
+    const fake = await withFakeSocket((socket, id) => {
+      socket.write(`${JSON.stringify({ jsonrpc: '2.0', id, result: { ok: true } })}\n`);
+    });
+    try {
+      await expect(fake.moveTab('wC:tItem', 3)).resolves.toBe(true);
+      expect(fake.received).toHaveLength(1);
+      const frame = JSON.parse(fake.received[0]) as {
+        jsonrpc: string;
+        method: string;
+        params: { tab_id: string; insert_index: number };
+      };
+      expect(frame.jsonrpc).toBe('2.0');
+      expect(frame.method).toBe('tab.move');
+      expect(frame.params).toEqual({ tab_id: 'wC:tItem', insert_index: 3 });
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('moveTabInWorkspace returns false (fail-open) on a JSON-RPC error payload', async () => {
+    const fake = await withFakeSocket((socket, id) => {
+      socket.write(
+        `${JSON.stringify({ jsonrpc: '2.0', id, error: { code: -1, message: 'no such tab' } })}\n`,
+      );
+    });
+    try {
+      await expect(fake.moveTab('wC:tItem', 0)).resolves.toBe(false);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('moveTabInWorkspace returns false (fail-open) when the socket is unreachable', async () => {
+    const bogus = path.join(os.tmpdir(), `no-such-herdr-${Date.now()}.sock`);
+    await expect(moveTabInWorkspace('wC:tItem', 0, bogus)).resolves.toBe(false);
+  });
+
+  it('moveTabInWorkspace returns false (fail-open) for an invalid tab id / index', async () => {
+    await expect(moveTabInWorkspace('', 0, '/tmp/x.sock')).resolves.toBe(false);
+    await expect(moveTabInWorkspace('wC:tItem', -1, '/tmp/x.sock')).resolves.toBe(false);
+  });
+
+  it('resolveHerdrSocketPath honours HERDR_SOCKET_PATH, then XDG_CONFIG_HOME, then ~/.config', () => {
+    expect(resolveHerdrSocketPath({ HERDR_SOCKET_PATH: '/tmp/explicit.sock' })).toBe('/tmp/explicit.sock');
+    expect(resolveHerdrSocketPath({ XDG_CONFIG_HOME: '/tmp/xdg' })).toBe('/tmp/xdg/herdr/herdr.sock');
+    expect(resolveHerdrSocketPath({})).toBe(path.join(os.homedir(), '.config', 'herdr', 'herdr.sock'));
   });
 });

@@ -806,7 +806,13 @@ describe('AC10 — the four observability surfaces quote one ledger state', () =
   it('AC10: decision log, header token, stderr line and worklist counter agree', async () => {
     await withMachineDir(async (dir) => {
       writeCaps(dir, { maxImplement: 2, maxAudit: 1 });
-      const panes = [livePane('pane-1', 'WL-IMP-1'), livePane('pane-2', 'WL-IMP-2')];
+      // All three panes are live, so every surface (including the pane-aware
+      // audit display) quotes the same ledger state.
+      const panes = [
+        livePane('pane-1', 'WL-IMP-1'),
+        livePane('pane-2', 'WL-IMP-2'),
+        livePane('pane-3', 'WL-AUD-1'),
+      ];
       writeBudgetLedger(dir, [
         makeBudgetEntry({ kind: 'implement', itemId: 'WL-IMP-1', paneId: 'pane-1', heartbeatAt: new Date(T0).toISOString() }),
         makeBudgetEntry({ kind: 'implement', itemId: 'WL-IMP-2', paneId: 'pane-2', heartbeatAt: new Date(T0).toISOString() }),
