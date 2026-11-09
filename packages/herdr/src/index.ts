@@ -33,6 +33,7 @@ import {
   rollbackClaimWorkItem,
   markNeedsProducerReviewWorkItem,
   getExecFileAsync,
+  getWorklogDir,
   buildWlArgs,
   buildWlArgsForRoot,
   extractJson,
@@ -531,9 +532,19 @@ export function createDowntimeDeps(
     // caller that passes no limit; it defaults to the sprint-view default so an unwindowed head
     // is never produced. `fetchNextItems` applies mandatory-always, browseItemCount windowing,
     // and regroupWorkItems grouping — the sole ranking path.
-    getHerdrListHead: async (_cwd: string, limit?: number): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
+    //
+    // ROOT-AWARE (WL-0MVR8GDJ3008WY3Y AC3): `cwd` is the worklog ROOT whose head is
+    // read. The read targets `<cwd>/.worklog` explicitly (`--worklog-dir`) so the
+    // registered-root sweep ranks a FOREIGN root through the SAME canonical path
+    // instead of the leader pane's module-configured database. When `cwd` already
+    // resolves to the module root the override is omitted, keeping the leader's own
+    // read byte-for-byte unchanged (including the bundle/snapshot cache keys).
+    getHerdrListHead: async (cwd: string, limit?: number): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
       try {
-        const items = await fetchNextItems(limit ?? defaultSettings.browseItemCount);
+        const ownDir = getWorklogDir();
+        const rootDir = join(cwd, '.worklog');
+        const dirOverride = ownDir === rootDir ? undefined : rootDir;
+        const items = await fetchNextItems(limit ?? defaultSettings.browseItemCount, dirOverride);
         return { ok: true, items };
       } catch (err) {
         return { ok: false, error: String(err) };

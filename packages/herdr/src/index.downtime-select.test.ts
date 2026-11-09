@@ -48,6 +48,54 @@ describe('createDowntimeDeps', () => {
     expect(nextCalls[1][1]).toEqual(expect.arrayContaining(['-n', '60']));
   });
 
+  // Registered-root sweep (WL-0MVR8GDJ3008WY3Y AC3): the canonical-ranking seam
+  // is ROOT-AWARE. Reading a FOREIGN root must target `<root>/.worklog`
+  // explicitly, never the leader pane's module-configured database.
+  it('getHerdrListHead targets a foreign root explicitly via --worklog-dir', async () => {
+    const leaderRoot = '/projects/leader';
+    const foreignRoot = '/projects/other-root';
+    setWorklogDir(join(leaderRoot, '.worklog'));
+    const mockExec = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+      void args;
+      // An unparsable `wl worklist` payload makes the read fall back to the
+      // per-subset path, so every spawned command is observable.
+      return Promise.resolve({ stdout: JSON.stringify({ success: true, results: [] }), stderr: '' });
+    });
+    setExecFileAsync(mockExec as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+
+    await deps.getHerdrListHead(foreignRoot, 5);
+
+    const calls = mockExec.mock.calls.map(([, a]) => a as string[]);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const args of calls) {
+      expect(args.slice(0, 2)).toEqual(['--worklog-dir', join(foreignRoot, '.worklog')]);
+    }
+  });
+
+  it('getHerdrListHead keeps the leader own root on the module-configured worklog dir', async () => {
+    const leaderRoot = '/projects/leader';
+    setWorklogDir(join(leaderRoot, '.worklog'));
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ success: true, results: [] }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+
+    await deps.getHerdrListHead(leaderRoot, 5);
+
+    const calls = mockExec.mock.calls.map(([, a]) => a as string[]);
+    expect(calls.length).toBeGreaterThan(0);
+    // The override is omitted, so the module-level `--worklog-dir` applies
+    // exactly once per spawn (unchanged pre-sweep behaviour).
+    for (const args of calls) {
+      expect(args.filter((token) => token === '--worklog-dir')).toHaveLength(1);
+      expect(args[0]).toBe('--worklog-dir');
+      expect(args[1]).toBe(join(leaderRoot, '.worklog'));
+    }
+  });
+
   it('getNextItem runs wl next --stage -n 10 and parses the first workItem', async () => {
     const mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task', status: 'open' } }),

@@ -48,20 +48,20 @@
  *     hand off leadership (that would flap the machine-wide election on every
  *     sweep).
  *
- * ## RED WITNESS
+ * ## GREEN AFTER THE SWEEP LANDED
  *
- * The sweep does not exist yet — `registeredRoots` is currently ignored — so
- * every target spec is committed with `it.fails(...)`: the suite stays GREEN
- * while the assertions are RED (the repo's documented TDD pattern; see
- * `coordination-cross-root.test.ts` and `downtime-worker.clamps.test.ts`).
- * Implementation child WL-0MW4ZOSD6004SAVD flips each `it.fails` to `it` when
- * the sweep lands. The two specs that already hold today (offer precedence,
- * the unchanged terminal reason when every root fails) are plain `it(...)`
- * regression guards and must stay green after the sweep lands.
+ * Committed RED as `it.fails(...)` (the repo's documented TDD pattern; see
+ * `coordination-cross-root.test.ts` and `downtime-worker.clamps.test.ts`)
+ * while `registeredRoots` was ignored. Implementation child
+ * WL-0MW4ZOSD6004SAVD landed the sweep in `downtime-worker.head-scan.ts` and
+ * flipped every target spec to plain `it(...)`: this whole file now pins live
+ * behaviour. The two specs that already held before the change (offer
+ * precedence, the unchanged terminal reason when every root fails) remain
+ * regression guards.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -71,7 +71,11 @@ import {
   type DowntimeHerdrItem,
   type DowntimeWorkerDeps,
 } from './downtime-worker.js';
-import { loadRoundRobinCursor, saveRoundRobinCursor } from './downtime-round-robin-by-root.js';
+import {
+  ROUND_ROBIN_BY_ROOT_FILE_NAME,
+  loadRoundRobinCursor,
+  saveRoundRobinCursor,
+} from './downtime-round-robin-by-root.js';
 import type { CoordinationEntry } from './coordination.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────
@@ -242,7 +246,7 @@ function offer(instanceId: string, workItemId: string, worklogRoot: string): Coo
 // ── Reachability + canonical ranking (parent AC1/AC3) ─────────────────
 
 describe('registered-root sweep — reachability and canonical ranking (parent AC1/AC3)', () => {
-  it.fails(
+  it(
     'AC1: dispatches the head of a registered root that has no running herdr instance (zero offers)',
     async () => {
       const root = makeRoot('alpha');
@@ -277,7 +281,7 @@ describe('registered-root sweep — reachability and canonical ranking (parent A
     },
   );
 
-  it.fails(
+  it(
     'AC3: the swept candidate is the first item in the root canonical order — never a second ranking',
     async () => {
       const root = makeRoot('canonical');
@@ -314,7 +318,7 @@ describe('registered-root sweep — reachability and canonical ranking (parent A
     },
   );
 
-  it.fails(
+  it(
     'AC3: the swept root is read through the same bounded window (sprint view, never an unbounded read)',
     async () => {
       const root = makeRoot('window');
@@ -361,10 +365,54 @@ describe('registered-root sweep — reachability and canonical ranking (parent A
   );
 });
 
+// ── Fail-safe: no registry (parent AC6) ──────────────────────────────
+
+describe('registered-root sweep — fail-safe without a registry (parent AC6)', () => {
+  it(
+    'AC6: an empty registry never reads a registered root and never touches the round-robin cursor',
+    async () => {
+      const root = makeRoot('unregistered');
+      const getHerdrListHead = rankedHeads({ [LEADER_ROOT]: [], [root]: [headItem({ id: 'WL-NOT-SWEPT' })] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps, []);
+
+      // Nothing dispatchable: the sweep is a no-op, not an error.
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+      expect(getHerdrListHead).not.toHaveBeenCalledWith(root, expect.any(Number));
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      // No cursor read/write: today's behaviour is byte-for-byte unchanged.
+      expect(existsSync(join(coordinationDir, ROUND_ROBIN_BY_ROOT_FILE_NAME))).toBe(false);
+    },
+  );
+
+  it(
+    'AC6: an ABSENT registry leaves the own-backlog fallback unchanged (its hand-off flag still raised)',
+    async () => {
+      const deps = makeDeps({
+        getHerdrListHead: rankedHeads(
+          { [LEADER_ROOT]: [] },
+          { [LEADER_ROOT]: [headItem({ id: 'WL-OWN-ONLY' })] },
+        ),
+      });
+
+      const outcome = await dispatch(deps, [], [], { registeredRoots: undefined });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-OWN-ONLY');
+      // The own-backlog fallback (not the sweep) served it: leadership hand-off
+      // semantics must be identical to the pre-sweep behaviour.
+      expect((outcome as { ownBacklogDispatch?: boolean }).ownBacklogDispatch).toBe(true);
+      expect(spawnCwd(deps)).toBe(LEADER_ROOT);
+    },
+  );
+});
+
 // ── Round-robin fairness (parent AC4) ────────────────────────────────
 
 describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
-  it.fails(
+  it(
     'AC4: two registered roots each holding dispatchable work are served alternately, never monopolised',
     async () => {
       const rootA = makeRoot('fair-a');
@@ -399,7 +447,7 @@ describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC4: the leader own backlog never starves a registered root — the sweep is served first',
     async () => {
       const root = makeRoot('not-starved');
@@ -423,7 +471,7 @@ describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC4: a registered root with nothing dispatchable never consumes the tick — the sweep continues to the next root',
     async () => {
       const rootEmpty = makeRoot('empty');
@@ -451,7 +499,7 @@ describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
 // ── Fail-open (parent AC5) ───────────────────────────────────────────
 
 describe('registered-root sweep — fail-open (parent AC5)', () => {
-  it.fails(
+  it(
     'AC5: an unreadable registered root is skipped without a strike and the next root dispatches',
     async () => {
       const rootBroken = makeRoot('broken');
@@ -473,7 +521,7 @@ describe('registered-root sweep — fail-open (parent AC5)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC5: a missing registered root is skipped without a strike and the next root dispatches',
     async () => {
       const missing = join(tmpdir(), 'herdr-sweep-root-that-does-not-exist');
@@ -519,7 +567,7 @@ describe('registered-root sweep — fail-open (parent AC5)', () => {
 // ── No gate bypass (parent AC2) ──────────────────────────────────────
 
 describe('registered-root sweep — no gate bypass (parent AC2)', () => {
-  it.fails(
+  it(
     'AC2: a swept candidate held for producer review is skipped and the next eligible in the same root dispatches',
     async () => {
       const root = makeRoot('producer-review');
@@ -541,7 +589,7 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC2: a swept candidate held by an assignee is skipped and the next eligible in the same root dispatches',
     async () => {
       const root = makeRoot('assignee-hold');
@@ -562,7 +610,7 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC2: an implement candidate above the effort cap is skipped and the next eligible in the same root dispatches',
     async () => {
       const root = makeRoot('effort-cap');
@@ -584,7 +632,7 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC2: a swept audit candidate still needs the audit slot minimum — a single free slot goes to the plan tier instead',
     async () => {
       const root = makeRoot('audit-slot-min');
@@ -614,7 +662,7 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC2: code-freeze pauses implement in a swept root while plan still dispatches from it',
     async () => {
       const root = makeRoot('code-freeze');
@@ -640,7 +688,7 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC2: a deep review queue in the swept root holds a non-critical implement and reports review-queue-hold',
     async () => {
       const root = makeRoot('review-queue');
@@ -665,7 +713,7 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC2: a critical swept candidate with a live pane in its own root is not dispatched (in-flight hold)',
     async () => {
       const root = makeRoot('in-flight');
@@ -698,6 +746,31 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
       expect(outcome.dispatched).toBe(false);
       expect(outcome.reason).toBe('in-flight-pane');
       expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    'AC2: the leader own freeze does not block a swept root — each root freeze marker is read on its own',
+    async () => {
+      const root = makeRoot('own-marker');
+      const deps = makeDeps({
+        getHerdrListHead: rankedHeads({
+          [LEADER_ROOT]: [],
+          [root]: [headItem({ id: 'WL-SWEPT-UNFROZEN' })],
+        }),
+        // A release is in progress in the LEADER's root only.
+        readCodeFreezeStatus: vi
+          .fn()
+          .mockImplementation((cwd: string) => (cwd === LEADER_ROOT ? 'frozen' : 'not-frozen')),
+      });
+
+      const outcome = await dispatch(deps, [root]);
+
+      // The sweep reached the root, whose own marker is clear, so its
+      // implement candidate dispatches even though the leader is frozen.
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-SWEPT-UNFROZEN');
+      expect(spawnCwd(deps)).toBe(root);
     },
   );
 });

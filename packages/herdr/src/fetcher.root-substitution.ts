@@ -145,6 +145,7 @@ async function substituteCriticalRoots(
   mandatory: WorkItem[],
   candidates: WorkItem[],
   itemDetails: ItemDetailsLookup,
+  dirOverride?: string,
 ): Promise<RootSubstitution> {
   const { kept, children } = partitionCriticalItems(mandatory);
   if (children.length === 0) return { mandatory: kept, roots: [] };
@@ -162,6 +163,9 @@ async function substituteCriticalRoots(
   // reachable from an actionable critical child. Skipped entirely when each
   // child's parent is already in the merged candidate set (nothing to read).
   if (children.some((child) => !child.parentId || !knownById.has(child.parentId))) {
+    // `dirOverride` targets the foreign root's database for the fast path too;
+    // without it the lookup would resolve ancestors from the MODULE root and a
+    // swept root's critical child could be substituted with the wrong parent.
     await withInProcessDb((db) => {
       for (const child of children) {
         let currentId = child.parentId;
@@ -174,7 +178,7 @@ async function substituteCriticalRoots(
         }
       }
       return null;
-    });
+    }, dirOverride);
   }
 
   const lookup = async (id: string): Promise<WorkItem | null> => {
@@ -238,9 +242,10 @@ export async function mergeMandatoryAndSelect(
   mandatory: WorkItem[],
   count: number,
   itemDetails: ItemDetailsLookup,
+  dirOverride?: string,
 ): Promise<WorkItem[]> {
   const candidates = mergeUniqueById(items, mandatory);
-  const substituted = await substituteCriticalRoots(mandatory, candidates, itemDetails);
+  const substituted = await substituteCriticalRoots(mandatory, candidates, itemDetails, dirOverride);
   // Audit-metadata merge (WL-0MUWDW0N6003KF6G): `wl next` does not emit the
   // audit content fingerprints (`fingerprint`/`currentFingerprint`) that
   // `wl list` does. Deduplication below keeps the FIRST occurrence, so without
@@ -277,6 +282,7 @@ export async function assembleDefaultWorklist(
   bundle: WorklistBundle,
   itemDetails: ItemDetailsLookup,
   count?: number,
+  dirOverride?: string,
 ): Promise<WorkItem[]> {
   const items = bundle.browse;
   if (count === undefined) {
@@ -290,5 +296,5 @@ export async function assembleDefaultWorklist(
     bundle.inProgressRoots,
     bundle.blockedRoots,
   );
-  return mergeMandatoryAndSelect(items, mandatory, count, itemDetails);
+  return mergeMandatoryAndSelect(items, mandatory, count, itemDetails, dirOverride);
 }

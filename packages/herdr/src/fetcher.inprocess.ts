@@ -117,9 +117,17 @@ function loadInProcessDbCtor(): Promise<InProcessDbCtor | null> {
  * Module-private surface consumed by the barrel's reads (the barrel is the only
  * consumer-visible entry point), so it is exported from this leaf for sibling
  * import but never re-exported from `./fetcher.js`.
+ *
+ * `dirOverride` names a FOREIGN root's `.worklog` directory (registered-root
+ * sweep, WL-0MVR8GDJ3008WY3Y): the fast path then opens THAT database instead
+ * of the module-configured one, so a cross-root critical-child substitution
+ * never reads the wrong store. Absent ⇒ unchanged behaviour.
  */
-export async function withInProcessDb<T>(fn: (db: InProcessDb) => T): Promise<T | undefined> {
-  const dir = getWorklogDir();
+export async function withInProcessDb<T>(
+  fn: (db: InProcessDb) => T,
+  dirOverride?: string,
+): Promise<T | undefined> {
+  const dir = dirOverride ?? getWorklogDir();
   if (!dir) return undefined;
   const dbPath = join(dir, 'worklog.db');
   if (!existsSync(dbPath)) return undefined;
