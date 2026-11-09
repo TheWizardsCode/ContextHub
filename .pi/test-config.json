@@ -1,6 +1,8 @@
 {
   "suiteCommands": [
-    "npm --silent test -- tests"
+    "npm --silent test -- tests",
+    "npm --silent test -- packages/shared",
+    "npm --silent test -- packages/tui/extensions"
   ],
   "timeoutPerCommand": 3600,
   "groups": {
