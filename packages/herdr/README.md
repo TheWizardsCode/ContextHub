@@ -410,12 +410,16 @@ dispatches; the other herdr instances coordinate instead of polling:
   (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview ===
   true`, above-caps, or otherwise not currently dispatchable) is **removed
   eagerly without pane or dispatched marker**, and dispatch continues to
-  the next offer. If no offer is dispatchable, the leader may fall back to
-  its **own backlog** — a bounded window extension of the same ranking
-  beyond the sprint view, own root only — and, on a successful own-backlog
-  dispatch, voluntarily steps down via `releaseLeadership()` so another
-  instance can take over (WL-0MUU4XFU90008E24; see the *Own-backlog
-  fallback & leadership hand-off* paragraph below). The dispatched entry is
+  the next offer. If no offer is dispatchable, the leader first **sweeps the
+  registered worklog roots** (`downtimeWorklogRoots`) in round-robin order —
+  extra roots with no running instance, read through the same canonical
+  ranking and the same sequential safety gates (see *Registered-root
+  discovery* below) — and then may fall back to its **own backlog** — a
+  bounded window extension of the same ranking beyond the sprint view, own
+  root only — and, on a successful own-backlog dispatch, voluntarily steps
+  down via `releaseLeadership()` so another instance can take over
+  (WL-0MUU4XFU90008E24; see the *Own-backlog fallback & leadership hand-off*
+  paragraph below). The dispatched entry is
   **removed**; its owner re-offers its next Herdr head at the next
   check-in. There is **no TTL-based pruning**. **Every per-entry `wl`
   invocation — the dispatch-time
@@ -490,8 +494,9 @@ dispatches; the other herdr instances coordinate instead of polling:
   the local model is idle. At or above `downtimeCpuGatePercent` (default
   75 %, `0` disables) measured host CPU utilisation, the dispatcher refuses
   NEW **audit** and **implement** dispatch on every path (direct Herdr head,
-  critical-first scan, coordination offers, own-backlog fallback and
-  audit-batch continuation) and does **not** resume a stalled pane; intake,
+  critical-first scan, coordination offers, registered-root sweep,
+  own-backlog fallback and audit-batch continuation) and does **not** resume
+  a stalled pane; intake,
   plan and risk-effort keep dispatching and a manual/operator dispatch is
   never gated. The reading is `/proc/stat` delta utilisation normalised
   across all cores, falling back to `1-min load average ÷ cores × 100` when
@@ -564,8 +569,9 @@ the head equals the rendered worklist (mandatory items always included, remainin
 filled from "other" items). Non-critical work outside the view is never dispatched by
 the normal paths: when the head yields no candidate the dispatcher reports the in-view
 terminal reason (`no-candidate`, `review-queue-hold`, `code-freeze`, …) and does not scan
-hidden backlog — except via the coordination own-backlog fallback below, which then hands
-off leadership.
+hidden backlog — except via the coordination leader's registered-root sweep and
+own-backlog fallback below; the sweep serves an explicitly registered root without
+handing off leadership, and the own-backlog fallback then hands off.
 A bounded out-of-window escape hatch (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional
 items) re-reads the **same ranking path** but returns **only** `critical` items — because
 critical items are already mandatory in the view this is normally a no-op, and it can
@@ -587,6 +593,24 @@ after a normal in-view dispatch, and a fallback that finds nothing retains
 leadership and the original terminal reason. **Legacy mode** (no
 `leaderManager`) is unchanged. See
 [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#own-backlog-fallback--leadership-hand-off-wl-0muu4xfu90008e24).
+
+**Registered-root discovery (`downtimeWorklogRoots`, parent
+WL-0MVR8GDJ3008WY3Y, option O1):** a root that holds dispatchable work but has
+**no running herdr instance** writes no coordination entry, so the offer path
+can never see it. The setting registers extra worklog **roots** (the parent of
+`.worklog/`, absolute) that the leader sweeps when the offer list yields
+nothing dispatchable — before its own out-of-view backlog. Each root is read
+through the **same canonical ranking window** (`getHerdrListHead` plus the
+bounded extension) with the **full sequential filter chain** applied against
+that root's own state (freeze, review queue, in-flight panes, cooldown log,
+claim target). The sweep starts at the least-recently-served registry root via
+the `downtime-round-robin-by-root` cursor and visits the rest in registry
+order, so no single root can monopolise the leader. An unreadable/missing root
+is skipped without a strike, and a swept dispatch is recorded with
+`selectionPath: registered-root-sweep` and does **not** hand off leadership.
+An **absent or empty registry is a no-op** — the candidate universe stays
+today's `offers ∪ ownBacklog` byte-for-byte. See
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#registered-root-discovery--sweeping-roots-with-no-running-instance-parent-wl-0mvr8gdj3008wy3y-option-o1).
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
@@ -723,6 +747,22 @@ pacing* below).
   Boolean; absent/malformed → `false`; re-read live on every tick, and the
   decision log records `leafAuditImmediate` on the `leaf-audit-admission`
   token
+- `downtimeWorklogRoots` — Registered worklog roots the leader may sweep for
+  dispatchable work even when **no herdr instance is running** in them
+  (default: `[]`). Each entry is a worklog ROOT — the parent of `.worklog/`,
+  matching the `worklogRoot`/`opts.cwd` semantics, not the `.worklog`
+  directory itself — and must be an absolute path. At settings load the list
+  is clamped (`clampDowntimeWorklogRoots`: non-array → `[]`, non-string/
+  blank/duplicate entries dropped, bounded to **32** entries) and then
+  validated (`resolveDowntimeWorklogRoots`): an entry survives only when it
+  realpath-resolves to a directory containing `.worklog/worklog.db`, and the
+  stored value is that realpath so a symlinked root can never dispatch into
+  an unexpected workspace. Validation is per entry — an invalid/unreadable
+  root is dropped on its own and never invalidates a good neighbour. **Empty
+  registry is the fail-safe default:** absent, empty or wholly unresolvable
+  leaves the candidate universe byte-for-byte unchanged (offers +
+  own-backlog only). Re-read each tick, so registry edits apply without a
+  plugin restart. See *Registered-root discovery* above
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's
@@ -1411,8 +1451,9 @@ fallback decision instead of a silent ~120 s proxy-side wait.
   consuming remote capacity); `medium`/`high`/`critical` and scheduled prompts
   (no work item, therefore no priority) keep the deployment default
   `remote-ok`. The resolution happens once in `dispatchClaimedTier`, so the
-  coordination offer, own-backlog fallback, audit-batch continuation,
-  critical-first/normal scan and the legacy tier chain all agree.
+  coordination offer, registered-root sweep, own-backlog fallback,
+  audit-batch continuation, critical-first/normal scan and the legacy tier
+  chain all agree.
   Explicitness is derived by `loadSettings`
   (`downtimeLocalPreferenceExplicit`) and never persisted; the persisted
   alphabet and the `X-Local-Preference` wire contract are both

@@ -501,6 +501,10 @@ export function removeLeader(worklogDir: string): boolean {
  * deliberately conservative: the worst that can happen is one extra idle tick
  * polling the offer list, never starvation.
  *
+ * Entry expiry remains a deliberate no-op (`pruneStaleEntries` returns 0 and
+ * never mutates the file, WL-0MTMPIQBE001J41P) — liveness lives ONLY in this
+ * read predicate, so the coordination file keeps its non-expiring contract.
+ *
  * Deliberately cheap and fail-open: it is a pure in-memory scan of entries
  * the caller has already read (the dispatch attempt reads them once), so no
  * second worklog CLI probe is issued.  Callers that omit `opts` keep the

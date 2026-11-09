@@ -45,6 +45,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (one item per instance per check-in) | `computeMostImportantItem`, `coordinationTierRank` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
+| `downtime-worker.head-scan.ts` | Bounded head/extension candidate scan over ONE root, plus the registered-root sweep that applies it per root in round-robin order | `dispatchFromOwnHead`, `dispatchFromRegisteredRoots` |
 | `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
 | `downtime-worker.launch-fence.ts` | One-per-idle-window launch fence (closes the stale-status launch window) | `createIdleWindowLaunchFence` |
 | `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
@@ -315,6 +316,129 @@ computes the downtime pick from the production `fetchNextItems` sequence + dispa
 filters and asserts the pick is the Herdr head whenever the head is dispatchable (and
 reports explicitly when a filter moves the pick deeper in the SAME sequence).
 
+### Registered-root discovery — sweeping roots with no running instance (parent WL-0MVR8GDJ3008WY3Y, option O1)
+
+**Problem (parent AC1).** The candidate universe above is
+`offers ∪ ownBacklog(opts.cwd)`. A worklog root that holds dispatchable work
+but has **no running herdr instance** never writes a coordination entry, so the
+leader has no path to it: its work is never dispatched even when the leader has
+idle capacity and every safety gate would admit the item. The empty-leader
+hand-off does not help — there is no peer in that root to hand off to.
+
+**Candidate universe (AC1/AC3).**
+
+```
+candidates = offers ∪ sweep(downtimeWorklogRoots) ∪ ownBacklog(opts.cwd)
+```
+
+The sweep is **strictly additive and ordered**: it runs only when the offer
+list yielded nothing dispatchable, and it runs **before** the leader's own
+out-of-view backlog, so a busy leader root can never starve a registered root
+(AC4). It lives on the **coordination leader path** (`dispatchFromCoordination`)
+only — legacy mode (no coordination directory) is unchanged. When no registry
+is configured nothing changes (AC6, below).
+
+**The registry (`downtimeWorklogRoots`, AC6).** An explicit, operator-managed
+list of worklog **roots** — the parent of `.worklog/`, matching the
+`worklogRoot`/`opts.cwd` semantics, *not* the `.worklog` directory itself.
+`loadSettings` clamps then validates it every tick
+(`clampDowntimeWorklogRoots` → `resolveDowntimeWorklogRoots`,
+`packages/herdr/src/settings.ts`, bound `MAX_DOWNTIME_WORKLOG_ROOTS = 32`):
+
+- a non-array value (including a single-string shorthand) → `[]`;
+- non-string entries are dropped, entries are trimmed, blank entries dropped;
+- duplicates collapse (first-seen order preserved) and the list is bounded
+  **after** filtering, so junk never consumes a slot;
+- an entry survives only when it is an **absolute** path that realpath-resolves
+  to a directory containing `.worklog/worklog.db`; the stored value is that
+  **realpath**, so a symlinked root can never dispatch into an unexpected
+  workspace;
+- validation is **per entry**: an invalid/unreadable root is dropped on its
+  own and never invalidates a good neighbour, and never crashes settings load.
+
+**Fail-safe (AC6).** An absent, empty, or wholly unresolvable registry is a
+no-op: `dispatchFromRegisteredRoots` returns immediately on a normalised-empty
+list, with no cursor read/write and no extra `wl` spawn. The candidate
+universe stays `offers ∪ ownBacklog(opts.cwd)` **byte-for-byte** — today's
+behaviour is unchanged for every deployment that does not opt in.
+
+**Canonical ranking, not a second ranking (AC3).** Each registered root is
+read through `readOwnHeadWindow` — the same
+`getHerdrListHead(root, browseItemCount)` path and the same bounded extension
+(`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 items) the own-backlog fallback uses — and
+the first eligible item in that canonical order wins. A registered root has no
+owner offering its head, so the sweep scans the **whole** window (head plus
+extension); the own-backlog fallback still scans only the extension, because
+in-view items belong to the offer path.
+
+**Round-robin fairness (AC4).** The sweep starts at the least-recently-served
+registry root, selected with the existing `selectLeastRecentlyServed` cursor
+from `downtime-round-robin-by-root.ts` (WL-0MTJDX4M4007YH5U) — the same cursor
+the offer path uses for cross-root ordering; it advances atomically for the
+selected root. The remaining roots follow in **registry order** (the cursor is
+a tie break, never a re-ranking). A root with nothing dispatchable does not
+end the sweep: the next root is tried, and a dispatch anywhere in the sweep
+ends the tick.
+
+**No gate bypass (AC2).** Every swept candidate passes the **full sequential
+filter chain** in `dispatchFromOwnHead`, evaluated against **its own root's**
+state: classify → dispatched-marker exclusion (id/stage guard) → attempt
+budget → non-terminal cooldown → per-root code freeze → host-CPU gate →
+leaf-aware audit slot minimum/pin → critical in-flight guard → review-queue
+hold → CAS claim. No gate was added, removed or reordered for the sweep, and
+the claim/comment/dispatch target resolves to the swept root's own
+`--worklog-dir`, so a swept item is claimed and dispatched in its own database.
+A gate that holds the only swept candidate surfaces its **neutral** terminal
+reason (`code-freeze`, `review-queue-hold`, `in-flight-pane`,
+`attempt-budget-exhausted`, `non-terminal-cooldown`, `cpu-saturated`, …) —
+never `no-candidate` — so the no-candidate cooldown does not arm on a held
+sweep.
+
+**Freeze is per root.** The leader's own tick-level freeze read is reused for
+`opts.cwd`; every other registered root gets a fresh
+`readCodeFreezeStatus(root)` so its freeze cannot be bypassed (and the
+leader's freeze cannot wrongly block it).
+
+**Fail-open (AC5).** A root whose head read throws or resolves `{ok:false}`
+(missing/unreadable/not-a-worklog) is skipped without a strike and never
+crashes the tick; when every registered root fails, the caller's original
+terminal reason is unchanged.
+
+**No leadership hand-off on a sweep.** A swept dispatch is recorded with
+`selectionPath: 'registered-root-sweep'` and
+`selectionReason: 'registered-root-sweep'`, and deliberately leaves
+`ownBacklogDispatch` unset — the leader is serving a *registered* root, not
+its own backlog, so it must not step down (stepping down on every sweep would
+flap the machine-wide election). The own-backlog hand-off and the empty-leader
+step-down are unchanged.
+
+**Composition summary.**
+
+| Order | Source | Scope |
+|---|---|---|
+| 1 | Scheduled prompts | a due prompt dispatches immediately |
+| 2 | Offer list (`downtime-coordination.json`) | live peer offers, file order |
+| 3 | **Registered roots (`downtimeWorklogRoots`)** | **round-robin sweep, per-root gates** |
+| 4 | Own backlog (`opts.cwd`) | bounded extension, own root only, then hand off |
+
+**Liveness-aware peer predicate (AC7).** Independent of the registry, the
+`no-candidate` pause-arm/cancel predicate `hasPeerOffer`
+(`packages/herdr/src/coordination.ts`) ignores entries whose `lastUpdated` is
+older than `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h) — a crashed
+instance can no longer masquerade as a live peer. Treating a stale entry as an
+**absent** peer makes the leader *more* willing to sweep/arm the probe, never
+less, so the worst case is one extra idle tick polling the offer list. Entry
+expiry remains a deliberate no-op (`pruneStaleEntries` returns `0` and never
+mutates the file, WL-0MTMPIQBE001J41P); liveness lives only in the read
+predicate. See *No-candidate cooldown & the empty offer file* for the full
+pause contract.
+
+**Constraints preserved.** The sweep is **not** a reinstatement of the
+unconditional non-critical window widening superseded by
+WL-0MUNS8X97007C9H9: it is a bounded window over an explicit registry, not a
+deeper read of an arbitrary backlog. It also never requires a running pane or
+instance per root — that is precisely the bug it fixes.
+
 ## Architecture
 
 ```
@@ -444,8 +568,11 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    Each entry is eligibility re-checked at dispatch time; stale entries are
    dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
    opens the first passing offer dispatches in the entry's `worklogRoot`. If
-   **no** offer passes, the leader performs one bounded own-backlog fallback
-   against its **own** root (`opts.cwd`) and, on a successful fallback
+   **no** offer passes, the leader first sweeps the registered worklog roots
+   (`downtimeWorklogRoots`) in round-robin order through the same ranking and
+   the same sequential gates (see *Registered-root discovery* above). If that
+   sweep finds nothing dispatchable, it then performs one bounded own-backlog
+   fallback against its **own** root (`opts.cwd`) and, on a successful fallback
    dispatch, voluntarily steps down via `releaseLeadership()` so another
    instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog fallback &
    leadership hand-off* above).
@@ -789,7 +916,8 @@ deliberately distinct from herdr's OWN paced stops (`prefill-gate` /
 `prefill-cap` / `prefill-eta`) and from the fence hold (`window-spent`), so an
 operator can tell a lost reservation race from a paced stop from the herdr
 header alone. The coordination-leader path returns that refusal directly
-instead of falling through to the own-backlog fallback (which would retry other
+instead of falling through to the registered-root sweep or the own-backlog
+fallback (which would retry other
 items and replace the evidence with a generic terminal reason).
 
 **Composition with the coordination leader.** The fence holds no distributed
@@ -1981,8 +2109,9 @@ contract that an absent value omits the env var.
 **Priority rule and precedence (WL-0MVNUIW77000VYAX).** The preference is
 resolved **once** at the dispatch boundary (`dispatchClaimedTier`, from the
 already-resolved candidate priority), so every dispatch path — coordination
-offer, own-backlog fallback, audit-batch continuation, critical-first/normal
-scan and the legacy tier chain — inherits the same decision. Precedence,
+offer, registered-root sweep, own-backlog fallback, audit-batch continuation,
+critical-first/normal scan and the legacy tier chain — inherits the same
+decision. Precedence,
 highest first:
 
 1. **Explicit operator setting wins.** When `downtimeLocalPreference` is
@@ -2652,11 +2781,12 @@ extension** (the bounded `fetchExtendedHerdrItems` tail of its own head — the
 head itself is the already-considered ranking prefix) and
 dispatches at most one continuation audit per invocation. The scan is factored
 into `dispatchFromOwnHead`, so a continuation applies the **identical**
-sequential filter chain as the own-backlog fallback (classify → dispatched
+sequential filter chain as the registered-root sweep and the own-backlog
+fallback (classify → dispatched
 marker id-guard → attempt budget → non-terminal cooldown → code-freeze → audit
 ≥ 2 free slots → critical in-flight guard → review-queue hold) and only
-`audit` items are eligible. If no audit candidate survives, the unchanged
-all-kinds own-backlog fallback runs.
+`audit` items are eligible. If no audit candidate survives, the registered-root
+sweep runs and then the unchanged all-kinds own-backlog fallback.
 
 An own-backlog dispatch normally steps down leadership immediately
 (WL-0MUU4XFU90008E24). During a batch the step-down is **deferred to batch
@@ -3454,7 +3584,7 @@ status refresh unchanged at 30s.**
 | Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.constants.ts`, `leader-election.ts` |
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.constants.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.constants.ts` |
-| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
+| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT; the **same** window bounds the `hasPeerOffer` peer-entry liveness check, WL-0MVR8GDJ3008WY3Y AC7) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS` (`downtime-worker.constants.ts`), `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.clamps.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (`downtime-worker.constants.ts`), `clampDowntimeMaxAttempts` (`downtime-worker.clamps.ts`), `countAttempts` (`downtime-log.ts`) |
 | Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (`downtime-worker.constants.ts`), `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.clamps.ts`) |
@@ -3496,7 +3626,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
-| `packages/herdr/src/downtime-worker*.ts` | The downtime-worker module family: the barrel (`downtime-worker.ts`, re-exports only) over the sibling modules — worker tick orchestration (`downtime-worker.orchestrator*.ts`, `worker-contract.ts`, `launch-fence.ts`), dispatch (`dispatch.ts`, `dispatch-filter.ts`, `dispatch-claims.ts`, `dispatch-cpu-gate.ts`, `dispatch-contract.ts`), coordination (`coordination.ts`, `coordination-leader.ts`), gates/prompts/stalled-resume, pane, idle/poller, parsers/selection, constants/types/clamps (full layout: [Module layout](#module-layout)) |
+| `packages/herdr/src/downtime-worker*.ts` | The downtime-worker module family: the barrel (`downtime-worker.ts`, re-exports only) over the sibling modules — worker tick orchestration (`downtime-worker.orchestrator*.ts`, `worker-contract.ts`, `launch-fence.ts`), dispatch (`dispatch.ts`, `dispatch-filter.ts`, `dispatch-claims.ts`, `dispatch-cpu-gate.ts`, `dispatch-contract.ts`), coordination (`coordination.ts`, `coordination-leader.ts`), the bounded head scan + registered-root sweep (`head-scan.ts`), gates/prompts/stalled-resume, pane, idle/poller, parsers/selection, constants/types/clamps (full layout: [Module layout](#module-layout)) |
 | `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
 | `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
@@ -3514,6 +3644,7 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
+| `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — the least-recently-served root starts the offer ordering and the registered-root sweep (WL-0MTJDX4M4007YH5U; fail-open) |
 | `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `implement`/`audit` dispatch (WL-0MVXY0WQF0069YDJ); audit entries stale-release after 2 h |
 | `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override) |
 | `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired** (WL-0MVXY0XPF006YUHA F2): a non-stale file written by an older instance is still read as ONE synthetic audit entry; this version never creates or removes it |
@@ -3533,6 +3664,17 @@ likewise re-read live every tick and clamped on load
   continuously, and the coordination list has offers. Check
   `downtime-coordination.log` for check-ins and the dispatches log for the
   last dispatch.
+- **A worklog root with dispatchable work is never served:** if no herdr
+  instance runs in that root it writes no coordination offer, so the offer
+  path can never see it. Register the root in `downtimeWorklogRoots` (the
+  absolute path of the worklog ROOT — the parent of `.worklog/`), then
+  confirm `loadSettings` kept it: a relative path, a missing/unreadable
+  directory, or one without `.worklog/worklog.db` is dropped **per entry**
+  (fail-open), so a typo silently yields `[]` and no sweep. The sweep only
+  runs when the offer list yields nothing dispatchable, so check the
+  decision log for `selectionPath: registered-root-sweep` and remember each
+  root's own code freeze, review-queue depth and in-flight panes still gate
+  it.
 - **Audits skipped with `audit-host-saturated` / `host-budget-audit`
   (WL-0MUIVE0YG000UVIA → WL-0MVXY0XPF006YUHA F2):** the machine-scoped ledger
   reports `maxAudit` fresh audit reservations, so an audit is already running —
@@ -3764,8 +3906,8 @@ duplicate-dispatch RCA is answerable from the log alone:
 
 | Field | Type | Description |
 |---|---|---|
-| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `own-backlog` (coordination own-backlog fallback, WL-0MUU4XFU90008E24), `scheduled-prompt`, or `legacy-tier` |
-| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `own-backlog-fallback` (WL-0MUU4XFU90008E24), `scheduled-due`, `critical-tier` |
+| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `registered-root-sweep` (registered-root discovery, WL-0MVR8GDJ3008WY3Y), `own-backlog` (coordination own-backlog fallback, WL-0MUU4XFU90008E24), `scheduled-prompt`, or `legacy-tier` |
+| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `registered-root-sweep` (WL-0MVR8GDJ3008WY3Y), `own-backlog-fallback` (WL-0MUU4XFU90008E24), `scheduled-due`, `critical-tier` |
 | `paneId` | string \| null | (Enrichment entry only) the resolved dispatch pane/session id, or `null` when it could not be resolved — never a guess |
 | `enrichment` | `true` | (Enrichment entry only) discriminator marking a post-spawn enrichment rather than a fresh dispatch |
 
@@ -3981,4 +4123,18 @@ trace.
   relinquish leadership* (bounded own-root fallback + voluntary
   `releaseLeadership()` hand-off; documented in *Own-backlog fallback &
   leadership hand-off* above)
+- Work item: **WL-0MVR8GDJ3008WY3Y** *Downtime leader cannot see a worklog
+  root with no running herdr instance* (registered-root discovery — option
+  O1; documented in *Registered-root discovery* above) with its children for
+  the `downtimeWorklogRoots` setting + validation, the registered-root
+  sweep, and the liveness-aware `hasPeerOffer`
+- Work item: **WL-0MTJDX4M4007YH5U** *global round-robin cursor module
+  (`downtime-round-robin-by-root`)* — the least-recently-served cursor the
+  sweep reuses for root-level fairness
+- Work item: **WL-0MTMPIQBE001J41P** *stale coordination entry pruning
+  (deliberate no-op)* — entry expiry stays a no-op; liveness lives only in
+  the `hasPeerOffer` read predicate
+- Work item: **WL-0MST3OJ8S0001ROL** *Refactor Downtime Dispatcher: leader
+  election with shared coordination file* — the coordination/offer
+  architecture the registered-root sweep composes with
 - Docs work item: **WL-0MT76H3Z900908TV** (this page)
