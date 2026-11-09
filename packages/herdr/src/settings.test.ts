@@ -671,7 +671,7 @@ describe('downtimeLeafAuditImmediate (WL-0MVV1F1P1005PO5M)', () => {
 // registries must leave the candidate universe byte-for-byte unchanged.
 //
 // RED WITNESS. Neither the setting nor its validation exists yet, so every
-// target spec is committed with `it.fails(...)` — the suite stays GREEN while
+// target spec is committed with `it(...)` — the suite stays GREEN while
 // the assertions are RED (the repo's documented TDD pattern, see
 // `packages/herdr/src/index.test.ts`, test-first WL-0MVF3PYO3000EVJ3).
 // Implementation child WL-0MW4ZOIJE001ROA4 flips each `it.fails` to `it`.
@@ -723,33 +723,33 @@ function writeSettingsFile(registry: unknown): string {
 }
 
 describe('downtimeWorklogRoots — fail-safe default (parent AC6)', () => {
-  it.fails('defaults to [] so the candidate universe stays offers + own backlog', () => {
+  it('defaults to [] so the candidate universe stays offers + own backlog', () => {
     expect(registryOf(defaultSettings)).toEqual([]);
   });
 
-  it.fails('loads an absent registry as []', () => {
+  it('loads an absent registry as []', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ autoRefresh: true }), 'utf-8');
     expect(registryOf(loadSettings(path))).toEqual([]);
   });
 
-  it.fails('loads an explicit empty registry as []', () => {
+  it('loads an explicit empty registry as []', () => {
     expect(registryOf(loadSettings(writeSettingsFile([])))).toEqual([]);
   });
 
-  it.fails('loads every non-array registry value as [] (never throws)', () => {
+  it('loads every non-array registry value as [] (never throws)', () => {
     for (const value of ['/repo/a', 42, true, null, { 0: '/repo/a' }]) {
       expect(registryOf(loadSettings(writeSettingsFile(value)))).toEqual([]);
     }
   });
 
-  it.fails('loads a settings file with no registry key at all as []', () => {
+  it('loads a settings file with no registry key at all as []', () => {
     const path = tempSettingsPath();
     writeFileSync(path, '{}', 'utf-8');
     expect(registryOf(loadSettings(path))).toEqual([]);
   });
 
-  it.fails('never aliases a loaded registry to defaultSettings', () => {
+  it('never aliases a loaded registry to defaultSettings', () => {
     // A shared default array would let one caller's push leak into every
     // later load (the fail-safe would silently stop being empty).
     const first = loadSettings(tempSettingsPath());
@@ -760,12 +760,12 @@ describe('downtimeWorklogRoots — fail-safe default (parent AC6)', () => {
 });
 
 describe('downtimeWorklogRoots — load-time validation (assumption A1)', () => {
-  it.fails('accepts a root whose <root>/.worklog/worklog.db exists', () => {
+  it('accepts a root whose <root>/.worklog/worklog.db exists', () => {
     const root = validWorklogRoot();
     expect(registryOf(loadSettings(writeSettingsFile([root])))).toEqual([root]);
   });
 
-  it.fails('realpath-normalises a symlinked root to its target', () => {
+  it('realpath-normalises a symlinked root to its target', () => {
     const target = validWorklogRoot();
     const link = join(realpathSync(mkdtempSync(join(tmpdir(), 'herdr-wl-link-'))), 'root-link');
     symlinkSync(target, link, 'dir');
@@ -773,16 +773,16 @@ describe('downtimeWorklogRoots — load-time validation (assumption A1)', () => 
     expect(registryOf(loadSettings(writeSettingsFile([link])))).toEqual([target]);
   });
 
-  it.fails('drops a root with no .worklog/worklog.db', () => {
+  it('drops a root with no .worklog/worklog.db', () => {
     expect(registryOf(loadSettings(writeSettingsFile([invalidWorklogRoot()])))).toEqual([]);
   });
 
-  it.fails('drops a nonexistent path', () => {
+  it('drops a nonexistent path', () => {
     const missing = join(tmpdir(), 'herdr-wl-does-not-exist-9f3c1a');
     expect(registryOf(loadSettings(writeSettingsFile([missing])))).toEqual([]);
   });
 
-  it.fails('drops an unresolvable (dangling) symlink', () => {
+  it('drops an unresolvable (dangling) symlink', () => {
     const dangling = join(
       realpathSync(mkdtempSync(join(tmpdir(), 'herdr-wl-dangling-'))),
       'gone',
@@ -791,18 +791,18 @@ describe('downtimeWorklogRoots — load-time validation (assumption A1)', () => 
     expect(registryOf(loadSettings(writeSettingsFile([dangling])))).toEqual([]);
   });
 
-  it.fails('drops a relative path (only absolute roots are resolvable)', () => {
+  it('drops a relative path (only absolute roots are resolvable)', () => {
     expect(registryOf(loadSettings(writeSettingsFile(['relative/root'])))).toEqual([]);
   });
 
-  it.fails('drops non-string entries carried in the file', () => {
+  it('drops non-string entries carried in the file', () => {
     const root = validWorklogRoot();
     expect(
       registryOf(loadSettings(writeSettingsFile([1, null, {}, '', root]))),
     ).toEqual([root]);
   });
 
-  it.fails('drops invalid entries and keeps the valid ones (per-root fail-open)', () => {
+  it('drops invalid entries and keeps the valid ones (per-root fail-open)', () => {
     const rootA = validWorklogRoot();
     const bare = invalidWorklogRoot();
     const rootB = validWorklogRoot();
@@ -811,14 +811,14 @@ describe('downtimeWorklogRoots — load-time validation (assumption A1)', () => 
     ).toEqual([rootA, rootB]);
   });
 
-  it.fails('collapses duplicate roots (same realpath) to one entry', () => {
+  it('collapses duplicate roots (same realpath) to one entry', () => {
     const root = validWorklogRoot();
     const link = join(realpathSync(mkdtempSync(join(tmpdir(), 'herdr-wl-dup-'))), 'dup-link');
     symlinkSync(root, link, 'dir');
     expect(registryOf(loadSettings(writeSettingsFile([root, link])))).toEqual([root]);
   });
 
-  it.fails('resolveDowntimeWorklogRoots is the validation seam and fails safe on []', () => {
+  it('resolveDowntimeWorklogRoots is the validation seam and fails safe on []', () => {
     const resolve = futureSettings.resolveDowntimeWorklogRoots;
     expect(typeof resolve).toBe('function');
     expect(resolve!([])).toEqual([]);
@@ -843,7 +843,7 @@ describe('downtimeWorklogRoots — saveSettings round-trip (no derived-field str
     expect(persisted.downtimeWorklogRoots).toEqual([rootA, rootB]);
   });
 
-  it.fails('save → load returns the same roots in the same order', () => {
+  it('save → load returns the same roots in the same order', () => {
     const rootA = validWorklogRoot();
     const rootB = validWorklogRoot();
     const path = tempSettingsPath();
@@ -862,7 +862,7 @@ describe('downtimeWorklogRoots — saveSettings round-trip (no derived-field str
     expect(persisted.downtimeWorklogRoots).toEqual([]);
   });
 
-  it.fails('a save/load round-trip leaves the other settings untouched', () => {
+  it('a save/load round-trip leaves the other settings untouched', () => {
     const root = validWorklogRoot();
     const path = tempSettingsPath();
     saveSettings(path, { ...withRegistry(root), autoRefresh: false, browseItemCount: 7 });

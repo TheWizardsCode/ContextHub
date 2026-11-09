@@ -5,7 +5,7 @@
  * sensible defaults and merge semantics.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, statSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
   DOWNTIME_LOCAL_PREFERENCE,
@@ -36,6 +36,7 @@ import {
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeStallThresholdMs,
+  clampDowntimeWorklogRoots,
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
@@ -50,6 +51,7 @@ import {
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
   DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+  MAX_DOWNTIME_WORKLOG_ROOTS,
 } from './downtime-worker.js';
 import {
   clampPaneCloseGracePeriodMinutes,
@@ -64,7 +66,7 @@ import {
 } from './capacity-starvation.js';
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import {
   clampDowntimeCpuGatePercent,
   DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
@@ -249,6 +251,25 @@ export interface PluginSettings {
    * Default 60000 (60 s), clamped to [1000, 300000] (1 s – 5 min).
    */
   maxSyncStalenessMs: number;
+  /**
+   * Registered worklog roots (parent WL-0MVR8GDJ3008WY3Y, option O1): extra
+   * worklog ROOT directories — the parent of `.worklog/`, matching the
+   * coordinator's `worklogRoot` / `opts.cwd` semantics, NOT the `.worklog`
+   * directory itself — that the downtime leader may sweep for dispatchable
+   * work even when no herdr instance is running in them.
+   *
+   * Strictly additive and fail-safe: an absent, empty, or wholly unresolvable
+   * registry leaves today's candidate universe (`offerList ∪
+   * ownBacklog(cwd)`) byte-for-byte unchanged (parent AC6).
+   *
+   * Entries are clamped by `clampDowntimeWorklogRoots` (non-string/blank/
+   * duplicate rejection, bounded by `MAX_DOWNTIME_WORKLOG_ROOTS`) and then
+   * validated at load time by `resolveDowntimeWorklogRoots`: only ABSOLUTE
+   * paths whose realpath is a directory containing `.worklog/worklog.db`
+   * survive, and the stored value is that realpath so a symlinked root can
+   * never dispatch into an unexpected workspace.
+   */
+  downtimeWorklogRoots: string[];
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -286,6 +307,10 @@ export const defaultSettings: PluginSettings = {
   paneCloseIdleThresholdMinutes: DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
   paneCloseGracePeriodMinutes: DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
   maxSyncStalenessMs: 60_000,
+  // Fail-safe default (parent AC6): no registered roots ⇒ today's
+  // offer-only + own-backlog candidate universe is unchanged. Never aliased
+  // out of `defaultSettings` (see `freshDefaults`).
+  downtimeWorklogRoots: [],
 };
 
 /** Minimum allowed maxSyncStalenessMs (1 s). */
@@ -299,6 +324,65 @@ export const MAX_MAX_SYNC_STALENESS_MS = 300_000;
 export function clampMaxSyncStalenessMs(value: number): number {
   if (!Number.isFinite(value)) return defaultSettings.maxSyncStalenessMs;
   return Math.min(Math.max(Math.round(value), MIN_MAX_SYNC_STALENESS_MS), MAX_MAX_SYNC_STALENESS_MS);
+}
+
+/**
+ * Resolve the registered-worklog-root registry (`downtimeWorklogRoots`) at
+ * load time — the validation seam for registered-root discovery (parent
+ * WL-0MVR8GDJ3008WY3Y, assumption A1; test-first WL-0MW4ZNYSV002LJDZ).
+ *
+ * Each entry is a WORKLOG ROOT — the parent directory of `.worklog/`,
+ * matching `worklogRoot` / `opts.cwd` semantics, NOT the `.worklog` directory
+ * itself. An entry is kept only when it is an ABSOLUTE path that
+ * realpath-resolves to a directory containing `.worklog/worklog.db`.
+ *
+ * - The stored value is the REALPATH, so a symlinked root can never dispatch
+ *   into an unexpected workspace (the brief's failure-mode mitigation).
+ * - An invalid entry is dropped on its own (fail-open per root, parent AC5): a
+ *   missing/unreadable root never crashes settings load and never invalidates
+ *   a good neighbour.
+ * - A relative entry is unresolvable by construction and is dropped.
+ * - Duplicates collapse by realpath (first-seen order preserved) and the
+ *   result is bounded by `MAX_DOWNTIME_WORKLOG_ROOTS`.
+ *
+ * Empty in → empty out: an absent/empty/unresolvable registry leaves the
+ * leader's candidate universe byte-for-byte unchanged (parent AC6).
+ */
+export function resolveDowntimeWorklogRoots(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const roots: string[] = [];
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const candidate = value.trim();
+    if (candidate.length === 0 || !isAbsolute(candidate)) continue;
+    let real: string;
+    try {
+      real = realpathSync(candidate);
+      if (!statSync(real).isDirectory()) continue;
+      if (!statSync(join(real, '.worklog', 'worklog.db')).isFile()) continue;
+    } catch {
+      // Missing/unreadable path or dangling symlink — drop this entry only.
+      continue;
+    }
+    if (seen.has(real)) continue;
+    seen.add(real);
+    roots.push(real);
+    if (roots.length >= MAX_DOWNTIME_WORKLOG_ROOTS) break;
+  }
+  return roots;
+}
+
+/**
+ * A FRESH copy of the defaults for `loadSettings` fallbacks.
+ *
+ * `defaultSettings` is a shared module singleton, so a plain spread is a
+ * SHALLOW copy: an array-valued setting (currently `downtimeWorklogRoots`)
+ * would be aliased and a caller mutation would leak into every later load —
+ * silently breaking the fail-safe empty registry. Every fallback path takes
+ * its arrays from a new literal explicitly.
+ */
+function freshDefaults(): PluginSettings {
+  return { ...defaultSettings, downtimeWorklogRoots: [] };
 }
 
 // ── Default config path ───────────────────────────────────────────────
@@ -329,13 +413,13 @@ export function loadSettings(settingsPath?: string): PluginSettings {
   const path = settingsPath ?? getDefaultSettingsPath();
 
   try {
-    if (!existsSync(path)) return { ...defaultSettings };
+    if (!existsSync(path)) return freshDefaults();
 
     const raw = readFileSync(path, 'utf-8');
     const parsed = JSON.parse(raw);
 
     if (typeof parsed !== 'object' || parsed === null) {
-      return { ...defaultSettings };
+      return freshDefaults();
     }
 
     return {
@@ -425,6 +509,13 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       maxSyncStalenessMs: typeof parsed.maxSyncStalenessMs === 'number'
         ? clampMaxSyncStalenessMs(parsed.maxSyncStalenessMs)
         : defaultSettings.maxSyncStalenessMs,
+      // Registered worklog roots (parent WL-0MVR8GDJ3008WY3Y AC6): clamped
+      // (pure, deterministic) then validated against the filesystem. An
+      // absent/non-array value clamps to `[]` and an unresolvable entry is
+      // dropped per root, so an invalid registry can never crash the load.
+      downtimeWorklogRoots: resolveDowntimeWorklogRoots(
+        clampDowntimeWorklogRoots(parsed.downtimeWorklogRoots),
+      ),
       // NOTE (WL-0MU2EP6JL006A1U3): `downtimeMaxRunningPanes` and its legacy
       // alias `downtimeMaxConcurrentDispatches` are deliberately NOT read.
       // Dispatched panes stay open until an operator closes them, so a
@@ -433,7 +524,7 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       // carrying either key loads cleanly and the key is simply ignored.
     };
   } catch {
-    return { ...defaultSettings };
+    return freshDefaults();
   }
 }
 

@@ -1683,6 +1683,11 @@ export async function main(): Promise<void> {
         // the fail-closed C4 admission (full idle threshold) is unchanged.
         leafAuditImmediate: s.downtimeLeafAuditImmediate,
         browseItemCount: s.browseItemCount,
+        // Registered-root discovery (parent WL-0MVR8GDJ3008WY3Y O1): the
+        // already-clamped/validated `downtimeWorklogRoots` registry, re-read
+        // each tick like the other downtime settings so registry edits apply
+        // without a plugin restart. Absent/empty ⇒ no sweep (AC6).
+        registeredRoots: s.downtimeWorklogRoots,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable
         // `paneCloseIdleThresholdMinutes` (default 30). The worker only

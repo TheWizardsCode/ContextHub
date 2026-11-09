@@ -148,6 +148,49 @@ export function clampDowntimeAuditBatchMax(value: number): number {
   );
 }
 /**
+ * Upper bound on the registered-worklog-root registry (`downtimeWorklogRoots`,
+ * parent WL-0MVR8GDJ3008WY3Y, option O1).
+ *
+ * The registry is an operator-managed list, so it is bounded like every other
+ * list-ish downtime knob: the cap keeps one dispatch tick from turning into an
+ * unbounded filesystem walk during load-time validation. 32 comfortably covers
+ * realistic multi-root operator setups while keeping that walk cheap.
+ */
+export const MAX_DOWNTIME_WORKLOG_ROOTS = 32;
+
+/**
+ * Clamp the registered-worklog-root registry (`downtimeWorklogRoots`,
+ * test-first WL-0MW4ZNYSV002LJDZ, parent WL-0MVR8GDJ3008WY3Y AC6/AC9).
+ *
+ * PURE — no filesystem access. The load-time `.worklog/worklog.db` validation
+ * and realpath normalisation live in `settings.ts`
+ * (`resolveDowntimeWorklogRoots`).
+ *
+ * Rules (frozen contract):
+ *  1. absent / non-array → `[]` (fail-safe: never throws, and never coerces a
+ *     single string shorthand into a one-element registry);
+ *  2. non-string entries are dropped (never coerced);
+ *  3. entries are trimmed; blank entries are dropped;
+ *  4. duplicates collapse, first-seen order is preserved;
+ *  5. the count is bounded by `MAX_DOWNTIME_WORKLOG_ROOTS` AFTER filtering, so
+ *     junk never consumes a slot (excess dropped from the tail);
+ *  6. idempotent — clamping an already-clamped registry is a fixed point.
+ */
+export function clampDowntimeWorklogRoots(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const roots: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue;
+    const root = entry.trim();
+    if (root.length === 0 || seen.has(root)) continue;
+    seen.add(root);
+    roots.push(root);
+    if (roots.length >= MAX_DOWNTIME_WORKLOG_ROOTS) break;
+  }
+  return roots;
+}
+/**
  * Clamp the stalled-work scan threshold (WL-0MUYMBK6H005PY16): reject
  * negative/non-finite (fall back to the 5-minute default) and clamp to
  * [MIN_DOWNTIME_STALL_THRESHOLD_MS, MAX_DOWNTIME_STALL_THRESHOLD_MS]

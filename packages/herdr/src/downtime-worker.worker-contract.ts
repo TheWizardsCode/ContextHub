@@ -693,6 +693,19 @@ export interface DowntimeWorkerConfig {
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
     /**
+     * Resolved `downtimeWorklogRoots` registry (parent WL-0MVR8GDJ3008WY3Y,
+     * option O1): extra worklog ROOT paths (parents of `.worklog/`) the leader
+     * may sweep for dispatchable work in addition to the offer list and its own
+     * backlog.
+     *
+     * Already clamped and validated by `loadSettings`
+     * (`resolveDowntimeWorklogRoots`), so consumers never re-resolve it.
+     * Read ONCE per tick and threaded into `dispatchFromCoordination` via
+     * `registeredRoots`. Optional for backward compat — absent/empty means no
+     * sweep, i.e. today's behaviour byte-for-byte (parent AC6).
+     */
+    registeredRoots?: readonly string[];
+    /**
      * Depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
      * WL-0MVEDM8OT007WDRS AC1). Optional for backward compat — defaults to
      * `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (2). `1` = batching off (legacy

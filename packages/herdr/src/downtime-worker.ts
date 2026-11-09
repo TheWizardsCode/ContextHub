@@ -114,6 +114,8 @@ export {
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeStallThresholdMs,
+  clampDowntimeWorklogRoots,
+  MAX_DOWNTIME_WORKLOG_ROOTS,
 } from './downtime-worker.clamps.js';
 
 // ── Selection + parsers (WL-0MVLIHYOU000YQ0R) ─────────────────────────

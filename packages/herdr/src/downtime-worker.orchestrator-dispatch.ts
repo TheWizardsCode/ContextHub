@@ -594,6 +594,13 @@ export async function performDispatch(
               freeSlots: admission.freeSlots,
               effectiveFreeSlots: admission.effectiveFreeSlots,
               browseItemCount: cfg.browseItemCount,
+              // Registered-root discovery (parent WL-0MVR8GDJ3008WY3Y O1):
+              // the resolved registry is read once per tick from the worker
+              // config and forwarded to the leader's sweep. Absent/empty ⇒
+              // no sweep (today's behaviour byte-for-byte, AC6).
+              ...(cfg.registeredRoots !== undefined
+                ? { registeredRoots: cfg.registeredRoots }
+                : {}),
               auditBatchMax: cfg.auditBatchMax,
               // Continuation budget (parent WL-0MVEDM8OT007WDRS AC1) —
               // consumed by the coordination continuation item.

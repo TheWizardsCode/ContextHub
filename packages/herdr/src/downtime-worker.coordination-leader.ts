@@ -170,7 +170,11 @@ export async function dispatchFromCoordination(
      * non-audit offer is ineligible (`slots-unavailable`) and the audit tier
      * admits no other candidate. `undefined` = no relaxation (unchanged).
      */
-    pinnedAuditItemId?: string },
+    pinnedAuditItemId?: string;
+    /**
+     * Resolved `downtimeWorklogRoots` roots the leader may sweep (WL-0MVR8GDJ3008WY3Y O1): already validated/normalised by `loadSettings`; absent/empty ⇒ no sweep (AC6).
+     */
+    registeredRoots?: readonly string[] },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1–AC5):
