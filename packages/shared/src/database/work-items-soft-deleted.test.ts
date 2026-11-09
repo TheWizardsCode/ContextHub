@@ -6,11 +6,17 @@
  * shared soft-delete predicate behaves consistently before the read/write
  * path tasks consume it.
  *
+ * The predicate is imported through the consumer-facing
+ * `@worklog/shared/predicates` subpath (the module that re-exports it from
+ * `./database/work-items.js`) so these tests pin the README-documented import
+ * path, not merely the internal definition.
+ *
  * Run: npx vitest run packages/shared/src/database/work-items-soft-deleted.test.ts
  */
 
 import { describe, it, expect } from 'vitest';
-import { isSoftDeleted } from './work-items.js';
+import { isSoftDeleted } from '../predicates.js';
+import { WorklogDatabase } from '../database.js';
 
 describe('isSoftDeleted predicate (WL-0MW8ESCYL0080I9F)', () => {
   describe('quadrant tests', () => {
@@ -49,12 +55,12 @@ describe('isSoftDeleted predicate (WL-0MW8ESCYL0080I9F)', () => {
       ).toBe(false);
     });
 
-    it('returns false for an open item with deletedBy (rescued)', () => {
-      // Item that was deleted then had deletedBy cleared — fully live.
-      // Note: this tests that only one of the two conditions is needed.
+    it('returns true for an open item whose deletedBy is set (deleted then status restored)', () => {
+      // Any non-empty deletedBy marks the row soft-deleted regardless of
+      // status — this is the reconciliation core (Option A).
       expect(
-        isSoftDeleted({ status: 'open', deletedBy: '' }),
-      ).toBe(false);
+        isSoftDeleted({ status: 'open', deletedBy: 'user@example.com' }),
+      ).toBe(true);
     });
   });
 
@@ -70,6 +76,14 @@ describe('isSoftDeleted predicate (WL-0MW8ESCYL0080I9F)', () => {
       expect(
         isSoftDeleted({ status: 'in-progress', deletedBy: '' }),
       ).toBe(false);
+    });
+  });
+
+  describe('shared façade exposure', () => {
+    it('exposes isSoftDeleted on the WorklogDatabase façade (one definition for read + write)', () => {
+      // The class member delegates to the same module function, so list/update
+      // consumers can reach the predicate without importing the module directly.
+      expect(typeof (WorklogDatabase.prototype as unknown as { isSoftDeleted?: unknown }).isSoftDeleted).toBe('function');
     });
   });
 });
