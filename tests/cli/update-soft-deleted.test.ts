@@ -137,6 +137,45 @@ describe('wl update refuses to resurrect a soft-deleted work item', () => {
     // The live item really moved.
     expect((await showItem(liveId)).status).toBe('in-progress');
   });
+
+  // ── WL-0MW8EW2XA00629SO: guard keys on the shared predicate ──────────
+
+  it('rejects a mutation on a status=deleted item whose deletedBy is empty (AC2)', async () => {
+    const id = await createItem('Deleted without attribution');
+    // Delete WITHOUT writing `.git/user-email`: attribution is absent, so the
+    // row is status=deleted with an EMPTY deletedBy. The shared predicate
+    // (status=deleted OR non-empty deletedBy) must still treat it as
+    // soft-deleted — before the refactor the deletedBy-only guard let it be
+    // resurrected.
+    await execAsync(`tsx ${cliPath} --json delete ${id} --no-sync`);
+    const before = await showItem(id);
+    expect(before.status).toBe('deleted');
+    expect(before.deletedBy).toBe('');
+
+    const run = await execAsync(
+      `tsx ${cliPath} --json update ${id} --status open`,
+    ).catch((e) => e as { stdout: string; stderr: string; exitCode?: number });
+    const parsed = JSON.parse((run as { stderr: string }).stderr || (run as { stdout: string }).stdout);
+    expect(parsed.success).toBe(false);
+    expect(parsed.error).toBe('deleted-item');
+    expect(run.exitCode).not.toBe(0);
+  });
+
+  it('still allows the explicit --deleted-by attribution override on a soft-deleted item (AC4)', async () => {
+    const id = await createItem('Attributed then cleared');
+    await deleteItem(id); // sets deletedBy
+    expect((await showItem(id)).deletedBy).not.toBe('');
+
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json update ${id} --deleted-by ""`,
+    );
+    expect(JSON.parse(stdout).success).toBe(true);
+
+    const after = await showItem(id);
+    expect(after.deletedBy).toBe('');
+    // Clearing attribution is not a resurrection: the status stays deleted.
+    expect(after.status).toBe('deleted');
+  });
 });
 
 // ── WL-0MW7S20IC001F3AP: shared soft-delete predicate quadrants ──────────
