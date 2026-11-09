@@ -150,7 +150,7 @@ describe('wl list --stage in_review -F concise ordering (WL-0MUWDW0N6003KF6G)', 
       return JSON.parse(res.stdout).workItems.map((i: { id: string }) => i.id);
     }
 
-    it.fails(
+    it(
       'does not return a completed/in_review row that retains a non-empty deletedBy (AC1)',
       async () => {
         const id = await createAttributedInReview('Attributed review row');
@@ -158,7 +158,7 @@ describe('wl list --stage in_review -F concise ordering (WL-0MUWDW0N6003KF6G)', 
       },
     );
 
-    it.fails(
+    it(
       'never returns a row that wl update --status in_progress rejects as deleted-item (AC2)',
       async () => {
         const id = await createAttributedInReview('Attributed review row invariant');
@@ -187,6 +187,25 @@ describe('wl list --stage in_review -F concise ordering (WL-0MUWDW0N6003KF6G)', 
       // 'deleted' and the row must stay out of the normal list.
       expect([0, null]).toContain(del.exitCode);
       expect(await listInReviewIds()).not.toContain(id);
+    });
+
+    it('--deleted still returns soft-deleted rows (status=deleted and live+deletedBy) (AC3)', async () => {
+      // A live-but-attributed row (soft-deleted via deletedBy).
+      const softDeletedId = await createAttributedInReview('Soft-deleted attributed row');
+      // A hard-deleted row (status=deleted).
+      const hardDeletedId = await createAttributedInReview('Hard-deleted row');
+      const del = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} delete ${hardDeletedId} --no-sync`,
+      );
+      expect([0, null]).toContain(del.exitCode);
+
+      const res = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} list --deleted`,
+      );
+      expect(res.exitCode).toBe(0);
+      const ids = JSON.parse(res.stdout).workItems.map((i: { id: string }) => i.id);
+      expect(ids).toContain(softDeletedId);
+      expect(ids).toContain(hardDeletedId);
     });
   });
 });
