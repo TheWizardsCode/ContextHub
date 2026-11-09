@@ -349,6 +349,31 @@ export function update(
 }
 
 /**
+ * Soft-delete predicate — the single definition of "soft-deleted" shared
+ * across all read and write paths (WL-0MW7S20IC001F3AP, AC1).
+ *
+ * A work item is soft-deleted when:
+ * - `status === 'deleted'` **OR**
+ * - `deletedBy` is non-empty (truthy after trimming whitespace)
+ *
+ * This reconciles the two previously divergent predicates in `wl list`
+ * (which only checked `status`) and `wl update` (which only checked
+ * `deletedBy`), ensuring no row is both visible and immutable.
+ *
+ * Do NOT conflate with:
+ * - `isAttributedDelete` in `src/sync/merge-predicates.ts` — delete
+ *   *attribution* for merge protection, not visibility.
+ * - `isDeleteIntent`/`Boolean(item.deletedBy) || Boolean(item.deleteReason)`
+ *   in `src/claim-hold.ts` — claim-hold suppression.
+ *
+ * @param item - The work item to test.
+ * @returns true if the item should be treated as soft-deleted.
+ */
+export function isSoftDeleted(item: Pick<WorkItem, 'status' | 'deletedBy'>): boolean {
+  return item.status === 'deleted' || String(item.deletedBy ?? '').trim() !== '';
+}
+
+/**
  * Delete a work item
  *
  * If the item has children, recursively deletes all descendants first,

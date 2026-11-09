@@ -57,6 +57,8 @@ import * as dependenciesModule from './database/dependencies.js';
 import * as commentsModule from './database/comments.js';
 
 export { normalizeTitleForMatch, UpdateIfMatchesResult } from './database/context.js';
+// Soft-delete predicate — shared across read/write paths (WL-0MW7S20IC001F3AP, AC0).
+export { isSoftDeleted } from './database/work-items.js';
 
 // ── Injectable service types ────────────────────────────────────────────
 
