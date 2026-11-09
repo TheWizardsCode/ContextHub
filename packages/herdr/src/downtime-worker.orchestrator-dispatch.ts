@@ -912,7 +912,7 @@ export async function performDispatch(
           // polled and the peer offer dispatchable across the leadership
           // hand-off. The check is a cheap scan of the entries already read
           // for this dispatch (no second worklog probe).
-          if (!hasPeerOffer(coordinationEntries, ctx.instanceId)) {
+          if (!hasPeerOffer(coordinationEntries, ctx.instanceId, { nowMs: Date.now() })) {
             ctx.cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
             ctx.tracker.record(false);
             ctx.perSlotTracker.record([]);

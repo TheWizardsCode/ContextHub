@@ -37,6 +37,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getMachineCoordinationDir, ensureMachineCoordinationDir } from './machine-coordination.js';
+import { DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS } from './downtime-worker.constants.js';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -487,11 +488,23 @@ export function removeLeader(worklogDir: string): boolean {
  * just somebody else's root — so the pause must not arm (and a live pause
  * must be cancelled at the next leader check-in).
  *
+ * Liveness-aware (WL-0MVR8GDJ3008WY3Y AC7): entries whose `lastUpdated`
+ * exceeds `staleWindowMs` (default `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`,
+ * 24 h) are treated as absent.  Stale entries are silently ignored — the
+ * instance's OWN entry and the leader block never count as a peer (inherited
+ * from the pre-liveness contract).
+ *
+ * Conservative rationale: stale = absent peer makes the leader *more* willing
+ * to sweep (it sees no peer and arms the cooldown probe), never less.  This is
+ * safer than treating stale = present and starving offers behind a
+ * no-candidate cooldown (parent WL-0MVP7QHUB003ZA2A).  The decision is
+ * deliberately conservative: the worst that can happen is one extra idle tick
+ * polling the offer list, never starvation.
+ *
  * Deliberately cheap and fail-open: it is a pure in-memory scan of entries
  * the caller has already read (the dispatch attempt reads them once), so no
- * second worklog CLI probe is issued. The predicate is intentionally
- * conservative — a stale peer entry merely keeps the offer list polling, the
- * failure mode that costs one idle tick, never a starvation.
+ * second worklog CLI probe is issued.  Callers that omit `opts` keep the
+ * default 24 h window — the signature change is purely additive.
  *
  * An instance's OWN entry never counts (that is what the empty-own-root
  * probe is for), and an entry without a `workItemId` is not an offer.
@@ -499,10 +512,21 @@ export function removeLeader(worklogDir: string): boolean {
 export function hasPeerOffer(
   entries: readonly CoordinationEntry[],
   instanceId: string,
+  opts?: { nowMs?: number; staleWindowMs?: number },
 ): boolean {
-  return entries.some(
-    (entry) => entry.instanceId !== instanceId && entry.workItemId.length > 0,
-  );
+  const nowMs = opts?.nowMs ?? Date.now();
+  const staleWindowMs = opts?.staleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS;
+  return entries.some((entry) => {
+    // Own entry never counts (inherited from pre-liveness contract).
+    if (entry.instanceId === instanceId) return false;
+    // Entry must have a stated offer.
+    if (entry.workItemId.length === 0) return false;
+    // Liveness gate: entry older than the stale window is treated as absent.
+    const updatedMs = Date.parse(entry.lastUpdated);
+    if (!Number.isFinite(updatedMs)) return false; // unparseable → not live
+    if (nowMs - updatedMs > staleWindowMs) return false; // stale → not live
+    return true;
+  });
 }
 
 /**

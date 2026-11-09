@@ -2179,7 +2179,20 @@ reads the block as work. Therefore:
   scan of the coordination entries **already read for that dispatch** — never
   a second worklog CLI probe. It is deliberately conservative/fail-open (a
   stale peer entry only costs an idle tick); an instance's own entry never
-  counts, and neither does an entry with an empty `workItemId`. The cooldown
+  counts, and neither does an entry with an empty `workItemId`.
+- **Liveness-aware peer predicate (WL-0MVR8GDJ3008WY3Y AC7).** `hasPeerOffer`
+  rejects entries whose `lastUpdated` is older than
+  `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h) — a crashed instance whose
+  entry lingers can no longer masquerade as a live peer. The rationale is
+  deliberately conservative: treating a stale entry as an **absent** peer
+  makes the leader *more* willing to sweep/arm the cooldown probe, never less,
+  so the worst case is one extra idle tick polling the offer list — never a
+  starved offer. Both orchestrator call sites (the tick-time pause-cancel and
+  the dispatch-time pause-arm) pass an explicit `nowMs`, and the default
+  window applies to callers that omit the options object. Entry expiry remains
+  a deliberate no-op (`pruneStaleEntries` still returns 0 and never mutates
+  the file, WL-0MTMPIQBE001J41P); liveness lives only in the read predicate.
+  The cooldown
   duration (`downtimeNoCandidateCooldownMs`, 60 min) is unchanged and still
   arms when there is genuinely nothing anywhere. The empty-leader step-down
   still fires on that cycle (see *Own-backlog fallback & leadership hand-off*

@@ -26,6 +26,7 @@ import {
   pruneStaleEntries,
   mergeEntries,
   tryAcquireCoordLock,
+  hasPeerOffer,
   COORDINATION_FILE,
   COORDINATION_LOCK_FILE,
   COORDINATION_FILE_VERSION,
@@ -294,6 +295,93 @@ describe('machine-wide shared file (AC1)', () => {
 // The actual machine dir used above is `process.env.HERDR_COORDINATION_DIR`;
 // this import just proves the symbol is reachable from this test module.
 import { getMachineCoordinationDir as getMachineCoordinationDirForTest } from './machine-coordination.js';
+import { DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS } from './downtime-worker.constants.js';
+
+// ── hasPeerOffer liveness-aware staleness (WL-0MVR8GDJ3008WY3Y AC7) ──
+
+/** Build a peer entry with a controlled `lastUpdated` timestamp. */
+function makePeerEntry(
+  instanceId: string,
+  workItemId: string,
+  lastUpdated: string,
+): CoordinationEntry {
+  return {
+    instanceId,
+    workItemId,
+    directory: testDir,
+    worklogRoot: testDir,
+    assignedAt: lastUpdated,
+    lastUpdated,
+  };
+}
+
+describe('hasPeerOffer liveness-aware staleness (AC7)', () => {
+  const now = 1_700_000_000_000; // fixed epoch ms for deterministic tests
+  const staleWindow = DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS;
+  const freshTs = new Date(now - 10_000).toISOString();     // 10 s ago
+  const staleTs = new Date(now - staleWindow - 1_000).toISOString(); // > 24 h ago
+
+  it('returns true when a fresh peer entry holds a workItemId', () => {
+    const entries = [makePeerEntry('peer-1', 'WL-ABC', freshTs)];
+    expect(hasPeerOffer(entries, 'other', { nowMs: now })).toBe(true);
+  });
+
+  it('returns false when a peer entry is older than the stale window', () => {
+    const entries = [makePeerEntry('peer-1', 'WL-ABC', staleTs)];
+    expect(hasPeerOffer(entries, 'other', { nowMs: now })).toBe(false);
+  });
+
+  it('returns true when a fresh peer is present alongside a stale peer', () => {
+    const entries = [
+      makePeerEntry('stale-peer', 'WL-STALE', staleTs),
+      makePeerEntry('fresh-peer', 'WL-FRESH', freshTs),
+    ];
+    expect(hasPeerOffer(entries, 'other', { nowMs: now })).toBe(true);
+  });
+
+  it('returns false when only stale peers are present', () => {
+    const entries = [
+      makePeerEntry('stale-1', 'WL-A', staleTs),
+      makePeerEntry('stale-2', 'WL-B', staleTs),
+    ];
+    expect(hasPeerOffer(entries, 'other', { nowMs: now })).toBe(false);
+  });
+
+  it('excludes the instance\'s OWN entry from peer consideration', () => {
+    const entries = [makePeerEntry('me', 'WL-MINE', freshTs)];
+    expect(hasPeerOffer(entries, 'me', { nowMs: now })).toBe(false);
+  });
+
+  it('treats an entry without workItemId as no offer', () => {
+    const entries = [
+      { ...makePeerEntry('peer', '', freshTs), workItemId: '' },
+    ];
+    expect(hasPeerOffer(entries, 'other', { nowMs: now })).toBe(false);
+  });
+
+  it('uses the default stale window when opts is omitted', () => {
+    const entries = [makePeerEntry('peer', 'WL-ABC', staleTs)];
+    // No opts → default 24 h window → stale
+    expect(hasPeerOffer(entries, 'other')).toBe(false);
+  });
+
+  it('honours a custom staleWindowMs', () => {
+    const entries = [makePeerEntry('peer', 'WL-ABC', staleTs)];
+    const shortWindow = 1; // 1 ms — everything stale
+    expect(hasPeerOffer(entries, 'other', { nowMs: now, staleWindowMs: shortWindow })).toBe(false);
+  });
+
+  it('treats an unparseable lastUpdated as not live', () => {
+    const entries = [
+      { ...makePeerEntry('peer', 'WL-BAD', freshTs), lastUpdated: 'not-a-date' },
+    ];
+    expect(hasPeerOffer(entries, 'other', { nowMs: now })).toBe(false);
+  });
+
+  it('an empty entry array returns false', () => {
+    expect(hasPeerOffer([], 'any', { nowMs: now })).toBe(false);
+  });
+});
 
 // ── worklogRoot compat ───────────────────────────────────────────────────
 

@@ -593,6 +593,11 @@ export const DOWNTIME_AUDIT_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
  * stage is released once its age exceeds this window — a pane that spawned
  * but whose agent never advanced the item (crash, manual close, silent
  * failure) must not strand the item permanently. Default 24 hours.
+ *
+ * Reused as the peer-entry liveness window by `hasPeerOffer`
+ * (WL-0MVR8GDJ3008WY3Y AC7): a coordination entry older than this window is
+ * treated as an absent peer. One number for both keeps a dispatched-but-dead
+ * instance from lingering in either the marker ledger or the offer list.
  */
 export const DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
 /**

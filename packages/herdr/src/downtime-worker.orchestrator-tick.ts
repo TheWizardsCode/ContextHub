@@ -267,6 +267,7 @@ export async function runLeaderElectionAndCheckIn(
         } else if (ctx.cooldownUntil !== null && hasPeerOffer(
           readCoordinationFile(ctx.opts.coordinationDir!)?.entries ?? [],
           ctx.instanceId,
+          { nowMs: Date.now() },
         )) {
           // Coordination check-in cancels, peer presence cancels (parent
           // WL-0MVP7QHUB003ZA2A AC3): an offer that APPEARS during a pause
