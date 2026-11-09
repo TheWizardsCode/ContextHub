@@ -9,9 +9,9 @@
  * `packages/herdr/src/index.ts` (move-only, WL-0MVOA0ODW002W5C4, parent
  * WL-0MVGKGFFN009UCM6); the barrel re-exports the consumed symbols
  * (`claimItemForAgentCommand`, `resolveInteractiveDispatchPriority`) while
- * `AGENT_ASSIGNEE` and `fetchCriticalBlockers` stay out of the consumed
- * public surface, value-imported by the barrel only for its internal
- * dispatch paths (createDowntimeDeps / main()).
+ * `AGENT_ASSIGNEE`, `DISPATCHER_ASSIGNEE` and `fetchCriticalBlockers` stay out
+ * of the consumed public surface, value-imported by the barrel only for its
+ * internal dispatch paths (createDowntimeDeps / main()).
  */
 
 import { extractWorkItemId } from './index.pane-capture.js';
@@ -28,13 +28,24 @@ import {
   DOWNTIME_WL_TIMEOUT_MS,
   type CriticalCandidate,
 } from './downtime-worker.js';
+import { AGENT_ASSIGNEE } from './assignee-identities.js';
 
 /**
- * Assignee used when the plugin claims a work-item (sets status to
- * in_progress) before dispatching an agent command. Matches the agent
- * handle used across the worklog (see AGENTS.md claim pattern).
+ * Claim identity for INTERACTIVE agent commands: the plugin claims the item
+ * (sets status to in_progress) as `Map` before the agent pane is spawned.
+ *
+ * `Map` is the worklog PRODUCER-HOLD sentinel (see AGENTS.md claim pattern and
+ * the SorraAgents-side `skill/shared/claim_release.py` predicate): a session
+ * that ends while the item still carries `Map` leaves a DELIBERATE producer
+ * hold in place — `wl next`, the dispatch gates and the stale-claim reaper all
+ * respect it. Interactive agent claims therefore keep `Map` exactly as it was.
+ *
+ * Both identities are DEFINED ONCE in `./assignee-identities.ts` (a leaf
+ * module) so `downtime-worker.selection.ts` can consume them without a runtime
+ * cycle; this module re-exports them for its own dispatch paths and the
+ * existing test surface (WL-0MW55V8PA000CD6P).
  */
-const AGENT_ASSIGNEE = 'Map';
+export { AGENT_ASSIGNEE, DISPATCHER_ASSIGNEE } from './assignee-identities.js';
 
 /**
  * Claim the work-item referenced by an agent command (set its status to
@@ -141,5 +152,6 @@ async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<Criti
 // Exported for the barrel's internal dispatch paths only (index.ts
 // `createDowntimeDeps` / main()); never re-exported by the barrel — they
 // stay out of the consumed public surface (same pattern as
-// `notifyBackgroundFailure` in index.background.ts).
-export { AGENT_ASSIGNEE, fetchCriticalBlockers };
+// `notifyBackgroundFailure` in index.background.ts). The values themselves are
+// defined once in `./assignee-identities.ts` and re-exported above.
+export { fetchCriticalBlockers };

@@ -112,6 +112,9 @@ function makeCoordinationDeps(overrides: Partial<DowntimeWorkerDeps> = {}): Down
     spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
     recordDispatch: vi.fn().mockResolvedValue(true),
     recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
+    // Claim rollback (WL-0MT32F908002YFFA / WL-0MW5JE0SZ0057K30): placement
+    // runs after the claim, so an anchor-unavailable abort rolls it back.
+    rollbackClaim: vi.fn().mockResolvedValue(true),
     recordError: vi.fn().mockResolvedValue(undefined),
     getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
     recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
@@ -367,7 +370,11 @@ describe('dispatchFromCoordination', () => {
     const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
-    expect(deps.claimItem).not.toHaveBeenCalled();
+    // Placement now runs AFTER the CAS claim (WL-0MW5JE0SZ0057K30): the item
+    // is claimed, then rolled back on the anchor failure so it stays
+    // re-selectable. No pane is ever created.
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     // The offer stays in the file (anchor failure is transient, not stale).
     expect(getEntry(testDir, 'inst-1')).not.toBe(null);
@@ -460,6 +467,9 @@ describe('dispatchFromCoordination', () => {
       model: 'plan',
       cwd: '/repo',
       paneName: 'Downtime /skill:refactor',
+      // Scheduled prompts dispatch at the scheduled-prompt priority default
+      // (`high`, WL-0MVIDWJ090090J3Q AC3) — the entry declares none.
+      priority: 'high',
       localPreference: 'remote-ok',
     });
     // No pre-dispatch claim and NO coordination-tier work (AC3/AC4/AC6).
@@ -1065,6 +1075,51 @@ describe('runCoordinationCheckIn empty-offer attribution (WL-0MVR8FKMU009XTED)',
       .filter((entry) => entry.operation === 'checkin')
       .map((entry) => entry as unknown as Record<string, unknown>);
   }
+
+  it('dispatcher-claimed items are never attributed to all-window-items-held (WL-0MW51OB1Y0073TLG)', async () => {
+    // The downtime dispatcher claims the items it auto-dispatches. That claim
+    // means "an agent is on it", so it must not be reported as a scheduling
+    // hold: a window refused for another reason stays all-window-items-gated.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-dispatcher-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({
+              id: 'WL-D1',
+              stage: 'idea',
+              status: 'completed',
+              assignee: 'dispatcher',
+            }),
+            headItem({
+              id: 'WL-D2',
+              stage: 'idea',
+              status: 'completed',
+              assignee: 'dispatcher',
+            }),
+          ],
+        }),
+      });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-D1', root)] });
+      const result = await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+      });
+      expect(result.offered).toBe(null);
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied.length).toBeGreaterThan(0);
+        const last = emptied[emptied.length - 1];
+        expect(last.reason).toBe('all-window-items-gated');
+        expect(last.dominantGate).toBe('not-dispatchable');
+        expect(last.heldAssignees).toBeUndefined();
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it('AC5: a fully-held window yields all-window-items-held with the observed sentinel', async () => {
     const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-held-'));

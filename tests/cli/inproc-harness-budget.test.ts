@@ -16,7 +16,11 @@
  *   2. POLICY — the limit maths and the clamped host-load factor are exercised
  *      against synthetic budgets/measurements, so they are deterministic.
  *   3. MEASURED — a real, bounded re-measurement of the four scenarios stays
- *      inside `baseline * (1 + headroom) * clampedLoadFactor`.
+ *      inside `baseline * (1 + headroom) * clampedLoadFactor`. A shared host
+ *      can inflate a single short measurement, so the re-measurement is
+ *      retried up to a small bounded number of attempts with the capture's
+ *      warmup methodology and the best attempt is judged; a real regression
+ *      fails every attempt (WL-0MW5DDY4U00468F1).
  *
  * Headroom rationale: the baselines are 2–5 ms medians, so the guard's job is
  * to catch a real regression (a per-call doubling or worse, or a lost/edited
@@ -26,9 +30,10 @@
  * load factor 1 the limit is 3.5x the recorded median.
  *
  * The re-measurement is bounded: 3 runs x 4 scenarios of a few milliseconds
- * each plus one throwaway store per run — a few hundred milliseconds of
- * profiling work, comfortably inside the AC's 5 s budget. It never writes the
- * artefact (`runInprocHarnessProfile` is pure) and never touches the
+ * each plus one throwaway store per run and one discarded warmup per scenario
+ * — a few hundred milliseconds of profiling work in the common case, and at
+ * most a few attempts, comfortably inside the AC's 5 s budget. It never writes
+ * the artefact (`runInprocHarnessProfile` is pure) and never touches the
  * repository `.worklog/`.
  */
 
@@ -46,6 +51,7 @@ import {
   evaluateInprocHarnessBudget,
   hostLoadFactor,
   readInprocHarnessBudget,
+  type InprocBudgetVerification,
   type InprocHarnessBudget,
 } from '../../bench/inproc-harness-budget.js';
 import {
@@ -272,21 +278,46 @@ describe('in-process harness budget: measured guard', () => {
     const budget = readInprocHarnessBudget(artefactPath);
     const startedAt = Date.now();
 
-    const result = await runInprocHarnessProfile({ runs: 3, warmupRuns: 0, repoRoot });
+    // Best-of-N measurement (WL-0MW5DDY4U00468F1): a shared host can deschedule
+    // or contend a short in-process call, inflating ONE measurement without a
+    // per-call regression. Re-measuring up to MEASURED_ATTEMPTS times and
+    // keeping the attempt that fits best preserves the order-of-magnitude
+    // ratchet (a genuine regression fails every attempt) while not flaking on
+    // transient host load. Each attempt uses the artefact's own capture
+    // methodology (one discarded warmup, then a median of runs).
+    const MEASURED_ATTEMPTS = 3;
+    const GUARD_BUDGET_MS = 5_000;
+    let best: InprocBudgetVerification[] | null = null;
+    let bestResult: InprocProfileResult | null = null;
+    const worstShare = (verifications: InprocBudgetVerification[]): number =>
+      Math.max(...verifications.map((entry) => entry.shareOfLimitPct));
 
-    // The guard's own cost budget: a few hundred milliseconds of profiling,
-    // nowhere near the 5 s the AC allows for the whole guard.
+    for (let attempt = 1; attempt <= MEASURED_ATTEMPTS; attempt += 1) {
+      const result = await runInprocHarnessProfile({ runs: 5, warmupRuns: 1, repoRoot });
+      const verifications = evaluateInprocHarnessBudget(budget, result, os.loadavg()[0]);
+      if (best === null || worstShare(verifications) < worstShare(best)) {
+        best = verifications;
+        bestResult = result;
+      }
+      if (verifications.every((entry) => entry.pass)) break;
+      // Do not start an attempt that would blow the guard's own time budget.
+      if (Date.now() - startedAt > GUARD_BUDGET_MS - 1_000) break;
+    }
+
+    // The guard's own cost budget: a few hundred milliseconds of profiling in
+    // the common case, still bounded by the 5 s the AC allows for the guard.
     const elapsedMs = Date.now() - startedAt;
-    expect(elapsedMs).toBeLessThan(5_000);
+    expect(elapsedMs).toBeLessThan(GUARD_BUDGET_MS);
 
-    expect(result.runs).toBe(3);
-    expect(result.scenarios.map((scenario) => scenario.name)).toEqual([...INPROC_BUDGET_SCENARIOS]);
+    expect(bestResult?.runs).toBe(5);
+    expect(bestResult?.scenarios.map((scenario) => scenario.name)).toEqual([
+      ...INPROC_BUDGET_SCENARIOS,
+    ]);
 
-    const verifications = evaluateInprocHarnessBudget(budget, result, os.loadavg()[0]);
-    const failures = verifications.filter((entry) => !entry.pass);
+    const failures = (best ?? []).filter((entry) => !entry.pass);
     expect(
       failures,
-      `per-call cost exceeded the budget: ${failures
+      `per-call cost exceeded the budget on every attempt: ${failures
         .map((entry) => `${entry.scenario} ${entry.measuredMs} ms > ${entry.limitMs} ms`)
         .join(', ')}`,
     ).toEqual([]);

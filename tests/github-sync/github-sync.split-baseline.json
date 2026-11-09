@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "provenance": {
+    "generatedBy": "npx tsx tests/github-sync/split-guard-scan.ts --write-baseline",
+    "sourceCommit": "a7f93b8341e756f2b3d7492456fe1b07952ff458",
+    "generatedAt": "2026-11-05T10:03:11.403Z",
+    "barrel": "src/github-sync.ts",
+    "consumerGlobs": [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "scripts/**/*.ts"
+    ]
+  },
+  "symbols": {
+    "value": [
+      "importIssuesToWorkItems",
+      "resolveAllLabelFields",
+      "resolveLabelField",
+      "upsertIssuesFromWorkItems"
+    ],
+    "type": [
+      "FieldChange",
+      "GithubProgress",
+      "GithubSyncResult",
+      "GithubSyncTiming",
+      "SyncErrorItem",
+      "SyncedItem"
+    ]
+  }
+}

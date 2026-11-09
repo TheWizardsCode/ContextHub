@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.0.28 (2026-11-09)
+> **Release focus:** This release focuses on improving workflow reliability and automation, with fixes ensuring pushes verify the exact commit, audits start promptly and don't block releases on save glitches, and daily routines run automatically at high priority. It also enhances session organization with grouped tabs and persistent worklists, improves GitHub sync and delegation handling, and adds support for numbered acceptance-criteria lists and deletion reasons.
+### Features
+- Tabs you open yourself now appear next to your Worklog tab, keeping your sessions grouped. (WL-0MVZ88G51004IYHW)
+- Your worklist now stays put between refreshes, with high-priority items always listed first. (WL-0MVVLBTTP003Y4XO)
+- Pushes now verify the exact commit being pushed, so a green check truly means your code passed. (WL-0MW2A3NAP0088IE9)
+- Daily test, standup and refactor routines now run automatically at high priority, even during peak times. (WL-0MVIDWJ090090J3Q)
+- Improved GitHub sync reliability and easier future updates to issue syncing. (WL-0MVGKH9Z900178UF)
+- Delegation holds now use a single assignee field, so items are never accidentally auto-delegated. (WL-0MVXVRAZS000GJHK)
+- Numbered acceptance-criteria lists are now supported, and empty lists no longer pass review silently. (WL-0MVO93BBC000H734)
+- The project setup command is now easier to maintain, so future fixes and improvements arrive faster. (WL-0MVGKH6Z1000XWGJ)
+### Bug Fixes
+- Prevents a harmless internal file from blocking development workflows. (WL-0MV4YJGA0009DRHD)
+- Audits that fail to save are now flagged as temporary errors, so releases no longer get blocked by glitches. (WL-0MW2F2T1I001ZNH7)
+- Audits now start right away when a previous audit pane closes, instead of stalling for up to two hours. (WL-0MW5KC8J300942EA)
+- You can now record why you deleted an item, keeping cleanups clear and auditable. (WL-0MW8078CA006Q2P7)
+- Tests now pass reliably regardless of temporary folder naming, so builds stay green. (WL-0MW5C6XS00071DWN)
+- Upgrading no longer overwrites your improved pre-push hook with an older version. (WL-0MW2N56M2004PSRP)
+- Fixed test runs leaving your game files dirty, so automated checks now pass cleanly. (WL-0MVPW5NNN00389BM)
+### Other
+- Internal code cleanup for smoother, more reliable work-item fetching. (WL-0MVGKH47T007GKN1)
+- Internal code cleanup for smoother, more reliable downtime logging. (WL-0MVGKHFT4003X6JW)
+- Removed the unused heartbeat skill; background work is now handled automatically by the downtime dispatcher. (WL-0MVVNJIIU001UUF4)
+
 ## v1.0.27 (2026-11-04)
 > **Release focus:** This release focuses on strengthening multi-project coordination and unattended agent reliability, with cross-project blocking, concurrency limits for implement and audit tasks, and better visibility into dispatch status and history. It also improves safety and accuracy across upgrades, GitHub pushes, test gating, and health checks, while reorganizing internal code for easier maintenance.
 ### Features

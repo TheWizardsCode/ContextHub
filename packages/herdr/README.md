@@ -453,7 +453,15 @@ dispatches; the other herdr instances coordinate instead of polling:
   (`~/.herdr/downtime/downtime-dispatch-anchor.json`). Resolution is
   fail-closed (never another project's tab, never the leader's pane): a
   null/failed resolution reports `anchor-unavailable` (no dispatch this
-  cycle). Scheduled prompts (no work-item id) keep the `Dispatcher` anchor.
+  cycle) and rolls the CAS claim back. **Placement is resolved late**
+  (WL-0MW5JE0SZ0057K30): after the CAS claim, the reservation gate and the
+  host-budget admission, immediately before the marker write — provisioning
+  the item tab any earlier left an orphaned empty pane whenever a gate
+  refused the tick. Once a tab does exist, every remaining pre-spawn abort
+  (marker-write failure, spawn failure) closes its placeholder root pane
+  fail-safely (a reused tab's live pane and unknown liveness are left open),
+  so a dispatch that never runs a command leaves no pane behind. Scheduled
+  prompts (no work-item id) keep the `Dispatcher` anchor.
   See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn).
 - **Stalled-work scan and resume (WL-0MUYMBSA90092QV2)** — before selecting a
@@ -1241,6 +1249,19 @@ Semantics:
   under the coordination lock with a double-check, and a second dispatch for
   the same workspace + item adds a pane to the existing tab rather than
   creating a duplicate.
+- **Placement: left of the Worklog/extensions tab** (WL-0MVZ88G51004IYHW) —
+  herdr's `tab create` appends a new tab at the right end of the tab row.
+  For a **freshly created** interactive item tab, the plugin then repositions
+  it immediately to the **left of the extensions/Worklog tab** (the tab that
+  hosts the `Work Items` plugin pane, or failing that a tab labelled
+  `Worklog`). Repositioning goes through the herdr socket API `tab.move`
+  (`insert_index` = the extensions tab's index) because herdr 0.9.5 has no
+  `tab move` CLI subcommand. This is **fail-open**: if the extensions tab
+  cannot be resolved (absent, ambiguous, unreadable) or the move fails, the
+  tab simply stays at herdr's default right-side position — the dispatch is
+  never blocked or dropped. **Adopted (reused) tabs are never moved** — a
+  reused tab's position is the operator's own arrangement. Automated
+  (downtime dispatcher) tabs keep today's right-side placement unchanged.
 - **No-ID panes unchanged** — commands with no work-item association (the
   unbound **Open Pi Agent** action, the `P n` blank-prompt session, generic
   commands) still split the current pane in the current tab.
@@ -1255,6 +1276,12 @@ Semantics:
 - **No focus stealing** — item tabs are created with `--no-focus` and the
   existing no-focus dispatch default is preserved, so the selection list
   keeps the keyboard focus.
+- **No orphaned pane on a refused dispatch** — an agent dispatch provisions
+  its item tab only **after** the host-budget gate has admitted it
+  (`resolveInteractiveItemAnchorAfterAdmission`, WL-0MW5JE0SZ0057K30), so
+  cancelling the over-quota dialog leaves no empty tab behind; a background
+  (`open_pane: false`) dispatch provisions none either. The shell/command
+  routes have no admission gate and resolve the anchor directly.
 
 See [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#interactive-dispatch-pane-placement-wl-0muyi3jao002btnl)
 for the implementation-level detail and the automated-vs-interactive
@@ -1499,10 +1526,18 @@ migration needed); re-saving the file drops them.
 **Scheduled prompts (WL-0MSS1Q5ER007QDKX)** — the FIRST dispatch stage: a
 project-local config file `.worklog/scheduled-prompts.json` (provisioned by
 `wl init` from `templates/scheduled-prompts.json`, create-if-absent) carries
-periodic maintenance prompts with a best-effort frequency. The base set includes a `/skill:refactor` entry (`intervalDays: 3`,
-`lastTriggeredAt: null`) for routine maintenance, and a `/skill:standup`
-entry (`intervalDays: 1`, `time: "06:05"`, `lastTriggeredAt: null`) that
-fires daily at or after 06:05 local — the canonical daily standup prompt. Each entry has:
+periodic maintenance prompts with a best-effort frequency. The base set is
+the canonical **daily maintenance routines** (WL-0MVIDWJ090090J3Q), kept in
+step by the `/skill:maintenance-routines` skill (see the
+[maintenance-routines skill](../../skill/maintenance-routines/SKILL.md)):
+
+| id | time | intervalDays | priority |
+|---|---|---|---|
+| `/skill:test` | `07:00` | 1 | `high` |
+| `/skill:standup` | `08:00` | 1 | `high` |
+| `/skill:refactor` | `09:00` | 1 | `high` |
+
+Every entry starts with `lastTriggeredAt: null` (never run). Each entry has:
 
 - `id` — stable entry id (pane name `Downtime <id>` and rolling-log marker
   `itemId`); set it to the command itself (e.g. `/skill:refactor`) so the
@@ -1511,6 +1546,16 @@ fires daily at or after 06:05 local — the canonical daily standup prompt. Each
 - `intervalDays` — best-effort frequency in whole days,
 - `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
   (`null` = never run; a missing field is treated as due),
+- `priority` — *(optional)* the dispatch request priority
+  (`low` | `medium` | `high` | `critical`), forwarded to the pane as
+  `HERDR_REQUEST_PRIORITY` and hence the `X-Priority` provider header.
+  **An absent `priority` defaults to `high`** — not the downtime default
+  (`medium`): scheduled prompts are the project's maintenance routines and
+  must be served even during peak-period contention. An entry that should be
+  polite sets `low`/`medium` explicitly. The value is validated with the
+  other entry fields: an invalid value skips the whole entry with a logged
+  warning (fail-closed, never a crash). `critical` is served as `high` by
+  the downtime priority table.
 - `time` — *(optional)* wall-clock `HH:MM` in 24-hour format (e.g. `06:05`);
   when present the entry is due only when **both** the interval gate has
   elapsed **and** the current local time is at or after this time on the
@@ -1542,7 +1587,9 @@ effort: a dispatch may be delayed (no idle slot, cooldown, freeze) but never
 happens more often than once per interval. A due prompt dispatches a pi agent
 pane named `Downtime <id>` via the same send-to-pi.sh path as the tiers
 (`--no-focus`, `--cwd <worklog root>`, `--model <downtimeModel>`) running the
-prompt text. Multiple due entries dispatch one per idle slot in config order
+prompt text, with the entry's `priority` (default `high`) passed through
+`spawnAgentPane` → `buildDowntimeSpawnOptions` → `HERDR_REQUEST_PRIORITY`.
+Multiple due entries dispatch one per idle slot in config order
 (the single-flight guard prevents overlap).
 
 Fail-closed at every boundary: an **absent** config is an empty set (silent —
@@ -1551,7 +1598,8 @@ are synthesized), and a **malformed** config (unreadable, corrupt JSON, no
 `entries` list) is an empty set (logged error) — in both cases no scheduled
 dispatch occurs and the
 existing tiers are unaffected. Invalid entries (missing/empty id or prompt,
-missing/non-finite/≤ 0 `intervalDays`, unparseable `lastTriggeredAt`) are
+missing/non-finite/≤ 0 `intervalDays`, unparseable `lastTriggeredAt`,
+invalid `time` or `priority`) are
 skipped with a logged warning — never a crash.
 
 Before the pane spawns, `lastTriggeredAt` is persisted to the config (atomic
@@ -1877,7 +1925,7 @@ auto-refresh tick (parent `WL-0MV02VA29009WBEN`).
   `fetchChildrenForItems`) previously opened a fresh `WorklogDatabase` each,
   running the synchronous open + pragmas + schema DDL on the UI event loop
   twice per refresh. `doRefresh` now opens ONE connection per refresh
-  (`createInProcessRefreshScope` in `fetcher.ts`), shares it across both
+  (`createInProcessRefreshScope` in `fetcher.inprocess.ts`), shares it across both
   reads, and closes it in a `finally` — so a refresh coinciding with typing
   stays within the ≤ 100 ms p95 input-lag budget, and the connection is
   never reused across a refresh boundary (no-stale-cache invariant). Scope-
@@ -1946,7 +1994,7 @@ regression guard. The harness contract is covered by
 
 The default-view refresh once spawned ~5 `wl` processes per cycle (`wl next` +
 two mandatory subsets + actionable count + review-queue state) plus one
-`wl list --parent` per expanded parent. `fetcher.ts` now cuts that to the
+`wl list --parent` per expanded parent. The fetcher family now cuts that to the
 minimum (`WL-0MV5CBQ6L005SPAG`):
 
 - **In-process SQLite reads** — when a worklog dir is resolved and the SQLite
@@ -2167,12 +2215,17 @@ consumers keep their child-inclusive semantics.
 `assignee` doubles as the **scheduling hold**: a non-empty assignee means the
 item is deliberately parked and is never auto-dispatched at any tier
 (the producer sentinel is `wl update <id> --assignee Map`; clear it with
-`--assignee ""`). The refusal used to be completely silent, so a root whose
+`--assignee ""`). The one exception is the downtime dispatcher's own
+`dispatcher` claim (`DISPATCHER_ASSIGNEE`): it is an agent claim — released at
+session end, reaped when orphaned — so it never parks an item and is never
+named by the hold surface below (WL-0MW51OB1Y0073TLG; see
+[downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#dispatcher-claim-identity-wl-0mw51ob1y0073tlg)).
+The refusal used to be completely silent, so a root whose
 entire dispatch window was parked looked exactly like an empty or broken
 backlog. The worklist now surfaces it (WL-0MVR8FN1D002SCIR):
 
 - **Header count (AC1)** — while any item in the dispatch window carries a
-  non-empty assignee, the header names how many and which sentinel(s):
+  scheduling hold, the header names how many and which sentinel(s):
   `[held: 30 by Map]`.
 - **All-held warning (AC2)** — when the window has **zero** dispatchable items
   *solely* because of assignee holds, an amber banner reads
@@ -2399,10 +2452,28 @@ at a glance; every other heading keeps the plain bold/stage-coloured style
 regardless of collapse state. Stage changes re-group items on the next
 refresh. Non-critical actively-worked items (`status = in-progress`) join
 the file-path-partitioned `Group N` lists alongside
-`plan_complete`/`intake_complete` items and sort ahead of them
-(actively-worked items first); "Other" remains only as a safety net for
+`plan_complete`/`intake_complete` items and, at equal priority, sort ahead of
+them; "Other" remains only as a safety net for
 unknown/custom stages (including the removed `in_progress`/`completed`
 stage values), so legacy rows still render deterministically.
+
+### Grouping stability (WL-0MVVLBTTP003Y4XO)
+
+Grouping is a **content-deterministic** function of the item set. Before the
+greedy first-fit packing runs, the selected items are canonicalised by a
+purely content-derived key — priority (high → medium → low) → stage sub-order →
+id. Timestamps are never part of the key, so a comment, an audit run or any
+other `updatedAt` churn cannot move an item between groups; only a material
+change can (its `**Key Files:**` section, its priority, its stage/status, or
+the item set itself).
+
+Within every group (including `Critical Group N` and `Group N`) the sort is
+**priority first** — every high-priority item ranks ahead of every
+medium-priority item, which ranks ahead of every low-priority item — then the
+stage sub-order (actively-worked → `plan_complete` → `intake_complete` →
+remaining), then `id` as a deterministic tie-break. Priority was the secondary
+key before this change, so a low-priority actively-worked item no longer
+outranks a high-priority `plan_complete` item.
 
 **In Review** items are sorted within the group by priority first, then by a
 deterministic **6-bucket audit predicate** (WL-0MSLPM5ZB003TADT):
@@ -2623,7 +2694,7 @@ packages/herdr/
 ├── README.md               # This file
 ├── src/
 │   ├── index.ts            # Entry point — TUI main loop
-│   ├── fetcher.ts          # Worklog data fetching via wl CLI
+│   ├── fetcher.ts          # Fetcher barrel: re-exports the fetcher.* family (see docs/dev/herdr-event-driven-refresh.md "Fetcher module layout")
 │   ├── auto-sync.ts       # Background `wl sync` with configurable timer
 │   ├── shortcut-config.ts  # Chord shortcut registry and config loader
 │   ├── shortcuts.json      # Shortcut/chord definitions
@@ -2683,7 +2754,7 @@ packages/herdr/
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
   - Local entries are validated with the same rules as bundled entries: an invalid entry is **logged and skipped**, and a missing/malformed local file (bad JSON, non-array) falls back to bundled-only with an error logged — a broken local file never crashes the plugin.
   - When no worklog root is resolved (uninitialized project) or no local file exists, the registry is exactly the bundled defaults and all dispatch behaviour is unchanged.
-- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows` (`worklist.meta.ts`), so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Assignee` (WL-0MVTPEB3A0091RDH):** `buildMetaRows` emits an `Assignee` row (raw stored value) immediately after `Effort` whenever the assignee is a non-empty, non-whitespace string, and every title-bearing surface routes through the shared `formatTitleWithAssignee` helper (`worklist.format.ts`) for the `[<assignee>] ` prefix — the list row (`formatItemLine`, inside the priority-coloured title segment), the panel `Title` row, the detail header (`formatDetailContent`) and `formatTooltipLines`. **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
+- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows` (`worklist.meta.ts`), so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Assignee` (WL-0MVTPEB3A0091RDH):** `buildMetaRows` emits an `Assignee` row (raw stored value) immediately after `Effort` whenever the assignee is a non-empty, non-whitespace string, and every title-bearing surface routes through the shared `formatTitleWithAssignee` helper (`worklist.format.ts`) for the `[<assignee>] ` prefix — the list row (`formatItemLine`, inside the priority-coloured title segment), the panel `Title` row, the detail header (`formatDetailContent`) and `formatTooltipLines`. **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.api.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
 - **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze

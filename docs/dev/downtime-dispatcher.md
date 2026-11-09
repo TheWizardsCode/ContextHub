@@ -37,7 +37,8 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
 | `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
 | `downtime-worker.dispatch-cpu-gate.ts` | Host-CPU dispatch gate (host-utilisation seam) | `CPU_SATURATED_REASON` |
-| `downtime-worker.dispatch-claims.ts` | The claim → marker → spawn pipeline for one selected candidate | *(internal to the dispatch entry)* |
+| `downtime-worker.dispatch-claims.ts` | The claim → reservation → admission → placement → marker → spawn pipeline for one selected candidate | *(internal to the dispatch entry)* |
+| `downtime-worker.dispatch-placement.ts` | Dispatch pane placement resolution (project workspace + item-ID tab, per-prefix tab, legacy anchor) and the fail-safe placeholder root-pane cleanup | *(internal to the dispatch entry)* |
 | `downtime-worker.dispatch-contract.ts` | The dispatch pipeline's dependency boundary + event/outcome types | `DowntimeDispatchEvent`, `DowntimeErrorEvent`, … |
 | `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
 | `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
@@ -49,7 +50,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
-| `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota` |
+| `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota`, `reduceAuditDisplayCounts` |
 | `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `readAuditBudgetState`, `confirmHostDispatch`, `releaseHostDispatch` |
 | `host-dispatch-budget.interactive.ts` | User-fired over-quota gate half: tier detection and prompt-then-claim (F4) | `budgetKindForAgentCommand`, `prepareInteractiveAgentDispatch` |
 | `host-budget-dialog.ts` | Pure bottom-anchored over-quota dialog + the renderer↔awaiter prompt host (F4) | `formatHostBudgetDialog`, `overlayHostBudgetDialog`, `createHostBudgetPromptHost` |
@@ -82,10 +83,36 @@ Layering: extracted modules import concrete siblings (and the coordination
 primitives), never the `dispatcher-anchor.js` barrel at runtime, so the import
 graph stays acyclic.
 
+### downtime-log module layout (WL-0MVGKHFT4003X6JW)
+
+`packages/herdr/src/downtime-log.ts` is likewise a **thin barrel** — a
+module-level doc comment plus re-export statements only, re-exporting exactly
+the 54 symbols the pre-split module exported from `./downtime-log.js` (44 of
+them are actually consumed). Every behaviour lives in the sibling modules
+below; each carries a doc comment stating its single responsibility, and no
+family module exceeds 1,000 lines (enforced by
+`downtime-log.split-guard.test.ts` over the frozen surface recorded in
+`downtime-log.split-baseline.json`).
+
+| Module | Single responsibility | Key exports (consumer-facing) |
+|---|---|---|
+| `downtime-log-storage.ts` | File names, retention/rotation policy, atomic bounded JSONL append, tolerant line parsing | `DOWNTIME_LOG_FILE`, `COORDINATION_LOG_FILE`, `DOWNTIME_LOG_MAX_ENTRIES`, `COORDINATION_LOG_MAX_ENTRIES`, `resolveCoordinationLogPolicy`, `coordinationLogPolicyFromConfig`, `CoordinationLogPolicy` |
+| `downtime-log-budget.ts` | Host-budget refusal vocabulary + evidence shape (pure leaf, no imports) | `HOST_BUDGET_IMPLEMENT_REASON`, `HOST_BUDGET_AUDIT_REASON`, `HOST_BUDGET_UNKNOWN_REASON`, `HOST_BUDGET_DECISION_REASONS`, `isHostBudgetDecisionReason`, `HostBudgetEvidence` |
+| `downtime-log-coordination.ts` | Coordination/decision entry shape, its fail-closed append, the readers (current file and rotated history) and the per-hour reason tally | `CoordinationLogEntry`, `appendCoordinationLogEntry`, `readCoordinationLogEntries`, `readCoordinationLogAllEntries`, `hourlyReasonTally`, `HourlyReasonCount` |
+| `downtime-log-entries.ts` | Dispatch-log entry shapes, pane-close lifecycle entries, fail-closed appends, fail-safe reader, and the marker-vs-lifecycle predicate | `DowntimeLogEntry`, `PaneCloseLogEntry`, `PaneLifecycleOutcome`, `PaneLifecycleKind`, `appendDowntimeLogEntry`, `appendPaneCloseLogEntry`, `readDowntimeLogEntries` |
+| `downtime-log-markers.ts` | Dispatched-marker readers, staleness/stage guards, per-item attempt budget, non-terminal pane-close cooldown | `auditDispatchedItemIds`, `implementDispatchedItemIds`, `recentAuditDispatchedItemIds`, `dispatchedItemMarkers`, `markerStillExcludes`, `countAttempts`, `isNonTerminalCooldownActive`, `planDispatchedItemStages`, `intakeDispatchedItemStages` |
+| `downtime-log-recent.ts` | Read-only "recent dispatches" projection and its 4-hour UTC time blocks | `recentDispatchedItems`, `RecentDispatchRow`, `groupRecentDispatchesByTimeBlock`, `DispatchTimeBlock`, `dispatchTimeBlockLabel`, `DISPATCH_TIME_BLOCK_HOURS` |
+
+Layering: `downtime-log-storage.ts` and `downtime-log-budget.ts` are leaves;
+`downtime-log-entries.ts` builds on storage; `downtime-log-markers.ts` and
+`downtime-log-recent.ts` build on entries. No family module imports the
+`downtime-log.js` barrel, so the import graph is acyclic (asserted by
+`downtime-log.split-guard.test.ts`).
+
 ## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
 
 The downtime dispatcher does **not** maintain its own ranking. The Herdr selection list
-(`packages/herdr/src/fetcher.ts:fetchNextItems` → `smart-selection.ts:selectWorkItems` →
+(`packages/herdr/src/fetcher.api.ts:fetchNextItems` → `smart-selection.ts:selectWorkItems` →
 `grouping.ts:regroupWorkItems`) is the **sole** ranking path (mandatory-always for critical +
 `completed`/`in_review`, `browseItemCount` windowing of "other" items, grouping logic,
 `reSort`/`computeScore` as used by the fetcher). The dispatcher (`dispatchDowntimeWork`,
@@ -912,7 +939,9 @@ wl update <id> --assignee <agent> --if-status completed --if-stage in_review --i
   (`--assignee "" --if-assignee <agent>`), so the item can never be stranded
   off the review queue.
 - Assignee-based scheduling hold: `classifyItemForDispatch` and every tier's
-  `select*` helper exclude items with a non-empty assignee, and the parse
+  `select*` helper exclude items with a non-empty assignee **other than the
+  dispatcher's own `dispatcher` claim** (see [Dispatcher claim
+  identity](#dispatcher-claim-identity-wl-0mw51ob1y0073tlg)), and the parse
   helpers (`parseShowItemOutput`, `parseAuditCandidatesOutput`,
   `parseNextCandidatesOutput`, `parseImplementCandidatesOutput`,
   `parseCriticalCandidatesOutput`) carry the field so the exclusion holds at
@@ -922,6 +951,42 @@ Every OTHER tier keeps the legacy status-flip claim
 (`--status in_progress` + the tier's status/stage CAS), and its rollback
 keeps the legacy status restore guarded by `--if-status in_progress`.
 
+### Dispatcher claim identity (WL-0MW51OB1Y0073TLG)
+
+The downtime dispatcher claims every item it auto-dispatches — at every tier
+(audit, implement, plan, intake, risk-effort) — with its own identity,
+**`dispatcher`** (`DISPATCHER_ASSIGNEE`), never with the producer sentinel
+`Map` (`AGENT_ASSIGNEE`). Both constants are defined once in
+`packages/herdr/src/assignee-identities.ts`; the interactive agent-command
+claim (`claimItemForAgentCommand`) keeps claiming `Map`.
+
+Why the two must differ:
+
+- `Map` is the producer's **scheduling hold**: sessions preserve it at exit,
+  `wl next` skips it, and the shared Python release predicate
+  (`skill/shared/claim_release.py` → `should_release_assignee`) never releases
+  it. A dispatcher claim parked on `Map` is therefore indistinguishable from a
+  deliberate producer hold, so an auto-dispatched item whose session ends
+  without completing it is stranded forever (observed on WL-0MVR8GDJ3008WY3Y).
+- `dispatcher` is an **agent claim**: it means "an agent is on it". It is
+  released on every terminal outcome, the TTL stale-claim reaper
+  (`reap_stale_claims`) reaps it when the session dies, and it is **not** a
+  scheduling hold.
+
+Consequences (each covered by a test):
+
+| Surface | Behaviour for a `dispatcher` claim |
+|---|---|
+| `isAssigneeHeld` (`downtime-worker.selection.ts`) | `false` — the item stays a dispatch candidate |
+| `classifyItemForDispatch` (`downtime-worker.gates.ts`) | no `assignee-hold` gate |
+| `classifyWindowHold` / `heldAssigneesOf` | never counted, never named |
+| all-held banner / coordination `all-window-items-held` | not triggered by a dispatcher claim |
+| `[<assignee>]` title prefix | still shown (a fact about the item, not a hold) |
+
+Double dispatch is still impossible: the claim flips the item to
+`in_progress` (or, on the audit tier, is CAS-guarded on `--if-assignee ""`) and
+the tier's dispatched marker excludes it for the marker lifetime.
+
 ### Producer-hold sentinel (WL-0MV85WDOM007BKF8)
 
 The **scheduling-hold convention**: a non-empty `assignee` means the item is
@@ -930,13 +995,16 @@ tier's `select*` helper exclude it, and the audit claim's `--if-assignee ""`
 CAS fails stale on it. Assigning an item therefore *pauses its automatic
 scheduling*, with no magic DB flag involved.
 
+The one non-empty assignee that is **not** a hold is the downtime dispatcher's
+own claim, `dispatcher` (see below).
+
 The per-item **producer pause switch** is assigning the item to the
-producer's wl identity. The reserved sentinel is
-`PRODUCER_HOLD_ASSIGNEE` (`'Map'`, the producer's wl identity), recognised
-by `isProducerHold()`. Because the value is self-describing, the ship
-release gate can key on it: an item assigned to the producer means "the
-producer owns it" and is not shippable until it has a passing audit
-(epic WL-0MV82CHGQ000HAZZ Q2; re-homed ship gate — SA-tracked).
+producer's wl identity. The reserved sentinel is `AGENT_ASSIGNEE` (`'Map'`,
+the producer's wl identity, defined once next to `DISPATCHER_ASSIGNEE` in
+`packages/herdr/src/assignee-identities.ts`). Because the value is
+self-describing, the ship release gate can key on it: an item assigned to the
+producer means "the producer owns it" and is not shippable until it has a
+passing audit (epic WL-0MV82CHGQ000HAZZ Q2; re-homed ship gate — SA-tracked).
 
 Rules:
 
@@ -1432,6 +1500,15 @@ path). The machine-wide `Dispatcher` workspace is only the fail-closed
 `dispatchClaimedTier` evaluates placement in this precedence order
 (WL-0MUR5FUWD00024XN AC1):
 
+> **Placement runs late in the pipeline (WL-0MW5JE0SZ0057K30).** The order is
+> CAS claim → local-capacity reservation gate → host-budget admission →
+> **placement resolution / item-ID tab provisioning** → marker write → spawn.
+> Provisioning a tab is what creates herdr's empty placeholder root pane, so
+> it must happen only once the dispatch is admitted: a refused tick (claim
+> lost, reservation refusal, host-budget refusal) must leave **no** pane on
+> screen. The F3 contract is unchanged — host-budget admission still happens
+> once, after the CAS claim and before the marker/spawn.
+
 1. **Project workspace + item-ID tab** — `resolveProjectWorkspace` resolves
    the herdr plugin pane whose logical root equals the item's worklog root
    `R`, then `getItemTabAnchor` ensures/reuses the tab labelled with the exact
@@ -1445,7 +1522,11 @@ path). The machine-wide `Dispatcher` workspace is only the fail-closed
 A `null`/failed project-workspace resolution does **not** abort when a
 fallback is wired; a project workspace that resolves but whose item-ID tab
 cannot be provisioned aborts with `anchor-unavailable` (never a wrong
-placement). An empty/unparseable per-prefix likewise fails closed. The
+placement). An empty/unparseable per-prefix likewise fails closed. Because
+placement now runs after the CAS claim, an `anchor-unavailable` abort also
+**rolls the claim back** and releases the host-budget entry/ticket (see
+[no orphaned pane](#no-orphaned-placeholder-pane-wl-0mw5je0sz0057k30)) — the
+item is never left stranded `in_progress`. The
 resolved anchor is forwarded as `--anchor <rootPaneId>` to `send-to-pi.sh`
 (`herdr pane split --pane <anchor>`), `--no-focus` preserved; the new pane's
 `workspace_id` is the project workspace (or `Dispatcher` fallback) and its
@@ -1454,7 +1535,9 @@ resolved anchor is forwarded as `--anchor <rootPaneId>` to `send-to-pi.sh`
 #### Project workspace + item-ID tab (primary path, WL-0MU321YK70035AYT)
 
 Invariant: for a `dispatchClaimedTier` spawn of `<PREFIX>-<hash>` whose
-worklog root is `R`:
+worklog root is `R` (steps 1–2 run after the CAS claim, the reservation gate
+and the host-budget admission, immediately before the marker write —
+WL-0MW5JE0SZ0057K30):
 
 1. **Project-workspace resolution** — `resolveProjectWorkspace(cwd, deps, R)`
    enumerates the machine-wide `herdr pane list`, keeps only plugin panes
@@ -1493,6 +1576,52 @@ worklog root is `R`:
 When the workspace resolves but the item-ID tab cannot be provisioned, the
 dispatch fails closed with `anchor-unavailable` — it never places the pane in
 the `Dispatcher` workspace (WL-0MU321YK70035AYT).
+
+#### No orphaned placeholder pane (WL-0MW5JE0SZ0057K30)
+
+**Guarantee:** a dispatch that never runs a command leaves no pane behind.
+The defect this closes: the item-ID tab (and herdr's empty placeholder root
+pane) used to be provisioned *before* the host-budget admission, while the
+root-pane cleanup only ran *after* a confirmed spawn — so a refused tick left
+an empty pane in a fresh item tab (the 2026-11-06 evidence `w3G:p1BK` in tab
+`MS-0MW3LTMHT001PRDT` and `w57:pCV` in tab `SA-0MVXUGXS5006M3HF`, both
+completed/in_review audit candidates refused by the audit cap).
+
+Two mechanisms, in this order of preference:
+
+1. **Never provision before admission.** `resolveDispatchPlacement` (in
+   `downtime-worker.dispatch-placement.ts`) runs after the CAS claim, the
+   reservation gate and the host-budget admission, and immediately before the
+   marker write. A claim loss, a reservation refusal, a TTL-below-bound
+   reservation or a host-budget refusal therefore returns **before any tab is
+   created** — there is no pane to leak. This covers the automated dispatcher's
+   `implement` and `audit` tiers alike.
+2. **Defence in depth on the aborts that DID provision.** Once the item tab
+   exists, every remaining pre-spawn abort closes the placeholder root pane via
+   `closePlaceholderRootPaneBestEffort`: marker-write failure
+   (`marker-write-failed` / `claim-rolled-back`), spawn failure
+   (`spawn-failed`), and the `anchor-unavailable` rollback path. The same
+   cleanup also runs after a successful spawn (the original
+   WL-0MU2EOHK900425VU behaviour).
+
+The cleanup is **fail-safe** and **fail-open**:
+
+- the anchor is closed only when liveness POSITIVELY confirms it is not a live
+  **downtime** pane (`paneIds`, or `records` filtered through
+  `countRunningDowntimePanes`) — a reused tab's live dispatch pane is never
+  closed, and unavailable liveness (query failed/absent) leaves the anchor
+  open;
+- a failed liveness query or a throwing `closePane` is swallowed: cleanup never
+  changes the dispatch outcome, never throws, and never turns a neutral refusal
+  into a strike;
+- the retained single `Dispatcher` anchor is deliberately exempt (`anchorIsTabRoot
+  = false`): closing it would trigger the stale-detection re-provision loop.
+
+Because placement now happens on an already-claimed item, an
+`anchor-unavailable` failure rolls the claim back to its pre-claim
+status+stage, releases the host-budget entry and records a granted
+reservation ticket as released/expired (`abortForAnchorUnavailable`) — the same
+invariants as the marker/spawn abort paths.
 
 #### Per-prefix tabs in the Dispatcher workspace (fallback, C1, WL-0MTRQT482001SNXC)
 
@@ -1654,6 +1783,12 @@ Lifecycle (`packages/herdr/src/index.ts`; shared anchor helper in
    when this call actually provisioned the tab — the create-vs-reuse signal
    consumed by step 4. **Any** resolution/creation error returns `null`
    (fail-open).
+   **Ordering (WL-0MW5JE0SZ0057K30):** on the **agent** route the anchor is
+   resolved only after `prepareInteractiveAgentDispatch` has decided (via
+   `resolveInteractiveItemAnchorAfterAdmission`, which is a hard no-op when the
+   dispatch was refused/cancelled), so cancelling the host-budget dialog can
+   never leave an empty item tab behind; the shell/command-output routes have
+   no admission gate and resolve the anchor directly in their branch.
 3. **Anchor forwarding** — the item-tab anchor is resolved once per dispatch
    and forwarded to both channels by the arg builders:
    `buildSendToPiArgs(..., anchor)` and `buildRunInPaneArgs(..., anchor)`
@@ -1691,6 +1826,48 @@ root-pane liveness source differ. The automated path checks the running
 **downtime** pane ids for its cleanup liveness; the interactive path checks
 the live **tracked pi/shell** panes (step 4).
 
+**No orphaned pane on a refused dispatch (WL-0MW5JE0SZ0057K30).** Because the
+item tab is provisioned only after the host-budget gate admits an agent
+dispatch, a dialog **cancel** (or an over-quota refusal) leaves **no** pane:
+`resolveInteractiveItemAnchorAfterAdmission(false, …)` returns before touching
+`herdr tab list`/`herdr tab create`. The cancel return still calls the
+fail-safe root-pane cleanup as defence in depth — a harmless no-op while no
+anchor was created. Background (`open_pane: false`) dispatches never provision
+a tab either: they carry no pane to place.
+
+**Tab placement — left of the Worklog/extensions tab
+(WL-0MVZ88G51004IYHW).** herdr's `tab create` always appends a new tab at the
+**right end** of the workspace tab row, so a freshly provisioned interactive
+item tab would otherwise appear far from the Worklog/extensions tab it
+belongs beside. After a **fresh** interactive tab is created (the
+create-vs-reuse `onCreate` signal), the plugin repositions it immediately to
+the **left of the extensions/Worklog tab**:
+
+- **Extensions-tab resolution** (`resolveExtensionsTab`) is deterministic and
+  fail-open: it first looks for a tab hosting a pane labelled `Work Items`
+  (`PLUGIN_PANE_LABEL`, read from the machine-wide `herdr pane list`, which
+  is the only output carrying pane labels), then falls back to a tab labelled
+  exactly `Worklog`. A single match wins; **none** or **multiple** ambiguous
+  matches resolve to `null`.
+- **Repositioning** uses the herdr **socket API** `tab.move`
+  (`{ tab_id, insert_index }`) — herdr 0.9.5 exposes no `tab move` CLI
+  subcommand — with `insert_index` = the extensions tab's index
+  (`moveTabInWorkspace` → `sendHerdrSocketRequest`). The newline-delimited
+  JSON-RPC Unix socket is `HERDR_SOCKET_PATH` (default
+  `~/.config/herdr/herdr.sock`).
+- **Fail-open at every boundary** (`applyPlacementMode`): unresolved or
+  ambiguous extensions tab, an absent transport, a socket error, a JSON-RPC
+  `error` payload or a timeout all leave the tab at its default right-side
+  position. The dispatch is never blocked, dropped or placed in a wrong
+  workspace.
+- **Only fresh tabs move.** Adopted/reused tabs are never repositioned —
+  their position is the operator's own arrangement.
+- **The automated downtime dispatcher is unchanged** — its tabs (project
+  item-ID tabs and the per-prefix `Dispatcher` workspace tabs) keep today's
+  right-side placement; the `placement` mode defaults to `right` and only the
+  interactive call sites (`index.ts` → `resolveInteractiveItemAnchor*`) pass
+  `'left-of-extensions'`.
+
 
 ### Request priority (`X-Priority`) on dispatched panes
 
@@ -1719,8 +1896,22 @@ the parent contract (WL-0MVE1NZ4J000H5NH):
   `buildDowntimeSpawnOptions`, which maps it with the downtime table and sets
   `HERDR_REQUEST_PRIORITY` beside `HERDR_RESOLVED_CWD`. Unattended work is
   therefore polite (`low` stays `low`) while `critical` work is served as
-  `high`. Scheduled prompts have no work item and get the downtime default
-  (`medium`).
+  `high`. Scheduled prompts have no work item, so they carry their own
+  per-entry `priority` field instead (WL-0MVIDWJ090090J3Q AC3):
+  `dispatchScheduledPrompt` forwards `prompt.priority` (normalized by
+  `parseScheduledPrompt`, `resolveScheduledPromptPriority`) through the same
+  `spawnAgentPane` → `buildDowntimeSpawnOptions` chain. **An absent
+  `priority` defaults to `high` for scheduled prompts** — deliberately
+  different from the downtime default (`medium`): the canonical daily
+  maintenance routines (`/skill:test` 07:00, `/skill:standup` 08:00,
+  `/skill/refactor` 09:00) must be served even during peak periods. An entry
+  that should be polite declares `low`/`medium` explicitly; `critical` is
+  mapped to `high` by the downtime table. An invalid value skips the whole
+  entry (fail-closed, logged warning), like an invalid `time`. The
+  `/skill:maintenance-routines` skill
+  ([SKILL.md](../../skill/maintenance-routines/SKILL.md)) creates and
+  reconciles those three entries (ids, `intervalDays`, `time` and `priority`)
+  in each project's `.worklog/scheduled-prompts.json`.
 - **Interactive** — the agent route resolves the dispatched item's priority
   with a bounded `wl show --json` lookup (2 s budget), maps it with the
   interactive table and passes it to `buildSendToPiArgs(...,
@@ -2093,6 +2284,52 @@ limiter, and the budget can only ever *reduce* concurrency below what those
 gates would admit. A budget refusal is also not capacity starvation
 (`capacity-starvation.ts` stays untouched), because an operator-imposed stop
 is not a saturated model.
+
+**Release points and the dead-pane sweep (WL-0MW5KC8J300942EA).** A
+ledger entry is released (removed) at every point the dispatch it represents
+ends:
+
+- **dispatch abort paths** — claim rollback, local-capacity reservation
+  refusal, host-budget refusal itself, marker-write failure and spawn failure
+  all release the entry immediately (`releaseHostDispatch` in
+  `downtime-worker.dispatch-claims.ts`);
+- **pane close** — the reaper releases the item's entry right after it closes
+  that pane (`ReaperDeps.releasePaneBudget`), for both `implement` and
+  `audit`;
+- **staleness** — the ledger's own 2 h heartbeat-staleness reap remains the
+  final backstop.
+
+A pane can still be closed *outside* those paths (the operator closes it in
+herdr, a session crashes, the window is torn down). Because the audit tier
+counts fresh entries **without** a live-pane requirement, such a dead entry
+would otherwise hold `maxAudit` until the 2 h window expired — the 2026-11-06
+incident. The reaper therefore runs one **dead-pane sweep** per pass
+(`sweepClosedPanes`) with the pane list it already read: any **confirmed**
+entry (non-empty `paneId`) whose pane is absent from that trusted list is
+reaped regardless of heartbeat freshness. Entries with no `paneId` (the
+reserve→spawn window) are retained, and a failed/unparseable pane read never
+sweeps (a synthetic empty list would over-reap and over-admit).
+
+**The header's audit count is pane-aware (WL-0MW8D4UQH002TWJV).** Admission
+keeps the marker's liveness-free rule on purpose (a slot is held from dispatch
+until a release point or staleness). The **display** does not: the worklist
+header's `audit n/max` uses `reduceAuditDisplayCounts` (through the single
+read-only `readHostBudgetStatus` reader), which excludes a fresh **confirmed**
+entry whose `paneId` is absent from the trusted live pane list. A pane closed
+outside the release paths therefore stops being reported immediately — the
+header shows `audit 0/1` as soon as the audit pane is gone, instead of a
+phantom slot for the remainder of the 2 h window.
+
+- Unconfirmed entries (no `paneId`, the reserve→spawn window) still count while
+  fresh, so a just-reserved audit is not hidden.
+- An absent live-pane list falls back to the marker-compatible freshness rule
+  (the display cannot distinguish "gone" from "unknown", and it never invents
+  a zero).
+- The display path remains strictly read-only: it never reaps or rewrites the
+  ledger (the sweep/staleness release owns cleanup).
+- This deliberately diverges from **admission**, which continues to count a
+  dead entry until it is released or reaped; the divergence is display-only and
+  cannot admit work.
 
 **Audit-cap unification (the choice, recorded).** The hard-coded host-wide
 audit cap of 1 — the `active-audit` marker in `machine-coordination.ts` — is
@@ -3250,7 +3487,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
 | `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
-| `packages/herdr/src/downtime-log.ts` | Coordination/dispatch rolling logs (per worklog root, retained) |
+| `packages/herdr/src/downtime-log*.ts` | The downtime-log module family: the barrel (`downtime-log.ts`, re-exports only) over the sibling modules — storage/rotation policy and atomic append (`downtime-log-storage.ts`), host-budget refusal vocabulary (`downtime-log-budget.ts`), coordination/decision log (`downtime-log-coordination.ts`), dispatch log and pane-close entries (`downtime-log-entries.ts`), dispatched-marker readers and suppression decisions (`downtime-log-markers.ts`), recent-dispatches projection and time blocks (`downtime-log-recent.ts`) (full layout: [downtime-log module layout](#downtime-log-module-layout-wl-0mvgkhft4003x6jw)) |
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
@@ -3717,6 +3954,10 @@ trace.
   item-ID-tab placement for worklist dispatch (both channels) and its
   fail-safe placeholder root-pane cleanup* (documented in *Interactive
   dispatch pane placement* above)
+- Work item: **WL-0MW5JE0SZ0057K30** *Dispatcher opening a pane but not
+  executing a command* — late placement (after host-budget admission) and
+  placeholder root-pane cleanup on every pre-spawn abort (documented in *No
+  orphaned placeholder pane* above)
 - Work item: **WL-0MUMA5OMH0024PN1** *When dispatching a new workload first
   scan all workspaces and panes for stalled work* (+ its children
   WL-0MUYMBK6H005PY16 settings / WL-0MUYMBMCG000Z4WP pane-record enrichment /

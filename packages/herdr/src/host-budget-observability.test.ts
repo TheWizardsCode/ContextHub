@@ -154,6 +154,9 @@ describe('host-budget observability convergence (AC5)', () => {
       const livePanes = makeLivePaneList([
         { paneId: 'pane-1', itemId: 'WL-IMP-1' },
         { paneId: 'pane-2', itemId: 'WL-IMP-2' },
+        // The audit pane is live so the pane-aware display counts it; a dead
+        // audit pane is covered separately in host-budget-status.test.ts.
+        { paneId: 'pane-3', itemId: 'WL-AUD-1' },
       ]);
       writeCaps(dir, { maxImplement: 2, maxAudit: 1 });
       writeBudgetLedger(dir, [
@@ -306,7 +309,14 @@ describe('host-budget observability convergence (AC5)', () => {
           '[worklog-plugin] Downtime audit tier skipped: host-budget-audit (live=2, max=2)\n',
         );
         const counter = hostBudgetStatusText(
-          readHostBudgetStatus({ dir, livePanes: [], now: T0, env: cleanEnv }),
+          readHostBudgetStatus({
+            dir,
+            // Both audit panes are live, so admission's freshness count and the
+            // pane-aware display agree on 2/2.
+            livePanes: makeLivePaneList([{ paneId: 'pane-9' }, { paneId: 'pane-10' }]),
+            now: T0,
+            env: cleanEnv,
+          }),
         );
         expect(counter).toBe('[budget: implement 0/2 · audit 2/2]');
         expect(counter).toContain(`audit ${entry?.budget?.live}/${entry?.budget?.max}`);

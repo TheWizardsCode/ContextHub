@@ -10,8 +10,10 @@
  *  - AC4 summary: `implement n/max · audit n/max`, `null` when the
  *    budget/ledger is unavailable, and the header renders nothing then;
  *  - AC5 rules: the summary counts through the ledger's own reductions
- *    (implement = fresh + live pane, audit = fresh, legacy marker included) and
- *    is strictly READ-ONLY — a display read never reaps or rewrites.
+ *    (implement = fresh + live pane, audit = pane-aware fresh — a confirmed
+ *    entry whose pane is gone is not displayed, and an absent live-pane list
+ *    falls back to the freshness rule — legacy marker included) and is
+ *    strictly READ-ONLY — a display read never reaps or rewrites.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -171,7 +173,7 @@ describe('readHostBudgetStatus — one read-only reader (AC5)', () => {
     });
   });
 
-  it('counts the implement tier by its live-pane rule and the audit tier by freshness', async () => {
+  it('counts the implement tier by its live-pane rule and the audit tier pane-aware', async () => {
     await withMachineDir((dir) => {
       writeCaps(dir, { maxImplement: 2, maxAudit: 2 });
       writeBudgetLedger(dir, [
@@ -189,7 +191,7 @@ describe('readHostBudgetStatus — one read-only reader (AC5)', () => {
           paneId: 'pane-not-live',
           heartbeatAt: new Date(NOW).toISOString(),
         }),
-        // Fresh audit with NO live pane: counted (marker-compatible rule).
+        // Unconfirmed audit (reserve→spawn window): counted while fresh.
         makeBudgetEntry({
           kind: 'audit',
           itemId: 'WL-AUDIT',
@@ -215,6 +217,58 @@ describe('readHostBudgetStatus — one read-only reader (AC5)', () => {
         audit: { live: 1, max: 2 },
       });
       expect(hostBudgetStatusText(status)).toBe('[budget: implement 1/2 · audit 1/2]');
+    });
+  });
+
+  it('does not count a fresh audit entry whose confirmed pane is gone', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { maxImplement: 2, maxAudit: 2 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-DEAD-AUDIT',
+          paneId: 'pane-gone',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-LIVE-AUDIT',
+          paneId: 'pane-live',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+
+      const status = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList([{ paneId: 'pane-live' }]),
+        now: NOW,
+        env: cleanEnv,
+      });
+      // The header must not claim the dead audit is in flight.
+      expect(status).toEqual({
+        implement: { live: 0, max: 2 },
+        audit: { live: 1, max: 2 },
+      });
+      expect(hostBudgetStatusText(status)).toBe('[budget: implement 0/2 · audit 1/2]');
+    });
+  });
+
+  it('falls back to the freshness rule when no live pane list is supplied', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { maxImplement: 2, maxAudit: 1 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-CONFIRMED',
+          paneId: 'pane-unknown',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      // No `livePanes`: the display cannot distinguish "gone" from "unknown",
+      // so it keeps the marker-compatible count rather than inventing a zero.
+      expect(readHostBudgetStatus({ dir, now: NOW, env: cleanEnv })).toMatchObject({
+        audit: { live: 1, max: 1 },
+      });
     });
   });
 

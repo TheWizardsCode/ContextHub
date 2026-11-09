@@ -62,7 +62,7 @@ which:
    moved again (the write settled mid-refresh), one final trailing refresh
    runs so the pane never shows a pre-commit snapshot.
 
-### 3. Cold-refresh cost (`fetcher.ts`)
+### 3. Cold-refresh cost (fetcher family)
 
 The default-view refresh now spawns far fewer `wl` processes:
 
@@ -76,7 +76,7 @@ The default-view refresh now spawns far fewer `wl` processes:
   synchronous open + pragmas + `initializeSchema`/`initializeFts` DDL on the
   UI event loop twice per refresh (~46–70 ms apiece on a large `worklog.db`).
   `doRefresh` now creates one `InProcessRefreshScope`
-  (`createInProcessRefreshScope` in `fetcher.ts`) and both helpers consume
+  (`createInProcessRefreshScope` in `fetcher.inprocess.ts`) and both helpers consume
   the SAME connection, closed in the refresh's `finally` — so the blocking
   cost is bounded at one open per refresh. Scope-less callers (e.g. the
   startup actionable-count load) still open a fresh per-call connection, and
@@ -154,6 +154,37 @@ npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-sec
 npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5 --query-set legacy
 npx tsx bench/herdr-refresh-perf.ts --json --query-set consolidated
 ```
+
+## Fetcher module layout
+
+The `packages/herdr/src/fetcher.ts` monolith was decomposed into cohesive leaf
+modules (parent WL-0MVGKH47T007GKN1). `fetcher.ts` is now a thin barrel that
+re-exports every consumer-imported symbol from `./fetcher.js`, so no consumer
+import path changed. The split is move-only: each leaf's behaviour is identical
+to the section it replaced, and every leaf carries a top-level doc comment
+naming its single responsibility. The `fetcher.split-guard.test.ts` gate freezes
+the public surface and enforces the 1,000-line ceiling, the dependency direction
+(no leaf imports the barrel) and the recorded cycle baseline.
+
+| Module | Single responsibility | Key exports |
+|---|---|---|
+| `fetcher.ts` | Thin barrel: re-exports the family and registers the two cache-invalidation hooks a leaf cannot wire itself. No declarations of its own. | the frozen 47-symbol surface (43 consumer-imported) |
+| `fetcher.types.ts` | Pure data types for the whole family (data shapes, in-process/refresh types, bundle and substitution shapes, claim result). | `WorkItem`, `WlError`, `BlockerRef`, `ReviewQueueState`, `ClaimResult`, `InProcessOpenStats`, `InProcessRefreshScope`, `DependencyTargetRef` |
+| `fetcher.args.ts` | `--worklog-dir` override, `wl` argument builders and the injectable `execFile` seam every `wl` spawn uses. | `buildWlArgs`, `buildWlArgsForRoot`, `setWorklogDir`, `getWorklogDir`, `setExecFileAsync`, `formatWlError` |
+| `fetcher.spawn-cap.ts` | Process-wide bounded `wl` read-spawn semaphore: the default/settable cap, strict-FIFO waiters and peak/queued stats. | `DEFAULT_WL_SPAWN_CAP`, `getWlSpawnCap`, `setWlSpawnCap`, `_wlSpawnStats` |
+| `fetcher.json.ts` | `wl`-payload JSON extraction and normalisation (`extractJson`, `normalizeItem`, `extractItems`). | `extractJson`, `extractItems` |
+| `fetcher.cli.ts` | `wl` CLI execution: binary probe, bounded timeout, retry, the in-flight read memo and write-path cache invalidation. | `runWl`, `DEFAULT_WL_TIMEOUT_MS`, `clearFetchMemo`, `_fetchMemoSize` |
+| `fetcher.inprocess.ts` | Fail-open in-process SQLite read path (`@worklog/shared` `WorklogDatabase`) and the shared refresh-scope connection. | `withInProcessDb`, `createInProcessRefreshScope`, `getInProcessOpenStats`, `resetInProcessOpenStats` |
+| `fetcher.worklist-bundle.ts` | The consolidated `wl worklist --json` read, its payload parser and the TTL-bounded snapshot / in-flight cache. | `WORKLIST_BUNDLE_SNAPSHOT_TTL_MS`, `fetchWorklistBundle`, `pendingWorklistBundle`, `recentWorklistBundle` |
+| `fetcher.review-queue.ts` | Review-queue banner state derivation and query, preferring the bundle already read this refresh over a second spawn. | `fetchReviewQueueState`, `reviewQueueArgs` |
+| `fetcher.root-substitution.ts` | Critical-child root substitution and the shared default-worklist assembly tail (dedupe, root ancestor, richer audit fields, select + regroup). | `mergeMandatoryAndSelect`, `assembleDefaultWorklist`, `mergeUniqueById` |
+| `fetcher.api.ts` | The per-query public fetch API over the `wl` CLI (next feed, stage/priority filters, details, outbound deps, blockers, actionable count, sync, children). | `fetchNextItems`, `fetchItemsByStage`, `fetchItemsByPriority`, `fetchItemDetails`, `fetchBlockersForItem`, `fetchOutboundDepsForItems`, `fetchActionableCount`, `fetchChildrenForItem`, `fetchChildrenForItems`, `runWlSync` |
+| `fetcher.claim.ts` | The dispatcher's work-item write mutations and the claim timeout bound. | `claimWorkItem`, `rollbackClaimWorkItem`, `markNeedsProducerReviewWorkItem` |
+| `fetcher.blockers.ts` | The active dependency-blocker predicate shared by the fetch API and the hydrator (keeps the `api ↔ hydrator` cycle type-only). | `isActiveBlocker` |
+
+Measured module sizes are recorded on the epic's close-out work item
+(WL-0MW08VZ5M003OK2X); every production `fetcher*.ts` module is comfortably
+below the 1,000-line ceiling.
 
 ## Verification
 
@@ -389,7 +420,7 @@ in-process failure degrades to it). Ten concurrent reads at 145 MB each is a
 | Budget item | Value | Enforcement |
 |---|---|---|
 | Per-spawn peak RSS | measured per profile/target in `large-db-budget.json` (`peakRssPerSpawnMb`; full-scale: ≤ ~130–145 MB baseline) | F1 refresh ratchet (`large-db-refresh-budget.test.ts`) |
-| **Concurrent `wl` read spawns per pane** | **`DEFAULT_WL_SPAWN_CAP = 1`** (`fetcher.ts` semaphore, FIFO, microtask handover) | **fetcher production code** + spawn-burst ratchet (`large-db-spawn-cap.test.ts`) |
+| **Concurrent `wl` read spawns per pane** | **`DEFAULT_WL_SPAWN_CAP = 1`** (`fetcher.spawn-cap.ts` semaphore, FIFO, microtask handover) | **fetcher production code** + spawn-burst ratchet (`large-db-spawn-cap.test.ts`) |
 | **Aggregate spawn-RSS bound** | **cap × worst-case cold per-spawn peak ≤ ~145–176 MB ≤ 300 MB ceiling** | spawn-burst policy (`evaluateSpawnCapReport`) |
 | Event-loop blocking with a spawn-heavy burst | ≤ ~200 ms (parent AC 1) | spawn-burst measured event-loop probe (CPU-attributed on-CPU time) |
 

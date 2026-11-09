@@ -2,8 +2,8 @@
   "version": 1,
   "provenance": {
     "generatedBy": "npx tsx packages/herdr/test/split-guard/dispatcher-anchor-family.ts --write-baseline",
-    "sourceCommit": "0ec88bab40c8143ebf621a3ea0d958b64f98c5f4",
-    "generatedAt": "2026-11-03T17:09:21.760Z",
+    "sourceCommit": "891b4f38837c131ed747b65ab9f16ae54db2599e",
+    "generatedAt": "2026-11-07T12:28:30.814Z",
     "barrel": "packages/herdr/src/dispatcher-anchor.ts",
     "consumerGlobs": [
       "packages/herdr/src/**/*.ts",
@@ -25,7 +25,9 @@
     "MachinePaneInfo",
     "PLUGIN_PANE_LABEL",
     "PaneProcessInfo",
+    "PlacementMode",
     "ProjectWorkspaceTarget",
+    "applyPlacementMode",
     "createDispatcherAnchorDeps",
     "createTabInWorkspace",
     "getDispatcherAnchor",
@@ -35,6 +37,7 @@
     "listMachinePanes",
     "listPanesInWorkspace",
     "listTabsInWorkspace",
+    "moveTabInWorkspace",
     "parseMachinePaneListOutput",
     "parsePaneListOutput",
     "parsePaneProcessInfoOutput",
@@ -42,7 +45,10 @@
     "parseTabCreateOutput",
     "parseTabListOutput",
     "readProcEnvironFile",
-    "resolveProjectWorkspace"
+    "resolveExtensionsTab",
+    "resolveHerdrSocketPath",
+    "resolveProjectWorkspace",
+    "sendHerdrSocketRequest"
   ],
   "valueSymbols": [
     "DISPATCHER_ANCHOR_FILE",
@@ -50,6 +56,7 @@
     "DISPATCHER_TAB_ANCHORS_FILE",
     "DISPATCHER_WORKSPACE_LABEL",
     "PLUGIN_PANE_LABEL",
+    "applyPlacementMode",
     "createDispatcherAnchorDeps",
     "createTabInWorkspace",
     "getDispatcherAnchor",
@@ -59,6 +66,7 @@
     "listMachinePanes",
     "listPanesInWorkspace",
     "listTabsInWorkspace",
+    "moveTabInWorkspace",
     "parseMachinePaneListOutput",
     "parsePaneListOutput",
     "parsePaneProcessInfoOutput",
@@ -66,7 +74,10 @@
     "parseTabCreateOutput",
     "parseTabListOutput",
     "readProcEnvironFile",
-    "resolveProjectWorkspace"
+    "resolveExtensionsTab",
+    "resolveHerdrSocketPath",
+    "resolveProjectWorkspace",
+    "sendHerdrSocketRequest"
   ],
   "typeSymbols": [
     "DispatcherAnchor",
@@ -78,6 +89,7 @@
     "ItemTabAnchor",
     "MachinePaneInfo",
     "PaneProcessInfo",
+    "PlacementMode",
     "ProjectWorkspaceTarget"
   ],
   "consumerSymbols": [
@@ -94,17 +106,22 @@
     "ItemTabAnchor",
     "MachinePaneInfo",
     "PLUGIN_PANE_LABEL",
+    "PlacementMode",
     "ProjectWorkspaceTarget",
+    "applyPlacementMode",
     "createDispatcherAnchorDeps",
     "getDispatcherAnchor",
     "getDispatcherTabAnchor",
     "getItemTabAnchor",
+    "moveTabInWorkspace",
     "parseMachinePaneListOutput",
     "parsePaneListOutput",
     "parsePaneProcessInfoOutput",
     "parseProcEnviron",
     "parseTabCreateOutput",
     "parseTabListOutput",
+    "resolveExtensionsTab",
+    "resolveHerdrSocketPath",
     "resolveProjectWorkspace"
   ]
 }

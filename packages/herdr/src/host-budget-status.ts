@@ -20,11 +20,23 @@
  * surfaces, and it does not count anything itself: it pairs the counts of the
  * SAME pure reductions the dispatcher's admission compares with the caps
  * (`reduceLedgerCounts` for the implement tier's live-pane rule,
- * `reduceMarkerCounts` + `legacyActiveAuditCount` for the audit tier's
- * marker-compatible rule). There is therefore no second counting or ranking
- * path: the decision log's `budget` evidence, the header token, the stderr
- * line and the worklist counter are all quoting the ledger through one set of
- * rules.
+ * `reduceAuditDisplayCounts` for the audit tier's pane-aware DISPLAY rule, or
+ * the marker-compatible `reduceMarkerCounts` when no live pane list is
+ * supplied, plus `legacyActiveAuditCount`). There is therefore no second
+ * counting or ranking path: the decision log's `budget` evidence, the header
+ * token, the stderr line and the worklist counter are all quoting the ledger
+ * through one set of rules.
+ *
+ * ## Audit display vs admission (WL-0MW8D4UQH002TWJV)
+ *
+ * Admission keeps the retired marker's semantics on purpose: an audit slot is
+ * held from dispatch until an explicit release point or the 2 h staleness
+ * window, so a reservation with no confirmed pane is still counted. The
+ * DISPLAY is deliberately stricter: a confirmed entry whose `paneId` is absent
+ * from the trusted live pane list has already closed, so the header must not
+ * claim it is in flight. Only the pane-aware exclusion differs; the live-pane
+ * list is required for it, and a caller that cannot supply one falls back to
+ * the freshness rule rather than inventing a zero.
  *
  * It also never writes: unlike `liveCount`/`freshCount` (which reap stale
  * entries on read because admission wants the cleanup), a DISPLAY read must
@@ -50,6 +62,7 @@ import {
   livePaneIdSet,
   readBudget,
   readBudgetConfig,
+  reduceAuditDisplayCounts,
   reduceLedgerCounts,
   reduceMarkerCounts,
   type HostBudgetConfig,
@@ -79,9 +92,12 @@ export interface HostBudgetStatus {
 /** Options for {@link readHostBudgetStatus} (ledger seams + the live pane list). */
 export interface HostBudgetStatusOptions extends HostBudgetOptions {
   /**
-   * The machine-wide live pane list. Only consulted for the implement tier's
-   * live-pane rule; absent means "no observed pane", which under-counts (the
-   * display is read-only, never an admission decision).
+   * The machine-wide live pane list. Consulted for the implement tier's
+   * live-pane rule and for the audit tier's pane-aware display rule; absent
+   * means "no observed pane", which under-counts (the display is read-only,
+   * never an admission decision). For the audit tier an absent list falls back
+   * to the marker-compatible freshness rule instead of excluding every
+   * confirmed entry.
    */
   livePanes?: readonly HostBudgetLivePane[];
 }
@@ -186,13 +202,17 @@ export function readHostBudgetStatus(
 
   const now = opts.now ?? Date.now();
   const windowMs = opts.staleWindowMs ?? HOST_BUDGET_STALE_WINDOW_MS;
-  const implement = reduceLedgerCounts(
-    read.ledger.entries,
-    livePaneIdSet(opts.livePanes ?? []),
-    now,
-    windowMs,
-  );
-  const audit = reduceMarkerCounts(read.ledger.entries, now, windowMs);
+  const livePaneIds = livePaneIdSet(opts.livePanes ?? []);
+  const implement = reduceLedgerCounts(read.ledger.entries, livePaneIds, now, windowMs);
+  // Pane-aware audit DISPLAY rule (WL-0MW8D4UQH002TWJV): a confirmed entry
+  // whose pane is gone is a dead audit and must not render as in flight.
+  // When the caller supplies no pane list we cannot distinguish "gone" from
+  // "unknown", so fall back to the marker-compatible freshness rule rather
+  // than inventing a zero (the production wiring always supplies a list).
+  const audit =
+    opts.livePanes === undefined
+      ? reduceMarkerCounts(read.ledger.entries, now, windowMs)
+      : reduceAuditDisplayCounts(read.ledger.entries, livePaneIds, now, windowMs);
   const legacy = legacyActiveAuditCount(dir, now, windowMs);
   const { config } = readBudgetConfig(ledgerOptions);
   return summariseHostBudget(

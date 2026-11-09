@@ -106,8 +106,6 @@ export interface UpdateOptions {
   tags?: string;
   assignee?: string;
   stage?: string;
-  /** Accepts true|false|yes|no to set or clear do-not-delegate tag */
-  doNotDelegate?: string;
   /** Accepts true|false|yes|no to set needsProducerReview flag */
   needsProducerReview?: string;
   risk?: string;
@@ -198,7 +196,7 @@ export interface CommentDeleteOptions { prefix?: string }
 export interface RecentOptions { number?: string; children?: boolean; prefix?: string }
 export interface CloseOptions { reason?: string; author?: string; prefix?: string; force?: boolean }
 
-export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: boolean }
+export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: boolean; reason?: string }
 
 export interface ReviewedOptions { prefix?: string }
 

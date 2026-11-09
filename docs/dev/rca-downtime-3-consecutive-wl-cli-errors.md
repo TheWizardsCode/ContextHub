@@ -126,7 +126,7 @@ in `packages/herdr/src/index.ts` (`createDowntimeDeps`) failed fast.
 
 ## Follow-ups
 
-- Consider adding the same transient retry to `packages/herdr/src/fetcher.ts`
+- Consider adding the same transient retry to `packages/herdr/src/fetcher.cli.ts`
   `runWl` for the TUI refresh path (same busy-timeout pragmas).
 - Monitor `.worklog/downtime-dispatches.log` for post-fix `error` distribution
   to confirm the transient class.

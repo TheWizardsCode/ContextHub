@@ -4,7 +4,8 @@ How `wl init` installs agent guidance into a project, how that local guidance
 relates to the global agent file, and why the model avoids duplication.
 
 > **Status:** documents the current behavior (verified against
-> `src/commands/init.ts` and `tests/cli/init.test.ts`).
+> `src/commands/init.register.ts`, `src/commands/init.agent-template.ts`,
+> `src/commands/init.workflow.ts` and `tests/cli/init.test.ts`).
 > The prior duplicated model (full template copy + pointer line) was retired
 > by SA-0MSITKWBP007VUJS. Workflow-setup delegation when the SorraAgents
 > global install is detected was implemented by WL-0MSIXMKOX0052514.
@@ -242,9 +243,13 @@ per the table below.
 
 ## Related
 
-- `src/commands/init.ts` — `ensureAgentTemplateInstalled`,
-  `promptAgentTemplateAction`, `ensureWorkflowTemplateInstalled`,
-  `CANONICAL_GLOBAL_REFERENCE_MARKER`, `WORKLOG_AGENT_TEMPLATE_RELATIVE_PATH`
+- `src/commands/init.agent-template.ts` — `ensureAgentTemplateInstalled`,
+  `promptAgentTemplateAction`, `resolveAgentDestination`
+- `src/commands/init.workflow.ts` — `ensureWorkflowTemplateInstalled`,
+  `insertWorkflowLoaderIntoAgents`, `promptWorkflowChoice`
+- `src/commands/init.constants.ts` — `CANONICAL_GLOBAL_REFERENCE_MARKER`,
+  `WORKLOG_AGENT_TEMPLATE_RELATIVE_PATH`
+- `src/commands/init.ts` — the thin public barrel those modules sit behind
 - `templates/AGENTS.md`, `templates/WORKFLOW.md` — the installed templates
 - `tests/cli/init.test.ts` — behavior tests (reference installation,
   idempotence, `--agents-template`, `--workflow-inline`)

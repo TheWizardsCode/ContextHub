@@ -88,6 +88,10 @@
  * | stale     | yes               | no      | no (pane still alive) |
  * | stale     | no                | no      | yes    |
  *
+ * A CONFIRMED entry (non-empty `paneId`) whose pane is absent from a trusted
+ * live list is additionally swept by {@link sweepClosedPanes} regardless of
+ * freshness (WL-0MW5KC8J300942EA), so a closed pane cannot pin a budget slot.
+ *
  * The window where a freshly reserved entry has no pane yet is why the
  * admission path must pass the `paneId` at reserve time whenever one exists;
  * reaping is bounded by the 2 h stale convention
@@ -489,6 +493,98 @@ export function reduceMarkerCounts(
   return { counts, retained, reaped };
 }
 
+/**
+ * Reduce a ledger for the AUDIT tier's DISPLAY count — pane-aware
+ * (WL-0MW8D4UQH002TWJV).
+ *
+ * The audit tier's ADMISSION rule is deliberately marker-compatible: it
+ * counts every fresh entry and ignores pane liveness ({@link reduceMarkerCounts}),
+ * so a slot is held from dispatch until an explicit release point or the 2 h
+ * staleness window. That is correct for admission, but wrong for the header: a
+ * CONFIRMED entry whose pane has closed is a dead audit, and the display must
+ * not claim it is still in flight for the rest of the staleness window.
+ *
+ * Display rule for a fresh entry:
+ *  - no `paneId` (reserve→spawn window, no pane evidence yet) → counted;
+ *  - `paneId` present in the trusted live-pane set → counted;
+ *  - `paneId` present but absent from the trusted live-pane set → NOT counted.
+ * Stale entries are excluded exactly as {@link reduceMarkerCounts} excludes
+ * them. The `implement` count is always 0 here — callers pair this reduction
+ * with {@link reduceLedgerCounts} for that tier.
+ *
+ * Pure and non-mutating: the display path NEVER reaps or rewrites the ledger
+ * (unlike {@link freshCount}), so `retained`/`reaped` are reported for symmetry
+ * only. `livePaneIds` MUST come from a trusted pane read; the caller decides
+ * what to do when it has no pane list (see `readHostBudgetStatus`).
+ */
+export function reduceAuditDisplayCounts(
+  entries: readonly HostBudgetEntry[],
+  livePaneIds: ReadonlySet<string>,
+  now: number,
+  staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
+): HostBudgetReduction {
+  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const retained: HostBudgetEntry[] = [];
+  const reaped: HostBudgetEntry[] = [];
+  for (const entry of entries) {
+    const confirmed =
+      typeof entry.paneId === 'string' && entry.paneId.length > 0;
+    const stale = isEntryStale(entry, now, staleWindowMs);
+    const deadConfirmed =
+      confirmed && !livePaneIds.has(entry.paneId as string);
+    if (stale || deadConfirmed) {
+      reaped.push(entry);
+      continue;
+    }
+    retained.push(entry);
+    if (entry.kind === 'audit') counts.audit += 1;
+  }
+  return { counts, retained, reaped };
+}
+
+/**
+ * Reduce a ledger by dropping CONFIRMED entries whose pane has closed
+ * (WL-0MW5KC8J300942EA).
+ *
+ * A "confirmed" entry is one whose `paneId` is non-empty — the dispatcher
+ * wrote the pane id back after the pane existed (`confirmHostDispatch`). When
+ * such a pane is absent from a TRUSTED machine-wide live pane list, the pane
+ * has closed: the entry is reaped immediately instead of waiting for the 2 h
+ * heartbeat-staleness window.
+ *
+ * Entries with NO `paneId` are the reserve→spawn window: there is no pane
+ * evidence to judge, so they are retained (and stay counted while fresh) —
+ * exactly the behaviour the staleness rule already provides. Stale entries are
+ * reaped as before.
+ *
+ * Pure — the sibling of {@link reduceLedgerCounts} / {@link reduceMarkerCounts}.
+ * `livePaneIds` MUST come from a trusted pane read; a failed read must not be
+ * passed as an empty set or every confirmed entry would be reaped.
+ */
+export function reduceClosedPaneSweep(
+  entries: readonly HostBudgetEntry[],
+  livePaneIds: ReadonlySet<string>,
+  now: number,
+  staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
+): HostBudgetReduction {
+  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const retained: HostBudgetEntry[] = [];
+  const reaped: HostBudgetEntry[] = [];
+  for (const entry of entries) {
+    const confirmed =
+      typeof entry.paneId === 'string' && entry.paneId.length > 0;
+    const hasLivePane = confirmed && livePaneIds.has(entry.paneId as string);
+    const stale = isEntryStale(entry, now, staleWindowMs);
+    if (stale || (confirmed && !hasLivePane)) {
+      reaped.push(entry);
+      continue;
+    }
+    retained.push(entry);
+    if (!stale && hasLivePane) counts[entry.kind] += 1;
+  }
+  return { counts, retained, reaped };
+}
+
 // ── Filesystem seams ───────────────────────────────────────────────────
 
 /** Absolute ledger path inside `dir`. */
@@ -793,6 +889,43 @@ export function reap(
   const livePaneIds = livePaneIdSet(livePanes);
   return withLedgerLock(dir, (ledger) => {
     const reduction = reduceLedgerCounts(ledger.entries, livePaneIds, now, windowMs);
+    if (
+      reduction.reaped.length > 0 &&
+      !writeBudgetAt(dir, { version: DISPATCH_BUDGET_VERSION, entries: reduction.retained })
+    ) {
+      return ioError();
+    }
+    return { ok: true as const, reaped: reduction.reaped.length, counts: reduction.counts };
+  });
+}
+
+/**
+ * Sweep CONFIRMED entries whose pane has closed (WL-0MW5KC8J300942EA).
+ *
+ * The dispatcher releases a ledger entry on every close path it owns, but a
+ * pane can also be closed by the operator, by herdr, or by a crashed session
+ * where no release fired. Waiting for the 2 h heartbeat-staleness window then
+ * leaves a dead audit entry holding `maxAudit` (the 2026-11-06 incident). This
+ * sweep uses a TRUSTED machine-wide live pane list to drop such entries as
+ * soon as their pane is gone, regardless of heartbeat freshness.
+ *
+ * `livePanes` must be a trusted list: a failed pane read must not be passed as
+ * an empty list, or every confirmed entry would be reaped (over-admission).
+ * Unconfirmed entries (no `paneId`) are retained; stale entries are reaped too.
+ * Idempotent and safe under the ledger lock; a corrupt ledger is never
+ * rewritten (the read fails and the sweep is a reported no-op).
+ */
+export function sweepClosedPanes(
+  livePanes: readonly HostBudgetLivePane[],
+  opts: HostBudgetOptions = {},
+): ReapResult {
+  const dir = resolveBudgetDir(opts);
+  if (dir === null) return noDir();
+  const now = opts.now ?? Date.now();
+  const windowMs = staleWindowOf(opts);
+  const livePaneIds = livePaneIdSet(livePanes);
+  return withLedgerLock(dir, (ledger) => {
+    const reduction = reduceClosedPaneSweep(ledger.entries, livePaneIds, now, windowMs);
     if (
       reduction.reaped.length > 0 &&
       !writeBudgetAt(dir, { version: DISPATCH_BUDGET_VERSION, entries: reduction.retained })

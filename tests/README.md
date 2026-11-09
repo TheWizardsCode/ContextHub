@@ -89,7 +89,6 @@ Tests live under the top-level `tests/` directory:
 - **`init.test.ts`** — `wl init` workflow
 - **`fresh-install.test.ts`** — Clean install scenario
 - **`update-batch.test.ts`** — Batch update operations
-- **`update-do-not-delegate.test.ts`** — Do-not-delegate flag handling
 - **`misc.test.ts`** — Miscellaneous CLI edge cases
 - **`helpers-tree-rendering.test.ts`** — Tree display formatting
 - **`action-opts-normalization.test.ts`** — Option normalization
@@ -117,7 +116,6 @@ Tests live under the top-level `tests/` directory:
 - **`tui-mouse-guard.test.ts`** — Mouse event handling
 - **`shutdown-flow.test.ts`** / **`event-cleanup.test.ts`** — Cleanup on exit
 - **`next-dialog-wrap.test.ts`** — Next dialog wrapping
-- **`toggle-do-not-delegate.test.ts`** — Do-not-delegate toggle in TUI
 
 ### Additional tests (migrated from the former `test/`)
 

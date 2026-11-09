@@ -188,7 +188,7 @@ therefore:
 
 - **clears the hold with a compare-and-swap** — `wl update <id> --status …
   --stage … --assignee "" --if-assignee <observed holder> --json`. The CAS
-  mirrors `rollbackClaimWorkItem()` in `fetcher.ts`, so a concurrent assignee
+  mirrors `rollbackClaimWorkItem()` in `fetcher.claim.ts`, so a concurrent assignee
   change is never clobbered; when the item had no holder there is no
   `--if-assignee` guard.
 - **records the previous holder in the release audit comment** — `wl comment

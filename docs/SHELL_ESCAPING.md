@@ -33,7 +33,7 @@ All files in `src/` that construct shell commands have been audited for proper e
 | `src/github/hierarchy.ts` | `quoteShellValue()` | Safe — every interpolated value is single‑quote wrapped |
 | `src/github/transport.ts` | Executes `gh` commands built upstream; interpolates no user text; re-exports `quoteShellValue()` | Safe — callers escape before building the command |
 | `src/commands/sync.ts` | No user text in shell commands | Safe — hardcoded git commands only |
-| `src/commands/init.ts` | No user text in shell commands | Safe — hardcoded git commands only |
+| `src/commands/init.hooks.ts` | No user text in shell commands | Safe — hardcoded git commands only |
 | `src/worklog-paths.ts` | No user text in shell commands | Safe — hardcoded git command only |
 | `src/pi-audit.ts` | `spawn()` with argument array, no shell | Safe — no shell parsing |
 | `src/wl-integration/spawn.ts` | `spawn()` with `{ shell: false }` | Safe — no shell parsing |

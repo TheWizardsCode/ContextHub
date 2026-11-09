@@ -20,6 +20,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { gitPushDataFileToBranch, type GitTarget } from '../src/sync.js';
+import { readInitFamilySource } from './cli/init/split-guard-scan.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -347,10 +348,7 @@ describe('pre-push hook worktree safety', () => {
   });
 
   it('installPrePushHook in src/commands/init.ts generates worktree-safe hook', () => {
-    const initSource = fs.readFileSync(
-      new URL('../src/commands/init.ts', import.meta.url),
-      'utf8'
-    );
+    const initSource = readInitFamilySource(path.join(__dirname, '..'));
     // The generated hookScript string should include worktree detection
     expect(initSource).toContain('tmp-worktree');
     expect(initSource).toContain('git-common-dir');
@@ -398,10 +396,7 @@ describe('post-checkout / post-pull hook worktree safety (WL-0MS99Y6R40028Q9G)',
   });
 
   it('src/commands/init.ts generates worktree-safe post-checkout hook content', () => {
-    const initSource = fs.readFileSync(
-      new URL('../src/commands/init.ts', import.meta.url),
-      'utf8'
-    );
+    const initSource = readInitFamilySource(path.join(__dirname, '..'));
     const idx = initSource.indexOf('const postCheckoutContent');
     expect(idx).toBeGreaterThan(-1);
     const block = initSource.slice(idx, idx + 4000);
@@ -411,10 +406,7 @@ describe('post-checkout / post-pull hook worktree safety (WL-0MS99Y6R40028Q9G)',
   });
 
   it('src/commands/init.ts generates worktree-safe central post-pull script content', () => {
-    const initSource = fs.readFileSync(
-      new URL('../src/commands/init.ts', import.meta.url),
-      'utf8'
-    );
+    const initSource = readInitFamilySource(path.join(__dirname, '..'));
     // Two central script templates exist: installPostPullHooks and installCommittedHooks.
     const first = initSource.indexOf('const centralScriptContent');
     const second = initSource.indexOf('const centralScriptContent', first + 1);

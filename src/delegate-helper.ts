@@ -24,14 +24,14 @@ export interface DelegateResult {
   assigned?: boolean;
   /** Human-readable error key or message when `success` is false. */
   error?: string;
+  /** Additional human-readable context for an error. */
+  message?: string;
   /** Warning messages that were produced but did not prevent delegation. */
   warnings?: string[];
 }
 
 /** Options accepted by `delegateWorkItem`. */
 export interface DelegateOptions {
-  /** Override the do-not-delegate tag guard rail. */
-  force?: boolean;
   /** Optional callback invoked at each major step of the delegate flow. */
   onProgress?: (step: string) => void;
 }
@@ -74,7 +74,7 @@ type AssignFn = typeof import('./github.js').assignGithubIssueAsync;
  * Execute the full delegate flow for a single work item:
  *
  * 1. Resolve item from DB (guard: not-found)
- * 2. Guard rail: do-not-delegate tag
+ * 2. Guard rail: non-empty assignee (scheduling hold)
  * 3. Guard rail: open children warning (non-blocking)
  * 4. Push item to GitHub via upsert
  * 5. Resolve GitHub issue number
@@ -111,19 +111,17 @@ export async function delegateWorkItem(
   }
 
   // ------------------------------------------------------------------
-  // 2. Guard rail: do-not-delegate tag
+  // 2. Guard rail: non-empty assignee (scheduling hold)
   // ------------------------------------------------------------------
-  if (Array.isArray(item.tags) && item.tags.includes('do-not-delegate')) {
-    if (!options.force) {
-      return {
-        success: false,
-        workItemId: itemId,
-        error: 'do-not-delegate',
-      };
-    }
-    warnings.push(
-      `Work item ${itemId} has a "do-not-delegate" tag. Proceeding due to --force.`,
-    );
+  if (typeof item.assignee === 'string' && item.assignee.trim() !== '') {
+    return {
+      success: false,
+      workItemId: itemId,
+      error: 'held-by-assignee',
+      message:
+        `Work item ${itemId} is held by assignee "${item.assignee}". ` +
+        `A non-empty assignee is the scheduling hold; clear it with --assignee "" to release the item before delegating.`,
+    };
   }
 
   // ------------------------------------------------------------------

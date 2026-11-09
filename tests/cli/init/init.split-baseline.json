@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "provenance": {
+    "generatedBy": "npx tsx tests/cli/init/split-guard-scan.ts --write-baseline",
+    "sourceCommit": "12138e0e9ddc7a487f872f08c60b61324882aa33",
+    "generatedAt": "2026-11-05T04:41:34.044Z",
+    "barrel": "src/commands/init.ts",
+    "consumerGlobs": [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "scripts/**/*.ts"
+    ]
+  },
+  "symbols": {
+    "value": [
+      "isSorraAgentsInstalled"
+    ],
+    "type": []
+  },
+  "defaultExport": true
+}

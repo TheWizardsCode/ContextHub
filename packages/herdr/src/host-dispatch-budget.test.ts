@@ -39,11 +39,14 @@ import {
   readBudget,
   readBudgetConfig,
   reap,
+  reduceAuditDisplayCounts,
+  reduceClosedPaneSweep,
   reduceLedgerCounts,
   reduceMarkerCounts,
   release,
   reserve,
   resolveBudgetConfig,
+  sweepClosedPanes,
   type HostBudgetEntry,
 } from './host-dispatch-budget.js';
 import { DOWNTIME_HOST_AUDIT_MARKER_FILE } from './machine-coordination.js';
@@ -341,6 +344,79 @@ describe('reduceMarkerCounts (pure marker-semantics reduction)', () => {
       heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS).toISOString(),
     });
     expect(reduceMarkerCounts([boundary], NOW).counts.audit).toBe(0);
+  });
+});
+
+describe('reduceAuditDisplayCounts (pane-aware audit DISPLAY reduction)', () => {
+  const entry = (overrides: Partial<HostBudgetEntry>): HostBudgetEntry =>
+    makeBudgetEntry(overrides) as HostBudgetEntry;
+  const live = livePaneIdSet([{ paneId: 'p1' }]);
+
+  it('excludes a fresh confirmed entry whose pane is gone, and counts live + unconfirmed', () => {
+    const entries = [
+      // Confirmed + dead pane: the audit has closed — must not display.
+      entry({ kind: 'audit', itemId: 'WL-DEAD', paneId: 'p-gone' }),
+      // Confirmed + live pane: displayed.
+      entry({ kind: 'audit', itemId: 'WL-LIVE', paneId: 'p1' }),
+      // Unconfirmed (reserve→spawn window): displayed while fresh.
+      entry({ kind: 'audit', itemId: 'WL-SPAWNING' }),
+      // Stale: never displayed, even with a live pane.
+      entry({
+        kind: 'audit',
+        itemId: 'WL-STALE',
+        paneId: 'p1',
+        heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS).toISOString(),
+      }),
+    ];
+    const reduction = reduceAuditDisplayCounts(entries, live, NOW);
+    expect(reduction.counts).toEqual({ implement: 0, audit: 2 });
+    expect(reduction.retained.map((e) => e.itemId)).toEqual(['WL-LIVE', 'WL-SPAWNING']);
+    expect(reduction.reaped.map((e) => e.itemId)).toEqual(['WL-DEAD', 'WL-STALE']);
+  });
+
+  it('never counts the implement tier (the display pairs it with reduceLedgerCounts)', () => {
+    const entries = [entry({ kind: 'implement', itemId: 'WL-IMPL', paneId: 'p1' })];
+    expect(reduceAuditDisplayCounts(entries, live, NOW).counts).toEqual({
+      implement: 0,
+      audit: 0,
+    });
+  });
+
+  it('treats an age of exactly the stale window as stale', () => {
+    const boundary = entry({
+      kind: 'audit',
+      itemId: 'WL-BOUNDARY',
+      paneId: 'p1',
+      heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS).toISOString(),
+    });
+    expect(reduceAuditDisplayCounts([boundary], live, NOW).counts.audit).toBe(0);
+  });
+
+  it('does not mutate its input', () => {
+    const entries = [entry({ kind: 'audit', itemId: 'WL-A', paneId: 'p-gone' })];
+    reduceAuditDisplayCounts(entries, live, NOW);
+    expect(entries).toHaveLength(1);
+  });
+});
+
+describe('reduceClosedPaneSweep (pure dead-pane sweep)', () => {
+  const entry = (overrides: Partial<HostBudgetEntry>): HostBudgetEntry =>
+    makeBudgetEntry(overrides) as HostBudgetEntry;
+  const live = livePaneIdSet([{ paneId: 'p1' }]);
+
+  it('reaps confirmed dead-pane entries regardless of freshness, retains the rest', () => {
+    const entries = [
+      // Confirmed + dead pane → reaped even though fresh.
+      entry({ kind: 'audit', itemId: 'WL-DEAD', paneId: 'p-gone' }),
+      // Unconfirmed (reserve→spawn window) → retained.
+      entry({ kind: 'audit', itemId: 'WL-SPAWNING' }),
+      // Confirmed + live pane → retained and counted.
+      entry({ kind: 'audit', itemId: 'WL-LIVE', paneId: 'p1' }),
+    ];
+    const reduction = reduceClosedPaneSweep(entries, live, NOW);
+    expect(reduction.reaped.map((e) => e.itemId)).toEqual(['WL-DEAD']);
+    expect(reduction.retained.map((e) => e.itemId)).toEqual(['WL-SPAWNING', 'WL-LIVE']);
+    expect(reduction.counts).toEqual({ implement: 0, audit: 1 });
   });
 });
 
@@ -819,6 +895,109 @@ describe('reap and liveCount', () => {
     ]) {
       expect(result).toEqual({ ok: false, unknown: false, reason: 'no-coordination-dir' });
     }
+  });
+});
+
+// ── Dead-pane sweep (WL-0MW5KC8J300942EA) ──────────────────────────────
+
+describe('sweepClosedPanes — confirmed entries whose pane closed', () => {
+  // One live dispatch pane id (`pane-1`).
+  const panes = makeLivePaneList(['WL-AUDIT-LIVE']);
+
+  it('reaps a FRESH confirmed audit entry whose pane is absent', async () => {
+    await withMachineDir((dir) => {
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-AUDIT-DEAD',
+          paneId: 'pane-gone',
+          // Fresh heartbeat: the staleness rule alone would retain it, so the
+          // sweep is what frees the audit cap (the 2026-11-06 incident).
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      const result = sweepClosedPanes(panes, { now: NOW });
+      expect(result).toEqual({ ok: true, reaped: 1, counts: { implement: 0, audit: 0 } });
+      const read = readBudget();
+      expect(read.ok).toBe(true);
+      if (!read.ok) return;
+      expect(read.ledger.entries).toEqual([]);
+    });
+  });
+
+  it('retains a fresh confirmed entry whose pane is live', async () => {
+    await withMachineDir((dir) => {
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-AUDIT-LIVE',
+          paneId: 'pane-1',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      expect(sweepClosedPanes(panes, { now: NOW })).toEqual({
+        ok: true,
+        reaped: 0,
+        counts: { implement: 0, audit: 1 },
+      });
+      expect(sweepClosedPanes(panes, { now: NOW })).toMatchObject({ reaped: 0 });
+    });
+  });
+
+  it('retains a fresh UNCONFIRMED entry (no paneId — the reserve→spawn window)', async () => {
+    await withMachineDir((dir) => {
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-AUDIT-SPAWNING',
+          // No paneId: reserved but not yet confirmed against a live pane.
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      expect(sweepClosedPanes(panes, { now: NOW })).toMatchObject({ ok: true, reaped: 0 });
+      const read = readBudget();
+      expect(read.ok).toBe(true);
+      if (!read.ok) return;
+      expect(read.ledger.entries.map((entry) => entry.itemId)).toEqual(['WL-AUDIT-SPAWNING']);
+    });
+  });
+
+  it('reaps stale entries even when their pane is live', async () => {
+    await withMachineDir((dir) => {
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-STALE-LIVE',
+          paneId: 'pane-1',
+          heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString(),
+        }),
+      ]);
+      expect(sweepClosedPanes(panes, { now: NOW })).toMatchObject({ ok: true, reaped: 1 });
+    });
+  });
+
+  it('is a no-op (no rewrite) when nothing needs reaping', async () => {
+    await withMachineDir((dir) => {
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-AUDIT-LIVE',
+          paneId: 'pane-1',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      const before = readFileSync(budgetLedgerPath(dir), 'utf8');
+      expect(sweepClosedPanes(panes, { now: NOW })).toMatchObject({ ok: true, reaped: 0 });
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    });
+  });
+
+  it('degrades to "no ledger" for an unresolvable coordination dir', () => {
+    expect(sweepClosedPanes([], { dir: null, now: NOW })).toEqual({
+      ok: false,
+      unknown: false,
+      reason: 'no-coordination-dir',
+    });
   });
 });
 

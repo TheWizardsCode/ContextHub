@@ -67,6 +67,8 @@ export interface DispatcherPrefixTabAnchor {
   paneId: string;
 }
 
+export type PlacementMode = 'right' | 'left-of-extensions';
+
 export interface DispatcherAnchorDeps {
   /** Create a workspace. Resolves to { workspaceId, paneId } or throws. */
   createWorkspace(label: string): Promise<{ workspaceId: string; paneId: string }>;
@@ -113,6 +115,14 @@ export interface DispatcherAnchorDeps {
    * Optional; production supplies it.
    */
   readProcEnviron?(shellPid: string): Promise<string | null>;
+  /**
+   * Move a tab within a workspace to a specific insert index using the herdr
+   * socket API (`tab.move` with `insert_index`). Returns true on success,
+   * false on CLI/socket failure — never throws. Used for left-of-extensions
+   * placement of interactive dispatches (WL-0MVZ88G51004IYHW). Optional;
+   * production supplies it; absent in legacy/test callers.
+   */
+  moveTab?(workspaceId: string, tabId: string, insertIndex: number): Promise<boolean>;
 }
 
 /** One parsed `herdr tab list` record (id + label, plus agent liveness). */
