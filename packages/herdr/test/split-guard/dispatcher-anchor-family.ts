@@ -138,8 +138,8 @@ export const KNOWN_CONSUMER_FILES: readonly string[] = [
   'packages/herdr/src/downtime-worker.worker-contract.ts',
   'packages/herdr/src/hydrator.ts',
   'packages/herdr/src/index.anchor-resolvers.ts',
+  'packages/herdr/src/index.fixtures.ts',
   'packages/herdr/src/index.interactive.ts',
-  'packages/herdr/src/index.test.ts',
   'packages/herdr/src/index.ts',
   'tests/herdr/dispatcher-anchor.integration.test.ts',
 ];
