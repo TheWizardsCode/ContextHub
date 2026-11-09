@@ -113,3 +113,45 @@ describe('doctor status/stage validation', () => {
     expect(stageFinding?.safe).toBe(true);
   });
 });
+
+// ── WL-0MW7S20IC001F3AP / WL-0MW8EYL3Q008TSYL: no new doctor findings ──
+//
+// Option A makes `status=deleted` OR a non-empty `deletedBy` the definition of
+// soft-deleted. Soft-deleted rows are excluded from the live read/selection
+// paths and are immutable, so their retained status/stage combination must not
+// surface as a doctor finding. The exemption is scoped to soft-deleted rows;
+// genuinely incompatible live rows are still flagged.
+describe('soft-deleted rows are not flagged (WL-0MW7S20IC001F3AP)', () => {
+  it('does not flag a status=deleted row with a retained incompatible stage (AC2)', () => {
+    const item = baseItem({ id: 'WL-DELETED-IN-REVIEW', status: 'deleted', stage: 'in_review', deletedBy: 'repairer@example.com' });
+    expect(validateStatusStageItems([item], rules)).toEqual([]);
+  });
+
+  it('does not flag a status=deleted row even when deletedBy is empty (soft-delete predicate)', () => {
+    const item = baseItem({ id: 'WL-DELETED-NO-ATTR', status: 'deleted', stage: 'in_review' });
+    expect(validateStatusStageItems([item], rules)).toEqual([]);
+  });
+
+  it('does not flag a live row that retains a non-empty deletedBy (AC4)', () => {
+    // completed + idea would be incompatible for a live row; the retained
+    // deletedBy marks it soft-deleted, so doctor stays quiet.
+    const item = baseItem({ id: 'WL-ATTRIBUTED-COMPLETED', status: 'completed', stage: 'idea', deletedBy: 'repairer@example.com' });
+    expect(validateStatusStageItems([item], rules)).toEqual([]);
+  });
+
+  it('still flags a genuinely incompatible LIVE row (exemption is scoped to soft-deleted)', () => {
+    const item = baseItem({ id: 'WL-LIVE-INCOMPATIBLE', status: 'completed', stage: 'idea' });
+    const findings = validateStatusStageItems([item], rules);
+    expect(findings.map(f => f.type)).toContain('incompatible-status-stage');
+  });
+
+  it('still flags an invalid status/stage on a LIVE row', () => {
+    const items = [
+      baseItem({ id: 'WL-LIVE-BAD-STATUS', status: 'invalid' as any, stage: 'idea' }),
+      baseItem({ id: 'WL-LIVE-BAD-STAGE', status: 'open', stage: 'blocked' }),
+    ];
+    const types = validateStatusStageItems(items, rules).map(f => f.type);
+    expect(types).toContain('invalid-status');
+    expect(types).toContain('invalid-stage');
+  });
+});
