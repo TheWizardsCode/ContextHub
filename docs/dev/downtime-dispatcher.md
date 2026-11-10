@@ -43,6 +43,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
 | `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
 | `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (provisional — no server yet) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON` |
+| `downtime-worker.audit-availability.ts` | The fail-closed audit-availability `GET` client — one bounded call, one typed outcome (no dispatch consumer yet) | `createAuditAvailabilityClient` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (one item per instance per check-in) | `computeMostImportantItem`, `coordinationTierRank` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
@@ -923,19 +924,58 @@ admission and a proxy refusal from disagreeing (parent AC2). Additive proxy
 fields are ignored, so the contract can evolve without breaking this reader.
 
 **No behaviour change.** Nothing on a production dispatch path imports the
-parser or reads the path constant yet — the client
-(`WL-0MWAMSCOP003R837`) and the audit gate (`WL-0MWAMSDNW000SL0E`) are its
-first consumers, and the contract test asserts the absence so an accidental
-early consumer is caught. `AUDIT_AVAILABILITY_PATH` lives in
-`downtime-worker.constants.ts`; the contract module and its key symbols are
-re-exported from the `downtime-worker.ts` barrel for those children only.
+parser, the path constant or the client yet — the client
+(`WL-0MWAMSCOP003R837`) is the contract's first consumer, and the audit gate
+(`WL-0MWAMSDNW000SL0E`) is the client's. The contract test pins the allowed
+reader set, so an accidental early dispatch-path consumer is caught (it must
+widen that set deliberately). `AUDIT_AVAILABILITY_PATH` lives in
+`downtime-worker.constants.ts`; the contract module, the client and their key
+symbols are re-exported from the `downtime-worker.ts` barrel for those
+children only.
+
+**The client** (`packages/herdr/src/downtime-worker.audit-availability.ts`,
+child `WL-0MWAMSCOP003R837`) is the counterpart of `createLocalReserver` and
+`createDowntimePoller`:
+
+```
+createAuditAvailabilityClient(proxyUrl, fetcher = globalThis.fetch, timeoutMs = DEFAULT_DOWNTIME_POLL_TIMEOUT_MS)
+  -> () => Promise<AuditAvailabilityOutcome>
+```
+
+One call = one `GET {proxyUrl}{AUDIT_AVAILABILITY_PATH}` (URL normalised with
+the reserve client's trailing-slash convention, `accept: application/json`),
+bounded by the poller's timeout. It **never throws** and resolves exactly one
+typed outcome:
+
+| Outcome | Cause |
+|---|---|
+| `{ status: 'ok', availability }` | 2xx **and** the pinned parser accepts the body |
+| `{ status: 'endpoint-absent', reason: 'http-404' }` | the proxy predates the endpoint (the sibling proxy item has not shipped) |
+| `{ status: 'unreachable', reason: 'timeout' }` | the timeout expired — the request is **aborted**, not merely ignored |
+| `{ status: 'unreachable', reason: 'network' }` | connection refused / DNS failure / the fetcher threw |
+| `{ status: 'unreachable', reason: 'http-<status>' }` | any other non-2xx status (a contract-break `400` is distinct from `404`) |
+| `{ status: 'unparsable', reason: 'bad-body' }` | 2xx with a non-JSON body or a body the parser rejects (never `ok` with partial data) |
+
+The `404` check precedes the general non-2xx case, so a rollout gap can never
+be mistaken for an outage or a contract break. The abort timer is cleared on
+every path (no open handle after a call). The audit gate maps `endpoint-absent`,
+`unreachable` and `unparsable` to the fail-closed `audit-budget-unknown` reason
+(parent AC3).
 
 **Tests.** `downtime-worker.audit-availability.contract.test.ts` is table-driven
 and pins grant / saturated / alias spellings / absent and empty lease arrays /
 additive extra fields / non-derived `available` / every malformed shape
 (non-object, missing or non-finite or negative numbers, non-boolean verdict,
 non-array `leases`, malformed lease entries) / non-2xx statuses, plus the
-barrel re-export and the "no production consumer yet" guard.
+barrel re-export and the allowed-reader-set guard.
+`downtime-worker.audit-availability.test.ts` drives the client through an
+injected fetcher: the GET URL/method/header, the trailing-slash normalisation,
+the typed success (including `leases`/`reclaimed`/`reason`), `404` →
+`endpoint-absent`, `400`/`5xx` → `unreachable`/`http-<status>`, a network
+rejection and a synchronous throw → `unreachable`/`network`, an expired timeout
+→ `unreachable`/`timeout` with the signal **asserted aborted**, non-JSON and
+parser-rejected bodies → `unparsable`/`bad-body`, and the abort timer cleared
+(`vi.getTimerCount() === 0`) on both the success and failure paths.
 
 ### One launch per idle window (parent WL-0MVIKRFP0005JDL8 AC3, slice C3)
 

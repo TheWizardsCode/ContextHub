@@ -237,12 +237,19 @@ describe('barrel wiring and contract pinning (AC1, AC5)', () => {
   });
 
   const CONTRACT_MODULE = 'downtime-worker.audit-availability.contract';
-  /** Files allowed to reference the contract module / its path constant. */
+  /**
+   * Files allowed to reference the contract module / its path constant. The
+   * CLIENT is the contract's documented first consumer
+   * (WL-0MWAMSCOP003R837); the audit gate (WL-0MWAMSDNW000SL0E) is the next,
+   * and it must widen this set deliberately — an accidental dispatch-path
+   * consumer still fails here.
+   */
   const ALLOWED = new Set([
     `${CONTRACT_MODULE}.ts`,
     `${CONTRACT_MODULE}.test.ts`,
     'downtime-worker.ts', // the barrel re-export
     'downtime-worker.constants.ts', // declares AUDIT_AVAILABILITY_PATH
+    'downtime-worker.audit-availability.ts', // the client (first consumer)
   ]);
 
   function productionSources(): string[] {
@@ -251,14 +258,14 @@ describe('barrel wiring and contract pinning (AC1, AC5)', () => {
       .filter((name) => !ALLOWED.has(name));
   }
 
-  it('is not imported by any production dispatch module yet (no behaviour change)', () => {
+  it('is imported only by the pinned readers, not by a production dispatch module yet', () => {
     const importers = productionSources().filter((name) =>
       readFileSync(join(here, name), 'utf8').includes(`./${CONTRACT_MODULE}.js`),
     );
     expect(importers).toEqual([]);
   });
 
-  it('has no production reader of AUDIT_AVAILABILITY_PATH yet', () => {
+  it('has no production reader of AUDIT_AVAILABILITY_PATH outside the pinned client', () => {
     const readers = productionSources().filter((name) =>
       readFileSync(join(here, name), 'utf8').includes('AUDIT_AVAILABILITY_PATH'),
     );

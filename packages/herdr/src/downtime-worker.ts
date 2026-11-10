@@ -234,6 +234,15 @@ export type {
   AuditAvailability,
   AuditAvailabilityLease,
 } from './downtime-worker.audit-availability.contract.js';
+// The fail-closed client (WL-0MWAMSCOP003R837): one bounded GET per call,
+// resolved as a typed outcome. Not called on the dispatch path yet — the audit
+// gate (WL-0MWAMSDNW000SL0E) is its first consumer.
+export { createAuditAvailabilityClient } from './downtime-worker.audit-availability.js';
+export type {
+  AuditAvailabilityClient,
+  AuditAvailabilityFetcher,
+  AuditAvailabilityOutcome,
+} from './downtime-worker.audit-availability.js';
 
 // ── Observed routing outcome (WL-0MVWEZF4Z004UNYT AC10) ──────────────
 // Reader + split computation over the bounded route log (`local-route.log`,
