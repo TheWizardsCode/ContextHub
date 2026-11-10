@@ -455,8 +455,13 @@ function emitAuditBudgetEvent(
 }
 
 /**
- * The audit tier's admission read — the pre-check the dispatcher's
- * `getActiveAudit` consults where the retired `active-audit` marker was read.
+ * The audit tier's LEGACY budget read (WL-0MVXY0XPF006YUHA F2) — the one-release
+ * `HERDR_AUDIT_LOCAL_BUDGET=1` pre-check and the local evidence source.
+ *
+ * Since WL-0MW95GBEG005ERHS the DEFAULT audit pre-check is the proxy's
+ * availability read (`decideAuditAvailability`); this local read is no longer
+ * consulted on that path. It remains the legacy decision when the flag is set,
+ * and `readAuditLocalEvidence` still uses its count for divergence evidence.
  *
  * Never throws and never reserves. The order is significant:
  *

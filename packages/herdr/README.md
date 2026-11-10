@@ -264,7 +264,8 @@ The plugin respects the following environment variables:
 - `WL_COUNT` — Number of work items to fetch (default: 20, now superseded by `browseItemCount` in settings)
 - `HERDR_SOCKET_PATH` — Path to the herdr Unix socket used by the event subscription (default `~/.config/herdr/herdr.sock`). When unset/unreachable the plugin falls back to polling.
 - `HERDR_COORDINATION_DIR` — Machine coordination directory override (default `~/.herdr/downtime`); the host dispatch-budget ledger and its `budget.json` live here.
-- `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — Per-tier machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. Values clamp to `0`–`32`; `0` disables that tier host-wide (a per-tier kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`). See *Host-wide dispatch budget* under the downtime worker.
+- `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — Per-tier machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. Values clamp to `0`–`32`; `0` disables that tier host-wide (a per-tier kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`). `HERDR_HOST_MAX_IMPLEMENT` governs the implement tier; **`maxAudit` / `HERDR_HOST_MAX_AUDIT` are implement-tier-only for audit admission** — the audit budget is owned by the proxy (below), and `maxAudit` is only the one-release legacy cap and the local observability figure. See *Host-wide dispatch budget* under the downtime worker.
+- `HERDR_AUDIT_LOCAL_BUDGET` — **one-release** escape hatch (`=1`) restoring the pre-proxy audit decision (`budget.json` `maxAudit` + the local ledger, never consulting the proxy). It is removed in the release after the proxy side (`LP-0MW95FYMH006XYNK`) ships. Unset → the proxy-owned audit budget is authoritative. The proxy URL is `downtimeProxyUrl` in `~/.config/herdr/worklog-plugin.json` (default `http://192.168.0.199:8000`), the same URL the status poller and reserve client use.
 
 #### Plugin Settings (config file)
 
@@ -508,36 +509,49 @@ dispatches; the other herdr instances coordinate instead of polling:
   never a `no-candidate` cooldown, never an evicted coordination entry, and
   deliberately NOT counted as local-model capacity starvation. See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-cpu-dispatch-gate-wl-0mvk0uo3q002txw6).
-- **Host-wide dispatch budget (WL-0MVXWQFGV000D2AB, F1–F5)** — the operator
-  can cap how many `implement` and `audit` panes this **machine** runs at
-  once, regardless of how many herdr instances or projects are open. The
-  budget is a machine-scoped ledger
-  (`~/.herdr/downtime/dispatch-budget.json`, one entry per in-flight dispatch)
-  with per-tier caps in `~/.herdr/downtime/budget.json` (`{"maxImplement":
-  2, "maxAudit": 1}`; `0` disables a tier host-wide), overridable by
-  `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — **not** a per-instance
-  `settings.json` key, deliberately: a host cap stored per instance drifts by
-  construction (which is why `downtimeRequiredFreeSlots` cannot express it),
-  while one elected leader already dispatches for every root so a machine
-  file is authoritative. Dispatcher-fired work over quota is a neutral skip
-  (`host-budget-implement` / `host-budget-audit` /
-  `audit-host-saturated`), never a prompt and never a `no-candidate`
-  cooldown; an unreadable ledger **fails closed** there
-  (`host-budget-unknown`, self-healing rewrite from the live pane list).
-  User-fired `/skill:implement` / `/skill:audit` shortcuts (pane **and**
-  headless `open_pane: false`) instead open a bottom-anchored dialog when the
-  tier is at cap — `Enter`/`y` proceeds, `Esc`/`n` cancels;
-  cancel is the state on open; a proceed records `override: { by: "user" }`
-  on the ledger entry so a deliberate human override is distinguishable from
-  drift; that path **fails open with a visible notice** if the ledger is corrupt.
-  The audit dialog quotes the same pane-aware count the worklist header shows,
-  so a dead (pane-gone) audit no longer inflates the prompt (WL-0MW8IQNY7003JIOL).
-  The budget only ever reduces concurrency below the free-slot/prefill gates
-  (the WL-0MU2EP6JL006A1U3 "no client-side pane cap" boundary is preserved —
-  the inner limiter is unchanged), and it is not capacity starvation. The
-  retired `active-audit` marker is read for exactly one release of
-  compatibility. See
-  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope).
+- **Host-wide dispatch budget (WL-0MVXWQFGV000D2AB, F1–F5; audit admission
+  proxy-derived by WL-0MW95GBEG005ERHS)** — the operator can cap how many
+  agent panes this **machine** runs at once, regardless of how many herdr
+  instances or projects are open.
+  - **Implement tier** — a machine-scoped ledger
+    (`~/.herdr/downtime/dispatch-budget.json`, one entry per in-flight
+    dispatch) with the cap in `~/.herdr/downtime/budget.json` (`maxImplement:
+    2`; `0` disables the tier host-wide), overridable by
+    `HERDR_HOST_MAX_IMPLEMENT` — **not** a per-instance `settings.json` key,
+    deliberately: a host cap stored per instance drifts by construction (which
+    is why `downtimeRequiredFreeSlots` cannot express it), while one elected
+    leader already dispatches for every root so a machine file is
+    authoritative. Dispatcher-fired work over quota is a neutral skip
+    (`host-budget-implement`), never a prompt and never a `no-candidate`
+    cooldown; an unreadable ledger **fails closed** there
+    (`host-budget-unknown`, self-healing rewrite from the live pane list).
+  - **Audit tier is proxy-derived (cross-machine)** — the audit budget and the
+    live audit-lease registry are **owned by the proxy** (the one local
+    `llama-server` GPU every ContextHub host shares), and herdr queries
+    `GET {proxyUrl}/llama/local/audit/status` (URL from `downtimeProxyUrl`),
+    mapping the verdict to a refusal with the proxy's own tokens
+    (`audit-budget-saturated`; or `audit-budget-unknown` when the read fails
+    closed). A proxy/local disagreement is logged with both sides' evidence
+    (`audit-budget-divergence`). The local ledger's audit entries are
+    **observability only** (header/dialog/sweep) and can never refuse an
+    audit; `budget.json` `maxAudit` / `HERDR_HOST_MAX_AUDIT` are
+    implement-tier-only for admission. The one-release
+    `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
+    decision for a single release.
+  - User-fired `/skill:implement` / `/skill:audit` shortcuts (pane **and**
+    headless `open_pane: false`) instead open a bottom-anchored dialog when the
+    tier is at cap — `Enter`/`y` proceeds, `Esc`/`n` cancels;
+    cancel is the state on open; a proceed records `override: { by: "user" }`
+    on the ledger entry so a deliberate human override is distinguishable from
+    drift; that path **fails open with a visible notice** if the ledger is corrupt.
+    The audit dialog quotes the same pane-aware count the worklist header shows,
+    so a dead (pane-gone) audit no longer inflates the prompt (WL-0MW8IQNY7003JIOL).
+  - The budget only ever reduces concurrency below the free-slot/prefill gates
+    (the WL-0MU2EP6JL006A1U3 "no client-side pane cap" boundary is preserved —
+    the inner limiter is unchanged), and it is not capacity starvation. The
+    retired `active-audit` marker is read for exactly one release of
+    compatibility. See
+    [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope).
   The ledger covers **dispatched agent panes** only: a release's own
   subprocesses (`audit_runner.py`, `run_tests.py`, `git`/`gh`) and the
   `/skill:ship` command bypass it entirely, and the per-root **code-freeze**
@@ -707,8 +721,9 @@ pacing* below).
   audit) is at or above `browseItemCount`, one continuous idle window may
   issue this many **sequential** audits because the dispatcher's own
   post-dispatch reset is deferred between them (a busy poll still requires a
-  fresh idle run). At most **`maxAudit`** audits are active at a time host-wide
-  (default `1`, see *Single-active-audit guarantee* below); the cap only drains
+  fresh idle run). At most the **proxy's audit cap** audits are active at a
+  time across hosts (the proxy-owned budget; `maxAudit` only on the one-release
+  legacy path — see *Single-active-audit guarantee* below); the cap only drains
   a deep queue faster. `1` disables batching and restores the legacy
   single-dispatch-per-idle-window behaviour (default: `2`, clamped to 1 – 5)
 - `downtimeStallScanEnabled` — Enable the pre-dispatch stalled-work scan
@@ -1086,15 +1101,19 @@ Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
 makes the item dispatchable again on the next idle poll.
 
 > **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV; host-wide cap
-> generalised by WL-0MVXY0XPF006YUHA F2):** exactly one
-> audit is dispatched at a time during downtime dispatch by **default** —
-> strictly sequential, never fan-out across candidates. The host-wide
-> **dispatch budget** is the outermost audit-concurrency gate
-> (`maxAudit`, default `1`; see *Host-wide dispatch budget* above), counted
-> by the machine-scoped ledger with the retired `active-audit` marker read as
-> one synthetic entry for a release of compatibility. Beneath it, before the
+> generalised by WL-0MVXY0XPF006YUHA F2; proxy-derived by WL-0MW95GBEG005ERHS):**
+> exactly one audit is dispatched at a time during downtime dispatch by
+> **default** — strictly sequential, never fan-out across candidates. The
+> **proxy-owned audit budget** is the outermost audit-concurrency gate
+> (see *Host-wide dispatch budget* above): the proxy owns the cap and the live
+> audit-lease registry, and herdr reads its verdict from
+> `GET {proxyUrl}/llama/local/audit/status`, refusing with
+> `audit-budget-saturated` (or `audit-budget-unknown` when the read fails
+> closed). The local ledger's audit entries are **observability only** — they
+> can never refuse an audit; `budget.json` `maxAudit` is only the one-release
+> legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`). Beneath the proxy gate, before the
 > audit tier selects a candidate, the worker runs the host-wide audit-budget
-> check (`getActiveAudit`, which reads the machine-scoped ledger first and the
+> check (`getActiveAudit`, which reads the proxy availability first and the
 > per-worklog dispatch log beneath it): it reads the shared
 > `.worklog/downtime-dispatches.log`
 > (the cross-instance source of truth — an audit dispatched by ANY
@@ -1138,8 +1157,9 @@ makes the item dispatchable again on the next idle poll.
 > exclusion) and any non-`dispatched` outcome ends the batch. A busy poll
 > (including the audit pane's own proxy activity) resets the idle run and ends
 > the batch window, so the batch never relaxes the idle-duration gate. The
-> guarantee above is unchanged: with the default `maxAudit: 1`, exactly one
-> audit runs at a time, and batching is not concurrency relaxation. In
+> guarantee above is unchanged: with the proxy's default audit cap of one
+> lease, exactly one audit runs at a time, and batching is not concurrency
+> relaxation. In
 > coordination mode the leader continues
 > from its own Herdr head and defers its own-backlog leadership hand-off to
 > batch end. Set `downtimeAuditBatchMax` to `1` to restore

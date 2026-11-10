@@ -16,12 +16,26 @@
  * consumable per-tier caps come from `readBudgetConfig`, and the interactive
  * over-quota dialog / observability surfaces are F4/F5.
  *
+ * ## Audit admission authority (WL-0MW95GBEG005ERHS)
+ *
+ * For the **audit tier** this ledger's audit entries and `budget.json`
+ * `maxAudit` are **observability only**: the authoritative audit budget and
+ * live audit-lease registry are the PROXY's, read by herdr over HTTP
+ * (`GET {proxyUrl}/llama/local/audit/status`). The ledger still records audit
+ * entries so the header, the interactive dialog, the dead-pane sweep and the
+ * release paths work, but an audit entry can never refuse an audit. `maxAudit`
+ * is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local
+ * figure the divergence log compares against. The **implement tier** keeps the
+ * per-host ledger + `maxImplement` cap unchanged.
+ *
  * ## Files (machine coordination dir — `~/.herdr/downtime` or
  * ## `HERDR_COORDINATION_DIR`, see `machine-coordination.ts`)
  *
  *  - `dispatch-budget.json` — the ledger (this module's only write target).
  *  - `budget.json` — the per-tier caps (read-only here; the operator writes it):
- *    `{ "maxImplement": 2, "maxAudit": 1 }`.
+ *    `{ "maxImplement": 2, "maxAudit": 1 }`. `maxImplement` governs the
+ *    implement tier; `maxAudit` is the legacy/observability figure only (see
+ *    the audit-admission-authority note above).
  *
  * ## Ledger shape (version 1)
  *
@@ -68,15 +82,20 @@
  *    list, and reaps stale, pane-less entries on read so a crashed leader
  *    cannot wedge the host. A reap write is best-effort: the count already
  *    excludes those entries, so lock contention only defers the cleanup.
- *  - `freshCount(kind)` — the AUDIT tier's admission read: counts every entry
- *    of that kind whose heartbeat is fresh, with no live-pane requirement, and
- *    reaps every stale entry. This is the semantics of the retired host-wide
- *    `active-audit` marker (WL-0MVXY0XPF006YUHA F2): an audit slot is held from
- *    the dispatch until a release point fires (pane close, dispatch failure,
- *    claim rollback) and is released by staleness after the 2 h window — the
- *    pane list is not a release point for the audit tier. It also counts a
- *    non-stale legacy `active-audit` marker file as ONE synthetic audit entry
- *    (retirement read-compatibility) and never writes or removes that file.
+ *  - `freshCount(kind)` — the AUDIT tier's **legacy/observability** read:
+ *    counts every entry of that kind whose heartbeat is fresh, with no
+ *    live-pane requirement, and reaps every stale entry. This is the semantics
+ *    of the retired host-wide `active-audit` marker (WL-0MVXY0XPF006YUHA F2):
+ *    an audit slot is held from the dispatch until a release point fires (pane
+ *    close, dispatch failure, claim rollback) and is released by staleness
+ *    after the 2 h window — the pane list is not a release point for the audit
+ *    tier. It also counts a non-stale legacy `active-audit` marker file as ONE
+ *    synthetic audit entry (retirement read-compatibility) and never writes or
+ *    removes that file. Since WL-0MW95GBEG005ERHS the audit tier's ADMISSION
+ *    authority is the proxy's audit-availability read; this count is used for
+ *    the observability surfaces, the divergence evidence and the one-release
+ *    `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path — never to refuse an audit on the
+ *    default proxy path.
  *
  * The composite liveness rules are deliberately explicit, because the
  * in-between states matter and are pinned by tests:
@@ -100,12 +119,15 @@
  * ## Configuration
  *
  * Resolution order: `budget.json` → defaults (`maxImplement: 2`,
- * `maxAudit: 1`, preserving today's single-flight audit behaviour) →
+ * `maxAudit: 1`, the pre-proxy single-flight figure kept for the one-release
+ * legacy path and for local observability) →
  * `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` env override → clamp to
  * `0..HOST_BUDGET_MAX`. `0` disables that tier host-wide (a per-tier kill
- * switch). A malformed `budget.json` falls back to the defaults and records a
- * warning instead of throwing; an unresolvable coordination dir yields
- * defaults + env and never throws.
+ * switch) on the paths that read these caps (the implement tier always; the
+ * audit tier only under the one-release legacy flag — the proxy owns the
+ * default audit cap). A malformed `budget.json` falls back to the defaults and
+ * records a warning instead of throwing; an unresolvable coordination dir
+ * yields defaults + env and never throws.
  *
  * ## Layering
  *
@@ -530,12 +552,15 @@ export function reduceMarkerCounts(
  * Reduce a ledger for the AUDIT tier's DISPLAY count — pane-aware
  * (WL-0MW8D4UQH002TWJV).
  *
- * The audit tier's ADMISSION rule is deliberately marker-compatible: it
- * counts every fresh entry and ignores pane liveness ({@link reduceMarkerCounts}),
- * so a slot is held from dispatch until an explicit release point or the 2 h
- * staleness window. That is correct for admission, but wrong for the header: a
- * CONFIRMED entry whose pane has closed is a dead audit, and the display must
- * not claim it is still in flight for the rest of the staleness window.
+ * The audit tier's LEGACY (pre-proxy) admission rule was deliberately
+ * marker-compatible: it counted every fresh entry and ignored pane liveness
+ * ({@link reduceMarkerCounts}), so a slot was held from dispatch until an
+ * explicit release point or the 2 h staleness window. That remains the rule
+ * only under the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` path; the DEFAULT
+ * (proxy-derived) audit admission does not read this count at all. For the
+ * header the marker-compatible rule is wrong regardless: a CONFIRMED entry
+ * whose pane has closed is a dead audit, and the display must not claim it is
+ * still in flight for the rest of the staleness window.
  *
  * Display rule for a fresh entry:
  *  - no `paneId` (reserve→spawn window, no pane evidence yet) → counted;
@@ -1065,10 +1090,12 @@ export function auditDisplayCount(
  *
  * For the audit tier the result additionally includes a non-stale legacy
  * `active-audit` marker as one synthetic entry ({@link legacyActiveAuditCount}),
- * so `count` and `counts.audit` are exactly what admission must compare with
- * `maxAudit`. The reap write is best-effort, like `liveCount`: the returned
- * count already excludes reaped entries, so lock contention only defers the
- * cleanup.
+ * so `count` and `counts.audit` are exactly what the one-release LEGACY path
+ * compares with `maxAudit` (and what the divergence log uses as local
+ * evidence). The DEFAULT proxy-derived audit admission does not compare this
+ * count with `maxAudit` at all. The reap write is best-effort, like
+ * `liveCount`: the returned count already excludes reaped entries, so lock
+ * contention only defers the cleanup.
  */
 export function freshCount(
   kind: HostBudgetKind,
