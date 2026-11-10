@@ -538,6 +538,12 @@ dispatches; the other herdr instances coordinate instead of polling:
   retired `active-audit` marker is read for exactly one release of
   compatibility. See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope).
+  The ledger covers **dispatched agent panes** only: a release's own
+  subprocesses (`audit_runner.py`, `run_tests.py`, `git`/`gh`) and the
+  `/skill:ship` command bypass it entirely, and the per-root **code-freeze**
+  gate — not a budget slot — is what pauses implement/audit dispatch while a
+  release runs. See
+  [release-dispatch-budget-evaluation.md](../../docs/dev/release-dispatch-budget-evaluation.md).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see

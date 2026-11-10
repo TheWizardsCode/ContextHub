@@ -2537,6 +2537,23 @@ scope (`kind` is recorded, so extending is trivial), as is multi-machine or
 networked coordination — the single-machine v1 contract of
 `machine-coordination.ts` is unchanged.
 
+**Release window interaction — code-freeze, not a budget slot
+(WL-0MW7YIBG70021YI3).** The budget ledger counts **dispatched agent panes**;
+neither the release process's subprocesses (`audit_runner.py`, `run_tests.py`,
+`git`/`gh`) nor the `/skill:ship` command itself pass through
+`admitHostDispatch`, so a release **bypasses the ledger entirely** — it neither
+consumes nor is limited by `maxImplement`/`maxAudit`. While a release runs, the
+**per-root code-freeze gate** (evaluated *before* budget admission) skips all
+new implement and audit dispatch for the releasing root, still allows
+plan/intake prep (including critical prep), and lets in-progress panes finish.
+A dedicated "release budget" slot is **not recommended**: it would reserve
+ledger capacity as a declaration rather than measure the release's actual
+subprocess load. The real residual gap is scope — the freeze is per root while
+the ledger is host-wide, so a release in one project does not pause another
+project's implement/audit dispatch; that is tracked separately
+(WL-0MWAM5N75004ROSW). Full rationale, the tier table and the subprocess
+inventory: [release-dispatch-budget-evaluation.md](release-dispatch-budget-evaluation.md).
+
 ### Unified budget observability (F5 WL-0MVXY0ZYW009NEJD)
 
 The budget's numbers are surfaced through the existing observability tools —
