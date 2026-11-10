@@ -42,15 +42,23 @@ import { describe, expect, it } from 'vitest';
 import {
   admitHostDispatch,
   confirmHostDispatch,
+  decideAuditAvailability,
   HOST_BUDGET_AUDIT_REFUSAL,
   HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
   readAuditBudgetState,
   releaseHostDispatch,
+  type AuditBudgetLogEvent,
   type HostBudgetAdmission,
 } from './host-dispatch-budget.admission.js';
-import { HOST_BUDGET_CONFIG_FILE } from './host-dispatch-budget.js';
+import {
+  AUDIT_BUDGET_SATURATED_REASON,
+  AUDIT_BUDGET_UNKNOWN_REASON,
+} from './downtime-worker.audit-availability.contract.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import { AUDIT_BUDGET_DIVERGENCE_REASON, AUDIT_BUDGET_LEGACY_REASON } from './downtime-log-budget.js';
+import { HOST_BUDGET_CONFIG_FILE, isLegacyAuditBudgetEnabled } from './host-dispatch-budget.js';
 import {
   DOWNTIME_HOST_AUDIT_MARKER_FILE,
   readActiveAuditMarker,
@@ -266,7 +274,16 @@ function auditPane(paneId: string, itemId: string) {
   return { paneId, title: `Downtime triggered audit Audit ${itemId} - ${itemId}` };
 }
 
-/** One audit asking the machine-scoped ledger for a slot. */
+/**
+ * The one-release legacy audit env (WL-0MWAMSK9H005BOHD): these F2 cases pin
+ * the PRE-CHANGE `budget.json` + local-ledger decision, which is now reached
+ * only through `HERDR_AUDIT_LOCAL_BUDGET=1`.
+ */
+const LEGACY_AUDIT_ENV: Readonly<Record<string, string | undefined>> = {
+  HERDR_AUDIT_LOCAL_BUDGET: '1',
+};
+
+/** One audit asking the machine-scoped ledger for a slot (legacy local path). */
 function auditAdmit(
   itemId: string,
   livePanes: Parameters<typeof admitHostDispatch>[1]['livePanes'],
@@ -274,7 +291,7 @@ function auditAdmit(
 ): HostBudgetAdmission {
   return admitHostDispatch(
     { kind: 'audit', itemId, instanceId, root: '/repo/test' },
-    { livePanes },
+    { livePanes, env: LEGACY_AUDIT_ENV },
   );
 }
 
@@ -455,4 +472,266 @@ describe('host dispatch budget — audit tier (F2)', () => {
         reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
       });
     }));
+});
+
+// ── Proxy-derived audit admission (WL-0MWAMSK9H005BOHD) ───────────────
+//
+// The audit tier's capacity decision is the proxy's shared verdict, NOT the
+// per-host `budget.json` `maxAudit` cap. The local ledger stays as
+// observability only: it is reserved/confirmed/released as before, but an
+// entry can never refuse an audit, and a proxy/local disagreement is logged
+// with both sides' evidence. `HERDR_AUDIT_LOCAL_BUDGET=1` restores the
+// pre-change local decision for one release.
+
+/** A permissive proxy outcome the audit tier should ADMIT. */
+const proxyAdmits = (cap: number, live = 0): AuditAvailabilityOutcome => ({
+  status: 'ok',
+  availability: { cap, live, available: true },
+});
+
+/** A saturated proxy outcome the audit tier should REFUSE. */
+const proxySaturated = (cap: number, live = cap): AuditAvailabilityOutcome => ({
+  status: 'ok',
+  availability: { cap, live, available: false },
+});
+
+/** One audit asking the PROXY-derived path for a slot. */
+function proxyAuditAdmit(
+  itemId: string,
+  availability: AuditAvailabilityOutcome | undefined,
+  onAuditBudgetEvent?: (event: AuditBudgetLogEvent) => void,
+): HostBudgetAdmission {
+  return admitHostDispatch(
+    { kind: 'audit', itemId, instanceId: INSTANCE_A, root: '/repo/test' },
+    {
+      livePanes: [],
+      env: {},
+      ...(availability !== undefined ? { auditAvailability: availability } : {}),
+      ...(onAuditBudgetEvent !== undefined ? { onAuditBudgetEvent } : {}),
+    },
+  );
+}
+
+describe('host dispatch budget — proxy-derived audit admission (WL-0MWAMSK9H005BOHD)', () => {
+  it('AC1: a permissive budget.json + permissive proxy admits; a saturated proxy refuses and the proxy decides', () =>
+    withMachineDir((dir) => {
+      // A deliberately PERMISSIVE local cap: if the local ledger decided, the
+      // second audit (local live 1 < maxAudit 5) would be admitted.
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 5 });
+
+      expect(proxyAuditAdmit('WL-AUD-1', proxyAdmits(5))).toMatchObject({
+        admitted: true,
+        live: 0,
+        max: 5,
+      });
+      // The admitted audit is still reserved locally (observability only).
+      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-AUD-1']);
+
+      // The proxy now refuses while the local ledger is BELOW the local cap:
+      // the proxy's verdict wins, with the proxy's own token and figures.
+      expect(proxyAuditAdmit('WL-AUD-2', proxySaturated(5, 5))).toEqual({
+        admitted: false,
+        live: 5,
+        max: 5,
+        reason: AUDIT_BUDGET_SATURATED_REASON,
+      });
+      // A refusal reserves nothing.
+      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-AUD-1']);
+    }));
+
+  it('AC1: a proxy refusal is never overridden by a permissive local cap', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 9 });
+      expect(proxyAuditAdmit('WL-AUD', proxySaturated(1, 1))).toMatchObject({
+        admitted: false,
+        reason: AUDIT_BUDGET_SATURATED_REASON,
+      });
+      // Nothing was reserved for a refused dispatch.
+      expect(readBudgetLedger(dir)).toBeNull();
+    }));
+
+  it('AC2: the pre-check helper and admission agree on the answer and the refusal token', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 5 });
+      const states: Array<AuditAvailabilityOutcome | undefined> = [
+        proxyAdmits(5, 0),
+        proxySaturated(5, 5),
+        { status: 'endpoint-absent', reason: 'http-404' },
+        { status: 'unreachable', reason: 'timeout' },
+        { status: 'unparsable', reason: 'bad-body' },
+        undefined,
+      ];
+      for (const [index, outcome] of states.entries()) {
+        // `getActiveAudit` maps through this helper; admission must agree.
+        const decision = decideAuditAvailability(outcome);
+        const admission = proxyAuditAdmit(`WL-AGREE-${index}`, outcome);
+        expect(admission.admitted).toBe(!decision.active);
+        expect(admission.reason).toBe(decision.reason);
+      }
+    }));
+
+  it('AC2: a divergence writes exactly ONE decision entry with both sides’ evidence', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      const events: AuditBudgetLogEvent[] = [];
+      const sink = (event: AuditBudgetLogEvent): void => {
+        events.push(event);
+      };
+
+      // Proxy ADMITS while the local ledger is at its cap → divergence.
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-LOCAL', heartbeatAt: new Date().toISOString() }),
+      ]);
+      expect(proxyAuditAdmit('WL-PROXY-OK', proxyAdmits(1, 0), sink).admitted).toBe(true);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: 'divergence',
+        reason: AUDIT_BUDGET_DIVERGENCE_REASON,
+        divergence: {
+          proxy: { live: 0, cap: 1, available: true },
+          local: { live: 1, maxAudit: 1 },
+        },
+      });
+
+      // Inverse: proxy REFUSES while the local ledger is below the cap → one
+      // more divergence, naming the other direction.
+      events.length = 0;
+      writeBudgetLedger(dir, []);
+      expect(proxyAuditAdmit('WL-PROXY-NO', proxySaturated(1, 1), sink).admitted).toBe(false);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: 'divergence',
+        divergence: {
+          proxy: { live: 1, cap: 1, available: false },
+          local: { live: 0, maxAudit: 1 },
+        },
+      });
+    }));
+
+  it('AC2: an agreeing state writes NO decision entry (no log noise)', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      const events: AuditBudgetLogEvent[] = [];
+      const sink = (event: AuditBudgetLogEvent): void => {
+        events.push(event);
+      };
+
+      // Both agree there IS capacity: local empty, proxy admits.
+      writeBudgetLedger(dir, []);
+      expect(proxyAuditAdmit('WL-OK', proxyAdmits(1, 0), sink).admitted).toBe(true);
+      expect(events).toEqual([]);
+
+      // Both agree there is NO capacity: local at cap, proxy refuses.
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-LOCAL', heartbeatAt: new Date().toISOString() }),
+      ]);
+      expect(proxyAuditAdmit('WL-NO', proxySaturated(1, 1), sink).admitted).toBe(false);
+      expect(events).toEqual([]);
+    }));
+
+  it('AC3: an unreachable or absent proxy fails CLOSED as audit-budget-unknown', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 9 });
+      for (const outcome of [
+        { status: 'unreachable', reason: 'timeout' } as const,
+        { status: 'endpoint-absent', reason: 'http-404' } as const,
+        { status: 'unparsable', reason: 'bad-body' } as const,
+        undefined,
+      ]) {
+        const admission = proxyAuditAdmit('WL-UNKNOWN', outcome);
+        expect(admission.admitted).toBe(false);
+        expect(admission.reason).toBe(AUDIT_BUDGET_UNKNOWN_REASON);
+      }
+    }));
+
+  it('AC3: HERDR_AUDIT_LOCAL_BUDGET=1 restores the local decision, ignores the proxy, and logs a legacy warning', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      const events: AuditBudgetLogEvent[] = [];
+      const sink = (event: AuditBudgetLogEvent): void => {
+        events.push(event);
+      };
+      const legacyAdmit = (
+        itemId: string,
+        availability: AuditAvailabilityOutcome,
+      ): HostBudgetAdmission =>
+        admitHostDispatch(
+          { kind: 'audit', itemId, instanceId: INSTANCE_A, root: '/repo/test' },
+          { livePanes: [], env: LEGACY_AUDIT_ENV, auditAvailability: availability, onAuditBudgetEvent: sink },
+        );
+
+      // Local at cap: the LEGACY token and the local figures decide, even
+      // though the proxy would admit (the proxy is not consulted).
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-RUN', heartbeatAt: new Date().toISOString() }),
+      ]);
+      expect(legacyAdmit('WL-B', proxyAdmits(9))).toMatchObject({
+        admitted: false,
+        live: 1,
+        max: 1,
+        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+      });
+      // The legacy path is marked in the decision log; no divergence entry.
+      expect(events).toEqual([
+        expect.objectContaining({ event: 'legacy', reason: AUDIT_BUDGET_LEGACY_REASON }),
+      ]);
+
+      // Local below cap + a SATURATED proxy: the local ledger admits (the proxy
+      // is ignored), proving the legacy path never reads the proxy verdict.
+      events.length = 0;
+      writeBudgetLedger(dir, []);
+      expect(legacyAdmit('WL-C', proxySaturated(1, 1))).toMatchObject({
+        admitted: true,
+        live: 0,
+        max: 1,
+      });
+    }));
+
+  it('AC: an audit entry is reserved on admit, absent on refuse, and can NEVER cause a refusal', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+
+      // Local ledger AT CAP while the proxy admits: the entry is observability
+      // only, so the audit is admitted (and its own entry reserved).
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-LOCAL', heartbeatAt: new Date().toISOString() }),
+      ]);
+      expect(proxyAuditAdmit('WL-ADMITTED', proxyAdmits(3, 0)).admitted).toBe(true);
+      expect(
+        readBudgetLedger(dir)?.entries.map((entry) => entry.itemId).sort(),
+      ).toEqual(['WL-ADMITTED', 'WL-LOCAL']);
+
+      // Refusal path: no reservation.
+      writeBudgetLedger(dir, []);
+      expect(proxyAuditAdmit('WL-REFUSED', proxySaturated(1, 1)).admitted).toBe(false);
+      expect(readBudgetLedger(dir)?.entries).toEqual([]);
+    }));
+
+  it('AC: the implement tier never reads the proxy (a saturated audit verdict is ignored)', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 0 });
+      const events: AuditBudgetLogEvent[] = [];
+      const admission = admitHostDispatch(
+        { kind: 'implement', itemId: 'WL-IMPL', instanceId: INSTANCE_A, root: '/repo/test' },
+        {
+          livePanes: [],
+          env: {},
+          auditAvailability: proxySaturated(0, 99),
+          onAuditBudgetEvent: (event) => {
+            events.push(event);
+          },
+        },
+      );
+      // The implement branch is byte-for-byte unchanged: it admits on
+      // maxImplement and never looks at the audit availability or the sink.
+      expect(admission).toMatchObject({ admitted: true, live: 0, max: 2 });
+      expect(events).toEqual([]);
+    }));
+
+  it('isLegacyAuditBudgetEnabled reads the flag narrowly (only "1" enables it)', () => {
+    expect(isLegacyAuditBudgetEnabled({})).toBe(false);
+    expect(isLegacyAuditBudgetEnabled({ HERDR_AUDIT_LOCAL_BUDGET: '0' })).toBe(false);
+    expect(isLegacyAuditBudgetEnabled({ HERDR_AUDIT_LOCAL_BUDGET: 'true' })).toBe(false);
+    expect(isLegacyAuditBudgetEnabled({ HERDR_AUDIT_LOCAL_BUDGET: ' 1 ' })).toBe(true);
+  });
 });

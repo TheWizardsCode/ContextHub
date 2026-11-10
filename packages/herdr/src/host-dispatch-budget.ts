@@ -147,6 +147,23 @@ export const HOST_BUDGET_ENV_KEYS = {
 /** Ceiling for a configured cap — guards typos/overflow, never a policy. */
 export const HOST_BUDGET_MAX = 32;
 
+/**
+ * One-release escape hatch restoring the pre-proxy audit-budget behaviour
+ * (WL-0MWAMSK9H005BOHD AC3, parent WL-0MW95GBEG005ERHS AC3).
+ *
+ * The audit tier's capacity is normally the proxy's shared audit-availability
+ * verdict. Setting this environment variable to `1` restores the pre-change
+ * per-host decision (`budget.json` `maxAudit` + the local
+ * `dispatch-budget.json` ledger) WITHOUT consulting the proxy, so an operator
+ * can revert during the rollout of the proxy-owned budget.
+ *
+ * ONE RELEASE ONLY. This flag and the legacy branch it selects are removed
+ * after the proxy side (LP-0MW95FYMH006XYNK) is deployed everywhere; it is an
+ * environment variable (not a persisted setting) so it can be reverted without
+ * editing a file, matching the `HERDR_HOST_MAX_*` precedent.
+ */
+export const HERDR_AUDIT_LOCAL_BUDGET_ENV = 'HERDR_AUDIT_LOCAL_BUDGET';
+
 /** Today's behaviour preserved: two implements, one audit. */
 export const DEFAULT_HOST_BUDGET_CONFIG: Readonly<HostBudgetConfig> = Object.freeze({
   maxImplement: 2,
@@ -398,6 +415,22 @@ export function computeOverQuota(current: number, maximum: number): number {
 /** True when a tier at `current` already admits no further dispatch. */
 export function isOverQuota(current: number, maximum: number): boolean {
   return Math.trunc(current) >= Math.trunc(maximum);
+}
+
+/**
+ * True when the ONE-RELEASE legacy audit budget is explicitly enabled
+ * ({@link HERDR_AUDIT_LOCAL_BUDGET_ENV} `=1`).
+ *
+ * Read per tick so an operator can revert without restarting: an unset value,
+ * `0`, an empty string or any other value keeps the proxy-derived path. The
+ * comparison is deliberately narrow (`1`) so a typo can never silently
+ * resurrect the per-host cap.
+ */
+export function isLegacyAuditBudgetEnabled(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const raw = env[HERDR_AUDIT_LOCAL_BUDGET_ENV];
+  return typeof raw === 'string' && raw.trim() === '1';
 }
 
 /**

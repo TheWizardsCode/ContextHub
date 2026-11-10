@@ -261,6 +261,11 @@ describe('barrel wiring and contract pinning (AC1, AC5)', () => {
     'downtime-worker.ts', // the barrel re-export
     'downtime-worker.constants.ts', // declares AUDIT_AVAILABILITY_PATH
     'downtime-worker.audit-availability.ts', // the client (first consumer)
+    // The admission choke point (WL-0MWAMSK9H005BOHD) consumes the contract's
+    // proxy refusal tokens DIRECTLY (`audit-budget-saturated` /
+    // `audit-budget-unknown`) so its answer and the pre-check use one spelling.
+    // The barrel would create a cycle (admission <- dispatch <- barrel).
+    'host-dispatch-budget.admission.ts',
   ]);
 
   function productionSources(): string[] {
@@ -269,7 +274,7 @@ describe('barrel wiring and contract pinning (AC1, AC5)', () => {
       .filter((name) => !ALLOWED.has(name));
   }
 
-  it('is imported only by the pinned readers, not by a production dispatch module yet', () => {
+  it('is imported only by the pinned readers — never by an unpinned dispatch module', () => {
     const importers = productionSources().filter((name) =>
       readFileSync(join(here, name), 'utf8').includes(`./${CONTRACT_MODULE}.js`),
     );

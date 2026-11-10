@@ -222,9 +222,12 @@ export interface DowntimeHostBudgetAdmission {
   live: number;
   max: number;
   /**
-   * Refusal token: `host-budget-implement` | `host-budget-audit` |
-   * `audit-host-saturated` (the audit tier at `maxAudit: 1`, preserving the
-   * retired marker's token) | `host-budget-unknown`.
+   * Refusal token. The implement tier uses `host-budget-implement` /
+   * `host-budget-unknown`. The audit tier is proxy-derived
+   * (WL-0MWAMSK9H005BOHD) and reports the proxy's own vocabulary
+   * (`audit-budget-saturated` / `audit-budget-unknown`); only the one-release
+   * `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path still reports
+   * `host-budget-audit` / `audit-host-saturated` / `host-budget-unknown`.
    */
   reason?: string;
   /** True when an unreadable ledger was rewritten from live panes (AC6). */

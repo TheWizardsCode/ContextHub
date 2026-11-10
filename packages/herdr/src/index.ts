@@ -67,10 +67,16 @@ import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSett
 import {
   admitHostDispatch as admitHostBudgetDispatch,
   confirmHostDispatch as confirmHostBudgetDispatch,
+  decideAuditAvailability,
+  detectAuditDivergence,
+  readAuditBudgetState,
+  readAuditLocalEvidence,
   releaseHostDispatch as releaseHostBudgetDispatch,
+  type AuditBudgetLogEvent,
   type HostBudgetLivePane,
 } from './host-dispatch-budget.admission.js';
-import { sweepClosedPanes } from './host-dispatch-budget.js';
+import { isLegacyAuditBudgetEnabled, sweepClosedPanes } from './host-dispatch-budget.js';
+import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
 // User-fired (interactive) host-budget gate (WL-0MVXY0Z93002HKCZ F4): the
 // counterpart of the dispatcher's admission. At/over cap it asks first — with
 // the bottom-anchored dialog the worklist renders — and only a deliberate
@@ -135,8 +141,6 @@ import {
   DOWNTIME_AUDIT_STALE_WINDOW_MS,
   parseInProgressOutput,
   type DowntimeActiveAuditResult,
-  AUDIT_BUDGET_SATURATED_REASON,
-  AUDIT_BUDGET_UNKNOWN_REASON,
   createAuditAvailabilityClient,
   withTransientRetry,
   parseHerdrPaneListOutput,
@@ -146,6 +150,7 @@ import {
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import type { AuditCandidateScopeResult } from './downtime-worker.gates.js';
 import {
+  appendCoordinationLogEntry,
   appendDowntimeLogEntry,
   appendPaneCloseLogEntry,
   auditDispatchedItemIds,
@@ -400,6 +405,36 @@ async function hostBudgetLivePanes(
   } catch {
     return [];
   }
+}
+
+/**
+ * Append one audit-budget decision entry (WL-0MWAMSK9H005BOHD).
+ *
+ * The admission module emits an `AuditBudgetLogEvent` on a proxy/local
+ * divergence (both sides' evidence) or on the one-release legacy path; this
+ * adapter turns it into the decision-log entry the operator sees. Fire-and-forget
+ * and fail-closed: the append helper itself never throws, and logging must never
+ * affect a dispatch.
+ */
+function appendAuditBudgetLogEntry(cwd: string, event: AuditBudgetLogEvent): void {
+  const at = new Date().toISOString();
+  const entry =
+    event.event === 'divergence'
+      ? {
+          kind: 'decision',
+          operation: 'audit-budget-divergence',
+          reason: event.reason,
+          auditBudget: event.divergence,
+          at,
+        }
+      : {
+          kind: 'decision',
+          operation: 'audit-budget-legacy',
+          reason: event.reason,
+          error: event.message,
+          at,
+        };
+  void appendCoordinationLogEntry(cwd, entry);
 }
 
 /**
@@ -690,52 +725,92 @@ export function createDowntimeDeps(
       cwd: string,
     ): Promise<DowntimeActiveAuditResult> {
       try {
-        // Proxy-derived audit admission (WL-0MWAMSDNW000SL0E, parent AC1/AC2/
-        // AC3): the audit tier's capacity decision is the proxy's shared local
-        // resource, NOT the per-host `budget.json` `maxAudit` cap. The proxy
-        // owns the audit budget and the live audit-lease registry, so two
-        // ContextHub hosts can no longer each believe they are under their own
-        // cap while contending for the single local llama-server GPU
-        // (2026-11-03 incident). `readAuditBudgetState` is deliberately NOT
-        // called on this path.
+        // Proxy-derived audit admission (WL-0MWAMSDNW000SL0E, WL-0MWAMSK9H005BOHD,
+        // parent AC1/AC2/AC3): the audit tier's capacity decision is the proxy's
+        // shared local resource, NOT the per-host `budget.json` `maxAudit` cap.
+        // The proxy owns the audit budget and the live audit-lease registry, so
+        // two ContextHub hosts can no longer each believe they are under their
+        // own cap while contending for the single local llama-server GPU
+        // (2026-11-03 incident).
+        //
+        // The pre-check maps the availability read through the SAME helper
+        // (`decideAuditAvailability`) that `admitHostDispatch` uses, so a
+        // refusal before selection and a refusal at admission agree and quote
+        // the SAME token (parent AC2). `readAuditBudgetState` is deliberately
+        // NOT called on this path.
         //
         // Fail closed on every non-`ok` outcome (AC3): `endpoint-absent` /
         // `unreachable` / `unparsable` stops audit dispatch with the named
         // `audit-budget-unknown` reason and the failing exchange (`detail`)
         // rather than silently reverting to the per-host cap. A missing seam
         // fails closed too, never open.
-        const readAuditAvailability = this.readAuditAvailability;
-        if (readAuditAvailability === undefined) {
-          return {
-            ok: true,
-            active: true,
-            source: 'proxy',
-            reason: AUDIT_BUDGET_UNKNOWN_REASON,
-            detail: 'seam-absent',
-          };
-        }
-        const outcome = await readAuditAvailability();
-        if (outcome.status !== 'ok') {
-          return {
-            ok: true,
-            active: true,
-            source: 'proxy',
-            reason: AUDIT_BUDGET_UNKNOWN_REASON,
-            detail: outcome.reason,
-          };
-        }
-        const availability = outcome.availability;
-        if (availability.available === false) {
-          // The proxy's own verdict refuses: quote its vocabulary verbatim
-          // (`audit-budget-saturated`, parent AC2) and carry its `live`/`cap`
-          // as the budget evidence.
-          return {
-            ok: true,
-            active: true,
-            source: 'proxy',
-            reason: AUDIT_BUDGET_SATURATED_REASON,
-            budget: { live: availability.live, max: availability.cap },
-          };
+        //
+        // ONE-RELEASE legacy escape hatch (parent AC3): `HERDR_AUDIT_LOCAL_BUDGET=1`
+        // restores the pre-change `budget.json` + local-ledger decision for the
+        // audit tier and never consults the proxy.
+        if (isLegacyAuditBudgetEnabled()) {
+          const coordinationDir = getMachineCoordinationDir();
+          if (coordinationDir !== null) {
+            // Cheap read first: the ledger + cap only, NO pane-list subprocess
+            // (the dispatch loop runs this check once per audit candidate). A
+            // pane list is read only on the rare unreadable-ledger path, to
+            // self-heal.
+            let state = readAuditBudgetState({ dir: coordinationDir, root: cwd });
+            if (state.reason === 'host-budget-unknown') {
+              state = readAuditBudgetState({
+                dir: coordinationDir,
+                root: cwd,
+                livePanes: await hostBudgetLivePanes(runningPanesResolver, cwd),
+              });
+            }
+            if (state.atCap) {
+              // Legacy host-wide budget refusal: an audit is already in flight
+              // (dispatched by this or another instance/project), or the tier
+              // is disabled/unreadable. Report with the legacy host-wide source
+              // so the worker logs the legacy reason token specifically.
+              return {
+                ok: true,
+                active: true,
+                source: 'host-wide',
+                ...(state.reason !== undefined ? { reason: state.reason } : {}),
+                budget: { live: state.live, max: state.max },
+              };
+            }
+          }
+        } else {
+          const outcome =
+            this.readAuditAvailability === undefined
+              ? undefined
+              : await this.readAuditAvailability();
+          const decision = decideAuditAvailability(outcome);
+          if (decision.active) {
+            // AC2 inverse divergence: the proxy REFUSES while the local ledger
+            // is below its cap. Admission will not run (the tier is skipped
+            // before selection), so the pre-check records the evidence here.
+            // The forward case (proxy admits / local at cap) is logged by
+            // admission when the candidate is actually dispatched, so the
+            // two cannot double-log.
+            const divergence = detectAuditDivergence(
+              outcome,
+              readAuditLocalEvidence(),
+              decision,
+            );
+            if (divergence !== null) {
+              appendAuditBudgetLogEntry(cwd, {
+                event: 'divergence',
+                reason: AUDIT_BUDGET_DIVERGENCE_REASON,
+                divergence,
+              });
+            }
+            return {
+              ok: true,
+              active: true,
+              source: 'proxy',
+              ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+              ...(decision.budget !== undefined ? { budget: decision.budget } : {}),
+              ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
+            };
+          }
         }
         // Active-audit single-flight (WL-0MT3PHW4I002SNOV): does any
         // non-stale kind=audit dispatch marker map to an item still
@@ -1375,16 +1450,37 @@ export function createDowntimeDeps(
     // `instanceId` is a per-process diagnostic label only (the ledger's
     // single-flight semantics never depend on it). Every seam is best-effort
     // and must never throw into the claim pipeline.
-    async admitHostDispatch(input) {
+    async admitHostDispatch(
+      this: DowntimeWorkerDeps,
+      input,
+    ) {
       const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
+      const audit = input.kind === 'audit';
+      // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD): read the SAME
+      // availability the dispatcher's pre-check read and hand the typed outcome
+      // to admission, so both reach the SAME decision. The one-release legacy
+      // flag skips the proxy entirely.
+      const auditAvailability =
+        audit && !isLegacyAuditBudgetEnabled() && this.readAuditAvailability !== undefined
+          ? await this.readAuditAvailability()
+          : undefined;
       return admitHostBudgetDispatch(
         {
-          kind: input.kind === 'audit' ? 'audit' : 'implement',
+          kind: audit ? 'audit' : 'implement',
           itemId: input.itemId,
           instanceId: `herdr:${process.pid}`,
           root: input.cwd,
         },
-        { livePanes },
+        {
+          livePanes,
+          ...(audit
+            ? {
+                onAuditBudgetEvent: (event: AuditBudgetLogEvent) =>
+                  appendAuditBudgetLogEntry(input.cwd, event),
+                ...(auditAvailability !== undefined ? { auditAvailability } : {}),
+              }
+            : {}),
+        },
       );
     },
     async confirmHostDispatch(itemId, kind, paneId, cwd): Promise<void> {

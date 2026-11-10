@@ -740,10 +740,10 @@ export type DowntimeClaimResult =
  *    `source` says why: `'proxy'` when the proxy's audit-availability verdict
  *    refuses (saturated, or unknown because the read failed closed), `'host-wide'`
  *    when the machine-scoped dispatch-budget ledger reports the audit tier
- *    at/over `maxAudit` (or cannot be read — the LEGACY path, no longer produced
- *    by the real `getActiveAudit`), and `'per-worklog'` when a non-stale
- *    `kind=audit` dispatch marker maps to an item still `in_progress`
- *    (dispatched but not yet completed/reviewed).
+ *    at/over `maxAudit` (or cannot be read — the ONE-RELEASE legacy path,
+ *    `HERDR_AUDIT_LOCAL_BUDGET=1`, WL-0MWAMSK9H005BOHD), and `'per-worklog'`
+ *    when a non-stale `kind=audit` dispatch marker maps to an item still
+ *    `in_progress` (dispatched but not yet completed/reviewed).
  *  - `{ok:true, active:false, source:'proxy'}` — the proxy reports capacity and
  *    no per-worklog audit is in flight; the audit tier may proceed.
  *  - `{ok:false}` — the check could not complete (e.g. worklog query

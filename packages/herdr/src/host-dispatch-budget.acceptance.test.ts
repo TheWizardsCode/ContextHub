@@ -57,7 +57,15 @@ import {
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
   readAuditBudgetState,
+  type AuditBudgetLogEvent,
 } from './host-dispatch-budget.admission.js';
+import {
+  AUDIT_BUDGET_SATURATED_REASON,
+  AUDIT_BUDGET_UNKNOWN_REASON,
+} from './downtime-worker.audit-availability.contract.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
+import { readCoordinationLogEntries } from './downtime-log.js';
 import {
   HOST_BUDGET_CONFIG_FILE,
   HOST_BUDGET_STALE_WINDOW_MS,
@@ -107,11 +115,20 @@ import {
   jsonResponseFixture,
   makeDeps,
 } from './downtime-worker.fixtures.js';
+import { createDowntimeDeps } from './index.js';
 
 /** Deterministic clock: 2026-11-03T12:00:00.000Z. */
 const T0 = Date.parse('2026-11-03T12:00:00.000Z');
 const HOUR = 60 * 60 * 1000;
 const CLEAN_ENV: Readonly<Record<string, string | undefined>> = {};
+/**
+ * The one-release legacy audit env (WL-0MWAMSK9H005BOHD AC3): the AC3/AC4/AC5
+ * audit cases below pin the PRE-CHANGE `budget.json` + local-ledger decision,
+ * which is now reached only through this flag.
+ */
+const LEGACY_AUDIT_ENV: Readonly<Record<string, string | undefined>> = {
+  HERDR_AUDIT_LOCAL_BUDGET: '1',
+};
 
 /** A worklog root per fake instance (never touched on disk). */
 const INSTANCE_A_ROOT = '/repo/a';
@@ -151,11 +168,15 @@ function budgetSeams(
     instanceId?: string;
     livePanes?: readonly HostBudgetLivePane[];
     now?: number;
+    env?: Readonly<Record<string, string | undefined>>;
+    auditAvailability?: AuditAvailabilityOutcome;
+    onAuditBudgetEvent?: (event: AuditBudgetLogEvent) => void;
   } = {},
 ): Pick<DowntimeWorkerDeps, 'admitHostDispatch' | 'confirmHostDispatch' | 'releaseHostDispatch'> {
   const now = opts.now ?? T0;
   const livePanes = opts.livePanes ?? [];
   const instanceId = opts.instanceId ?? 'instance-a';
+  const env = opts.env ?? CLEAN_ENV;
   return {
     admitHostDispatch: vi.fn(
       async (input: { itemId: string; kind: string; cwd: string }) =>
@@ -166,7 +187,18 @@ function budgetSeams(
             instanceId,
             root: input.cwd,
           },
-          { dir, livePanes, now, env: CLEAN_ENV },
+          {
+            dir,
+            livePanes,
+            now,
+            env,
+            ...(opts.auditAvailability !== undefined
+              ? { auditAvailability: opts.auditAvailability }
+              : {}),
+            ...(opts.onAuditBudgetEvent !== undefined
+              ? { onAuditBudgetEvent: opts.onAuditBudgetEvent }
+              : {}),
+          },
         ),
     ),
     confirmHostDispatch: vi.fn(
@@ -435,7 +467,7 @@ describe('AC3 — maxAudit replaces the hard-coded single-flight', () => {
       const deps = makeDeps({
         getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: AUDIT_CANDIDATE }),
         getActiveAudit: auditStateSeam(dir),
-        ...budgetSeams(dir, { instanceId: 'instance-a', livePanes: [] }),
+        ...budgetSeams(dir, { instanceId: 'instance-a', livePanes: [], env: LEGACY_AUDIT_ENV }),
       });
 
       const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
@@ -467,7 +499,7 @@ describe('AC3 — maxAudit replaces the hard-coded single-flight', () => {
             .fn()
             .mockResolvedValue({ ok: true, candidate: { ...AUDIT_CANDIDATE, id } }),
           getActiveAudit: auditStateSeam(dir),
-          ...budgetSeams(dir, { instanceId: 'instance-a', livePanes: [] }),
+          ...budgetSeams(dir, { instanceId: 'instance-a', livePanes: [], env: LEGACY_AUDIT_ENV }),
         });
         return dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
       };
@@ -512,7 +544,7 @@ describe('AC4 — maxImplement=0 / maxAudit=0 disable the tier host-wide', () =>
       const deps = makeDeps({
         getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: AUDIT_CANDIDATE }),
         getActiveAudit: auditStateSeam(dir),
-        ...budgetSeams(dir, { instanceId: 'instance-a', livePanes: [] }),
+        ...budgetSeams(dir, { instanceId: 'instance-a', livePanes: [], env: LEGACY_AUDIT_ENV }),
       });
 
       const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
@@ -579,7 +611,7 @@ describe('AC5 — every release path gives the slot back', () => {
       const auditAdmit = () =>
         admitHostDispatch(
           { kind: 'audit', itemId: 'WL-NEW', instanceId: 'instance-a', root: INSTANCE_A_ROOT },
-          { dir, livePanes: [], now: T0, env: CLEAN_ENV },
+          { dir, livePanes: [], now: T0, env: LEGACY_AUDIT_ENV },
         );
 
       // Reserve, then release by item id — exactly what the pane-close handler,
@@ -883,7 +915,7 @@ describe('AC11 — an unresolvable coordination dir changes nothing', () => {
     expect(
       admitHostDispatch(
         { kind: 'audit', itemId: 'WL-B', instanceId: 'instance-a', root: INSTANCE_A_ROOT },
-        { dir: null, livePanes: [], env: CLEAN_ENV },
+        { dir: null, livePanes: [], env: LEGACY_AUDIT_ENV },
       ),
     ).toEqual({ admitted: true, live: 0, max: 1 });
 
@@ -899,5 +931,207 @@ describe('AC11 — an unresolvable coordination dir changes nothing', () => {
     // The worklist adds no chrome (no counter) when the budget is unavailable.
     expect(readHostBudgetStatus({ dir: null, env: CLEAN_ENV })).toBeNull();
     expect(hostBudgetStatusText(null)).toBeNull();
+  });
+});
+
+// ── Proxy-derived audit admission (WL-0MWAMSK9H005BOHD) ──────────────
+//
+// End-to-end proof through the real dispatch pipeline + REAL admission reader:
+// the proxy's audit verdict decides (never the per-host cap), the local ledger
+// is observability only, and a divergence is logged with both sides' evidence.
+describe('proxy-derived audit admission (WL-0MWAMSK9H005BOHD)', () => {
+  it('the proxy decides end to end: a saturated proxy refuses despite a permissive local cap', async () => {
+    await withMachineDir(async (dir) => {
+      // Deliberately permissive local cap: if the local ledger decided, the
+      // (empty-ledger) audit would be admitted.
+      writeCaps(dir, { maxAudit: 5 });
+      const deps = makeDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: AUDIT_CANDIDATE }),
+        ...budgetSeams(dir, {
+          instanceId: 'instance-a',
+          livePanes: [],
+          auditAvailability: {
+            status: 'ok',
+            availability: { cap: 5, live: 5, available: false },
+          },
+        }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
+      expect(outcome).toMatchObject({
+        dispatched: false,
+        reason: AUDIT_BUDGET_SATURATED_REASON,
+        budget: { live: 5, max: 5 },
+      });
+      // The proxy's vocabulary, never the legacy local token (parent AC2).
+      expect(outcome.reason).not.toBe(HOST_BUDGET_AUDIT_SATURATED_REFUSAL);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      // A refusal reserves nothing locally.
+      expect(readBudgetLedger(dir)).toBeNull();
+    });
+  });
+
+  it('a proxy admission beats a local ledger at its cap (an audit entry alone can never refuse)', async () => {
+    await withMachineDir(async (dir) => {
+      writeCaps(dir, { maxAudit: 1 });
+      // The local ledger is already at its cap — observability only.
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-LOCAL',
+          heartbeatAt: new Date(T0).toISOString(),
+        }),
+      ]);
+      const deps = makeDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: AUDIT_CANDIDATE }),
+        ...budgetSeams(dir, {
+          instanceId: 'instance-a',
+          livePanes: [],
+          auditAvailability: {
+            status: 'ok',
+            availability: { cap: 1, live: 0, available: true },
+          },
+        }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      // The admitted audit is still reserved so the header/release paths work.
+      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId).sort()).toEqual([
+        'WL-AUD',
+        'WL-LOCAL',
+      ]);
+    });
+  });
+
+  it('an unreachable proxy fails closed end to end as audit-budget-unknown', async () => {
+    await withMachineDir(async (dir) => {
+      writeCaps(dir, { maxAudit: 5 });
+      const deps = makeDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: AUDIT_CANDIDATE }),
+        ...budgetSeams(dir, {
+          instanceId: 'instance-a',
+          livePanes: [],
+          auditAvailability: { status: 'unreachable', reason: 'timeout' },
+        }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
+      expect(outcome).toMatchObject({ dispatched: false, reason: AUDIT_BUDGET_UNKNOWN_REASON });
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    });
+  });
+
+  it('a divergence during a dispatch writes exactly one decision entry with both sides’ evidence', async () => {
+    await withMachineDir(async (dir) => {
+      writeCaps(dir, { maxAudit: 1 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-LOCAL',
+          heartbeatAt: new Date(T0).toISOString(),
+        }),
+      ]);
+      const events: AuditBudgetLogEvent[] = [];
+      const deps = makeDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: AUDIT_CANDIDATE }),
+        ...budgetSeams(dir, {
+          instanceId: 'instance-a',
+          livePanes: [],
+          auditAvailability: {
+            status: 'ok',
+            availability: { cap: 1, live: 0, available: true },
+          },
+          onAuditBudgetEvent: (event) => events.push(event),
+        }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
+      expect(outcome.dispatched).toBe(true);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: 'divergence',
+        divergence: {
+          proxy: { live: 0, cap: 1, available: true },
+          local: { live: 1, maxAudit: 1 },
+        },
+      });
+    });
+  });
+});
+
+// ── Pre-check / admission agreement (WL-0MWAMSK9H005BOHD AC2) ─────────
+describe('audit pre-check and admission agree (WL-0MWAMSK9H005BOHD AC2)', () => {
+  it('the REAL getActiveAudit and admitHostDispatch give the same answer and refusal token', async () => {
+    await withMachineDir(async (dir) => {
+      writeCaps(dir, { maxAudit: 5 });
+      // The real production pre-check; only the availability seam is injected.
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'dispatcher');
+
+      const states: AuditAvailabilityOutcome[] = [
+        { status: 'ok', availability: { cap: 5, live: 0, available: true } },
+        { status: 'ok', availability: { cap: 5, live: 5, available: false } },
+        { status: 'unreachable', reason: 'timeout' },
+        { status: 'endpoint-absent', reason: 'http-404' },
+      ];
+
+      for (const availability of states) {
+        deps.readAuditAvailability = async () => availability;
+        const preCheck = await deps.getActiveAudit(INSTANCE_A_ROOT);
+        const admission = admitHostDispatch(
+          { kind: 'audit', itemId: 'WL-AGREE', instanceId: 'instance-a', root: INSTANCE_A_ROOT },
+          { dir, livePanes: [], now: T0, env: CLEAN_ENV, auditAvailability: availability },
+        );
+
+        expect(preCheck.ok).toBe(true);
+        if (!preCheck.ok) continue;
+        // `getActiveAudit.active` refuses; admission `admitted` admits.
+        expect(admission.admitted).toBe(!preCheck.active);
+        if (preCheck.active) {
+          expect(admission.reason).toBe(preCheck.reason);
+          // The same proxy figures ride on both sides.
+          expect(admission.live).toBe(preCheck.budget?.live ?? 0);
+          expect(admission.max).toBe(preCheck.budget?.max ?? 0);
+        }
+      }
+    });
+  });
+});
+
+describe('audit divergence logged by the real pre-check (WL-0MWAMSK9H005BOHD AC2)', () => {
+  it('records the INVERSE divergence (proxy refuses, local below cap) exactly once', async () => {
+    await withMachineDir(async (dir) => {
+      writeCaps(dir, { maxAudit: 5 });
+      // The worklog root IS the temp dir, so the real coordination-log append
+      // lands somewhere observable.
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'dispatcher');
+      deps.readAuditAvailability = async () => ({
+        status: 'ok',
+        availability: { cap: 5, live: 5, available: false },
+      });
+
+      const preCheck = await deps.getActiveAudit(dir);
+      expect(preCheck).toMatchObject({
+        ok: true,
+        active: true,
+        source: 'proxy',
+        reason: AUDIT_BUDGET_SATURATED_REASON,
+        budget: { live: 5, max: 5 },
+      });
+
+      // The append is fire-and-forget — wait for the file to carry it.
+      await vi.waitFor(async () => {
+        const entries = await readCoordinationLogEntries(dir);
+        const divergences = entries.filter(
+          (entry) => entry.reason === AUDIT_BUDGET_DIVERGENCE_REASON,
+        );
+        expect(divergences).toHaveLength(1);
+        expect(divergences[0].auditBudget).toEqual({
+          proxy: { live: 5, cap: 5, available: false },
+          local: { live: 0, maxAudit: 5 },
+        });
+      });
+    });
   });
 });
