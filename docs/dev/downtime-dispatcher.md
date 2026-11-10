@@ -42,6 +42,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.dispatch-contract.ts` | The dispatch pipeline's dependency boundary + event/outcome types | `DowntimeDispatchEvent`, `DowntimeErrorEvent`, … |
 | `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
 | `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
+| `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (provisional — no server yet) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (one item per instance per check-in) | `computeMostImportantItem`, `coordinationTierRank` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
@@ -870,6 +871,71 @@ fail-open per failure mode; at most one reserve per poll; prefill pacing
 unchanged) and the pane-arg/env forwarding;
 `tests/herdr/send-to-pi.test.ts` pins `--reservation-ticket` →
 `PI_LOCAL_RESERVATION_TICKET` in the pane process.
+
+### Proxy audit availability (provisional wire contract, parent WL-0MW95GBEG005ERHS, child WL-0MWAMS1PW000O3OS)
+
+**Why.** Today the audit tier asserts a **per-host** `budget.json` cap
+(`maxAudit`, default `1`). The resource an audit actually contends for is the
+single local `llama-server` GPU, which every ContextHub host shares — so two
+hosts each enforcing "one audit" produce two concurrent audits on one GPU (the
+2026-11-03 incident). The fix is to let the **proxy** own the audit budget and
+have herdr **query** it (parent AC1). This child pins the client-side wire
+contract *before* that proxy endpoint exists, exactly as the reserve-handshake
+slice C1 pinned its shape (`downtime-worker.local-reservation.ts`).
+
+**The proxy side is sibling llm item `LP-0MW95FYMH006XYNK` and has not
+shipped.** Probed **2026-11-10** against the live proxy
+(`http://192.168.0.199:8000`): `/openapi.json` lists only
+`/llama/local/status` and `/llama/local/reserve`, and `/llama/local/audit`,
+`/llama/local/budget` and `/llama/local/audit/status` all answer **`404`**.
+The contract is therefore **provisional**; the final path is one constant
+(`AUDIT_AVAILABILITY_PATH`) and a field rename on either side is a one-line
+change because the parser reads documented aliases.
+
+**Provisional wire contract** (`packages/herdr/src/downtime-worker.audit-availability.contract.ts`):
+
+```
+GET {proxyUrl}/llama/local/audit/status
+
+200 -> { "cap": <n>, "live": <n>, "available": <bool>,
+         "leases": [ { "id": "<id>", "expires_at": <epoch ms> } ],
+         "reclaimed": <n>, "reason": "<open vocabulary>" }
+```
+
+| Field | Aliases read | Rule |
+|---|---|---|
+| audit cap | `cap`, `max`, `max_audit` | finite, `>= 0` |
+| live leases | `live`, `in_flight`, `live_leases` | finite, `>= 0` |
+| availability verdict | `available`, `can_admit` | must be a real boolean — **never derived** from cap/live |
+| lease expiry | `expires_at`, `expires_at_ms`, `expiry`, `expiresAt` | positive epoch-ms number or a `Date.parse`-able ISO-8601 string |
+| lease identity | `id`, `lease_id`, `ticket_id`, `owner` | optional non-empty string |
+| reclaimed leases | `reclaimed` | finite, `>= 0` |
+| refusal reason | `reason`, `refusal_reason` | open vocabulary; the canonical saturated token is `AUDIT_BUDGET_SATURATED_REASON` (`audit-budget-saturated`, parent AC2) |
+
+**Fail-closed parse.** `parseAuditAvailabilityResponse(raw, httpStatus)` returns
+`null` for **every** unusable payload — a non-2xx status, a non-object body, a
+missing/non-finite/negative `cap` or `live`, a missing/non-boolean availability
+verdict, a `leases` value that is not an array, a malformed lease entry, or a
+malformed `reclaimed` count. A garbage payload can therefore never be read as
+"available". `available` is copied from the proxy's own field and never derived
+locally: two sides reading the same verdict is what keeps a dispatcher
+admission and a proxy refusal from disagreeing (parent AC2). Additive proxy
+fields are ignored, so the contract can evolve without breaking this reader.
+
+**No behaviour change.** Nothing on a production dispatch path imports the
+parser or reads the path constant yet — the client
+(`WL-0MWAMSCOP003R837`) and the audit gate (`WL-0MWAMSDNW000SL0E`) are its
+first consumers, and the contract test asserts the absence so an accidental
+early consumer is caught. `AUDIT_AVAILABILITY_PATH` lives in
+`downtime-worker.constants.ts`; the contract module and its key symbols are
+re-exported from the `downtime-worker.ts` barrel for those children only.
+
+**Tests.** `downtime-worker.audit-availability.contract.test.ts` is table-driven
+and pins grant / saturated / alias spellings / absent and empty lease arrays /
+additive extra fields / non-derived `available` / every malformed shape
+(non-object, missing or non-finite or negative numbers, non-boolean verdict,
+non-array `leases`, malformed lease entries) / non-2xx statuses, plus the
+barrel re-export and the "no production consumer yet" guard.
 
 ### One launch per idle window (parent WL-0MVIKRFP0005JDL8 AC3, slice C3)
 

@@ -30,6 +30,21 @@ export const DOWNTIME_STATUS_PATH = '/llama/local/status';
  */
 export const LOCAL_RESERVE_PATH = '/llama/local/reserve';
 /**
+ * Proxy audit-availability endpoint path (parent WL-0MW95GBEG005ERHS):
+ * `GET {proxyUrl}/llama/local/audit/status`, the read the audit `tier` will
+ * use instead of asserting a per-host `budget.json` cap.
+ *
+ * PROVISIONAL. The proxy side is sibling llm item LP-0MW95FYMH006XYNK and has
+ * not shipped: probed 2026-11-10 against the live proxy
+ * (`http://192.168.0.199:8000`), `/openapi.json` lists only
+ * `/llama/local/status` and `/llama/local/reserve`, and
+ * `/llama/local/audit`, `/llama/local/budget` and `/llama/local/audit/status`
+ * all answer `404`. The contract (types + tolerant parser) is pinned BEFORE
+ * the server exists, exactly as the reserve-handshake slice C1 pinned its
+ * wire shape; the proxy's final path is a one-line change here.
+ */
+export const AUDIT_AVAILABILITY_PATH = '/llama/local/audit/status';
+/**
  * Request/response header carrying the granted reservation ticket id
  * (`X-Local-Reservation: <ticketId>`), sent on the pane's FIRST request
  * (parent AC1).

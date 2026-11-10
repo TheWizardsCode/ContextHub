@@ -35,6 +35,7 @@ export type { CoordinationEntry } from './coordination.js';
 
 // ── Constants, types, clamps (WL-0MVN6UUEH009GID8) ────────────────────
 export {
+  AUDIT_AVAILABILITY_PATH,
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
@@ -218,6 +219,21 @@ export {
   createLocalReserver,
   parseLocalReservationResponse,
 } from './downtime-worker.local-reservation.js';
+
+// ── Proxy audit-availability wire contract (WL-0MWAMS1PW000O3OS) ───────
+// Pinned BEFORE the proxy endpoint exists (sibling LP-0MW95FYMH006XYNK, still
+// 404 on the live proxy). No production dispatch path imports these yet; the
+// client (WL-0MWAMSCOP003R837) and the audit gate (WL-0MWAMSDNW000SL0E) are
+// their first consumers. Re-exported here only for the names those children
+// need.
+export {
+  AUDIT_BUDGET_SATURATED_REASON,
+  parseAuditAvailabilityResponse,
+} from './downtime-worker.audit-availability.contract.js';
+export type {
+  AuditAvailability,
+  AuditAvailabilityLease,
+} from './downtime-worker.audit-availability.contract.js';
 
 // ── Observed routing outcome (WL-0MVWEZF4Z004UNYT AC10) ──────────────
 // Reader + split computation over the bounded route log (`local-route.log`,
