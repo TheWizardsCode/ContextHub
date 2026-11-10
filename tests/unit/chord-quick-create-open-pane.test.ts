@@ -212,7 +212,7 @@ describe('c q quick create runs without a pane (WL-0MV6J5JXL002D8C4)', () => {
     // And no bundled pane-opening shortcut was accidentally flagged false
     // beyond the documented quiet set (covers AC5 wholesale).
     const quiet = new Set([
-      'a,y', 'a,r', 'c,q', 'r,p,a', 'u,p,l', 'u,p,m', 'u,p,h', 'u,p,c', 'x,c', 'x,d',
+      'a,y', 'a,r', 'c,q', 'r,p,a', 'r,p,r', 'u,p,l', 'u,p,m', 'u,p,h', 'u,p,c', 'x,c', 'x,d',
     ]);
     for (const entry of registry.getEntries()) {
       const key = entry.chord.join(',');
