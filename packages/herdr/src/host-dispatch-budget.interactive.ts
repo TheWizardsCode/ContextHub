@@ -25,22 +25,29 @@
  *
  * Counting semantics are the ledger's, never re-derived here: the implement
  * tier uses `liveCount` (fresh heartbeat AND pane in the machine-wide live
- * pane list) and the audit tier `freshCount` (fresh heartbeat only) — exactly
- * what admission compares with the same cap.
+ * pane list). The audit tier quotes the pane-aware DISPLAY count the worklist
+ * header shows (`auditDisplayCount` → `reduceAuditDisplayCounts`), so the
+ * over-quota dialog never claims an audit is running when its pane is gone
+ * (WL-0MW8IQNY7003JIOL). Admission itself is unchanged and still uses the
+ * marker-compatible `freshCount`/`readAuditBudgetState` rule.
  *
  * The gate runs BEFORE the claim and BEFORE any pane/background spawn, so a
  * cancel leaves every observable unchanged (AC2/AC6).
  */
 
 import {
-  freshCount,
+  HOST_BUDGET_STALE_WINDOW_MS,
+  auditDisplayCount,
   liveCount,
+  livePaneIdSet,
+  readBudget,
   readBudgetConfig,
   reserve,
   type HostBudgetKind,
   type HostBudgetLivePane,
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
+import { getMachineCoordinationDir } from './machine-coordination.js';
 import type { HostBudgetDialogChoice, HostBudgetPromptRequest } from './host-budget-dialog.js';
 import { extractWorkItemId } from './index.pane-capture.js';
 
@@ -111,6 +118,15 @@ export interface InteractiveAgentDispatchPreparation {
  * unreadable / lock contention) — the fail-open notice path. `{ live: 0 }`
  * for the unresolvable-coordination-dir case is handled by the caller via
  * `noLedger`, because that case must NOT produce a notice (parent AC11).
+ *
+ * The implement tier uses the admission rule `liveCount` (fresh heartbeat AND
+ * pane in the live list). The audit tier quotes the pane-aware DISPLAY count
+ * the worklist header shows (WL-0MW8IQNY7003JIOL): a confirmed audit whose
+ * pane is gone must not inflate the dialog, so the operator sees the same
+ * number on both surfaces. Admission itself is untouched — the dispatcher
+ * still uses `freshCount`/`readAuditBudgetState` (fail-closed, marker-
+ * compatible). This read is non-mutating: unlike `freshCount` it never reaps
+ * or rewrites the ledger.
  */
 type CountReadout =
   | { state: 'counted'; live: number }
@@ -121,19 +137,45 @@ function readTierCount(
   kind: HostBudgetKind,
   max: number,
   livePanes: readonly HostBudgetLivePane[],
+  livePanesTrusted: boolean,
+  dir: string | null,
   opts: HostBudgetOptions,
 ): CountReadout {
   // A disabled tier (`max 0`) admits nothing, so the count is irrelevant —
   // the prompt still quotes the documented 0/0 evidence.
   if (max === 0) return { state: 'counted', live: 0 };
-  const result = kind === 'implement' ? liveCount(kind, livePanes, opts) : freshCount(kind, opts);
-  if (!result.ok) {
-    if (!result.unknown && result.reason === 'no-coordination-dir') {
+  if (kind === 'implement') {
+    const result = liveCount(kind, livePanes, opts);
+    if (!result.ok) {
+      if (!result.unknown && result.reason === 'no-coordination-dir') {
+        return { state: 'noLedger' };
+      }
+      return { state: 'unreadable' };
+    }
+    return { state: 'counted', live: result.count };
+  }
+
+  // Audit tier: pane-aware DISPLAY count, identical to the worklist header
+  // (`readHostBudgetStatus` → `auditDisplayCount`). A trusted pane list lets
+  // a confirmed entry whose pane is gone be excluded; without one, fall back
+  // to the freshness rule rather than inventing a zero.
+  const read = readBudget(opts);
+  if (!read.ok) {
+    if (!read.unknown && read.reason === 'no-coordination-dir') {
       return { state: 'noLedger' };
     }
     return { state: 'unreadable' };
   }
-  return { state: 'counted', live: result.count };
+  const now = opts.now ?? Date.now();
+  const windowMs = opts.staleWindowMs ?? HOST_BUDGET_STALE_WINDOW_MS;
+  const live = auditDisplayCount(
+    read.ledger.entries,
+    livePanesTrusted ? livePaneIdSet(livePanes) : undefined,
+    now,
+    windowMs,
+    dir,
+  );
+  return { state: 'counted', live };
 }
 
 /**
@@ -160,12 +202,33 @@ export async function prepareInteractiveAgentDispatch(
   const budgetOptions: HostBudgetOptions = { ...deps.budget };
   const { config } = readBudgetConfig(budgetOptions);
   const max = kind === 'implement' ? config.maxImplement : config.maxAudit;
-  // Fail-open liveness read: a pane-list hiccup under-counts (admits), which is
-  // the interactive path's documented direction (a human is present).
-  const livePanes = max === 0
-    ? []
-    : await deps.readLivePanes().catch(() => [] as readonly HostBudgetLivePane[]);
-  const counted = readTierCount(kind, max, livePanes, budgetOptions);
+  // Fail-open liveness read: a pane-list hiccup must not block a human. We
+  // track whether the list is TRUSTED so the audit display count can fall
+  // back to the freshness rule (as the header does) instead of treating a
+  // failed read as "every pane is gone" (which would invent a zero).
+  let livePanes: readonly HostBudgetLivePane[] = [];
+  let livePanesTrusted = false;
+  if (max !== 0) {
+    try {
+      livePanes = await deps.readLivePanes();
+      livePanesTrusted = true;
+    } catch {
+      livePanes = [];
+      livePanesTrusted = false;
+    }
+  }
+  const dir =
+    budgetOptions.dir !== undefined
+      ? budgetOptions.dir
+      : getMachineCoordinationDir();
+  const counted = readTierCount(
+    kind,
+    max,
+    livePanes,
+    livePanesTrusted,
+    dir,
+    budgetOptions,
+  );
 
   if (counted.state === 'noLedger') {
     // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.

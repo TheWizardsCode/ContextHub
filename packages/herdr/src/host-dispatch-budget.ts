@@ -992,6 +992,40 @@ export function legacyActiveAuditCount(
 }
 
 /**
+ * The audit tier's pane-aware DISPLAY count, shared by the worklist header and
+ * the interactive over-quota dialog (WL-0MW8IQNY7003JIOL).
+ *
+ * Both operator-facing surfaces must quote the same number: a confirmed audit
+ * entry whose pane has closed is a dead audit and must not render as in flight,
+ * even though the admission rule keeps counting it until an explicit release or
+ * the staleness window ({@link reduceMarkerCounts}). This helper is the ONE
+ * place that rule is spelled out, so the header and the dialog cannot drift.
+ *
+ * `livePaneIds` MUST come from a trusted machine-wide pane read. When it is
+ * `undefined` (no trusted list available) the marker-compatible freshness rule
+ * is used instead of excluding every confirmed entry — the same fallback
+ * `readHostBudgetStatus` applies, rather than inventing a zero.
+ *
+ * Includes the non-stale legacy `active-audit` marker as one synthetic audit
+ * entry ({@link legacyActiveAuditCount}), exactly like the header. Read-only:
+ * unlike `freshCount`, it never reaps or rewrites the ledger (a TUI render and
+ * the interactive gate must never mutate machine state).
+ */
+export function auditDisplayCount(
+  entries: readonly HostBudgetEntry[],
+  livePaneIds: ReadonlySet<string> | undefined,
+  now: number,
+  staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
+  dir: string | null = null,
+): number {
+  const reduction =
+    livePaneIds === undefined
+      ? reduceMarkerCounts(entries, now, staleWindowMs)
+      : reduceAuditDisplayCounts(entries, livePaneIds, now, staleWindowMs);
+  return reduction.counts.audit + legacyActiveAuditCount(dir, now, staleWindowMs);
+}
+
+/**
  * Count a tier's FRESH entries without requiring a live pane, and reap every
  * stale entry (see {@link reduceMarkerCounts} for the semantics and why the
  * audit tier uses them).

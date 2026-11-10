@@ -57,14 +57,12 @@ import * as fs from 'node:fs';
 
 import {
   HOST_BUDGET_STALE_WINDOW_MS,
+  auditDisplayCount,
   budgetLedgerPath,
-  legacyActiveAuditCount,
   livePaneIdSet,
   readBudget,
   readBudgetConfig,
-  reduceAuditDisplayCounts,
   reduceLedgerCounts,
-  reduceMarkerCounts,
   type HostBudgetConfig,
   type HostBudgetCounts,
   type HostBudgetLivePane,
@@ -204,19 +202,24 @@ export function readHostBudgetStatus(
   const windowMs = opts.staleWindowMs ?? HOST_BUDGET_STALE_WINDOW_MS;
   const livePaneIds = livePaneIdSet(opts.livePanes ?? []);
   const implement = reduceLedgerCounts(read.ledger.entries, livePaneIds, now, windowMs);
-  // Pane-aware audit DISPLAY rule (WL-0MW8D4UQH002TWJV): a confirmed entry
-  // whose pane is gone is a dead audit and must not render as in flight.
-  // When the caller supplies no pane list we cannot distinguish "gone" from
-  // "unknown", so fall back to the marker-compatible freshness rule rather
-  // than inventing a zero (the production wiring always supplies a list).
-  const audit =
-    opts.livePanes === undefined
-      ? reduceMarkerCounts(read.ledger.entries, now, windowMs)
-      : reduceAuditDisplayCounts(read.ledger.entries, livePaneIds, now, windowMs);
-  const legacy = legacyActiveAuditCount(dir, now, windowMs);
+  // Pane-aware audit DISPLAY rule (WL-0MW8D4UQH002TWJV), shared with the
+  // interactive over-quota dialog so the two surfaces cannot disagree
+  // (WL-0MW8IQNY7003JIOL). A confirmed entry whose pane is gone is a dead
+  // audit and must not render as in flight. When the caller supplies no pane
+  // list we cannot distinguish "gone" from "unknown", so fall back to the
+  // marker-compatible freshness rule rather than inventing a zero (the
+  // production wiring always supplies a list). The legacy `active-audit`
+  // marker is included as one synthetic entry, exactly as before.
+  const audit = auditDisplayCount(
+    read.ledger.entries,
+    opts.livePanes === undefined ? undefined : livePaneIds,
+    now,
+    windowMs,
+    dir,
+  );
   const { config } = readBudgetConfig(ledgerOptions);
   return summariseHostBudget(
-    { implement: implement.counts.implement, audit: audit.counts.audit + legacy },
+    { implement: implement.counts.implement, audit },
     config,
   );
 }

@@ -33,6 +33,11 @@ import {
   type InteractiveAgentDispatchDeps,
 } from './host-dispatch-budget.interactive.js';
 import {
+  HOST_BUDGET_STALE_WINDOW_MS,
+  freshCount,
+} from './host-dispatch-budget.js';
+import { readHostBudgetStatus } from './host-budget-status.js';
+import {
   formatHostBudgetHeadline,
   type HostBudgetDialogChoice,
   type HostBudgetPromptRequest,
@@ -354,6 +359,159 @@ describe('unreadable ledger (AC8)', () => {
   it('the notice names the ledger and the skipped check', () => {
     expect(HOST_BUDGET_UNREADABLE_NOTICE).toContain('unreadable');
     expect(HOST_BUDGET_UNREADABLE_NOTICE).toContain('quota check');
+  });
+});
+
+// ── Audit tier dialog uses pane-aware display count (WL-0MW8IQNY7003JIOL) ──
+//
+// The interactive over-quota dialog for the audit tier must quote the same
+// pane-aware display count the worklist header shows (`reduceAuditDisplayCounts`),
+// not the admission-compatible count (`freshCount` / `reduceMarkerCounts`), so
+// the two operator-facing surfaces never disagree.
+
+describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
+  /** A stale heartbeat (older than the 2 h staleness window). */
+  function staleHeartbeat(): string {
+    return new Date(Date.now() - HOST_BUDGET_STALE_WINDOW_MS - 1000).toISOString();
+  }
+
+  it('does not prompt for a dead (confirmed, pane-gone) audit entry', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { maxAudit: 1 });
+      // One confirmed audit whose pane is NOT in the live pane list.
+      seedBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-DEAD-1', paneId: 'pane-gone' }),
+      ]);
+      const { deps, confirm } = makeDeps(dir, {
+        readLivePanes: async () => makeLivePaneList([]),
+      });
+
+      // Before the dispatch the dead entry is excluded from the display count.
+      const header = readHostBudgetStatus({ dir, livePanes: [] });
+      expect(header?.audit).toEqual({ live: 0, max: 1 });
+
+      // Admission is untouched: `freshCount` (marker-compatible, fail-closed)
+      // still counts the dead entry — the divergence is display-only.
+      const admission = freshCount('audit', { dir });
+      expect(admission.ok && admission.count).toBe(1);
+
+      const result = await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
+
+      // Display count is 0 (dead entry excluded) ⇒ below cap ⇒ no prompt.
+      expect(result.proceed).toBe(true);
+      expect(confirm).not.toHaveBeenCalled();
+    });
+  });
+
+  it('prompts for a live audit entry (pane is in the live pane list)', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { maxAudit: 1 });
+      seedBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-LIVE-1', paneId: 'pane-1' }),
+      ]);
+      const { deps, confirm } = makeDeps(dir, {
+        readLivePanes: async () => makeLivePaneList(['WL-LIVE-1']),
+      });
+
+      await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
+
+      // At cap ⇒ it PROMPTS with the same count the header shows.
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'audit', live: 1, max: 1 });
+      const header = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList(['WL-LIVE-1']),
+      });
+      expect(header?.audit).toEqual({ live: 1, max: 1 });
+    });
+  });
+
+  it('prompts for an unconfirmed audit entry (no paneId — reserve→spawn window)', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { maxAudit: 1 });
+      // No paneId yet: the display rule still counts a fresh unconfirmed entry.
+      seedBudgetLedger(dir, [makeBudgetEntry({ kind: 'audit', itemId: 'WL-UNCONF-1' })]);
+      const { deps, confirm } = makeDeps(dir, {
+        readLivePanes: async () => makeLivePaneList([]),
+      });
+
+      await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
+
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'audit', live: 1, max: 1 });
+    });
+  });
+
+  it('does not prompt for a stale audit entry', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { maxAudit: 1 });
+      seedBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-STALE-1',
+          paneId: 'pane-1',
+          heartbeatAt: staleHeartbeat(),
+        }),
+      ]);
+      const { deps, confirm } = makeDeps(dir, {
+        readLivePanes: async () => makeLivePaneList(['WL-STALE-1']),
+      });
+
+      const result = await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
+
+      expect(result.proceed).toBe(true);
+      expect(confirm).not.toHaveBeenCalled();
+      // The display read is read-only: the stale entry is excluded from the
+      // count but NOT reaped/rewritten by the dialog path.
+      const entries = readBudgetLedger(dir)?.entries ?? [];
+      expect(entries.some((e) => e.itemId === 'WL-STALE-1')).toBe(true);
+    });
+  });
+
+  it('the dialog live count equals the header audit count for mixed entries', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { maxAudit: 2 });
+      // Three entries: one live (counted), one dead (excluded), one unconfirmed
+      // (counted) ⇒ display count 2, admission count 3.
+      seedBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-MIX-LIVE', paneId: 'pane-live' }),
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-MIX-DEAD', paneId: 'pane-dead' }),
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-MIX-UNCONF' }),
+      ]);
+      const livePanes = makeLivePaneList([
+        { paneId: 'pane-live', itemId: 'WL-MIX-LIVE' },
+      ]);
+      const { deps, confirm } = makeDeps(dir, {
+        readLivePanes: async () => livePanes,
+      });
+
+      await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
+
+      const header = readHostBudgetStatus({ dir, livePanes });
+      const dialogLive = confirm.mock.calls[0][0].live;
+      // The two surfaces agree, and both exclude the dead entry.
+      expect(dialogLive).toBe(header?.audit.live);
+      expect(dialogLive).toBe(2);
+    });
+  });
+
+  it('the implement-tier dialog counting is unchanged (liveCount)', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { maxImplement: 1 });
+      // One implement entry whose pane is NOT in the live pane list.
+      seedBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'implement', itemId: 'WL-IMP-GONE', paneId: 'pane-gone' }),
+      ]);
+      const { deps, confirm } = makeDeps(dir, {
+        readLivePanes: async () => makeLivePaneList([]),
+      });
+
+      const result = await prepareInteractiveAgentDispatch(IMPLEMENT_CMD, deps);
+
+      // liveCount requires a live pane: count 0 ⇒ below cap ⇒ no prompt.
+      expect(result.proceed).toBe(true);
+      expect(confirm).not.toHaveBeenCalled();
+    });
   });
 });
 

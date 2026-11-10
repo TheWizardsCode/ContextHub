@@ -530,6 +530,8 @@ dispatches; the other herdr instances coordinate instead of polling:
   cancel is the state on open; a proceed records `override: { by: "user" }`
   on the ledger entry so a deliberate human override is distinguishable from
   drift; that path **fails open with a visible notice** if the ledger is corrupt.
+  The audit dialog quotes the same pane-aware count the worklist header shows,
+  so a dead (pane-gone) audit no longer inflates the prompt (WL-0MW8IQNY7003JIOL).
   The budget only ever reduces concurrency below the free-slot/prefill gates
   (the WL-0MU2EP6JL006A1U3 "no client-side pane cap" boundary is preserved —
   the inner limiter is unchanged), and it is not capacity starvation. The

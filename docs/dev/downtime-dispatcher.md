@@ -2476,6 +2476,28 @@ phantom slot for the remainder of the 2 h window.
   dead entry until it is released or reaped; the divergence is display-only and
   cannot admit work.
 
+**The interactive over-quota dialog follows the same display rule
+(WL-0MW8IQNY7003JIOL).** When an operator fires `/skill:audit` by hand and the
+audit tier is at its cap, the confirmation dialog quotes the **pane-aware
+display count** the header shows — not the admission count — so the two
+operator-facing surfaces never disagree. Both go through the same shared
+helper (`auditDisplayCount`, used by `readHostBudgetStatus` and
+`prepareInteractiveAgentDispatch`):
+
+- A dead (confirmed, pane-gone) audit entry neither triggers the dialog nor
+  appears in its `live` figure.
+- An unconfirmed audit entry (no `paneId`) and a confirmed entry whose pane is
+  live still count, and stale entries stay excluded.
+- With no trusted live-pane list the dialog falls back to the freshness rule —
+  the same fallback the header uses — rather than inventing a zero.
+- Admission is untouched: the dispatcher still counts marker-compatibly
+  (`freshCount` / `readAuditBudgetState`, fail-closed). The consequence is
+  deliberate and documented: after the fix the dialog may not prompt when only
+  dead-pane entries exist, so the operator can hand-fire an audit that
+  admission would refuse — they are choosing from the count they just saw in
+  the header.
+- The dialog read stays read-only: it never reaps or rewrites the ledger.
+
 **Audit-cap unification (the choice, recorded).** The hard-coded host-wide
 audit cap of 1 — the `active-audit` marker in `machine-coordination.ts` — is
 **retired in favour of the ledger** with `maxAudit` as its cap. The marker was
@@ -2678,22 +2700,28 @@ registered — or a TUI torn down while a prompt is pending — an `ask()` resol
 hang. `host-dispatch-budget.interactive.ts` is the decision half:
 `budgetKindForAgentCommand()` (implement family / audit; everything else is
 outside the budget) and `prepareInteractiveAgentDispatch()`, which reads the
-cap, counts with the ledger's own per-tier semantics (`liveCount` for implement,
-`freshCount` for audit), prompts only at/over cap, then claims.
+cap, counts with the ledger's own per-tier semantics (`liveCount` for implement;
+the pane-aware `auditDisplayCount`/`reduceAuditDisplayCounts` for the audit
+dialog, matching the header — WL-0MW8IQNY7003JIOL), prompts only at/over cap,
+then claims.
 
 **Known limitation.** The implement tier counts an entry only while its
 `paneId` is in the machine-wide live pane list (the F1 liveness table). The
 pane branch confirms the reservation with the captured pane id once
 `send-to-pi.sh` reports the split; a headless `open_pane: false` dispatch never
 gains a pane, so its entry is recorded (and carries the override) but never
-counts toward the implement cap. The audit tier is unaffected (marker
-semantics — no pane required).
+counts toward the implement cap. The audit dialog's count is pane-aware (the
+header's display rule, WL-0MW8IQNY7003JIOL) while its **admission** stays
+marker-compatible — the two rules differ only by dead (pane-gone) confirmed
+entries.
 
 **Tests.** `host-budget-dialog.test.ts` pins the copy/overshoot arithmetic and
 every key path; `host-dispatch-budget.interactive.test.ts` pins the gate
 against the isolated machine-dir fixture (under-quota no-op, cancel with no
-claim/ledger entry, proceed with `override: { by: 'user' }`, the audit counting
-asymmetry, the fail-open notice, and both agent branches);
+claim/ledger entry, proceed with `override: { by: 'user' }`, the fail-open
+notice, both agent branches, and — for WL-0MW8IQNY7003JIOL — dialog-vs-header
+agreement for dead / live / unconfirmed / stale audit entries plus the
+unchanged implement-tier counting);
 `host-budget-dialog-tui.test.ts` drives the REAL worklist with the REAL
 shortcut registry and prompt host, proving the dialog renders over the list and
 that `y`/`Enter`/`Esc` resolve the dispatch path.
