@@ -2403,12 +2403,12 @@ describe('issue-type shortcut filtering — worklist integration', () => {
     expect(chords).toContain('aa');
     expect(chords).toContain('ay');
     expect(chords).toContain('ar');
-    // Producer Review is the generic housekeeping chord; its binding is `r p`
-    // (WL-0MU95SGEB006HQAM) — the former single-key `r` chord was split into
-    // `r p` (producer review, WL-0MU95SGEB006HQAM) and `r i` (interview),
-    // which is why this expects the joined two-key chord here
-    // (WL-0MUKDBVFP008ARY6).
-    expect(chords).toContain('rp');
+    // Producer Reject/Approve are the generic housekeeping chords; their
+    // bindings are `r p r` and `r p a` (WL-0MU95SGEB006HQAM, split from the
+    // former `r p` chord in WL-0MW6GBWDA000VWBR) — joined here into their
+    // three-key chord strings (WL-0MUKDBVFP008ARY6).
+    expect(chords).toContain('rpr');
+    expect(chords).toContain('rpa');
   });
 
   it('excludes a type-gated local chord on non-matching types via the merged registry', () => {
