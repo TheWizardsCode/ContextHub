@@ -130,78 +130,78 @@ critical work is never starved by lower-priority items occupying the window (see
 "no candidate" rather than falling back to a second ranking.
 No `wl next`/database scoring change is required; the observable contract is
 "dispatcher == Herdr list head". The head is fetched with the **live per-root
-`browseItemCount`** limit (clamped 1–50), so the dispatcher head equals the
-rendered sprint view — see *Sprint-view-only dispatch window* below.
+`browseItemCount`** limit (clamped 1–50) as its *initial* window — see
+*Whole-backlog dispatch window* below.
 
-### Sprint-view-only dispatch window (WL-0MUNS8X97007C9H9)
+### Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH)
 
-The dispatcher head **is** the sprint view. Both selection paths pass the live
-per-root `browseItemCount` setting — clamped to the supported `1`–`50` range by
-`resolveSprintViewWindow` (`packages/herdr/src/browse-window.ts`), the same
-clamp the TUI worklist applies — as the `getHerdrListHead` limit:
+> **Supersedes the sprint-view-only restriction of WL-0MUNS8X97007C9H9.** That
+> item bounded the whole dispatch candidate universe to the rendered view. This
+> contract restores WL-0MU6UL3GQ0015AA5's whole-backlog reach **without**
+> reintroducing its unbounded-read cost: every ranked work item is a dispatch
+> candidate, in the canonical prioritisation order, still bounded by every
+> budget and safety gate.
+
+**Any work item is dispatchable.** Both selection paths pass the live per-root
+`browseItemCount` setting — clamped to `1`–`50` by `resolveSprintViewWindow`
+(`packages/herdr/src/browse-window.ts`), the same clamp the TUI applies — as
+the **initial** `getHerdrListHead` window, then walk the rest of the ranked
+backlog:
 
 - `dispatchDowntimeWork` (direct dispatch), and
 - `computeMostImportantItem` (the coordination check-in offer).
 
-`getHerdrListHead` forwards the limit to `fetchNextItems(limit)`, so the head
-contains exactly the items the sprint view renders (`f-s-s` → `/wl`): the
-mandatory set (all `critical` plus all completed/`in_review`) and enough
-"other" items to fill the remaining `browseItemCount` slots. The setting is
-re-read live on every dispatch cycle, so a change applies without a restart. A
-caller that passes no limit falls back to the sprint-view default (20), so an
-unwindowed head is never produced.
+When the initial window yields no candidate, `fetchExtendedHerdrItems` re-reads
+the **same ranking path** with a larger window — a window extension, never a
+second ranking — and returns the newly visible items. The window grows
+**geometrically** (`max(current.length + DOWNTIME_DISPATCH_EXTEND_MAX,
+current.length * 2)`), so a deep item costs O(log n) reads rather than one read
+per 30 items. The walk stops as soon as a candidate dispatches, so the extra
+reads are paid only when the visible window yields nothing, and it is bounded
+by `DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS` (20) as a defensive stop against a
+pathological provider.
 
-**Non-critical work outside the view is never dispatched by the normal
-paths.** When the head yields no candidate the dispatcher reports the terminal
-reason derived from the in-view flags (`no-candidate`, `review-queue-hold`,
-`code-freeze`, `fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`,
-`host-budget-implement`, `host-budget-audit`, `host-budget-unknown`,
-`in-flight-hold`, `wl-error`) and does **not** fall back to a second ranking or
-an out-of-view non-critical scan. Audit-batch observability adds the decision
-*observation* tokens `audit-batch-continue` / `audit-batch-end` (never terminal
-reasons) — see *Decision-log entries: audit-batch tokens & metadata* under
-*Log schema*. When every visible item is filtered by a
-safety gate (or the view is empty) the outcome is a NOP — **except** on the
-coordination leader path, which has one bounded, own-root escape valve that
-then hands off leadership (see *Own-backlog fallback & leadership hand-off*
-below).
+**Both critical and non-critical items are eligible** — there is no
+critical-only filter on the extension. The leader-side paths (own-backlog
+fallback, audit-batch continuation, registered-root sweep) use
+`fetchWholeBacklogTail`, which loops the same primitive until the backlog is
+exhausted.
 
-**Critical escape hatch (defensive).** A bounded out-of-window read
-(`fetchExtendedHerdrItems`, `DOWNTIME_DISPATCH_EXTEND_MAX = 30`) re-reads the
-**same ranking path** with a larger window — a window extension, never a second
-ranking — and returns **only** `critical` items. Because every `critical` item
-is already mandatory in the view, this escape hatch is normally a no-op; it
-exists purely as a safety net so a release blocker can never be windowed out.
-Non-critical items beyond the sprint view are filtered out, so the operator can
-never be surprised by hidden-backlog dispatch. (The critical-only filter is
-lifted **only** for the coordination-mode own-backlog fallback below; the
-defensive escape hatch itself stays critical-only.) The extension runs on both
-dispatch paths; the **TUI worklist is unchanged** (it keeps rendering exactly
-`browseItemCount` items, plus the mandatory set).
+**The TUI worklist is unchanged**: it keeps rendering exactly
+`browseItemCount` items (plus the mandatory set). The window bounds only
+*rendering*; it no longer bounds *dispatch*.
 
-**Supersedes WL-0MU6UL3GQ0015AA5 AC1/AC4.** That item widened the non-critical
-window to prevent a 31-hour starvation incident. This item deliberately reverses
-the non-critical part of that behaviour: the dispatch window now tracks the
-operator-curated sprint view. The accepted trade-off (recorded on
-WL-0MUNS8X97007C9H9) is that if every visible item is blocked and the only
-dispatchable item lies beyond `browseItemCount`, the dispatcher no-ops —
-mitigated operationally by raising `browseItemCount` (up to 50) or clearing a
-blocker. The WL-0MU6UL3GQ0015AA5 starvation regression now asserts this NOP
-behaviour rather than a dispatch.
+**Prioritisation is unchanged.** Ordering remains
+`fetchNextItems` → `selectWorkItems` → `regroupWorkItems`: priority
+(high → medium → low), then the established stage sub-order, then id. The
+annexed extension is the same ranking with more items included.
+
+**Every budget and safety gate still applies** to out-of-window candidates,
+unchanged and as sequential filters: the host dispatch budget
+(`maxImplement`/`maxAudit`), the per-item/per-kind attempt budget, free-slot
+minimums, the code-freeze split-by-skill, the host-CPU gate, the review-queue
+depth hold, active-audit single-flight and host saturation, freshness/recency,
+the producer-review flag, the `assignee` hold, soft-delete, dispatched-marker
+exclusion, the non-terminal pane-close cooldown and the CAS claim.
 
 **Fail-open preserved.** A failed head lookup still resolves `{ok:false}` (the
-caller keeps its entry / reports `wl-error`); a failed or empty extended
-critical read degrades to the original terminal reason, so the escape hatch can
+caller keeps its entry / reports `wl-error`); a failed or empty extended read
+stops the walk and degrades to the original terminal reason, so the walk can
 never convert a defined outcome into a new failure.
+
+**Relationship to the own-backlog fallback.** Because an instance now offers its
+whole ranked backlog at check-in, out-of-view work arrives as a normal
+fleet-visible *offer*; the own-backlog fallback below is reached only when no
+offer is dispatchable. It remains wired, and its leadership step-down still
+fires when it is the path that dispatches.
 
 ### Own-backlog fallback & leadership hand-off (WL-0MUU4XFU90008E24)
 
-The sprint-view-only window above is the **normal** dispatch contract: the
-dispatcher head equals the rendered view and a view with nothing dispatchable
-is a NOP. In **coordination/leader mode** the leader additionally has a
-bounded, self-scoped escape valve so a fleet does not idle when one root's view
-is momentarily empty or fully blocked — with a fairness guard so no instance
-can monopolise leadership by repeatedly reaching into its own hidden backlog.
+With the whole-backlog window above, an instance offers its **entire ranked
+backlog** at check-in, so out-of-view work normally arrives as a fleet-visible
+offer and dispatch needs no special case. The own-backlog fallback below
+remains wired for the case where the offer scan yields nothing dispatchable —
+with a fairness guard so no instance can monopolise leadership.
 
 **Trigger (AC1).** The fallback is evaluated in `dispatchFromCoordination`
 **only after** the coordination offer scan yields no dispatchable candidate —
@@ -284,17 +284,19 @@ work can then win the next election and dispatch it. Contract details:
 **Scope: coordination/leader mode only.** The fallback lives on the
 coordination leader path (`dispatchFromCoordination`) and both step-downs are
 guarded by a non-null `leaderManager`. **Legacy mode** (no `coordinationDir`;
-`leaderManager === null`, `leaderState` hard-coded `true`) is unchanged — there
-is no manager and no peer to hand off to, so the direct/legacy path keeps the
-strict sprint-view-only behaviour (non-critical out-of-view work is never
-dispatched). The TUI worklist is unchanged.
+`leaderManager === null`, `leaderState` hard-coded `true`) has no manager and
+no peer to hand off to; its direct path dispatches the whole ranked backlog
+(see *Whole-backlog dispatch window*). The TUI worklist is unchanged.
 
-**No contradiction with WL-0MUNS8X97007C9H9.** The sprint-view-only contract
-still governs the dispatcher head and the direct/legacy path; the fallback is a
-bounded, own-root, leadership-handing-off exception on the coordination leader
-path only. It is *not* a reinstatement of the unconditional non-critical
-extension that WL-0MUNS8X97007C9H9 superseded: the window stays bounded, the
-ranking is the same, and the fairness guard removes the monopolisation risk.
+**Relationship to WL-0MUNS8X97007C9H9 (superseded).** That item's
+sprint-view-only contract is gone: the dispatcher now considers the whole
+ranked backlog on every path, so non-critical out-of-view work is dispatched
+directly rather than only through this fallback. Because that work is offered
+fleet-wide (not read from a privileged view of a *hidden* backlog), the
+step-down guard's original monopolisation premise no longer applies to it —
+cross-root fairness is owned by the `selectLeastRecentlyServed` round-robin
+cursor. The fallback and both of its step-downs stay wired and tested for the
+no-dispatchable-offer case.
 
 **Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
 entry per instance — an **offer** of that instance's own Herdr list head (computed at the
@@ -433,11 +435,13 @@ mutates the file, WL-0MTMPIQBE001J41P); liveness lives only in the read
 predicate. See *No-candidate cooldown & the empty offer file* for the full
 pause contract.
 
-**Constraints preserved.** The sweep is **not** a reinstatement of the
-unconditional non-critical window widening superseded by
-WL-0MUNS8X97007C9H9: it is a bounded window over an explicit registry, not a
-deeper read of an arbitrary backlog. It also never requires a running pane or
-instance per root — that is precisely the bug it fixes.
+**Constraints preserved.** The sweep remains a **bounded window over an
+explicit registry** (the `downtimeWorklogRoots` setting), not an unbounded scan
+of the filesystem, and it never requires a running pane or instance per root —
+that is precisely the bug it fixes. Note that the whole-backlog window
+(WL-0MW9XS0XR007K1TH) now lets any path reach deep work; the sweep's distinctive
+job is *cross-root reach* into roots that have no running instance to offer
+work.
 
 ## Architecture
 
@@ -2274,13 +2278,12 @@ The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
 (no poll, no idle tracking, no dispatch) for `downtimeNoCandidateCooldownMs`
 (default 60 min) after a genuinely empty backlog, resetting the idle
 tracker so a fresh full idle period is required after the pause. A
-`no-candidate` outcome means the *sprint view* — the live `browseItemCount`
-window (plus mandatory items) — held nothing dispatchable: the dispatcher does
-not scan hidden backlog (WL-0MUNS8X97007C9H9; see *Sprint-view-only dispatch
-window* above) **except** via the coordination leader's bounded own-backlog
-fallback, which dispatches before this reason is returned and then hands off
-leadership (WL-0MUU4XFU90008E24; see *Own-backlog fallback & leadership
-hand-off* above). In
+`no-candidate` outcome means the **whole ranked backlog** held nothing
+dispatchable: the dispatcher walks every ranked work item beyond the initial
+`browseItemCount` window (see *Whole-backlog dispatch window* above), so this
+reason now implies a genuinely empty-or-fully-gated backlog rather than a
+narrow view (WL-0MW9XS0XR007K1TH supersedes WL-0MUNS8X97007C9H9's
+sprint-view-only reading). In
 coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
 (`.worklog/downtime-coordination.json`) is an **offer list, not the
 backlog**: the leader removes each entry after dispatching (see step 4

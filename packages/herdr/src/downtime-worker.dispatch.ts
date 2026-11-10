@@ -25,6 +25,7 @@ import {
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+  DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS,
   DISPATCH_PIPELINE_SINGLE_FLIGHT,
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
@@ -538,22 +539,27 @@ export async function dispatchDowntimeWork(
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return finalize(herdrOutcome);
 
-        // ── Extended dispatch window (WL-0MU6UL3GQ0015AA5) ──
-        // The initial head is windowed (mandatory items always included, the
-        // remaining slots filled from "other" items), so when the mandatory
-        // set is large the first genuinely dispatchable candidate can fall
-        // outside it and the dispatcher would report 'no-candidate' despite a
-        // healthy backlog (the 2026-09-18 31-hour starvation). Re-read the
-        // SAME ranking path with a bounded larger window and filter ONLY the
-        // newly visible items — a window extension, never a second ranking.
+        // ── Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH) ──
+        // The initial head is windowed to the rendered sprint view, so a
+        // genuinely dispatchable candidate can rank beyond it. Re-read the
+        // SAME ranking path with a growing window and scan only the newly
+        // visible items — a window extension, never a second ranking. Both
+        // critical and non-critical candidates are eligible (supersedes the
+        // sprint-view-only restriction of WL-0MUNS8X97007C9H9), and the walk
+        // stops as soon as a candidate dispatches, so the extra reads are paid
+        // only when the visible window yields nothing.
+        //
         // Runs for every filtered-exhaustion reason (including a code-freeze,
         // where plan/intake work can still lie beyond the window); the
         // terminal reason below is unchanged when the extension adds nothing,
         // so no defined outcome is ever converted into a new failure.
-        const extendedItems = await fetchExtendedHerdrItems(deps, opts.cwd, head.items);
-        if (extendedItems.length > 0) {
+        let seenItems = head.items;
+        for (let round = 0; round < DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS; round += 1) {
+          const extendedItems = await fetchExtendedHerdrItems(deps, opts.cwd, seenItems);
+          if (extendedItems.length === 0) break;
           const extendedOutcome = await dispatchFromHerdrList(deps, extendedItems, ctx, flags);
           if (extendedOutcome !== null) return finalize(extendedOutcome);
+          seenItems = [...seenItems, ...extendedItems];
         }
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;

@@ -26,6 +26,7 @@ import {
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+  DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS,
   type CoordinationTierKind,
 } from './downtime-worker.constants.js';
 import { resolveCpuGate, type HostCpuGateDeps } from './downtime-worker.dispatch-cpu-gate.js';
@@ -429,18 +430,25 @@ export async function computeMostImportantItem(
   const offer = await findOfferIn(head.items);
   if (offer !== null) return offer;
 
-  // ── Extended dispatch window (WL-0MU6UL3GQ0015AA5) ──
-  // Mandatory items (critical + completed/in_review) always occupy the head
-  // and consume its slots, so the only offerable item can lie beyond the
-  // window. Re-read the SAME ranking path with a bounded larger window and
-  // scan only the newly visible items; a window extension, never a second
-  // ranking. Runs for every filtered-exhaustion reason (plan/intake offers
-  // remain valid under a code-freeze); the terminal result below is
-  // unchanged when the extension adds nothing.
-  const extendedItems = await fetchExtendedHerdrItems(deps, cwd, head.items);
-  if (extendedItems.length > 0) {
+  // ── Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH) ──
+  // The head is windowed to the rendered sprint view, so the only offerable
+  // item can lie beyond it. Re-read the SAME ranking path with a growing
+  // window and scan only the newly visible items; a window extension, never a
+  // second ranking. Both critical and non-critical offers are eligible
+  // (supersedes WL-0MUNS8X97007C9H9), and the walk stops at the first offer so
+  // the extra reads are paid only when the visible window yields nothing.
+  // Runs for every filtered-exhaustion reason (plan/intake offers remain valid
+  // under a code-freeze); the terminal result below is unchanged when the
+  // extension adds nothing.
+  let seenItems = head.items;
+  let extendedTotal = 0;
+  for (let round = 0; round < DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS; round += 1) {
+    const extendedItems = await fetchExtendedHerdrItems(deps, cwd, seenItems);
+    if (extendedItems.length === 0) break;
     const extendedOffer = await findOfferIn(extendedItems);
     if (extendedOffer !== null) return extendedOffer;
+    extendedTotal += extendedItems.length;
+    seenItems = [...seenItems, ...extendedItems];
   }
 
   // Herdr list was non-empty but every item was filtered by a safety gate
@@ -454,7 +462,7 @@ export async function computeMostImportantItem(
   // no-candidate cooldown semantics must not change) — only the explanation
   // is added. A dedicated hold reason overrides the aggregate, because the
   // union already publishes that token.
-  const windowSize = head.items.length + extendedItems.length;
+  const windowSize = head.items.length + extendedTotal;
   const attribute = (reason?: EmptyOfferReason): EmptyOfferAttribution => {
     const summary = summariseEmptyOffer({ windowSize, rejections: [...rejections.values()] });
     return reason === undefined ? summary : { ...summary, reason };

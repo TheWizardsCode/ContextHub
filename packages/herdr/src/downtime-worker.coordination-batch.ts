@@ -20,6 +20,7 @@ import { resolveSprintViewWindow } from './browse-window.js';
 import {
   computeAuditEligibleDepth,
   fetchExtendedHerdrItems,
+  fetchWholeBacklogTail,
   type DowntimeGateDeps,
 } from './downtime-worker.gates.js';
 import type {
@@ -67,10 +68,17 @@ export function createCoordinationBatchRuntime(
 
 /**
  * The leader's own dispatch window (WL-0MVFE1DD8000D8T2 AC4): the canonical
- * ranking head windowed to the live sprint view, plus the bounded window
- * EXTENSION (`fetchExtendedHerdrItems`, never a second ranking). Fail-open:
- * a `{ok:false}`/thrown lookup resolves `null` — the caller then falls back to
- * its unchanged behaviour or to a depth of 0 (no batch armed).
+ * ranking head windowed to the live sprint view, plus the WHOLE ranked backlog
+ * beyond it (`fetchWholeBacklogTail`, never a second ranking).
+ *
+ * The tail is the full backlog, not one bounded step, because every ranked
+ * work item is a dispatch candidate (WL-0MW9XS0XR007K1TH AC1) — a caller that
+ * scans only `head` and then gives up would re-introduce the sprint-view
+ * restriction on this path. Even so, non-critical
+ * items are always included (supersedes WL-0MUNS8X97007C9H9).
+ *
+ * Fail-open: a `{ok:false}`/thrown lookup resolves `null` — the caller then
+ * falls back to its unchanged behaviour or to a depth of 0 (no batch armed).
  */
 export async function readOwnHeadWindow(
   deps: DowntimeGateDeps,
@@ -85,8 +93,6 @@ export async function readOwnHeadWindow(
     ownHead = null;
   }
   if (ownHead === null || !ownHead.ok) return null;
-  const tail = await fetchExtendedHerdrItems(deps, cwd, ownHead.items, {
-    includeNonCritical: true,
-  });
+  const tail = await fetchWholeBacklogTail(deps, cwd, ownHead.items);
   return { head: ownHead.items, tail };
 }

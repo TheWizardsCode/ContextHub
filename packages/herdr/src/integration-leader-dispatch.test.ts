@@ -479,55 +479,62 @@ describe('integration: leader election → coordination → dispatch', () => {
       }));
 
     it(
-      'AC1/AC4: steps down exactly once after an own-backlog dispatch; another instance can take over',
+      'WL-0MW9XS0XR007K1TH supersedes the step-down trigger: an out-of-view item is OFFERED fleet-wide, not reached via a privileged fallback',
       async () => {
         vi.useFakeTimers();
         vi.setSystemTime(70_000_000);
         try {
           releaseLeadershipSpy.mockClear();
-          const depsA = baseDeps({ getHerdrListHead: ownRoot([eligibleTail('WL-OWN-BACKLOG')]) });
+          // A's own root has ONE eligible item beyond its sprint view. Under
+          // the whole-backlog contract it is now part of A's offer, so the
+          // leader dispatches it as a NORMAL fleet-visible offer.
+          const depsA = baseDeps({
+            getHerdrListHead: ownRoot([eligibleTail('WL-OWN-BACKLOG')]),
+            // The offer is re-fetched at dispatch time, so the fixture must
+            // resolve the offered id (not the base default).
+            fetchItem: vi.fn().mockResolvedValue({
+              ok: true,
+              info: itemInfo('WL-OWN-BACKLOG', 'idea'),
+            }),
+          });
           const depsB = baseDeps(); // B has no own work to offer
           const workerA = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-a', cwd: dirA, deps: depsA });
           const workerB = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-b', cwd: dirB, deps: depsB });
 
-          await workerA.tick(); // A elects + checks in (nothing offered)
+          await workerA.tick(); // A elects + checks in (now offers its backlog)
           await workerB.tick(); // B joins as a non-leader
           expect(workerA.isLeader).toBe(true);
 
           vi.setSystemTime(70_000_000 + 60_001);
-          const at = await workerA.tick(); // idle threshold met → own-backlog dispatch
+          const at = await workerA.tick(); // idle threshold met → offer dispatch
 
           expect(at.dispatched).toBe(true);
-          // The dispatch itself was not undone by the hand-off: claim + marker
-          // + spawn all completed before the step-down.
           expect(depsA.claimItem).toHaveBeenCalled();
           expect(depsA.recordDispatch).toHaveBeenCalled();
           expect(depsA.spawnAgentPane).toHaveBeenCalledWith(
             expect.stringContaining('WL-OWN-BACKLOG'),
             expect.objectContaining({ cwd: dirA }),
           );
-          // The voluntary step-down fired exactly once.
-          expect(releaseLeadershipSpy).toHaveBeenCalledTimes(1);
-          expect(releaseLeadershipSpy).toHaveBeenCalledWith('inst-a');
-          // The lease was released so another instance can win.
-          expect(existsSync(join(sharedCoord, LEASE_FILE))).toBe(false);
-
-          // B takes over the now-vacant lease before A's next tick.
-          vi.setSystemTime(70_000_000 + 60_002);
-          await workerB.tick();
-          expect(workerB.isLeader).toBe(true);
-
-          // A's next tick observes itself as non-leader (no re-election).
-          vi.setSystemTime(70_000_000 + 60_003);
-          await workerA.tick();
-          expect(workerA.isLeader).toBe(false);
-          // The step-down is once per own-backlog dispatch — no repeated calls.
-          expect(releaseLeadershipSpy).toHaveBeenCalledTimes(1);
+          // No step-down: the item was a fleet-visible OFFER, not a privileged
+          // read of a hidden backlog. Cross-root fairness is owned by the
+          // round-robin cursor, so leadership is retained.
+          expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+          expect(workerA.isLeader).toBe(true);
+          expect(existsSync(join(sharedCoord, LEASE_FILE))).toBe(true);
         } finally {
           vi.useRealTimers();
         }
       },
     );
+
+    // NOTE (WL-0MW9XS0XR007K1TH): the own-backlog FALLBACK + step-down path is
+    // not reachable in this integration scenario any more — an instance now
+    // offers its whole ranked backlog at check-in, so its out-of-view work
+    // arrives as a normal fleet-visible offer and dispatches via the offer
+    // path. The fallback and its step-down remain wired and unit-covered by
+    // `coordination-dispatch.test.ts` (`step-down surface AC1`) and
+    // `coordination-registered-root-sweep.test.ts`; they run when no offer is
+    // dispatchable.
 
     it(
       'AC2: a normal in-view (offer-list) dispatch does NOT step down',

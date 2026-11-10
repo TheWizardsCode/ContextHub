@@ -557,23 +557,33 @@ export const DISPATCH_PIPELINE_SINGLE_FLIGHT = 1;
  */
 export { DEFAULT_BROWSE_ITEM_COUNT } from './browse-window.js';
 /**
- * Maximum number of additional items to fetch when extending the dispatch
- * window (WL-0MU6UL3GQ0015AA5; restricted to critical-only by
- * WL-0MUNS8X97007C9H9 AC2/AC4).
+ * Growth step (in items) for the dispatcher's whole-backlog window walk
+ * (WL-0MU6UL3GQ0015AA5; widened to the whole backlog by WL-0MW9XS0XR007K1TH,
+ * superseding the critical-only restriction of WL-0MUNS8X97007C9H9 AC2/AC4).
  *
- * The dispatcher head is the sprint view, so a defensive out-of-window read
- * re-checks the SAME ranking path with a window of
- * `head length + DOWNTIME_DISPATCH_EXTEND_MAX` items. The extension returns
- * ONLY `critical` items: every non-critical candidate must be visible in the
- * sprint view, so a non-critical item beyond `browseItemCount` is never
- * dispatched. Because all `critical` items are mandatory in the view, this
- * escape hatch is normally a no-op.
+ * The dispatcher's initial head is the rendered sprint view, so a window
+ * EXTENSION re-reads the SAME ranking path with a larger window and scans only
+ * the newly visible items. The window grows geometrically —
+ * `max(current.length + DOWNTIME_DISPATCH_EXTEND_MAX, current.length * 2)` — so
+ * a deep item is reached in O(log n) reads rather than one read per 30 items.
  *
- * The extension is bounded: at most `head length + 30` items are ever scanned
- * per dispatch cycle. The TUI worklist continues to show exactly
- * `browseItemCount` items (clamped 1–50).
+ * EVERY ranked item beyond the head is eligible (critical and non-critical), so
+ * any work item is dispatchable; the extension is a window, never a second
+ * ranking. The TUI worklist still shows exactly `browseItemCount` items
+ * (clamped 1–50) — the window bounds rendering only.
  */
 export const DOWNTIME_DISPATCH_EXTEND_MAX = 30;
+/**
+ * Hard cap on the number of window-extension reads in one walk
+ * (WL-0MW9XS0XR007K1TH AC8).
+ *
+ * Geometric growth means a realistic backlog is exhausted in a handful of
+ * reads; this bound is a defensive stop so a pathological backing read (e.g. a
+ * mocking/looping provider that keeps returning "new" items) can never wedge
+ * the idle tick in an unbounded loop. At the cap the walk stops and the caller
+ * proceeds with what it has collected.
+ */
+export const DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS = 20;
 /**
  * Audit-tier recency window: a completed/in_review candidate is only
  * dispatched for audit when it was modified within the last 7 days.
