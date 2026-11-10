@@ -67,7 +67,6 @@ import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSett
 import {
   admitHostDispatch as admitHostBudgetDispatch,
   confirmHostDispatch as confirmHostBudgetDispatch,
-  readAuditBudgetState,
   releaseHostDispatch as releaseHostBudgetDispatch,
   type HostBudgetLivePane,
 } from './host-dispatch-budget.admission.js';
@@ -136,6 +135,9 @@ import {
   DOWNTIME_AUDIT_STALE_WINDOW_MS,
   parseInProgressOutput,
   type DowntimeActiveAuditResult,
+  AUDIT_BUDGET_SATURATED_REASON,
+  AUDIT_BUDGET_UNKNOWN_REASON,
+  createAuditAvailabilityClient,
   withTransientRetry,
   parseHerdrPaneListOutput,
   isSafeDowntimePaneToClose,
@@ -683,50 +685,57 @@ export function createDowntimeDeps(
         return { ok: false };
       }
     },
-    async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
+    async getActiveAudit(
+      this: DowntimeWorkerDeps,
+      cwd: string,
+    ): Promise<DowntimeActiveAuditResult> {
       try {
-        // Host-wide audit admission (WL-0MVXY0XPF006YUHA F2): FIRST consult the
-        // machine-scoped dispatch-budget ledger where the retired
-        // `active-audit` marker used to be read. `readAuditBudgetState` counts
-        // fresh `kind: audit` entries against `maxAudit` (plus a non-stale
-        // legacy marker as ONE synthetic entry, so a mixed-version host is still
-        // serialised) and returns the refusal token the dispatcher reports:
-        // `audit-host-saturated` at `maxAudit: 1` (the legacy token, unchanged
-        // for existing consumers), `host-budget-audit` at any other cap
-        // (including `0`, with 0/0 evidence), and `host-budget-unknown` when an
-        // unreadable ledger had to be repaired. The check coordinates audits
-        // ACROSS projects and herdr instances on the same host — the per-worklog
-        // check below cannot see audits dispatched by other projects'
-        // dispatchers, which is what allowed host-wide saturation
-        // (2026-09-26 incident). Fail-open: if the coordination dir cannot be
-        // resolved the host-wide check is skipped and the per-worklog check
-        // below still runs (the legacy behaviour is preserved).
-        const coordinationDir = getMachineCoordinationDir();
-        if (coordinationDir !== null) {
-          // Cheap read first: the ledger + cap only, NO pane-list subprocess (the
-          // dispatch loop runs this check once per audit candidate). A pane list
-          // is read only on the rare unreadable-ledger path, to self-heal.
-          let state = readAuditBudgetState({ dir: coordinationDir, root: cwd });
-          if (state.reason === 'host-budget-unknown') {
-            state = readAuditBudgetState({
-              dir: coordinationDir,
-              root: cwd,
-              livePanes: await hostBudgetLivePanes(runningPanesResolver, cwd),
-            });
-          }
-          if (state.atCap) {
-            // Host-wide budget refusal: an audit is already in flight
-            // (dispatched by this or another instance/project), or the tier is
-            // disabled/unreadable. Report with source so the worker logs the
-            // host-budget reason token specifically.
-            return {
-              ok: true,
-              active: true,
-              source: 'host-wide',
-              ...(state.reason !== undefined ? { reason: state.reason } : {}),
-              budget: { live: state.live, max: state.max },
-            };
-          }
+        // Proxy-derived audit admission (WL-0MWAMSDNW000SL0E, parent AC1/AC2/
+        // AC3): the audit tier's capacity decision is the proxy's shared local
+        // resource, NOT the per-host `budget.json` `maxAudit` cap. The proxy
+        // owns the audit budget and the live audit-lease registry, so two
+        // ContextHub hosts can no longer each believe they are under their own
+        // cap while contending for the single local llama-server GPU
+        // (2026-11-03 incident). `readAuditBudgetState` is deliberately NOT
+        // called on this path.
+        //
+        // Fail closed on every non-`ok` outcome (AC3): `endpoint-absent` /
+        // `unreachable` / `unparsable` stops audit dispatch with the named
+        // `audit-budget-unknown` reason and the failing exchange (`detail`)
+        // rather than silently reverting to the per-host cap. A missing seam
+        // fails closed too, never open.
+        const readAuditAvailability = this.readAuditAvailability;
+        if (readAuditAvailability === undefined) {
+          return {
+            ok: true,
+            active: true,
+            source: 'proxy',
+            reason: AUDIT_BUDGET_UNKNOWN_REASON,
+            detail: 'seam-absent',
+          };
+        }
+        const outcome = await readAuditAvailability();
+        if (outcome.status !== 'ok') {
+          return {
+            ok: true,
+            active: true,
+            source: 'proxy',
+            reason: AUDIT_BUDGET_UNKNOWN_REASON,
+            detail: outcome.reason,
+          };
+        }
+        const availability = outcome.availability;
+        if (availability.available === false) {
+          // The proxy's own verdict refuses: quote its vocabulary verbatim
+          // (`audit-budget-saturated`, parent AC2) and carry its `live`/`cap`
+          // as the budget evidence.
+          return {
+            ok: true,
+            active: true,
+            source: 'proxy',
+            reason: AUDIT_BUDGET_SATURATED_REASON,
+            budget: { live: availability.live, max: availability.cap },
+          };
         }
         // Active-audit single-flight (WL-0MT3PHW4I002SNOV): does any
         // non-stale kind=audit dispatch marker map to an item still
@@ -745,9 +754,8 @@ export function createDowntimeDeps(
           DOWNTIME_AUDIT_STALE_WINDOW_MS,
         );
         if (auditCandidateIds.size === 0) {
-          // Cheap fast-path: no non-stale audit markers → no active audit
-          // (no worklog query needed). Source is per-worklog.
-          return { ok: true, active: false, source: 'per-worklog' };
+          // Cheap fast-path: no non-stale audit markers → no active audit.
+          return { ok: true, active: false, source: 'proxy' };
         }
         // Intersect with the worklog's in_progress items: a marker only
         // counts as an ACTIVE audit while its item is still in_progress
@@ -1625,6 +1633,14 @@ export async function main(): Promise<void> {
   // via `claimItemForAgentCommand`.
   const downtimeDeps = createDowntimeDeps(SEND_TO_PI_SCRIPT, DISPATCHER_ASSIGNEE);
   downtimeDeps.reserveLocalCapacity = createLocalReserver(runSettings.downtimeProxyUrl);
+  // Proxy-derived audit admission (WL-0MWAMSDNW000SL0E): same wiring point as
+  // the reserve client, so the audit gate reads the proxy URL from the SAME
+  // `runSettings` snapshot. A missing/older proxy answers 404 → the client
+  // resolves `endpoint-absent` → the audit gate fails CLOSED as
+  // `audit-budget-unknown` (never a silent revert to the per-host cap).
+  downtimeDeps.readAuditAvailability = createAuditAvailabilityClient(
+    runSettings.downtimeProxyUrl,
+  );
 
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),

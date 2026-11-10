@@ -228,6 +228,7 @@ export {
 // need.
 export {
   AUDIT_BUDGET_SATURATED_REASON,
+  AUDIT_BUDGET_UNKNOWN_REASON,
   parseAuditAvailabilityResponse,
 } from './downtime-worker.audit-availability.contract.js';
 export type {

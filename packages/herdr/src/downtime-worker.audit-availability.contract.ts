@@ -44,6 +44,16 @@
 export const AUDIT_BUDGET_SATURATED_REASON = 'audit-budget-saturated';
 
 /**
+ * The audit gate's canonical fail-closed token (parent AC3, WL-0MWAMSDNW000SL0E):
+ * the proxy could not answer (absent endpoint, unreachable, or an unparsable
+ * body), so availability is UNKNOWN and audit dispatch stops. Defined here
+ * beside {@link AUDIT_BUDGET_SATURATED_REASON} so the audit gate and the
+ * decision log share the proxy's own vocabulary instead of inventing a local
+ * spelling.
+ */
+export const AUDIT_BUDGET_UNKNOWN_REASON = 'audit-budget-unknown';
+
+/**
  * One live audit lease on the proxy. `expiresAt` is the only substantive
  * field: a lease with no usable expiry cannot be reasoned about, so a
  * malformed entry makes the whole payload unusable (fail-closed).

@@ -45,6 +45,7 @@ import type {
   DowntimeHostBudgetAdmission,
   DowntimeHostBudgetAdmissionInput,
 } from './downtime-worker.dispatch-contract.js';
+import type { AuditAvailabilityClient } from './downtime-worker.audit-availability.js';
 import type {
   DowntimeActiveAuditResult,
   DowntimeCandidate,
@@ -346,6 +347,24 @@ export interface DowntimeWorkerDeps {
    * fully supported). Production wiring (`index.ts`) always provides it.
    */
   reserveLocalCapacity?(request: LocalReservationRequest): Promise<LocalReservationResult | null>;
+  /**
+   * Proxy audit-availability read (WL-0MWAMSDNW000SL0E, parent AC1/AC3): the
+   * audit tier's capacity decision is the proxy-managed shared resource, so
+   * `getActiveAudit` consumes this seam instead of asserting the per-host
+   * `budget.json` `maxAudit` cap. Production wires
+   * `createAuditAvailabilityClient(runSettings.downtimeProxyUrl)` at the same
+   * point as `reserveLocalCapacity` (main()), so the proxy URL comes from the
+   * same settings snapshot as the status poller.
+   *
+   * The client never throws; it resolves a typed outcome
+   * (`ok` / `endpoint-absent` / `unreachable` / `unparsable`). Every non-`ok`
+   * outcome fails CLOSED as `audit-budget-unknown`.
+   *
+   * Optional for backward compatibility: existing test doubles keep
+   * compiling. A MISSING seam fails closed too (audit-budget-unknown) — never
+   * open — because the audit tier cannot prove availability without it.
+   */
+  readAuditAvailability?: AuditAvailabilityClient;
   /**
    * Resolve the dedicated machine-wide Dispatcher anchor pane (C0
    * WL-0MTR01EU7005SYZG, F1 WL-0MTR2CD4X006XI7U): the persisted anchor pane

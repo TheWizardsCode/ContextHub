@@ -26,12 +26,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AUDIT_BUDGET_SATURATED_REASON,
+  AUDIT_BUDGET_UNKNOWN_REASON,
   parseAuditAvailabilityResponse,
   type AuditAvailability,
 } from './downtime-worker.audit-availability.contract.js';
 import { AUDIT_AVAILABILITY_PATH } from './downtime-worker.constants.js';
 import {
   AUDIT_BUDGET_SATURATED_REASON as BARREL_REASON,
+  AUDIT_BUDGET_UNKNOWN_REASON as BARREL_UNKNOWN_REASON,
   parseAuditAvailabilityResponse as barrelParse,
 } from './downtime-worker.js';
 
@@ -229,6 +231,7 @@ describe('parseAuditAvailabilityResponse (AC2–AC4)', () => {
 describe('barrel wiring and contract pinning (AC1, AC5)', () => {
   it('re-exports the token and the parser from the downtime-worker barrel', () => {
     expect(BARREL_REASON).toBe(AUDIT_BUDGET_SATURATED_REASON);
+    expect(BARREL_UNKNOWN_REASON).toBe(AUDIT_BUDGET_UNKNOWN_REASON);
     expect(barrelParse({ cap: 1, live: 0, available: true }, 200)).toEqual({
       cap: 1,
       live: 0,
@@ -236,13 +239,21 @@ describe('barrel wiring and contract pinning (AC1, AC5)', () => {
     });
   });
 
+  it('pins the audit refusal vocabulary to the proxy literal spellings (parent AC2)', () => {
+    // One spelling shared with the proxy: a dispatcher admission and a proxy
+    // refusal can never disagree because a local renaming drifted.
+    expect(AUDIT_BUDGET_SATURATED_REASON).toBe('audit-budget-saturated');
+    expect(AUDIT_BUDGET_UNKNOWN_REASON).toBe('audit-budget-unknown');
+  });
+
   const CONTRACT_MODULE = 'downtime-worker.audit-availability.contract';
   /**
    * Files allowed to reference the contract module / its path constant. The
    * CLIENT is the contract's documented first consumer
-   * (WL-0MWAMSCOP003R837); the audit gate (WL-0MWAMSDNW000SL0E) is the next,
-   * and it must widen this set deliberately — an accidental dispatch-path
-   * consumer still fails here.
+   * (WL-0MWAMSCOP003R837); the audit gate (WL-0MWAMSDNW000SL0E) is the next.
+   * The gate consumes the client and the tokens through the BARREL, so it
+   * needs no direct-contract entry here — an accidental direct dispatch-path
+   * consumer still fails.
    */
   const ALLOWED = new Set([
     `${CONTRACT_MODULE}.ts`,

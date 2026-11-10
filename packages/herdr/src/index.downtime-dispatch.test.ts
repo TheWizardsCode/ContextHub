@@ -516,12 +516,12 @@ describe('createDowntimeDeps', () => {
     // consecutive idle windows (no audit recorded between), the worker
     // dispatches exactly once. The first dispatch writes the durable
     // per-worklog marker (kind:audit) AND reserves the machine-scoped audit
-    // slot (WL-0MVXY0XPF006YUHA F2, replacing the active-audit marker). The
-    // second window's HOST-WIDE audit admission check reads the ledger, finds
-    // the tier at its `maxAudit: 1` cap and skips the audit tier outright —
-    // reporting reason 'audit-host-saturated' (never 'no-candidate', so the
-    // no-candidate cooldown is not entered while the audit runs) — so no
-    // second dispatch.
+    // slot (WL-0MVXY0XPF006YUHA F2). The second window's PROXY-DERIVED audit
+    // admission check (WL-0MWAMSDNW000SL0E) reads the proxy's availability,
+    // which now holds the lease the first dispatch acquired, and skips the
+    // audit tier outright — reporting the proxy's own token
+    // 'audit-budget-saturated' (never 'no-candidate', so the no-candidate
+    // cooldown is not entered while the audit runs) — so no second dispatch.
     const now = Date.now();
     const candidate = {
       id: 'WL-ONCE',
@@ -584,6 +584,19 @@ describe('createDowntimeDeps', () => {
     );
     const cwd = makeTempDir();
 
+    // Proxy-managed audit budget (WL-0MWAMSDNW000SL0E): the proxy holds the
+    // live audit lease, so it admits window 1 and reports saturation once the
+    // first dispatch's lease is live. Flipped after window 1 below.
+    let proxySaturated = false;
+    deps.readAuditAvailability = vi.fn(async () => ({
+      status: 'ok' as const,
+      availability: {
+        cap: 1,
+        live: proxySaturated ? 1 : 0,
+        available: !proxySaturated,
+      },
+    }));
+
     // Idle window 1: audit candidate selected and dispatched.
     const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd });
     expect(first.dispatched).toBe(true);
@@ -608,11 +621,14 @@ describe('createDowntimeDeps', () => {
     // tick refuses against.
     expect(freshCount('audit')).toMatchObject({ ok: true, count: 1 });
 
-    // Idle window 2: the host-wide audit serialisation check skips the audit
-    // tier (audit-host-saturated); nothing else to dispatch.
+    // The proxy now reports the live audit lease: window 2 skips the tier.
+    proxySaturated = true;
+
+    // Idle window 2: the proxy-derived audit admission check skips the audit
+    // tier (audit-budget-saturated); nothing else to dispatch.
     const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd });
     expect(second.dispatched).toBe(false);
-    expect(second.reason).toBe('audit-host-saturated');
+    expect(second.reason).toBe('audit-budget-saturated');
     expect(second.kind).toBeUndefined();
     expect(spawnFn).toHaveBeenCalledTimes(1);
   });

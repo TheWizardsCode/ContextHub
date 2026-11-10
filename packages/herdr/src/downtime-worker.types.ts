@@ -732,36 +732,52 @@ export type DowntimeClaimResult =
   | { ok: true }
   | { ok: false; reason: 'stale' | 'error'; error?: string };
 /**
- * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV,
- * generalised to the host-wide dispatch budget by WL-0MVXY0XPF006YUHA F2).
+ * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV),
+ * generalised to the host-wide dispatch budget by WL-0MVXY0XPF006YUHA F2 and
+ * made proxy-derived for the audit tier by WL-0MWAMSDNW000SL0E.
  *
  *  - `{ok:true, active:true}` — the audit tier must be skipped this tick. The
- *    `source` says why: `'host-wide'` when the machine-scoped dispatch-budget
- *    ledger reports the audit tier at/over `maxAudit` (or cannot be read —
- *    fail-closed), `'per-worklog'` when a non-stale `kind=audit` dispatch
- *    marker maps to an item still `in_progress` (dispatched but not yet
- *    completed/reviewed).
- *  - `{ok:true, active:false}` — the audit tier may proceed.
+ *    `source` says why: `'proxy'` when the proxy's audit-availability verdict
+ *    refuses (saturated, or unknown because the read failed closed), `'host-wide'`
+ *    when the machine-scoped dispatch-budget ledger reports the audit tier
+ *    at/over `maxAudit` (or cannot be read — the LEGACY path, no longer produced
+ *    by the real `getActiveAudit`), and `'per-worklog'` when a non-stale
+ *    `kind=audit` dispatch marker maps to an item still `in_progress`
+ *    (dispatched but not yet completed/reviewed).
+ *  - `{ok:true, active:false, source:'proxy'}` — the proxy reports capacity and
+ *    no per-worklog audit is in flight; the audit tier may proceed.
  *  - `{ok:false}` — the check could not complete (e.g. worklog query
  *    failure): fail-open — the audit tier is skipped and dispatch falls
  *    through to the next tier; all dispatch is never blocked by an
  *    unanswerable check.
  *
- * `reason`/`budget` (F2) carry the host-budget refusal token and its
- * `live`/`max` evidence on a `source: 'host-wide'` skip, so the dispatcher
- * reports the cap decision rather than inferring it: `audit-host-saturated` at
- * `maxAudit: 1` (the retired marker's token, unchanged for existing
- * consumers), `host-budget-audit` at any other cap (including `0`), and
- * `host-budget-unknown` when the ledger had to be repaired. Absent on a
- * per-worklog skip.
+ * `reason`/`budget` carry the refusal token and its `live`/`cap` evidence. On
+ * the proxy path the token is the proxy's own vocabulary —
+ * `audit-budget-saturated` (verdict `available:false`) or
+ * `audit-budget-unknown` (absent/unreachable/unparsable read, fail-closed) —
+ * never the legacy `host-budget-audit` / `audit-host-saturated` tokens. On the
+ * retained host-wide source the legacy tokens are unchanged. `detail` records
+ * the failing exchange on a fail-closed proxy read (`timeout` / `network` /
+ * `http-<status>` / `bad-body` / `seam-absent`) for the decision log. Absent on
+ * a per-worklog skip.
  */
 export type DowntimeActiveAuditResult =
   | {
       ok: true;
       active: boolean;
-      source?: 'host-wide' | 'per-worklog';
-      reason?: 'audit-host-saturated' | 'host-budget-audit' | 'host-budget-unknown';
+      source?: 'host-wide' | 'per-worklog' | 'proxy';
+      reason?:
+        | 'audit-host-saturated'
+        | 'host-budget-audit'
+        | 'host-budget-unknown'
+        | 'audit-budget-saturated'
+        | 'audit-budget-unknown';
       budget?: { live: number; max: number };
+      /**
+       * Failing-exchange evidence on a fail-closed proxy read (decision log):
+       * `timeout` / `network` / `http-<status>` / `bad-body` / `seam-absent`.
+       */
+      detail?: string;
     }
   | { ok: false; error?: string };
 /**

@@ -22,6 +22,7 @@ import {
   type HostBudgetLivePane,
 } from './host-dispatch-budget.js';
 import { resetExecFileAsync, resetWorklogDir, setExecFileAsync, setWorklogDir } from './fetcher.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
 import { setupHostCpuPin, makeTempDir, resetTempDirs } from './index.fixtures.js';
 
 setupHostCpuPin();
@@ -38,7 +39,7 @@ setupHostCpuPin();
 // marker must never be written or removed again.
 // ---------------------------------------------------------------------------
 
-describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
+describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
   const originalCoordinationDir = process.env.HERDR_COORDINATION_DIR;
 
   /** Write the legacy marker verbatim, as an older herdr instance would. */
@@ -55,9 +56,21 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
   }
 
   /**
-   * `wl` invocations of the stubbed exec. The host-wide fast path must not
-   * issue a worklog query; a `herdr pane list` (only on the unreadable-ledger
-   * repair path) is not a `wl` call.
+   * A usable proxy availability outcome with overridable cap/live/verdict, so
+   * each scenario states only the field it exercises.
+   */
+  function availabilityOk(
+    overrides: Partial<{ cap: number; live: number; available: boolean }> = {},
+  ): AuditAvailabilityOutcome {
+    return {
+      status: 'ok',
+      availability: { cap: 1, live: 0, available: true, ...overrides },
+    };
+  }
+
+  /**
+   * `wl` invocations of the stubbed exec. The proxy fast path must not issue a
+   * worklog query; only the retained per-worklog marker check may.
    */
   function wlCalls(mockExec: ReturnType<typeof vi.fn>): unknown[][] {
     return mockExec.mock.calls.filter(([bin]) => bin === 'wl');
@@ -74,144 +87,139 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     resetTempDirs();
   });
 
-  it('getActiveAudit counts a non-stale LEGACY marker as one synthetic audit entry (AC2 read-compatibility)', async () => {
-    // Simulates a SECOND, older herdr instance on the same host: it still
-    // writes the retired `active-audit` marker. The marker must keep blocking
-    // this instance (mixed-version safety), i.e. it is counted as exactly one
-    // audit entry against the default `maxAudit: 1`.
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeLegacyMarker(coordinationDir, 'older-instance');
-
-    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
-    setExecFileAsync(mockExec as never);
-    const cwd = makeTempDir();
-
+  it('reports the proxy available verdict as active:false with source proxy (AC1)', async () => {
+    // The proxy is the shared-resource authority: an available verdict admits
+    // the audit tier even when the local host has no audit in flight.
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    const result = await deps.getActiveAudit(cwd);
+    const read = vi.fn().mockResolvedValue(availabilityOk({ cap: 4, live: 1 }));
+    deps.readAuditAvailability = read;
 
-    // maxAudit defaults to 1 → the legacy single-flight token is preserved.
-    expect(result).toEqual({
-      ok: true,
-      active: true,
-      source: 'host-wide',
-      reason: 'audit-host-saturated',
-      budget: { live: 1, max: 1 },
-    });
-    // The host-wide fast path short-circuits before any wl query.
-    expect(wlCalls(mockExec)).toEqual([]);
+    const result = await deps.getActiveAudit(makeTempDir());
+
+    expect(result).toEqual({ ok: true, active: false, source: 'proxy' });
+    // AC: the availability read is invoked exactly once per gate evaluation.
+    expect(read).toHaveBeenCalledTimes(1);
   });
 
-  it('getActiveAudit reads the ledger cap: one live audit against maxAudit=2 still admits (AC3)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeMaxAudit(coordinationDir, 2);
-    expect(
-      reserve({
-        kind: 'audit',
-        itemId: 'WL-RUNNING',
-        instanceId: 'other-instance',
-        root: '/repo/other',
-        paneId: 'pane-1',
-      }).ok,
-    ).toBe(true);
-
-    // No per-worklog marker → the per-worklog check runs and answers none.
-    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
-    setExecFileAsync(mockExec as never);
-    const cwd = makeTempDir();
-
+  it('maps the proxy saturated verdict to audit-budget-saturated with live/cap evidence (AC2)', async () => {
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    const result = await deps.getActiveAudit(cwd);
+    deps.readAuditAvailability = vi.fn().mockResolvedValue(
+      availabilityOk({ cap: 2, live: 2, available: false }),
+    );
 
-    // One of two permitted audits is running: this tick may dispatch the second.
-    expect(result).toEqual({ ok: true, active: false, source: 'per-worklog' });
-  });
-
-  it('getActiveAudit refuses the third audit with host-budget-audit at maxAudit=2 (AC3)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeMaxAudit(coordinationDir, 2);
-    for (const itemId of ['WL-A', 'WL-B']) {
-      expect(
-        reserve({
-          kind: 'audit',
-          itemId,
-          instanceId: 'other-instance',
-          root: '/repo/other',
-          paneId: `pane-${itemId}`,
-        }).ok,
-      ).toBe(true);
-    }
-
-    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
-    setExecFileAsync(mockExec as never);
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    const result = await deps.getActiveAudit(cwd);
+    const result = await deps.getActiveAudit(makeTempDir());
 
     expect(result).toEqual({
       ok: true,
       active: true,
-      source: 'host-wide',
-      reason: 'host-budget-audit',
+      source: 'proxy',
+      reason: 'audit-budget-saturated',
       budget: { live: 2, max: 2 },
     });
-    expect(wlCalls(mockExec)).toEqual([]);
+    // One vocabulary: the proxy path never emits the legacy host-budget tokens.
+    const reason = (result as { reason?: string }).reason;
+    expect(reason).not.toBe('host-budget-audit');
+    expect(reason).not.toBe('audit-host-saturated');
   });
 
-  it('getActiveAudit refuses every audit at maxAudit=0 with 0/0 evidence (AC3)', async () => {
+  it('budget.json maxAudit (including 0) does not influence the proxy-path decision (AC1)', async () => {
+    // The legacy per-host kill switch would refuse every audit at maxAudit 0;
+    // the proxy-derived audit tier must ignore it entirely.
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
     writeMaxAudit(coordinationDir, 0);
 
-    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
-    setExecFileAsync(mockExec as never);
-    const cwd = makeTempDir();
-
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    const result = await deps.getActiveAudit(cwd);
+    deps.readAuditAvailability = vi.fn().mockResolvedValue(
+      availabilityOk({ cap: 3, live: 1, available: true }),
+    );
 
-    // The kill switch reports the same token at every live count, with 0/0.
-    expect(result).toEqual({
-      ok: true,
-      active: true,
-      source: 'host-wide',
-      reason: 'host-budget-audit',
-      budget: { live: 0, max: 0 },
-    });
+    const result = await deps.getActiveAudit(makeTempDir());
+
+    // The proxy admits despite the local maxAudit:0 — the local cap is unused.
+    expect(result).toEqual({ ok: true, active: false, source: 'proxy' });
   });
 
-  it('getActiveAudit fails closed on an unreadable ledger and repairs it from live panes (AC6)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeFileSync(join(coordinationDir, 'dispatch-budget.json'), '{ not json');
+  it('fails closed as audit-budget-unknown for every unusable proxy exchange (AC3)', async () => {
+    // The failing exchange is recorded (`detail`) so the decision log explains
+    // WHY audit dispatch stopped: rollout (404), incident (timeout/network),
+    // or contract break (bad body).
+    const cases: Array<{
+      label: string;
+      outcome: AuditAvailabilityOutcome;
+      detail: string;
+    }> = [
+      {
+        label: 'endpoint absent (proxy predates the endpoint)',
+        outcome: { status: 'endpoint-absent', reason: 'http-404' },
+        detail: 'http-404',
+      },
+      {
+        label: 'unreachable (timeout)',
+        outcome: { status: 'unreachable', reason: 'timeout' },
+        detail: 'timeout',
+      },
+      {
+        label: 'unreachable (network)',
+        outcome: { status: 'unreachable', reason: 'network' },
+        detail: 'network',
+      },
+      {
+        label: 'unusable status',
+        outcome: { status: 'unreachable', reason: 'http-500' },
+        detail: 'http-500',
+      },
+      {
+        label: 'unparsable body',
+        outcome: { status: 'unparsable', reason: 'bad-body' },
+        detail: 'bad-body',
+      },
+    ];
 
     setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
-    const cwd = makeTempDir();
+    for (const testCase of cases) {
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+      deps.readAuditAvailability = vi.fn().mockResolvedValue(testCase.outcome);
 
+      const result = await deps.getActiveAudit(makeTempDir());
+
+      // Never a permissive active:false — an unknown budget stops audits.
+      expect(result, testCase.label).toEqual({
+        ok: true,
+        active: true,
+        source: 'proxy',
+        reason: 'audit-budget-unknown',
+        detail: testCase.detail,
+      });
+      expect((result as { reason?: string }).reason).not.toBe('host-budget-unknown');
+    }
+  });
+
+  it('fails closed as audit-budget-unknown when the seam is absent (never open)', async () => {
+    // Test doubles and pre-wiring callers omit the optional seam; the audit
+    // tier cannot prove availability, so it must stop rather than revert to
+    // the per-host cap.
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    const result = await deps.getActiveAudit(cwd);
+
+    const result = await deps.getActiveAudit(makeTempDir());
 
     expect(result).toEqual({
       ok: true,
       active: true,
-      source: 'host-wide',
-      reason: 'host-budget-unknown',
-      budget: { live: 0, max: 1 },
+      source: 'proxy',
+      reason: 'audit-budget-unknown',
+      detail: 'seam-absent',
     });
-    // Self-healing: the unreadable document was rewritten from live state (no
-    // downtime panes here, so an empty but VALID ledger).
-    expect(freshCount('audit')).toMatchObject({ ok: true, count: 0 });
   });
 
-  it('getActiveAudit falls back to the per-worklog check when the host-wide marker is absent (AC1, backward compatible)', async () => {
-    // No machine-wide marker: the legacy per-worklog check still runs and
-    // reports its own source, so existing single-project behaviour is intact.
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-
+  it('runs the retained per-worklog single-flight check after the proxy admits (AC1)', async () => {
+    // The per-worklog marker answers a DIFFERENT question ("has this worklog
+    // already been audited this window?") and is retained unchanged: a fresh
+    // marker whose item is still in_progress still blocks the tier.
     const cwd = makeTempDir();
     mkdirSync(join(cwd, '.worklog'), { recursive: true });
     writeFileSync(
@@ -235,38 +243,28 @@ describe('host-wide audit admission (WL-0MVXY0XPF006YUHA F2)', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+    deps.readAuditAvailability = vi.fn().mockResolvedValue(availabilityOk());
     const result = await deps.getActiveAudit(cwd);
 
     expect(result).toEqual({ ok: true, active: true, source: 'per-worklog' });
+    expect(wlCalls(mockExec)).toHaveLength(1);
   });
 
-  it('a stale host-wide marker is ignored and the audit slot is released (AC1)', async () => {
+  it('ignores the retired host-wide marker and per-host cap on the proxy path (AC1)', async () => {
+    // A fresh legacy marker (an older herdr instance) and a maxAudit:1 config
+    // must NOT gate the audit tier: the proxy's verdict is authoritative.
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    // Write a marker far in the past (simulating a crashed audit pane whose
-    // cleanup never ran); it must be treated as released.
-    const markerPath = join(coordinationDir, 'active-audit');
-    mkdirSync(coordinationDir, { recursive: true });
-    writeFileSync(
-      markerPath,
-      JSON.stringify({
-        instanceId: 'crashed-instance',
-        dispatchedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-      }),
-      'utf8',
-    );
+    writeLegacyMarker(coordinationDir, 'older-instance');
+    writeMaxAudit(coordinationDir, 1);
 
-    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
-    setExecFileAsync(mockExec as never);
-    const cwd = makeTempDir();
-
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    const result = await deps.getActiveAudit(cwd);
+    deps.readAuditAvailability = vi.fn().mockResolvedValue(availabilityOk());
 
-    // No in_progress item either → no active audit, and source is the
-    // per-worklog fallback (the stale host marker was released).
-    expect(result).toEqual({ ok: true, active: false, source: 'per-worklog' });
-    expect(isHostAuditActive(coordinationDir)).toBe(false);
+    const result = await deps.getActiveAudit(makeTempDir());
+
+    expect(result).toEqual({ ok: true, active: false, source: 'proxy' });
   });
 
   it('recordDispatch never writes the retired host-wide marker for an audit dispatch (AC2)', async () => {

@@ -95,21 +95,25 @@ function logHostAuditSaturation(
   contentionQueueDepth: number | undefined,
   budget?: { live: number; max: number },
   reason: string = 'audit-host-saturated',
+  detail?: string,
 ): void {
   try {
     const slots = typeof freeSlots === 'number' ? freeSlots : 'unknown';
     const contention = typeof contentionQueueDepth === 'number' ? contentionQueueDepth : 'unknown';
-    // The audit tier now counts the machine-scoped ledger: report the observed
-    // concurrent audits and cap when the caller has them (WL-0MVXY0XPF006YUHA
-    // F2), falling back to the retired marker's single-flight figures so the
-    // line shape is unchanged for callers without ledger evidence. `reason` is
-    // the token the caller actually refused with (WL-0MVXY0ZYW009NEJD F5), so
-    // the line never quotes the retired marker's token for a budget stop.
+    // The audit tier's admission is proxy-derived (WL-0MWAMSDNW000SL0E) or, on
+    // the retained legacy source, counts the machine-scoped ledger: report the
+    // observed concurrent audits and cap when the caller has them, falling back
+    // to the retired marker's single-flight figures so the line shape is
+    // unchanged for callers without ledger evidence. `reason` is the token the
+    // caller actually refused with, so the line never quotes the retired
+    // marker's token for a budget stop. `detail` names the failing proxy
+    // exchange when the read failed closed (`audit-budget-unknown`).
     const concurrent = budget !== undefined ? budget.live : 1;
     const cap = budget !== undefined ? `, maxAudit=${budget.max}` : '';
+    const errorDetail = detail !== undefined ? `, detail=${detail}` : '';
     process.stderr.write(
       `[worklog-plugin] Downtime audit tier skipped: ${reason} ` +
-        `(concurrentAudits=${concurrent}${cap}, freeSlots=${slots}, contentionQueueDepth=${contention})\n`,
+        `(concurrentAudits=${concurrent}${cap}, freeSlots=${slots}, contentionQueueDepth=${contention}${errorDetail})\n`,
     );
   } catch {
     // fail-closed: logging must never crash the worker
@@ -429,18 +433,21 @@ export async function dispatchDowntimeWork(
     let auditInFlight = false;
     let auditCheckFailed = false;
     let freshnessSkip = false;
-    // Host-wide audit admission (WL-0MVXY0XPF006YUHA F2; formerly the marker,
-    // WL-0MUIVE0YG000UVIA): true when the machine-scoped dispatch-budget ledger
-    // (another project/instance on this host), or its disabled/unreadable
-    // state, caused the audit-tier skip — as opposed to a per-worklog
-    // in-flight audit. Drives the host-budget reason/log token.
+    // Audit-budget refusal (WL-0MWAMSDNW000SL0E proxy-derived; formerly the
+    // host-wide ledger, WL-0MVXY0XPF006YUHA F2): true when the proxy's
+    // availability verdict refuses (or its read fails closed) or the
+    // machine-scoped dispatch-budget ledger (another project/instance on this
+    // host) is at/over cap — as opposed to a per-worklog in-flight audit.
+    // Drives the budget reason/log token.
     let auditHostSaturated = false;
-    // The host-budget refusal token and its live/max evidence, when the audit
-    // pre-check reported them: `audit-host-saturated` at maxAudit 1 (the retired
-    // marker's token), `host-budget-audit` at any other cap, and
-    // `host-budget-unknown` when an unreadable ledger was repaired.
+    // The budget refusal token and its live/max evidence, when the audit
+    // pre-check reported them: `audit-budget-saturated` / `audit-budget-unknown`
+    // on the proxy path, or the legacy `audit-host-saturated` / `host-budget-audit`
+    // / `host-budget-unknown` tokens on the retained host-wide source.
     let auditHostBudgetReason: string | undefined;
     let auditHostBudget: { live: number; max: number } | undefined;
+    // Failing proxy exchange on a fail-closed audit read (audit-budget-unknown).
+    let auditHostBudgetDetail: string | undefined;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
@@ -512,7 +519,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated, hostBudgetReason: auditHostBudgetReason, hostBudget: auditHostBudget };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated, hostBudgetReason: auditHostBudgetReason, hostBudget: auditHostBudget, hostBudgetDetail: auditHostBudgetDetail };
       const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -566,6 +573,7 @@ export async function dispatchDowntimeWork(
         auditHostSaturated = flags.auditHostSaturated;
         auditHostBudgetReason = flags.hostBudgetReason;
         auditHostBudget = flags.hostBudget;
+        auditHostBudgetDetail = flags.hostBudgetDetail;
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
@@ -599,6 +607,7 @@ export async function dispatchDowntimeWork(
               opts.contentionQueueDepth,
               auditHostBudget,
               auditHostBudgetReason ?? 'audit-host-saturated',
+              auditHostBudgetDetail,
             );
             return finalize({
               dispatched: false,
@@ -640,6 +649,7 @@ export async function dispatchDowntimeWork(
       auditHostSaturated = flags.auditHostSaturated;
       auditHostBudgetReason = flags.hostBudgetReason;
       auditHostBudget = flags.hostBudget;
+      auditHostBudgetDetail = flags.hostBudgetDetail;
       freshnessSkip = flags.freshnessSkip;
     }
 
@@ -695,16 +705,19 @@ export async function dispatchDowntimeWork(
         if (activeAudit.ok) {
           if (activeAudit.active) {
             auditInFlight = true;
-            auditHostSaturated = activeAudit.source === 'host-wide';
+            auditHostSaturated =
+              activeAudit.source === 'host-wide' || activeAudit.source === 'proxy';
             if (auditHostSaturated) {
               auditHostBudgetReason = activeAudit.reason;
               auditHostBudget = activeAudit.budget;
+              auditHostBudgetDetail = activeAudit.detail;
             }
-            // Host-wide budget refusal (WL-0MVXY0XPF006YUHA F2; formerly the
-            // marker) vs per-worklog: distinct reason strings for
-            // observability. The `source` field is set by getActiveAudit:
-            // 'host-wide' when the machine-scoped ledger reports the audit tier
-            // at/over maxAudit (or disabled/unreadable), 'per-worklog' when a
+            // Audit-budget refusal (proxy-derived, WL-0MWAMSDNW000SL0E;
+            // formerly the host-wide ledger, WL-0MVXY0XPF006YUHA F2) vs
+            // per-worklog: distinct reason strings for observability. The
+            // `source` field is set by getActiveAudit: 'proxy' when the proxy's
+            // availability verdict refuses (or the read fails closed),
+            // 'host-wide' on the legacy ledger source, 'per-worklog' when a
             // per-worklog dispatch marker maps to an in_progress item.
             const skipReason = auditHostSaturated
               ? (auditHostBudgetReason ?? 'audit-host-saturated')
@@ -715,6 +728,7 @@ export async function dispatchDowntimeWork(
                 opts.contentionQueueDepth,
                 auditHostBudget,
                 skipReason,
+                auditHostBudgetDetail,
               );
             } else {
               process.stderr.write(

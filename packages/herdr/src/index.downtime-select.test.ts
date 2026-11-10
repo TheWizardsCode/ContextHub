@@ -11,7 +11,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createDowntimeDeps } from './index.js';
-import { DOWNTIME_WL_TIMEOUT_MS } from './downtime-worker.js';
+import { DOWNTIME_WL_TIMEOUT_MS, createAuditAvailabilityClient } from './downtime-worker.js';
 import { DISPATCHER_ASSIGNEE } from './index.claim.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE } from './downtime-log.js';
 import { reserve } from './host-dispatch-budget.js';
@@ -679,6 +679,38 @@ describe('createDowntimeDeps', () => {
 
     expect(result).toEqual({ ok: false });
     expect(classifyAuditScope(result)).toBe('parent');
+  });
+
+  // Proxy audit-availability seam (WL-0MWAMSDNW000SL0E): main() wires
+  // `createAuditAvailabilityClient(runSettings.downtimeProxyUrl)` onto the
+  // deps object at the SAME point as `reserveLocalCapacity`. This pins that
+  // `getActiveAudit` consumes that injected client (not a hard-wired read), so
+  // the audit tier's decision is the proxy's shared-resource verdict.
+  it('getActiveAudit consumes the injected proxy availability client (seam wiring)', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ cap: 2, live: 2, available: false }),
+    });
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+    deps.readAuditAvailability = createAuditAvailabilityClient(
+      'http://proxy:8000',
+      fetcher as never,
+    );
+
+    const result = await deps.getActiveAudit(makeTempDir());
+
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://proxy:8000/llama/local/audit/status',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(result).toEqual({
+      ok: true,
+      active: true,
+      source: 'proxy',
+      reason: 'audit-budget-saturated',
+      budget: { live: 2, max: 2 },
+    });
   });
 
 });
