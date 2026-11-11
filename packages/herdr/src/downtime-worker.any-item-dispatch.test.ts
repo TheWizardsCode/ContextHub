@@ -22,11 +22,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   computeMostImportantItem,
+  CPU_SATURATED_REASON,
   dispatchDowntimeWork,
   fetchExtendedHerdrItems,
   type DowntimeHerdrItem,
 } from './downtime-worker.js';
-import { makeDeps } from './downtime-worker.fixtures.js';
+import {
+  createTempDirTracker,
+  makeDeps,
+  writeDowntimeLog,
+} from './downtime-worker.fixtures.js';
 import { selectWorkItems } from './smart-selection.js';
 import {
   clearFetchMemo,
@@ -262,6 +267,12 @@ describe('whole-backlog dispatch: budgets still bind (WL-0MW9XS0XR007K1TH AC4)',
 // ── AC5 — safety gates still apply out of window ──────────────────────
 
 describe('whole-backlog dispatch: safety gates still apply out of window (WL-0MW9XS0XR007K1TH AC5)', () => {
+  const tempDirs = createTempDirTracker();
+
+  afterEach(() => {
+    tempDirs.cleanup();
+  });
+
   it('a producer-review-flagged out-of-window item is not dispatched', async () => {
     const head = windowFiller(30);
     const target = dispatchableIntake('BEYOND-REVIEW-FLAGGED', { needsProducerReview: true });
@@ -341,6 +352,164 @@ describe('whole-backlog dispatch: safety gates still apply out of window (WL-0MW
     // Split-by-skill is unchanged: implement paused, intake still dispatches.
     expect(outcome.dispatched).toBe(true);
     expect(outcome.candidate?.id).toBe('BEYOND-INTAKE-FROZEN');
+  });
+
+  it('host-CPU saturation still refuses an out-of-window implement candidate', async () => {
+    const head = windowFiller(30);
+    const target = dispatchableImplement('BEYOND-CPU');
+    const getHerdrListHead = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, items: head })
+      .mockResolvedValueOnce({ ok: true, items: [...head, target] });
+    const deps = makeDeps({
+      getHerdrListHead,
+      // The gate is always injected — no test reads the real /proc/stat.
+      readHostCpu: () => ({ ok: true as const, percent: 90, source: 'proc-stat' as const }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 20,
+      cpuGatePercent: 50,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe(CPU_SATURATED_REASON);
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('the review-queue depth hold still holds an out-of-window implement candidate', async () => {
+    const head = windowFiller(30);
+    const target = dispatchableImplement('BEYOND-REVIEW-HOLD');
+    const getHerdrListHead = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, items: head })
+      .mockResolvedValueOnce({ ok: true, items: [...head, target] });
+    // A deep queue (>= browseItemCount) holds non-critical implement candidates.
+    const deps = makeDeps({
+      getHerdrListHead,
+      getReviewQueueCount: vi.fn().mockResolvedValue(99),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 20,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('the dispatched-marker exclusion still excludes an out-of-window item', async () => {
+    const cwd = tempDirs.make('wl-any-item-marker-');
+    const head = windowFiller(30);
+    const target = dispatchableIntake('BEYOND-MARKED');
+    const mockHeadOnce = (): ReturnType<typeof vi.fn> =>
+      vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, items: head })
+        .mockResolvedValueOnce({ ok: true, items: [...head, target] });
+
+    // A FRESH marker for the item at its current stage → excluded.
+    writeDowntimeLog(cwd, [
+      {
+        itemId: 'BEYOND-MARKED',
+        kind: 'intake',
+        stage: 'idea',
+        dispatchedAt: new Date().toISOString(),
+      },
+    ]);
+    const deps = makeDeps({ getHerdrListHead: mockHeadOnce() });
+
+    const excluded = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      browseItemCount: 20,
+    });
+
+    expect(excluded.dispatched).toBe(false);
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // The SAME candidate with a STALE marker does dispatch — so the marker was
+    // the deciding gate, not the widened window.
+    writeDowntimeLog(cwd, [
+      {
+        itemId: 'BEYOND-MARKED',
+        kind: 'intake',
+        stage: 'idea',
+        dispatchedAt: new Date(Date.now() - 60_000).toISOString(),
+      },
+    ]);
+    const admittedDeps = makeDeps({ getHerdrListHead: mockHeadOnce() });
+
+    const admitted = await dispatchDowntimeWork(admittedDeps, {
+      model: 'plan',
+      cwd,
+      browseItemCount: 20,
+      markerStaleWindowMs: 1_000,
+    });
+
+    expect(admitted.dispatched).toBe(true);
+    expect(admitted.candidate?.id).toBe('BEYOND-MARKED');
+  });
+});
+
+// ── AC4 — the attempt budget binds out of window ──────────────────
+
+describe('whole-backlog dispatch: the attempt budget binds out of window (WL-0MW9XS0XR007K1TH AC4)', () => {
+  const tempDirs = createTempDirTracker();
+
+  afterEach(() => {
+    tempDirs.cleanup();
+  });
+
+  it('an out-of-window item at the attempt cap is skipped and flagged', async () => {
+    const cwd = tempDirs.make('wl-any-item-attempt-');
+    const head = windowFiller(30);
+    const target = dispatchableImplement('BEYOND-BUDGET');
+    // Three attempts at the item's CURRENT stage = the cap. Attempts are
+    // counted from the rolling dispatch log, scoped to the stage.
+    writeDowntimeLog(
+      cwd,
+      Array.from({ length: 3 }, () => ({
+        itemId: 'BEYOND-BUDGET',
+        kind: 'implement',
+        stage: 'plan_complete',
+        // Stale: the dispatched-MARKER exclusion only holds while fresh, so an
+        // old timestamp leaves the attempt budget as the deciding gate.
+        dispatchedAt: new Date(Date.now() - 60_000).toISOString(),
+      })),
+    );
+    const getHerdrListHead = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, items: head })
+      .mockResolvedValueOnce({ ok: true, items: [...head, target] });
+    const markNeedsProducerReview = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({ getHerdrListHead, markNeedsProducerReview });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      browseItemCount: 20,
+      markerStaleWindowMs: 1_000,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('attempt-budget-exhausted');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // Flagged for producer review exactly once — the neutral escape hatch, not
+    // a strike.
+    expect(markNeedsProducerReview).toHaveBeenCalledTimes(1);
+    expect(markNeedsProducerReview).toHaveBeenCalledWith('BEYOND-BUDGET', cwd);
+    expect(deps.recordError).not.toHaveBeenCalled();
   });
 });
 
