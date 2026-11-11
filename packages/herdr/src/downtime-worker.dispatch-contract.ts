@@ -541,6 +541,75 @@ export interface DowntimeDispatchOutcome {
   cpuGatePercent?: number;
 }
 
+// ── Continuable holds (WL-0MWBT76WY00298AY AC1) ────────────────────────
+//
+// A head scan may only step past a NON-DISPATCHED outcome when that outcome
+// is a CONTINUABLE HOLD: a neutral condition that applies to that candidate
+// (or to the host's budget) rather than a terminal failure of the tick.
+//
+// This is an ALLOW-LIST, deliberately not a deny-list: "not dispatched" is
+// never enough to continue. A new refusal reason must be added here
+// explicitly, so a future strike-worthy outcome cannot be swallowed into a
+// silent retry loop by accident.
+
+/**
+ * Lost-claim outcomes: the CAS race was lost (`claim-failed`) or the marker
+ * write failed after the claim and the claim was rolled back
+ * (`claim-rolled-back`). Both are neutral and candidate-scoped; the two head
+ * scans already continue past them when `skipOnLostClaim` is set.
+ */
+export const LOST_CLAIM_REASONS: ReadonlySet<string> = new Set([
+  'claim-failed',
+  'claim-rolled-back',
+]);
+
+/**
+ * Host-budget refusals: the machine-wide dispatch budget (or the proxy-owned
+ * audit-budget verdict) refused this BUDGETED candidate (`implement` /
+ * `audit`). Every token below is emitted by the same admission seam
+ * (`dispatchClaimedTier`) with the same neutral contract — `{live, max}`
+ * evidence, no strike, no cooldown, no attempt budget — so all of them are
+ * continuable holds:
+ *  - `host-budget-implement` / `host-budget-audit` / `host-budget-unknown`
+ *    (the ledger path), and
+ *  - `audit-budget-saturated` / `audit-budget-unknown` (the proxy-owned
+ *    availability verdict) plus the one-release legacy `audit-host-saturated`.
+ *
+ * Prep work (`plan` / `intake` / `risk-effort`) is never budget-gated, which
+ * is exactly why a refusal must not end the scan: the prep candidate ranked
+ * behind the refused budgeted candidate is still dispatchable.
+ */
+export const HOST_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
+  'host-budget-implement',
+  'host-budget-audit',
+  'host-budget-unknown',
+  'audit-budget-saturated',
+  'audit-budget-unknown',
+  'audit-host-saturated',
+]);
+
+/** True when `reason` is one of the host-budget refusal tokens. */
+export function isHostBudgetHoldReason(reason: string | undefined): boolean {
+  return reason !== undefined && HOST_BUDGET_HOLD_REASONS.has(reason);
+}
+
+/** True when `reason` is one of the lost-claim tokens. */
+export function isLostClaimReason(reason: string | undefined): boolean {
+  return reason !== undefined && LOST_CLAIM_REASONS.has(reason);
+}
+
+/**
+ * The single continuable-hold predicate every head-scan path consults
+ * (WL-0MWBT76WY00298AY AC1). `true` for exactly the allow-listed neutral
+ * holds — lost claims and host-budget refusals — and `false` for every other
+ * non-dispatch outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
+ * `anchor-unavailable`, `no-candidate`, …), which must keep returning
+ * immediately so the caller's strike/skip semantics are preserved.
+ */
+export function isContinuableHoldOutcome(outcome: { reason?: string }): boolean {
+  return isHostBudgetHoldReason(outcome.reason) || isLostClaimReason(outcome.reason);
+}
+
 /**
  * Reservation evidence carried by a dispatch outcome and copied onto the
  * polled decision entry (parent AC4). Field names mirror

@@ -25,9 +25,11 @@
 
 import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
 import { readOwnHeadWindow } from './downtime-worker.coordination-batch.js';
-import type {
-  DowntimeDispatchDeps,
-  DowntimeDispatchOutcome,
+import {
+  isContinuableHoldOutcome,
+  isHostBudgetHoldReason,
+  type DowntimeDispatchDeps,
+  type DowntimeDispatchOutcome,
 } from './downtime-worker.dispatch-contract.js';
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
 import {
@@ -71,6 +73,19 @@ export interface HeadScanHolds {
   inFlight: boolean;
   review: boolean;
   cpu: boolean;
+  /**
+   * Host-budget refusal recorded by this scan (WL-0MWBT76WY00298AY AC4).
+   *
+   * A sibling of `budget` (the per-item ATTEMPT budget), `cooldown`,
+   * `inFlight`, `review` and `cpu` — never conflated with them. On a
+   * continuable host-budget refusal the scan records the FIRST refusal's
+   * reason token and `{live, max}` evidence here and keeps scanning, so the
+   * caller can report the neutral refusal (never `no-candidate`) when nothing
+   * else dispatches. Precedence in the caller's terminal chain is documented
+   * at the composition site: this hold is LAST, after `code-freeze` → CPU →
+   * review → cooldown → attempt-budget → in-flight → leaf-audit pin.
+   */
+  hostBudget?: { reason: string; budget?: { live: number; max: number } };
 }
 
 /**
@@ -311,16 +326,30 @@ export async function dispatchFromOwnHead(
       },
     );
     if (outcome.dispatched) return outcome;
-    // A lost CAS race / marker-recovery rollback applies to one candidate.
-    if (
-      ctx.skipOnLostClaim &&
-      (outcome.reason === 'claim-failed' || outcome.reason === 'claim-rolled-back')
-    ) {
+    // A non-continuable outcome (wl-error, spawn-failed, marker-write-failed,
+    // anchor-unavailable, …) is returned unchanged so the caller's strike/skip
+    // semantics are preserved. Only the allow-listed continuable holds below
+    // may step to the next candidate (AC1/AC7).
+    if (!isContinuableHoldOutcome(outcome)) return outcome;
+    if (isHostBudgetHoldReason(outcome.reason)) {
+      // Machine-wide budget refusal (WL-0MWBT76WY00298AY AC2): NEUTRAL — no
+      // strike, no cooldown, no attempt budget. Record the FIRST refusal (the
+      // ledger is host-wide, so later budgeted candidates report the same
+      // condition) and step on to the next candidate, which may be prep work
+      // the budget never gates. The batch continuation (`skipOnLostClaim`
+      // false) is the one exception: it records the hold and ENDS the batch
+      // (AC6) — a batch never hops to another audit target.
+      ctx.holds.hostBudget ??= {
+        reason: outcome.reason as string,
+        ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
+      };
+      if (!ctx.skipOnLostClaim) return outcome;
       continue;
     }
-    // Any other terminal outcome (or, for a continuation, ANY non-dispatched
-    // outcome — AC3: a batch never hops to another target) is returned
-    // unchanged so the caller's strike/skip semantics are preserved.
+    // A lost CAS race / marker-recovery rollback applies to one candidate.
+    // Unchanged semantics (AC7): the fallback/sweep continue, while the batch
+    // continuation ends on it exactly as before.
+    if (ctx.skipOnLostClaim) continue;
     return outcome;
   }
   return null;

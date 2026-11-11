@@ -32,6 +32,7 @@ import {
   dispatchFromOwnHead,
   dispatchFromRegisteredRoots,
   type HeadScanBase,
+  type HeadScanHolds,
 } from './downtime-worker.head-scan.js';
 import {
   withOfferRejections,
@@ -144,6 +145,21 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
  * `wl-error` only when EVERY entry failed (a fully broken lookup — a
  * strike); a per-entry failure skips that entry (fail-open per instance,
  * parent risk mitigation — one broken worklog must not starve the rest).
+ *
+ * ## Continuable holds and terminal-reason precedence
+ *
+ * A host-budget refusal is a CONTINUABLE HOLD (WL-0MWBT76WY00298AY): the offer
+ * loop records the first refusal and keeps trying the remaining offers, and
+ * the own-head scan records it on `HeadScanHolds.hostBudget` and steps to the
+ * next candidate, so prep work ranked behind a budget-refused candidate still
+ * dispatches. When nothing else dispatches, the terminal-reason chain folds
+ * that hold in with a fixed precedence:
+ *
+ *     code-freeze → CPU → review-queue → non-terminal cooldown →
+ *     attempt budget → in-flight → leaf-audit pin → host budget → no-candidate
+ *
+ * so a budget hold reports the neutral refusal (never `no-candidate`) with its
+ * `{live, max}` evidence — no strike, no cooldown, no attempt-budget charge.
  */
 export async function dispatchFromCoordination(
   deps: CoordinationLeaderDeps,
@@ -445,7 +461,7 @@ async function dispatchFromCoordinationGated(
   // True when at least one non-critical implement offer was held this cycle
   // by the review-queue depth gate (drives the terminal reason).
   let reviewHold = false;
-  const ownHeadHolds = {
+  const ownHeadHolds: HeadScanHolds = {
     budget: false,
     cooldown: false,
     inFlight: false,
@@ -823,8 +839,20 @@ async function dispatchFromCoordinationGated(
   // empty BACKLOG. A deep-queue hold is reported as the neutral
   // 'review-queue-hold' (never 'no-candidate' — the cooldown must not fire
   // while audits are draining the queue; the gate may lift at any moment).
-  // A hold reported by the own-head scan (fallback or batch continuation) is
-  // folded in here so a filtered own-head backlog keeps its neutral reason.
+  // A hold reported by the own-head scan (fallback, registered-root sweep or
+  // batch continuation) is folded in here so a filtered own-head backlog keeps
+  // its neutral reason.
+  //
+  // TERMINAL-REASON PRECEDENCE (module contract; WL-0MWBT76WY00298AY AC5):
+  // `code-freeze` → CPU → review-queue → non-terminal cooldown → attempt
+  // budget → in-flight → leaf-audit pin → host budget → `no-candidate`. A
+  // host-budget hold sits LAST because it is the weakest, most ambient
+  // statement: "some budgeted candidate was refused this tick". Any stronger
+  // hold that also fired keeps its own reason; with no other hold, the neutral
+  // refusal (and its `{live, max}` evidence) is reported instead of
+  // `no-candidate`, so no cooldown/strike is recorded. The offer path's
+  // `hostBudgetHold` (same seam, same neutral contract) keeps its position and
+  // is reported first when both paths recorded one.
   const terminal: DowntimeDispatchOutcome = frozen
     ? { dispatched: false, reason: 'code-freeze' }
     : cpuHold || ownHeadHolds.cpu
@@ -844,10 +872,18 @@ async function dispatchFromCoordinationGated(
             // no-candidate cooldown and no strike.
             ? { dispatched: false, reason: LEAF_AUDIT_PIN_HOLD_REASON }
             // Host-budget refusal (F3 AC5): a machine-wide cap, not an empty
-            // backlog, stopped the implement tier. Neutral — no cooldown, no
+            // backlog, stopped the budgeted tier. Neutral — no cooldown, no
             // strike; the next idle tick re-checks the ledger.
             : hostBudgetHold !== undefined
               ? hostBudgetHold
-              : { dispatched: false, reason: 'no-candidate' };
+              : ownHeadHolds.hostBudget !== undefined
+                ? {
+                    dispatched: false,
+                    reason: ownHeadHolds.hostBudget.reason,
+                    ...(ownHeadHolds.hostBudget.budget !== undefined
+                      ? { budget: ownHeadHolds.hostBudget.budget }
+                      : {}),
+                  }
+                : { dispatched: false, reason: 'no-candidate' };
   return withOfferRejections(terminal, offerRejections);
 }

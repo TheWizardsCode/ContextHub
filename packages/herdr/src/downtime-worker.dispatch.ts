@@ -633,14 +633,14 @@ export async function dispatchDowntimeWork(
         // continues so other work still dispatches and the flag write is
         // retried if it failed.
         if (budgetExhausted) return finalize({ dispatched: false, reason: 'attempt-budget-exhausted' });
-        // A relaxed leaf-audit tick reserves its single free slot for the
-        // pinned audit item: when nothing dispatched, that reservation — not
-        // an empty backlog — is the reason (WL-0MVV1F0HK009JQAP C4). Neutral
-        // reason, so no no-candidate cooldown and no strike.
-        return finalize({
-          dispatched: false,
-          reason: pinnedAuditItemId !== undefined ? LEAF_AUDIT_PIN_HOLD_REASON : 'no-candidate',
-        });
+        // Pin beats an ambient budget hold (C4); otherwise report the
+        // continuable host-budget refusal the filter recorded (AC5) with its
+        // {live, max} evidence — never 'no-candidate'. Nothing else dispatched,
+        // so the tick is neutral: no cooldown, no strike.
+        if (auditHostBudgetReason !== undefined && pinnedAuditItemId === undefined) {
+          return finalize({ dispatched: false, reason: auditHostBudgetReason, ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}) });
+        }
+        return finalize({ dispatched: false, reason: pinnedAuditItemId !== undefined ? LEAF_AUDIT_PIN_HOLD_REASON : 'no-candidate' });
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
       // legacy chain (test-compat path; flags still drive the terminal reason).

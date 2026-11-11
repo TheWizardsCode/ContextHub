@@ -34,7 +34,12 @@ import {
   type DispatchMarker,
 } from './downtime-log.js';
 import type { LocalPreference, LocalPreferenceMode } from './local-preference.js';
-import type { DowntimeDispatchDeps, DowntimeDispatchOutcome } from './downtime-worker.dispatch-contract.js';
+import {
+  isContinuableHoldOutcome,
+  isHostBudgetHoldReason,
+  type DowntimeDispatchDeps,
+  type DowntimeDispatchOutcome,
+} from './downtime-worker.dispatch-contract.js';
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
 import type {
   DowntimeCandidate,
@@ -202,12 +207,17 @@ export async function dispatchFromHerdrList(
       selectionReason: guard.reason,
     });
     if (outcome.dispatched) return outcome;
-    // A lost CAS race / marker-recovery rollback applies to one candidate:
-    // try the next critical candidate, then fall through to the normal loop.
-    if (outcome.reason === 'claim-failed' || outcome.reason === 'claim-rolled-back') continue;
-    // Any other terminal outcome (wl-error, spawn-failed, anchor-unavailable)
-    // is returned unchanged so the caller's strike/skip semantics are kept.
-    return outcome;
+    // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): a host-budget refusal
+    // is NEUTRAL and candidate-scoped, so record the FIRST refusal's token and
+    // `{live, max}` evidence in `flags` and try the next critical candidate
+    // instead of ending the scan. Lost claims keep today's continue. Every
+    // other terminal outcome (wl-error, spawn-failed, anchor-unavailable) is
+    // returned unchanged so the caller's strike/skip semantics are kept.
+    if (!isContinuableHoldOutcome(outcome)) return outcome;
+    if (isHostBudgetHoldReason(outcome.reason)) {
+      flags.hostBudgetReason ??= outcome.reason;
+      if (outcome.budget !== undefined) flags.hostBudget ??= outcome.budget;
+    }
   }
 
   for (const item of items) {
@@ -357,9 +367,16 @@ export async function dispatchFromHerdrList(
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
     });
     if (outcome.dispatched) return outcome;
-    if (outcome.reason === 'claim-failed') continue;
-    if (outcome.reason === 'claim-rolled-back') continue; // marker-write recovery (WL-0MT32F908002YFFA)
-    return outcome;
+    // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): record the first
+    // host-budget refusal's token + `{live, max}` evidence in `flags` and keep
+    // scanning — the prep work ranked behind a budget-refused candidate is not
+    // budget-gated and must still dispatch. Lost claims continue as before;
+    // every other terminal outcome is returned unchanged.
+    if (!isContinuableHoldOutcome(outcome)) return outcome;
+    if (isHostBudgetHoldReason(outcome.reason)) {
+      flags.hostBudgetReason ??= outcome.reason;
+      if (outcome.budget !== undefined) flags.hostBudget ??= outcome.budget;
+    }
   }
   return null;
 }
