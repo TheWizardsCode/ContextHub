@@ -538,6 +538,15 @@ dispatches; the other herdr instances coordinate instead of polling:
     implement-tier-only for admission. The one-release
     `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
     decision for a single release.
+  - **A refusal is a continuable hold on that candidate, not a whole-tick
+    stop.** Both head-scan paths record the refusal (reason + `live`/`max`
+    evidence) and keep scanning, so `plan`/`intake` ranked behind a refused
+    `implement` — or a `plan`/`intake` behind a refused `audit` — keep
+    dispatching. A budget refusal therefore costs only *budgeted* throughput;
+    when nothing else dispatches the tick's terminal reason is still the
+    neutral refusal (never `no-candidate`, never a strike, never a cooldown).
+    See *Continuable vs terminal outcomes* in
+    [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#continuable-vs-terminal-outcomes-wl-0mwbt76wy00298ay).
   - User-fired `/skill:implement` / `/skill:audit` shortcuts (pane **and**
     headless `open_pane: false`) instead open a bottom-anchored dialog when the
     tier is at cap — `Enter`/`y` proceeds, `Esc`/`n` cancels;

@@ -14,6 +14,21 @@
  * `CriticalFirstCandidate` are consumer-facing and re-exported from the
  * barrel; the filter itself is internal to the dispatch entry. No behaviour
  * change: filter order, hold reasons and log lines are identical.
+ *
+ * Continuable holds (WL-0MWBT76WY00298AY): both loops of
+ * `dispatchFromHerdrList` (normal and critical-first) continue past exactly
+ * the outcomes `isContinuableHoldOutcome` allow-lists — lost claims
+ * (`claim-failed` / `claim-rolled-back`) and neutral host-budget refusals
+ * (`host-budget-implement` / `host-budget-audit` / `host-budget-unknown` /
+ * `audit-budget-saturated` / `audit-budget-unknown` /
+ * `audit-host-saturated`). A budget refusal is recorded on
+ * `flags.hostBudgetReason` / `flags.hostBudget` (reason + `{live, max}`
+ * evidence) and the scan steps to the next candidate, so prep work ranked
+ * behind the refused budgeted candidate still dispatches and the caller can
+ * report the neutral terminal reason when nothing else does. Every other
+ * non-dispatched outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
+ * `anchor-unavailable`, …) returns immediately, preserving the strike/skip
+ * semantics.
  */
 
 import {

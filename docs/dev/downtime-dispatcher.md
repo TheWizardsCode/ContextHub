@@ -988,11 +988,11 @@ admission agree and quote the SAME token. The proxy always wins:
 | Availability read | Audit decision | Decision-log reason | Header token |
 |---|---|---|---|
 | proxy `available: true` | admit (reserve locally for observability only) | — | — |
-| proxy `available: false` | skip the tick (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) | `budget-audit` |
-| `endpoint-absent` (`404`, the proxy predates the endpoint) | **fail closed** — skip the tick | `audit-budget-unknown` + `detail: 'http-404'` | `budget-unknown` |
-| `unreachable` (`timeout` / `network` / `http-<status>`) | **fail closed** — skip the tick | `audit-budget-unknown` + the failing exchange as `detail` | `budget-unknown` |
-| `unparsable` (`bad-body`) | **fail closed** — skip the tick | `audit-budget-unknown` + `detail: 'bad-body'` | `budget-unknown` |
-| seam absent (no availability client wired) | **fail closed** — skip the tick | `audit-budget-unknown` + `detail: 'seam-absent'` | `budget-unknown` |
+| proxy `available: false` | skip that audit candidate and keep scanning (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) | `budget-audit` |
+| `endpoint-absent` (`404`, the proxy predates the endpoint) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'http-404'` | `budget-unknown` |
+| `unreachable` (`timeout` / `network` / `http-<status>`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + the failing exchange as `detail` | `budget-unknown` |
+| `unparsable` (`bad-body`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'bad-body'` | `budget-unknown` |
+| seam absent (no availability client wired) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'seam-absent'` | `budget-unknown` |
 
 The two fail-closed tokens are the proxy's own vocabulary, so a dispatcher
 admission and a proxy refusal cannot disagree about *why* an audit was
@@ -2577,22 +2577,51 @@ entered and the next idle tick re-checks (as with `audit-budget-saturated`).
 | Tier | Condition (evaluated at admission) | Decision | Decision-log reason | Header token |
 |---|---|---|---|---|
 | implement | fresh entries whose pane is in the live pane list **<** `maxImplement` | admit + reserve | — | — |
-| implement | at/over `maxImplement` (including `maxImplement: 0`) | skip the tick — no claim, no pane | `host-budget-implement` | `budget-implement` |
+| implement | at/over `maxImplement` (including `maxImplement: 0`) | skip that candidate and keep scanning — no claim, no pane | `host-budget-implement` | `budget-implement` |
 | audit | proxy availability read `available: true` | admit + reserve (the local entry is observability only) | — | — |
-| audit | proxy availability read `available: false` | skip the tick (neutral) | `audit-budget-saturated` | `budget-audit` |
-| audit | proxy read not `ok` — `endpoint-absent` / `unreachable` / `unparsable`, or the seam is absent | **fail closed** — skip the tick, recording the failing exchange as `detail` | `audit-budget-unknown` | `budget-unknown` |
+| audit | proxy availability read `available: false` | skip that audit candidate and keep scanning (neutral) | `audit-budget-saturated` | `budget-audit` |
+| audit | proxy read not `ok` — `endpoint-absent` / `unreachable` / `unparsable`, or the seam is absent | **fail closed** — skip that audit candidate and keep scanning, recording the failing exchange as `detail` | `audit-budget-unknown` | `budget-unknown` |
 | audit (one-release legacy path, `HERDR_AUDIT_LOCAL_BUDGET=1`) | fresh entries (no live-pane requirement) **<** `maxAudit` | admit + reserve (pre-proxy behaviour) | `audit-budget-legacy` (warning entry, once per tick) | — |
-| audit (legacy path) | at cap with `maxAudit: 1` (default) | skip the tick | `audit-host-saturated` (byte-identical to the retired marker) | `budget-audit` |
-| audit (legacy path) | at cap with any other `maxAudit` (including `0`) | skip the tick | `host-budget-audit` | `budget-audit` |
+| audit (legacy path) | at cap with `maxAudit: 1` (default) | skip that candidate and keep scanning | `audit-host-saturated` (byte-identical to the retired marker) | `budget-audit` |
+| audit (legacy path) | at cap with any other `maxAudit` (including `0`) | skip that candidate and keep scanning | `host-budget-audit` | `budget-audit` |
 | audit (either path) | the proxy verdict and the local (observability-only) ledger disagree about capacity | decision unchanged — the proxy wins; ONE evidence entry with both sides' figures | `audit-budget-divergence` | — |
-| implement | ledger exists but cannot be trusted (corrupt/unreadable bytes, or the reservation lock/I/O failed) | **fail closed** — skip the tick, then rewrite the ledger from the live pane list so the next tick can decide again | `host-budget-unknown` | `budget-unknown` |
-| audit (legacy path) | ledger exists but cannot be trusted | **fail closed** — skip the tick (pre-proxy semantics) | `host-budget-unknown` | `budget-unknown` |
+| implement | ledger exists but cannot be trusted (corrupt/unreadable bytes, or the reservation lock/I/O failed) | **fail closed** — skip that candidate and keep scanning, then rewrite the ledger from the live pane list so the next tick can decide again | `host-budget-unknown` | `budget-unknown` |
+| audit (legacy path) | ledger exists but cannot be trusted | **fail closed** — skip that candidate and keep scanning (pre-proxy semantics) | `host-budget-unknown` | `budget-unknown` |
 | audit (proxy path) | local ledger unreadable | **no effect on admission** — the proxy is authoritative, the local entry is observability only; the local ledger is never read to refuse an audit | — | — |
 | either | coordination dir unresolvable | admit — no ledger, no new failure mode; the audit tier still consults the proxy (degrades exactly as before the budget existed) | — | — |
 
 Beneath the table, existing capacity gates remain the inner limiter: free-slot
 minimums, the local reservation/prefill pacing, contention and the host-CPU
 gate all still apply, in their existing order.
+
+#### Continuable vs terminal outcomes (WL-0MWBT76WY00298AY)
+
+A head scan (`dispatchFromOwnHead`, and both loops of `dispatchFromHerdrList`)
+never treats "not dispatched" as sufficient reason to keep scanning. It steps
+to the next candidate ONLY for an allow-listed **continuable hold**:
+
+- **lost claim** — `claim-failed`, `claim-rolled-back`: the CAS race was lost
+  or a marker write was rolled back; the candidate is neutral, so the scan
+  steps on (the audit-batch continuation ends instead — see below).
+- **neutral budget refusal** — `host-budget-implement`, `host-budget-audit`,
+  `host-budget-unknown`, `audit-budget-saturated`, `audit-budget-unknown`,
+  `audit-host-saturated`: the candidate is budgeted, but a prep candidate
+  ranked behind it (`plan` / `intake` / `risk-effort`) is not, so the scan
+  records the hold (reason + `{live, max}`) and keeps scanning.
+
+Everything else is **terminal/strike-worthy** and returns immediately, ending
+the tick exactly as before: `wl-error`, `spawn-failed`, `marker-write-failed`,
+`anchor-unavailable`, … The rule lives in ONE allow-list predicate
+(`isContinuableHoldOutcome`, `downtime-worker.dispatch-contract.ts`) used
+identically by `dispatchFromOwnHead` and both `dispatchFromHerdrList` loops. It
+is deliberately an allow-list, not a deny-list, so a new refusal class must be
+added explicitly and can never be swallowed into a silent retry loop.
+
+The audit-batch continuation is the one exception to "keep scanning": while a
+batch is armed, a budget refusal records the hold and **ends the batch** — it
+does not hop to another audit target — so the "a batch never hops to another
+target" contract holds while the batch's terminal reason stays the neutral
+refusal.
 
 **Fail directions are deliberately different per path.** This is a design
 decision, not an inconsistency:
@@ -2795,6 +2824,12 @@ write machine state). A budget refusal is an **operator-imposed** stop, so it
 never starts or extends a capacity-starvation episode
 (`capacity-starvation.ts` is untouched).
 
+A refusal token is a **hold on one candidate**, not a whole-tick stop: the
+tick records it (with `{live, max}` evidence) and keeps scanning, so prep work
+ranked behind the refused candidate still dispatches. The neutral reason is
+reported only when nothing else dispatches, and no cooldown/strike is
+recorded.
+
 ### Host-wide audit admission — budget ledger, `active-audit` marker retired
 ### (WL-0MUIVE0YG000UVIA → WL-0MVXY0XPF006YUHA F2)
 
@@ -2845,8 +2880,10 @@ reason token is:
     (live/max `0/0`);
   - **`host-budget-unknown`** when an unreadable ledger had to be rewritten
     from the live pane list (fail-closed; the next tick can decide again).
-  All three are neutral skips — never `no-candidate`, so the no-candidate
-  cooldown is not entered and the next idle tick re-checks.
+  All three are neutral **holds on one candidate** — never `no-candidate`, so
+  the no-candidate cooldown is not entered and the next idle tick re-checks.
+  The head scan records the hold and keeps scanning, so a `plan`/`intake`
+  candidate behind the refused audit can still dispatch this tick.
 - **Legacy read-compatibility (exactly one release).** A non-stale
 `active-audit` file written by an OLDER herdr instance is counted as ONE
 synthetic audit entry, so a mixed-version host can never double-dispatch.
@@ -2865,8 +2902,8 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 
 | Guard | Scope | Sees | Action |
 |---|---|---|---|
-| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/status`) | skip audit tier; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
-| **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip audit tier; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
+| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/status`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
+| **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip that audit candidate and keep scanning; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
 | **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |
 | **`AUDIT_PHASE2_PARALLELISM=1`** (always) | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots (fully serial Phase 2) |
@@ -2919,7 +2956,7 @@ observable happens. The gate lives in `index.ts`'s `route === 'agent'` block,
 BEFORE the claim and before any spawn, so it covers **both** branches of that
 route with one enforcement point: the interactive pane and the headless
 `open_pane: false` background dispatch. Dispatcher-fired work never prompts —
-it refuses the tick and logs the reason (above).
+it refuses that candidate, logs the reason and keeps scanning (above).
 
 | State | Behaviour |
 |---|---|
@@ -2941,7 +2978,7 @@ dispatcher's log can never disagree.
 
 | Path | Unreadable ledger | Rationale |
 |---|---|---|
-| Dispatcher (admission) | **fail closed** — skip the tick, reason `host-budget-unknown`, self-healing rewrite from the live pane list | nobody is watching; over-admitting is unbounded |
+| Dispatcher (admission) | **fail closed** — skip that candidate and keep scanning, reason `host-budget-unknown`, self-healing rewrite from the live pane list | nobody is watching; over-admitting is unbounded |
 | Interactive (this gate) | **fail open + visible notice** | a human is present and owns the decision; a corrupt ledger must never block their shortcut |
 
 **Modules.** `host-budget-dialog.ts` is the pure dialog half — the copy helper,

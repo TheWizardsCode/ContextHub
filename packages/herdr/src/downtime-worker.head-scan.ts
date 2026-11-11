@@ -21,6 +21,20 @@
  * (`cooldownEntriesForRoot`, `inFlightForRoot`, `reviewGateForRoot`) are passed
  * in through the scan context, so each root is inspected against ITS OWN
  * worklog state.
+ *
+ * Continuable holds (WL-0MWBT76WY00298AY): a scan may only step past a
+ * non-dispatched outcome when `isContinuableHoldOutcome` says so — a lost
+ * claim (`claim-failed` / `claim-rolled-back`) or a neutral host-budget
+ * refusal. A budget refusal is recorded on `HeadScanHolds.hostBudget` (reason
+ * + `{live, max}` evidence) and the scan continues, so
+ * `dispatchFromRegisteredRoots` crosses to the next root when a root only
+ * offers refused candidates. The audit-batch continuation is the one
+ * exception: it records the hold and ends the batch (never hops). Every other
+ * outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
+ * `anchor-unavailable`, …) returns immediately, preserving the caller's
+ * strike/skip semantics. In the caller's terminal-reason composition
+ * `HeadScanHolds.hostBudget` is LAST (after code-freeze → CPU → review →
+ * cooldown → attempt-budget → in-flight → leaf-audit pin).
  */
 
 import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
