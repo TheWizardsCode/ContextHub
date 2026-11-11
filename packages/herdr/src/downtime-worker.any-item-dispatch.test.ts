@@ -10,13 +10,16 @@
  *  1. a non-critical item beyond the visible `browseItemCount` window is
  *     dispatchable (direct path + coordination offer path);
  *  2. the order in which candidates are chosen is still the canonical ranking;
- *  3. widening the candidate universe never weakens a budget or safety gate.
+ *  3. widening the candidate universe never weakens a budget or safety gate;
+ *  4. the TUI sprint-view window is untouched — `browseItemCount` bounds only
+ *     what the worklist renders, and the widened reach is nothing more than a
+ *     larger limit on the same `fetchNextItems` seam (AC6).
  *
  * Scaffolding is imported from `downtime-worker.fixtures.ts`; no setup logic is
  * re-implemented here.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   computeMostImportantItem,
   dispatchDowntimeWork,
@@ -24,6 +27,15 @@ import {
   type DowntimeHerdrItem,
 } from './downtime-worker.js';
 import { makeDeps } from './downtime-worker.fixtures.js';
+import { selectWorkItems } from './smart-selection.js';
+import {
+  clearFetchMemo,
+  fetchNextItems,
+  resetExecFileAsync,
+  resetWorklogDir,
+  setExecFileAsync,
+  type WorkItem,
+} from './fetcher.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -329,5 +341,137 @@ describe('whole-backlog dispatch: safety gates still apply out of window (WL-0MW
     // Split-by-skill is unchanged: implement paused, intake still dispatches.
     expect(outcome.dispatched).toBe(true);
     expect(outcome.candidate?.id).toBe('BEYOND-INTAKE-FROZEN');
+  });
+});
+
+// ── AC6 — the TUI sprint-view window is unchanged ─────────────────────
+
+/**
+ * One row of the ranked backlog, shaped like a `wl worklist` payload item.
+ * The extra fields `selectWorkItems`/`regroupWorkItems` read are the ones the
+ * consolidated read emits; no TUI state is involved.
+ */
+const workItemRow = (id: string, overrides: Record<string, unknown> = {}): WorkItem =>
+  ({
+    id,
+    title: `Item ${id}`,
+    status: 'open',
+    stage: 'idea',
+    priority: 'medium',
+    parentId: null,
+    createdAt: '2026-11-10T00:00:00.000Z',
+    updatedAt: '2026-11-10T00:00:00.000Z',
+    ...overrides,
+  }) as unknown as WorkItem;
+
+/**
+ * A five-item ranked backlog. `A-CRIT` (critical) and `B-REVIEW`
+ * (completed/in_review) are mandatory — always rendered whatever the count;
+ * `C`-`E` are ordinary ranked work the count window may cut.
+ */
+const sprintBacklog = (): WorkItem[] => [
+  workItemRow('A-CRIT', { priority: 'critical' }),
+  workItemRow('B-REVIEW', { status: 'completed', stage: 'in_review', priority: 'high' }),
+  workItemRow('C-OTHER-1'),
+  workItemRow('D-OTHER-2'),
+  workItemRow('E-OTHER-3'),
+];
+
+/**
+ * The set the worklist renders for `browseItemCount = 3`: the two mandatory
+ * legs plus one "other" slot, in the documented placement order (critical,
+ * then review, then capped others).
+ */
+const SPRINT_VIEW_AT_3 = ['A-CRIT', 'B-REVIEW', 'C-OTHER-1'];
+
+/**
+ * Install a mock `wl` that answers the consolidated `worklist` read with the
+ * sprint backlog, windowing the browse feed by the requested `-n` exactly as
+ * the real command does. Any other command is an unexpected spawn (an extra
+ * ranking query would violate AC7), so it throws instead of silently passing.
+ * Returns the recorded argv so the count handed to `wl` can be asserted.
+ */
+function mockWorklistRead(): string[][] {
+  const calls: string[][] = [];
+  setExecFileAsync((async (_binary: string, args: string[]) => {
+    calls.push(args);
+    if (!args.includes('worklist')) {
+      throw new Error(`unexpected wl spawn: ${args.join(' ')}`);
+    }
+    const nIndex = args.indexOf('-n');
+    const count = nIndex >= 0 ? Number(args[nIndex + 1]) : 1;
+    const backlog = sprintBacklog();
+    const payload = {
+      success: true,
+      requestedCount: count,
+      subsets: {
+        // Browse entries carry the `wl next` `{ workItem, reason }` shape.
+        browse: backlog
+          .slice(0, count)
+          .map((item) => ({ workItem: item, reason: 'selected' })),
+        critical: backlog.filter((item) => item.priority === 'critical'),
+        reviewQueue: backlog.filter(
+          (item) => item.status === 'completed' && item.stage === 'in_review',
+        ),
+        inProgressRoots: backlog.filter((item) => item.status === 'in-progress'),
+        blockedRoots: backlog.filter((item) => item.status === 'blocked'),
+      },
+    };
+    return { stdout: JSON.stringify(payload), stderr: '' };
+  }) as never);
+  return calls;
+}
+
+/** The `-n <count>` pair the fetched read was invoked with. */
+function requestedCount(args: string[]): string | undefined {
+  const nIndex = args.indexOf('-n');
+  return nIndex >= 0 ? args[nIndex + 1] : undefined;
+}
+
+describe('whole-backlog dispatch: the TUI sprint-view window is unchanged (WL-0MW9XS0XR007K1TH AC6)', () => {
+  beforeEach(() => {
+    clearFetchMemo();
+    resetExecFileAsync();
+    resetWorklogDir();
+  });
+
+  afterEach(() => {
+    clearFetchMemo();
+    resetExecFileAsync();
+    resetWorklogDir();
+  });
+
+  it('selectWorkItems returns exactly the sprint-view set for the same count', () => {
+    const selected = selectWorkItems(sprintBacklog(), 3).map((item) => item.id);
+
+    // Exactly the sprint view — not a widened set, and not the whole backlog.
+    expect(selected).toEqual(SPRINT_VIEW_AT_3);
+  });
+
+  it('fetchNextItems(count) renders exactly the sprint-view set for that count', async () => {
+    const calls = mockWorklistRead();
+
+    const rendered = await fetchNextItems(3);
+
+    expect(rendered.map((item) => item.id).sort()).toEqual([...SPRINT_VIEW_AT_3].sort());
+    // One consolidated read, still windowed by the TUI's count.
+    expect(calls).toHaveLength(1);
+    expect(requestedCount(calls[0])).toBe('3');
+  });
+
+  it('a wider dispatcher limit is only a wider window on the same seam — no second ranking', async () => {
+    const calls = mockWorklistRead();
+
+    const rendered = await fetchNextItems(20);
+
+    // The identical read returns the whole ranked backlog: the dispatcher's
+    // widening is a limit argument, not a new selection path.
+    expect(rendered.map((item) => item.id).sort()).toEqual(
+      sprintBacklog()
+        .map((item) => item.id)
+        .sort(),
+    );
+    expect(calls).toHaveLength(1);
+    expect(requestedCount(calls[0])).toBe('20');
   });
 });
