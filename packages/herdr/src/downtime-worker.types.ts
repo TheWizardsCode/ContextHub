@@ -674,16 +674,28 @@ export interface DowntimeItemInfo {
 export type DowntimeItemResult =
   | { ok: true; info: DowntimeItemInfo }
   | { ok: false; error?: string };
+/** v2 per-bucket nominee (parent AC2/AC3): canonical first offerable item of a dispatch bucket; mirrors `CoordinationOffer` (types.ts cannot import the coordination module). */
+export interface CoordinationNominee { kind: 'implement' | 'audit' | 'prep'; workItemId: string }
+
 /**
  * Outcome of the check-in most-important-item computation. `{ok:true,
- * kind/candidate}` — a dispatchable item was found; `{ok:true,
- * noCandidate:true}` — the instance genuinely has nothing dispatchable
- * (its own entry may be removed); `{ok:false}` — wl/CLI errors occurred
- * during the computation (fail-open: keep the existing entry, retry at
- * the next check-in).
+ * kind/candidate}` — a dispatchable item was found (plus `nominees`, the
+ * per-bucket candidates of the same window); `{ok:true, noCandidate:true}`
+ * — nothing dispatchable (the own entry may be removed); `{ok:false}` —
+ * wl/CLI errors (fail-open: keep the entry, retry at the next check-in).
  */
 export type MostImportantItemResult =
-  | { ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate }
+  | {
+      ok: true;
+      kind: DowntimeSkillKind;
+      candidate: DowntimeCandidate;
+      /**
+       * Per-bucket nominees (parent AC2/AC3): canonical first offerable item
+       * of each dispatch bucket, in `COORDINATION_OFFER_BUCKETS` order, from
+       * the SAME single head read; empty for escalation/extension paths.
+       */
+      nominees: CoordinationNominee[];
+    }
   /**
    * `attribution` (WL-0MVR8FKMU009XTED AC1) names WHY nothing was offered —
    * `empty-window` / `all-window-items-held` (+ sentinels) /

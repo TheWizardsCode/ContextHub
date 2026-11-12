@@ -163,20 +163,30 @@ export async function runCoordinationCheckIn(
     // Defensive: a malformed result (stub/regression) keeps the entry.
     return { offered: current?.workItemId ?? null, updated: false };
   }
+  // v2 write path (parent WL-0MWDDHQON0015T3P AC1/AC3): the entry carries
+  // the bounded per-bucket `offers` payload computed by
+  // `computeMostImportantItem` — one nominee per bucket, drawn from the
+  // single head read, in canonical bucket order. The paths that do NOT
+  // partition the window (a critical item escalated ahead of the window
+  // scan, or the only offerable item lying beyond the visible window)
+  // leave `nominees` empty — the entry then carries the single candidate
+  // offer, byte-identical to the pre-tier-aware entry (AC9 legacy compat).
+  // `workItemId` mirrors the FIRST offer so a v1-era leader keeps reading
+  // the first offer and ignoring the rest (parent AC9).
   const entryKind = toOfferBucket(result.kind);
+  const offers: CoordinationOffer[] =
+    result.nominees.length > 0
+      ? result.nominees
+      : entryKind !== null
+        ? [{ kind: entryKind, workItemId: result.candidate.id }]
+        : [];
   const entry: CoordinationEntry = {
     instanceId: coordinator.instanceId,
-    workItemId: result.candidate.id,
+    workItemId: offers.length > 0 ? offers[0].workItemId : result.candidate.id,
     directory: coordinator.cwd,
     assignedAt: current?.assignedAt ?? new Date(now).toISOString(),
     lastUpdated: new Date(now).toISOString(),
-    // v2 write path (parent WL-0MWDDHQON0015T3P AC1): the entry carries a
-    // bounded `offers` payload. Until the per-bucket computation lands (F2,
-    // WL-0MWDVMZNV0011FDT) the single candidate maps to its classifier bucket;
-    // `workItemId` (mirroring the first offer) keeps v1-era leaders reading it.
-    ...(entryKind !== null
-      ? { offers: [{ kind: entryKind, workItemId: result.candidate.id }] as CoordinationOffer[] }
-      : {}),
+    ...(offers.length > 0 ? { offers } : {}),
   };
   const updated = upsertEntry(coordinator.coordinationDir, entry);
   // Audit trail (WL-0MSXHAE290067VAL): log the offered item on every

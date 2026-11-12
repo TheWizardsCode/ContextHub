@@ -1058,6 +1058,110 @@ describe('runCoordinationCheckIn', () => {
     expect(result.updated).toBe(false);
     expect(getEntry(testDir, 'inst-1')?.workItemId).toBe('WL-EXISTING');
   });
+
+  it('writes a bounded v2 offers array from the per-bucket nominees (one head read for all three buckets)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+        headItem({ id: 'WL-PREP', stage: 'intake_complete', status: 'open' }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    const result = await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    expect(result.offered).toBe('WL-IMP');
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    const entry = getEntry(testDir, 'inst-1');
+    expect(entry?.workItemId).toBe('WL-IMP');
+    // The v2 `offers` payload is the canonical per-bucket nominee array
+    // (implement → audit → prep) computed from the single head read.
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+      { kind: 'prep', workItemId: 'WL-PREP' },
+    ]);
+  });
+
+  it('orders the offers by canonical bucket, not window order — workItemId mirrors the first (implement) offer', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      // AUD appears first in the WINDOW (it is the window-first candidate),
+      // but the v2 offers payload follows the canonical bucket order
+      // implement → audit → prep (parent AC2: buckets, not a second ranking),
+      // and `workItemId` mirrors offers[0] so a v1-era leader reads the
+      // implement nominee (parent AC9).
+      items: [
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    const result = await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    expect(result.offered).toBe('WL-IMP');
+    const entry = getEntry(testDir, 'inst-1');
+    expect(entry?.workItemId).toBe('WL-IMP');
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+    ]);
+  });
+
+  it('offers only the buckets present in the window — no read to widen for a missing bucket', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    // The missing prep bucket nominated nothing and was NOT sought beyond the
+    // window (parent AC3): still exactly one head read.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    const entry = getEntry(testDir, 'inst-1');
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+    ]);
+  });
+
+  it('falls back to a single-offer entry when the visible window yields nothing and the offer comes from the whole-backlog extension', async () => {
+    // The only window item is freshly dispatched (marker exclusion filters the
+    // WHOLE window); the whole-backlog extension then finds the next
+    // implement. The entry carries ONE offer (the window partition is empty —
+    // AC3: the window is never widened to fill a bucket), so a v1-era leader
+    // keeps reading exactly the pre-tier-aware offer.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-checkin-ext-'));
+    try {
+      writeDowntimeLog(root, [
+        { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
+      ] as never);
+      const getHerdrListHead = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [headItem({ id: 'WL-IMP-1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' })],
+        })
+        .mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-IMP-1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-IMP-2', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+          ],
+        });
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+      const result = await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      expect(result.offered).toBe('WL-IMP-2');
+      const entry = getEntry(testDir, 'inst-1');
+      expect(entry?.workItemId).toBe('WL-IMP-2');
+      expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+        { kind: 'implement', workItemId: 'WL-IMP-2' },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Empty-offer attribution (WL-0MVR8FKMU009XTED AC1/AC5) ────────────
@@ -4089,14 +4193,11 @@ describe('audit-budget refusal on the offer path (WL-0MWDDHVF2004PTYX)', () => {
 // the single-offer path's fail-open, stall-scan short-circuit and sequential
 // filters preserved per bucket.
 //
-// RED WITNESS. The per-bucket surface does not exist yet: today
-// `computeMostImportantItem` still returns a SINGLE offer (`{ok:true, kind,
-// candidate}`) with no `nominees` array. Each body below asserts the
-// post-implementation contract and is committed with `it.fails` — the suite
-// stays green because the bodies currently throw (the `nominees` surface is
-// absent). Implementation child WL-0MWDVMZNV0011FDT flips each `it.fails` to
-// `it` and makes the bodies pass; the two plain `it` bodies pin contracts
-// that are preserved unchanged (they pass today and must keep passing).
+// GREEN (F2, WL-0MWDVMZNV0011FDT): `computeMostImportantItem` now returns the
+// single offer (`{ok:true, kind, candidate}`) PLUS a `nominees` array — the
+// per-bucket candidates of the same window, in canonical bucket order. The
+// four bodies below (`it.fails` until this slice) now run as plain `it`; the
+// two plain `it` bodies pin contracts that are preserved unchanged.
 describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
   /**
    * Post-F2 per-bucket nominee — the v2 `offers` entry shape F1's check-in
@@ -4107,7 +4208,7 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     workItemId: string;
   }
 
-  /** Read the per-bucket surface through a narrow structural cast (absent today). */
+  /** Read the per-bucket surface from a computation result. */
   const nomineesOf = (result: unknown): NomineeWitness[] | undefined =>
     (result as { nominees?: NomineeWitness[] }).nominees;
 
@@ -4121,7 +4222,7 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
   const prepItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
     headItem({ id, title: `Prep ${id}`, status: 'open', stage: 'intake_complete', sortIndex });
 
-  it.fails('AC1: each nominee is the canonical FIRST item of its bucket in window order — a lower sortIndex later in the window never displaces it', async () => {
+  it('AC1: each nominee is the canonical FIRST item of its bucket in window order — a lower sortIndex later in the window never displaces it', async () => {
     const deps = makeCoordinationDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({
         ok: true,
@@ -4149,7 +4250,7 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     ]);
   });
 
-  it.fails('AC2: exactly ONE getHerdrListHead call computes all three nominees (no per-bucket wl spawn)', async () => {
+  it('AC2: exactly ONE getHerdrListHead call computes all three nominees (no per-bucket wl spawn)', async () => {
     const getHerdrListHead = vi.fn().mockResolvedValue({
       ok: true,
       items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1')],
@@ -4165,7 +4266,7 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     expect(getHerdrListHead).toHaveBeenCalledWith('/repo', expect.any(Number));
   });
 
-  it.fails('AC3: a bucket empty in the window nominates NOTHING and the window is not widened', async () => {
+  it('AC3: a bucket empty in the window nominates NOTHING and the window is not widened', async () => {
     const getHerdrListHead = vi.fn().mockResolvedValue({
       ok: true,
       // No idea / intake_complete / risk-effort item anywhere → the prep
@@ -4184,28 +4285,33 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     expect(getHerdrListHead).toHaveBeenCalledTimes(1);
   });
 
-  it.fails('AC3: per-bucket filters preserved — a fresh dispatch marker on the implement head skips to the NEXT offerable implement, other buckets unaffected', async () => {
+  it('AC3: per-bucket filters preserved — a fresh dispatch marker on the implement head skips to the NEXT offerable implement, other buckets unaffected', async () => {
     // WL-IMP-1 was just dispatched at its current stage → the implement-bucket
     // exclusion skips it and nominates the next offerable implement, while
     // the audit and prep buckets still nominate their own canonical heads
     // (the same sequential filters the single-offer path applies today).
-    writeDowntimeLog('/repo', [
-      { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
-    ] as never);
-    const deps = makeCoordinationDeps({
-      getHerdrListHead: vi.fn().mockResolvedValue({
-        ok: true,
-        items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1'), implementItem('WL-IMP-2')],
-      }),
-    });
+    const root = mkdtempSync(join(tmpdir(), 'herdr-nominees-'));
+    try {
+      writeDowntimeLog(root, [
+        { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
+      ] as never);
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1'), implementItem('WL-IMP-2')],
+        }),
+      });
 
-    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
-    expect(result.ok).toBe(true);
-    expect(nomineesOf(result)).toEqual([
-      { kind: 'implement', workItemId: 'WL-IMP-2' },
-      { kind: 'audit', workItemId: 'WL-AUD-1' },
-      { kind: 'prep', workItemId: 'WL-PREP-1' },
-    ]);
+      const result = await computeMostImportantItem(deps, root, Date.now(), 20);
+      expect(result.ok).toBe(true);
+      expect(nomineesOf(result)).toEqual([
+        { kind: 'implement', workItemId: 'WL-IMP-2' },
+        { kind: 'audit', workItemId: 'WL-AUD-1' },
+        { kind: 'prep', workItemId: 'WL-PREP-1' },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('AC3: preserve the {ok:false} fail-open contract — a head lookup failure yields no nominees and never throws (the caller keeps its entry)', async () => {

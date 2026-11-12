@@ -2,10 +2,13 @@
  * packages/herdr/src/downtime-worker.coordination.ts — the coordination OFFER
  * computation.
  *
- * Single responsibility: compute the ONE item an instance OFFERS to the
- * coordination leader — the tier rank, the candidate shape and the sequential
- * safety filters over the instance's own Herdr list head — without dispatching
- * anything.
+ * Single responsibility: compute the items an instance OFFERS to the
+ * coordination leader — the single most-important item (the tier rank, the
+ * candidate shape and the sequential safety filters over the instance's own
+ * Herdr list head) PLUS the per-bucket nominees of the same window
+ * (parent WL-0MWDDHQON0015T3P AC2/AC3: one nominee per dispatch bucket,
+ * partitioned from the SAME single `getHerdrListHead` read) — without
+ * dispatching anything.
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  * Extracted verbatim from `downtime-worker.ts` by WL-0MVLII1AO007TTRK (extract
@@ -20,6 +23,11 @@
 
 import { DEFAULT_BROWSE_ITEM_COUNT, resolveSprintViewWindow } from './browse-window.js';
 import { DEFAULT_DOWNTIME_CPU_GATE_PERCENT } from './host-cpu.js';
+import {
+  COORDINATION_OFFER_BUCKETS,
+  toOfferBucket,
+  type CoordinationOfferKind,
+} from './coordination.js';
 import {
   COORDINATION_TIER_ORDER,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
@@ -60,6 +68,7 @@ import {
 import { resolveInFlightPanes } from './downtime-worker.pane.js';
 import { resumeStalledWorkIfAble } from './downtime-worker.stalled-resume.js';
 import type {
+  CoordinationNominee,
   DowntimeCandidate,
   DowntimeHerdrItem,
   DowntimeItemInfo,
@@ -113,6 +122,18 @@ export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandida
  * exactly its current Herdr list head, so the leader never has to
  * re-rank an offer against a second ordering (see
  * `dispatchFromCoordination`).
+ *
+ * Tier-aware offers (parent WL-0MWDDHQON0015T3P AC2/AC3): the SAME single
+ * sprint-view window is also partitioned into the three dispatch buckets
+ * (`implement` / `audit` / `prep`), producing one `nominees` entry per
+ * bucket — the canonical FIRST offerable item of that bucket — from the
+ * single `getHerdrListHead` read (no per-bucket `wl` spawn, no second
+ * ranking: window order IS the ranking, and only the existing sequential
+ * filters are applied per bucket). A bucket empty in the window nominates
+ * nothing and the window is never widened to fill it (AC3). The critical-
+ * escalation and whole-backlog-extension paths keep today's single-offer
+ * shape (`nominees` empty) — the check-in write path falls back to a
+ * single-offer `offers` payload for them.
  *
  * The filters mirror the direct dispatch path (`dispatchFromHerdrList`)
  * but WITHOUT dispatching:
@@ -327,19 +348,62 @@ export async function computeMostImportantItem(
       priority: criticalFirst.item.priority,
       sortIndex: criticalFirst.item.sortIndex,
     };
-    return { ok: true, kind: criticalFirst.kind, candidate };
+    // The escalation path offers the critical item directly, WITHOUT running
+    // the window partition (per-bucket nominees, parent AC2/AC3): the
+    // critical offer must not wait, and it deliberately bypasses the
+    // sequential filters, so a "canonical first of bucket" nominee would be
+    // misleading here. An empty `nominees` makes the check-in write a
+    // single-offer `offers` payload, byte-identical to the pre-tier-aware
+    // entry for this path.
+    return { ok: true, kind: criticalFirst.kind, candidate, nominees: [] };
   }
 
   /**
-   * Scan one ordered candidate window for the first offerable item (the
-   * sequential filters mirror `dispatchFromHerdrList`). Returns null when
-   * nothing in the window is offerable; `heldByReviewQueue` records whether
-   * the only reason was the deep-queue hold of a non-critical implement.
+   * Per-bucket nominee surface (parent WL-0MWDDHQON0015T3P AC2/AC3): the
+   * canonical FIRST offerable item of each dispatch bucket, partitioned
+   * from the SAME sprint-view window the single-offer path reads — one
+   * `getHerdrListHead` call serves every bucket, no second ranking and no
+   * per-bucket `wl` spawn. The single offer (the window-first offerable
+   * item) and the per-bucket nominees are produced by ONE sequential pass
+   * over the window, reusing the exact per-item filters the single-offer
+   * path applies today.
+   *
+   * The pass is deliberately term-limited: an item whose bucket already has
+   * a nominee can only serve as the single offer, so once that is found it
+   * is skipped BEFORE the filters run — the side-effectful seams
+   * (attempt-budget producer-review flags, the review-queue gate) stay
+   * untouched for items behind the window-first offerable item, exactly as
+   * the single-offer path behaves today.
    */
-  const findOfferIn = async (
+  const offerState: {
+    singleOffer: { kind: DowntimeSkillKind; candidate: DowntimeCandidate } | null;
+    nomineesByBucket: Map<CoordinationOfferKind, CoordinationNominee>;
+  } = { singleOffer: null, nomineesByBucket: new Map() };
+
+  /**
+   * Scan one ordered candidate batch through the sequential filters
+   * (mirror `dispatchFromHerdrList`), accumulating the single offer and —
+   * for the SPRINT-VIEW WINDOW (`withNominees`) — one nominee per bucket.
+   * `withNominees:false` is the whole-backlog extension, which feeds ONLY
+   * the single offer (AC3: the window is never widened to fill a bucket).
+   * `heldByReviewQueue` records whether the only reason was the deep-queue
+   * hold of a non-critical implement.
+   *
+   * Accumulates into `state` (a const object, so the type-checker keeps the
+   * declared union across the closure assignments).
+   */
+  const scanOfferable = async (
     items: DowntimeHerdrItem[],
-  ): Promise<{ ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate } | null> => {
+    withNominees: boolean,
+    state: typeof offerState,
+  ): Promise<void> => {
+    const { nomineesByBucket } = state;
     for (const item of items) {
+      // Early stop: the single offer is found AND (for the window) every
+      // bucket has a nominee — no later item can render new service.
+      if (state.singleOffer !== null && (!withNominees || nomineesByBucket.size === COORDINATION_OFFER_BUCKETS.length)) {
+        return;
+      }
       const classification = classifyItemForDispatchDetail(item, now);
       if (classification.kind === null) {
         // review-gate + freshness/recency + caps — record WHICH gate.
@@ -347,6 +411,13 @@ export async function computeMostImportantItem(
         continue;
       }
       const k = classification.kind;
+      const bucket = toOfferBucket(k);
+      // An item whose bucket already has a nominee can only become the
+      // single offer — skip it entirely (and its filter side effects) once
+      // that is found.
+      if (state.singleOffer !== null && bucket !== null && nomineesByBucket.has(bucket)) {
+        continue;
+      }
       // Dispatched-marker exclusion per kind, staleness-aware
       // (WL-0MU6UL0RJ008IHGT): exclude only while the item is STILL at the
       // marker's dispatched-at stage AND the marker is fresh; a stale marker
@@ -414,21 +485,49 @@ export async function computeMostImportantItem(
           continue;
         }
       }
-      const candidate: DowntimeCandidate = {
-        id: item.id,
-        title: item.title,
-        stage: k === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
-        status: item.status,
-        priority: item.priority,
-        sortIndex: item.sortIndex,
-      };
-      return { ok: true, kind: k, candidate };
+      // The item is OFFERABLE: it becomes the single (window-first)
+      // offerable item unless an earlier one already holds that slot, and it
+      // becomes its bucket's nominee (the canonical FIRST offerable item of
+      // that bucket) unless the bucket already has one.
+      if (state.singleOffer === null) {
+        state.singleOffer = {
+          kind: k,
+          candidate: {
+            id: item.id,
+            title: item.title,
+            stage: k === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
+            status: item.status,
+            priority: item.priority,
+            sortIndex: item.sortIndex,
+          },
+        };
+      }
+      if (bucket !== null && !nomineesByBucket.has(bucket)) {
+        nomineesByBucket.set(bucket, { kind: bucket, workItemId: item.id });
+      }
     }
-    return null;
   };
 
-  const offer = await findOfferIn(head.items);
-  if (offer !== null) return offer;
+  /** Emit the per-bucket nominees in canonical bucket order (COORDINATION_OFFER_BUCKETS). */
+  const emitNominees = (
+    byBucket: ReadonlyMap<CoordinationOfferKind, CoordinationNominee>,
+  ): CoordinationNominee[] =>
+    COORDINATION_OFFER_BUCKETS.flatMap((bucket) => {
+      const nominee = byBucket.get(bucket);
+      return nominee === undefined ? [] : [nominee];
+    });
+
+  // The WINDOW scan produces the single offer AND the per-bucket nominees
+  // (parent AC2/AC3): one partitioned pass over the SAME sprint-view read.
+  await scanOfferable(head.items, true, offerState);
+  if (offerState.singleOffer !== null) {
+    return {
+      ok: true,
+      kind: offerState.singleOffer.kind,
+      candidate: offerState.singleOffer.candidate,
+      nominees: emitNominees(offerState.nomineesByBucket),
+    };
+  }
 
   // ── Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH) ──
   // The head is windowed to the rendered sprint view, so the only offerable
@@ -445,10 +544,28 @@ export async function computeMostImportantItem(
   for (let round = 0; round < DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS; round += 1) {
     const extendedItems = await fetchExtendedHerdrItems(deps, cwd, seenItems);
     if (extendedItems.length === 0) break;
-    const extendedOffer = await findOfferIn(extendedItems);
-    if (extendedOffer !== null) return extendedOffer;
+    // The extension feeds ONLY the single offer — the per-bucket nominees are
+    // a WINDOW partition (AC3: the window is never widened to fill a bucket).
+    await scanOfferable(extendedItems, false, offerState);
+    if (offerState.singleOffer !== null) break;
     extendedTotal += extendedItems.length;
     seenItems = [...seenItems, ...extendedItems];
+  }
+  // Control-flow narrowing cannot see the closure's writes through
+  // `offerState`, so re-read with the declared union before the check.
+  const extOffer = offerState.singleOffer as
+    | { kind: DowntimeSkillKind; candidate: DowntimeCandidate }
+    | null;
+  if (extOffer !== null) {
+    // The offer came from beyond the visible window; `nominees` stays the
+    // (possibly empty) window partition — the check-in falls back to a
+    // single-offer `offers` payload for this path.
+    return {
+      ok: true,
+      kind: extOffer.kind,
+      candidate: extOffer.candidate,
+      nominees: emitNominees(offerState.nomineesByBucket),
+    };
   }
 
   // Herdr list was non-empty but every item was filtered by a safety gate

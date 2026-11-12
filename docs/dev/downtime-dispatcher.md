@@ -45,7 +45,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (provisional path, sibling proxy item `LP-0MW95FYMH006XYNK`) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON`, `AUDIT_BUDGET_UNKNOWN_REASON` |
 | `downtime-worker.audit-availability.ts` | The fail-closed audit-availability `GET` client — one bounded call, one typed outcome; consumed by the audit pre-check and admission (WL-0MWAMSDNW000SL0E) | `createAuditAvailabilityClient` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
-| `downtime-worker.coordination.ts` | The coordination OFFER computation (one item per instance per check-in) | `computeMostImportantItem`, `coordinationTierRank` |
+| `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
 | `downtime-worker.head-scan.ts` | Bounded head/extension candidate scan over ONE root, plus the registered-root sweep that applies it per root in round-robin order | `dispatchFromOwnHead`, `dispatchFromRegisteredRoots` |
 | `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
@@ -134,6 +134,50 @@ No `wl next`/database scoring change is required; the observable contract is
 "dispatcher == Herdr list head". The head is fetched with the **live per-root
 `browseItemCount`** limit (clamped 1–50) as its *initial* window — see
 *Whole-backlog dispatch window* below.
+
+### Per-bucket nominees from one head read (parent WL-0MWDDHQON0015T3P AC2/AC3)
+
+A root that offers only ONE item can hide its whole backlog behind a single
+refused offer (observed 2026-11-12: ContextHub offered an implement head while
+the machine-wide implement cap was full, and its 5 `idea` / 4 `intake_complete`
+/ 5 `plan_complete` candidates were never visible to any leader).
+`computeMostImportantItem` therefore returns the single offer **and** a
+`nominees` array — at most one nominee per dispatch bucket:
+
+| bucket | classifier kinds |
+|---|---|
+| `implement` | `implement` |
+| `audit` | `audit` |
+| `prep` | `plan`, `intake`, `risk-effort` |
+
+Contract:
+
+- **Buckets, not a second ranking.** Each nominee is the canonical FIRST
+  offerable item of its bucket in the same window order the single-offer path
+  uses; no priority/age/scoring logic is added and `classifyItemForDispatch`
+  stays the single classifier (no bucket logic lives in it).
+- **One head read.** All three nominees are partitioned from the SAME single
+  `getHerdrListHead(cwd, sprintWindow)` read — no per-bucket `wl` list spawn.
+- **Filters preserved per bucket.** The same sequential filter chain the
+  single-offer path applies (classifier gates, dispatched marker, attempt
+  budget, non-terminal cooldown, code-freeze split, in-flight guard,
+  review-queue hold) decides each bucket's nominee, in one pass over the
+  window. The pass stops as soon as both the single offer and every bucket are
+  resolved, so filter side effects never extend past the window-first offerable
+  item.
+- **Nothing is widened to fill a bucket.** A bucket with no offerable item in
+  the window nominates nothing (the window is never extended per bucket), and
+  the stall-scan short-circuit plus the `{ok:false}` fail-open contract are
+  unchanged.
+- **Escalation and extension paths keep the single offer.** A critical item
+  escalated ahead of the window walk, and an offer found only by the
+  whole-backlog extension (see *Whole-backlog dispatch window* below), return
+  `nominees: []`; the check-in then writes a single-offer `offers` payload,
+  exactly the pre-tier-aware entry.
+
+The check-in writes the nominees as the v2 `offers` array (canonical bucket
+order `implement` → `audit` → `prep`) with `workItemId` mirroring the first
+offer, so a v1-era leader keeps reading exactly one offer.
 
 ### Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH)
 
@@ -556,7 +600,9 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
 1. **Check-in** — every instance reads the file on startup; leaders re-offer every ~4 minutes
    (`DEFAULT_LEADER_CHECK_IN_MS = 4 min`) and followers every 5 minutes
    (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H — was 30 min, clamped ≥ 60 s),
-   recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
+   recomputing their worklog's **most-important item** and its **per-bucket nominees**
+   (see *Per-bucket nominees from one head read*) and upserting the v2 `offers` payload
+   (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
    also checks in on the follower cadence (WL-0MWDDHOK6009GJCC — see *Offer-only mode*
    below), so a passive root still contributes an offer to the leader. When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
 2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**. A non-dispatchable entry (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via `removeEntry` **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the tier loop **continues to the next entry**. Entries do **not** expire by wall-clock age.
