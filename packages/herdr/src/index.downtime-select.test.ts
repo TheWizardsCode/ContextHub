@@ -16,8 +16,9 @@ import { DISPATCHER_ASSIGNEE } from './index.claim.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE } from './downtime-log.js';
 import { reserve } from './host-dispatch-budget.js';
 import { classifyAuditScope } from './downtime-worker.gates.js';
-import { resetExecFileAsync, resetWorklogDir, setExecFileAsync, setWorklogDir } from './fetcher.js';
+import { resetExecFileAsync, resetWorklogDir, setExecFileAsync, setWorklogDir, type WorkItem } from './fetcher.js';
 import { setupHostCpuPin, makeTempDir, useIsolatedCoordinationDir } from './index.fixtures.js';
+import { WorklogDatabase } from '@worklog/shared';
 
 setupHostCpuPin();
 
@@ -94,6 +95,83 @@ describe('createDowntimeDeps', () => {
       expect(args[0]).toBe('--worklog-dir');
       expect(args[1]).toBe(join(leaderRoot, '.worklog'));
     }
+  });
+
+  // Dispatcher-head / render parity for SUBSTITUTED roots
+  // (WL-0MWDDAQ0L009FLEF AC4): getHerdrListHead feeds the downtime dispatcher
+  // the same fetchNextItems output the worklist renders. A critical child
+  // whose root is substituted into the head must carry childCount, otherwise
+  // the expanded-worklist shape and the dispatch head diverge (the child is
+  // invisible to both the operator and auto-dispatch). This drives the real
+  // getHerdrListHead seam against a real seeded store.
+  it('getHerdrListHead exposes the same expandable substituted-root shape as rendering (WL-0MWDDAQ0L009FLEF AC4)', async () => {
+    const rootDir = makeTempDir();
+    const worklogDir = join(rootDir, '.worklog');
+    mkdirSync(worklogDir, { recursive: true });
+    const db = new WorklogDatabase(
+      'WL',
+      join(worklogDir, 'worklog.db'),
+      join(worklogDir, 'worklog-data.jsonl'),
+      true,
+      false,
+    );
+    const root = db.create({ title: 'Parity root', priority: 'medium', stage: 'idea' });
+    const child = db.create({
+      title: 'Parity critical child',
+      priority: 'critical',
+      stage: 'idea',
+      parentId: root.id,
+    });
+    db.close();
+
+    setWorklogDir(worklogDir);
+    const now = new Date().toISOString();
+    const criticalChild = {
+      id: child.id,
+      title: `Item ${child.id}`,
+      status: 'open',
+      priority: 'critical',
+      stage: 'idea',
+      parentId: root.id,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const mockExec = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+      if (args.includes('worklist')) {
+        // Window pressure: the browse feed is EMPTY and the mandatory subsets
+        // (here: just the critical child) fill the window — the root is only
+        // injected by substitution, exactly the pre-fix broken shape.
+        return {
+          stdout: JSON.stringify({
+            success: true,
+            subsets: {
+              critical: [criticalChild],
+              reviewQueue: [],
+              inProgressRoots: [],
+              blockedRoots: [],
+              browse: [],
+            },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+    const head = await deps.getHerdrListHead(rootDir, 1);
+
+    expect(head.ok).toBe(true);
+    const items = (head as { ok: true; items: WorkItem[] }).items;
+    const headRoot = items.find((i) => i.id === root.id);
+    expect(headRoot).toBeDefined();
+    // The seeded root has one direct child; the head carries its count so the
+    // expand affordance and the dispatch head cannot diverge.
+    expect(headRoot?.childCount).toBe(1);
+    expect(items.find((i) => i.id === child.id)).toBeUndefined();
+    // Clean up the seeded store.
+    rmSync(rootDir, { recursive: true, force: true });
   });
 
   it('getNextItem runs wl next --stage -n 10 and parses the first workItem', async () => {

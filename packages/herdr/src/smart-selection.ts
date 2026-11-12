@@ -84,6 +84,15 @@ export function selectWorkItems<T extends Pick<WorkItem, 'priority' | 'status' |
   // always shown, is sorted by its own priority/group (it is not marked
   // critical), and is omitted when already present — so the ship
   // critical-items gate keeps blocking releases without a duplicate row.
+  //
+  // The substituted root MUST additionally carry `childCount`
+  // (WL-0MWDDAQ0L009FLEF): the expand affordance here is downstream of this
+  // function's output, and every expand gate (arrow, Tab toggle, on-demand
+  // child fetch) requires `childCount > 0`. A stripped ancestor would render
+  // without an expand arrow, making the substituted root's critical child
+  // unreachable — the top level only renders roots, so the child has no
+  // other path into the pane. `substituteCriticalRoots` re-attaches counts
+  // from the in-process store (fail-open: arrow absent if the read fails).
   const nonCriticals = items.filter((i) => !i.parentId);
   const actionable = nonCriticals.filter((i) => i.stage !== 'done');
   const criticals = actionable.filter((i) => i.priority === 'critical');

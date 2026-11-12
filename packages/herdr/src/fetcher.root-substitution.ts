@@ -67,6 +67,18 @@ export function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
 // critical-items gate keeps blocking a release on it. Substitution keeps that
 // work reachable without rendering the child twice: the child stays hidden at
 // the top level, its ROOT ancestor is shown in its place.
+//
+// Reachability contract of the substituted root (WL-0MWDDAQ0L009FLEF): a
+// substituted root MUST carry `childCount`, because every expand affordance in
+// the worklist — the `▶` arrow, the Tab expand gate and the on-demand child
+// fetch — is gated on `childCount > 0`. A stripped ancestor (no `childCount`)
+// renders without an expand arrow and its critical child is unreachable both
+// in the pane and in the dispatcher list head, which shares the same items.
+// The ancestor reads themselves (`db.get` and the `wl show` fallback) emit no
+// `childCount` — only the `wl list`/`wl next`/`wl worklist` enrichments — so
+// substitution re-attaches it from the same in-process `getChildCounts` pass
+// the child read uses, fail-open (a failed read leaves the arrow absent —
+// today's behaviour, never a crash).
 
 /** Maximum `parentId` hops walked when resolving a critical child's root. */
 const MAX_ANCESTOR_HOPS = 32;
@@ -135,6 +147,12 @@ async function walkToRootAncestor(
  * root/chain cost ONE lookup — no new hot-path spawn when the in-process read
  * succeeds (WL-0MVI0IT4S0070G78 / WL-0MV5CBQ6L005SPAG).
  *
+ * Substituted roots carry `childCount` (WL-0MWDDAQ0L009FLEF): the ancestor
+ * reads emit none, and every worklist expand affordance gates on
+ * `childCount > 0`, so the enrichment below re-attaches counts from the same
+ * in-process `getChildCounts` pass the children read uses — fail-open (arrow
+ * absent if the read fails), never a crash.
+ *
  * Display-layer only: nothing is written back, and the substituted root keeps
  * its own `priority`/`status`/`stage` and group — no badge, marker or
  * indicator is attached. Fail-open: an unresolvable parent (missing/deleted)
@@ -162,17 +180,30 @@ async function substituteCriticalRoots(
   // In-process SQLite fast path: ONE connection pre-resolves every ancestor
   // reachable from an actionable critical child. Skipped entirely when each
   // child's parent is already in the merged candidate set (nothing to read).
+  //
+  // While the connection is open it ALSO attaches `childCount` to every
+  // resolved ancestor (WL-0MWDDAQ0L009FLEF): `db.get` returns the raw row
+  // without `childCount` (only the `wl list`-style enrichments carry it), and
+  // the worklist's expand affordance is gated on `childCount > 0` — a root
+  // substituted without it renders without an expand arrow and its critical
+  // child is unreachable. `getChildCounts` runs over ALL items (deleted
+  // included) exactly like the CLI's enrichment and `readChildrenInProcess`;
+  // a missing map entry means the item has no children and counts as 0.
   if (children.some((child) => !child.parentId || !knownById.has(child.parentId))) {
     // `dirOverride` targets the foreign root's database for the fast path too;
     // without it the lookup would resolve ancestors from the MODULE root and a
     // swept root's critical child could be substituted with the wrong parent.
     await withInProcessDb((db) => {
+      const childCounts = db.getChildCounts(db.list({}));
       for (const child of children) {
         let currentId = child.parentId;
         while (currentId && !knownById.has(currentId) && !memo.has(currentId)) {
           const raw = db.get(currentId);
           if (!raw) break;
           const parent = normalizeItem(raw);
+          if (parent.childCount === undefined) {
+            parent.childCount = childCounts.get(currentId) ?? 0;
+          }
           memo.set(currentId, parent);
           currentId = parent.parentId;
         }
@@ -203,6 +234,26 @@ async function substituteCriticalRoots(
     if (mandatoryIds.has(root.id) || rootIds.has(root.id)) continue;
     rootIds.add(root.id);
     roots.push(root);
+  }
+
+  // Post-walk childCount enrichment (WL-0MWDDAQ0L009FLEF): a root resolved
+  // via the `wl show` fallback (a chain whose first hop is already in the
+  // candidate set skips the fast path, so hops ABOVE it resolve by `wl show`)
+  // still lacks `childCount` even when the store is readable. ONE bounded
+  // fail-open pass re-attaches counts from the same `getChildCounts` source;
+  // an unavailable store leaves the arrow absent (the pre-fix behaviour),
+  // never a crash. Only fires when a substituted root is actually missing
+  // its count, so an already-enriched refresh never pays for it.
+  if (roots.some((root) => root.childCount === undefined)) {
+    await withInProcessDb((db) => {
+      const childCounts = db.getChildCounts(db.list({}));
+      for (const root of roots) {
+        if (root.childCount === undefined) {
+          root.childCount = childCounts.get(root.id) ?? 0;
+        }
+      }
+      return null;
+    }, dirOverride);
   }
   return { mandatory: [...kept, ...roots], roots };
 }

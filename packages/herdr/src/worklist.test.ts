@@ -6806,6 +6806,41 @@ describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', (
   });
 });
 
+// ── Expand arrow gated on childCount (WL-0MWDDAQ0L009FLEF AC1) ─────────
+// The worklist renders `▶`/`▼` only when `childCount > 0` (formatItemLine,
+// the Tab toggle and the on-demand child fetch all gate on it). A
+// SUBSTITUTED root injected by substituteCriticalRoots therefore MUST carry
+// childCount — a stripped ancestor would render with a blank two-cell slot
+// and its critical child would be unreachable. This pins the render half of
+// the contract; the fetcher tests pin that substituted roots actually carry
+// the count.
+describe('formatItemLine — expand arrow for childCount-bearing rows (WL-0MWDDAQ0L009FLEF AC1)', () => {
+  it('renders ▶ for a row whose childCount > 0', () => {
+    const root = makeItem('ROOT-C', 'idea');
+    root.childCount = 3;
+    const line = formatItemLine(root, 160);
+    expect(line).toContain('▶');
+    expect(line).not.toContain('▼');
+  });
+
+  it('renders ▼ for an expanded row whose childCount > 0', () => {
+    const root = makeItem('ROOT-E', 'idea');
+    root.childCount = 3;
+    root._expanded = true;
+    const line = formatItemLine(root, 160);
+    expect(line).toContain('▼');
+  });
+
+  it('renders the blank two-cell slot (no arrow) when childCount is absent or 0', () => {
+    // The pre-fix substituted-root shape: resolved via db.get / wl show,
+    // which carry no childCount. Such a row is not expandable.
+    expect(formatItemLine(makeItem('ROOT-NONE', 'idea'), 160)).not.toContain('▶');
+    const zero = makeItem('ROOT-ZERO', 'idea');
+    zero.childCount = 0;
+    expect(formatItemLine(zero, 160)).not.toContain('▶');
+  });
+});
+
 // ── Footer help-line: advertise `?: Help`, drop downtime + mouse hints ──
 // Test-first pins for parent help screen work (WL-0MTV97GV20088CS7 AC1, AC2,
 // AC7a). The footer advertises `?: Help` instead of the low-value

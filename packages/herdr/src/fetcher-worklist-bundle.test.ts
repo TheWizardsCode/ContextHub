@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { WorklogDatabase } from '@worklog/shared';
 import {
   fetchNextItems,
+  fetchChildrenForItem,
   fetchReviewQueueState,
   fetchItemsByStage,
   fetchItemsByPriority,
@@ -226,9 +227,13 @@ function argAfter(args: string[], token: string): string | undefined {
  */
 function substitutionWorklistPayload(
   browseLimit?: number,
-  options: { criticalChildren?: Record<string, unknown>[]; rootInBrowse?: boolean } = {},
+  options: {
+    criticalChildren?: Record<string, unknown>[];
+    rootInBrowse?: boolean;
+    rootChildCount?: number;
+  } = {},
 ): Record<string, unknown> {
-  const { criticalChildren = [substitutionItems.critKid], rootInBrowse = false } = options;
+  const { criticalChildren = [substitutionItems.critKid], rootInBrowse = false, rootChildCount } = options;
   const browse = [
     entry(browseItems.crit, 'critical'),
     entry(browseItems.review, 'in review'),
@@ -236,7 +241,12 @@ function substitutionWorklistPayload(
     entry(browseItems.blocked, 'blocked'),
     entry(browseItems.other, 'browse'),
     entry(browseItems.child, 'browse child'),
-    ...(rootInBrowse ? [entry(substitutionItems.critRoot, 'browse')] : []),
+    // A browse-sourced substituted root carries the CLI's enriched
+    // childCount (only when the caller models it) — the pre-fix bug was the
+    // window-pressure case where NO enriched copy exists.
+    ...(rootInBrowse
+      ? [entry({ ...substitutionItems.critRoot, ...(rootChildCount !== undefined ? { childCount: rootChildCount } : {}) }, 'browse')]
+      : []),
   ];
   return {
     success: true,
@@ -269,6 +279,7 @@ function substitutionRespond(
     criticalChildren?: Record<string, unknown>[];
     resolvableRoots?: Record<string, Record<string, unknown>>;
     rootInBrowse?: boolean;
+    rootChildCount?: number;
   } = {},
 ) {
   const {
@@ -276,6 +287,7 @@ function substitutionRespond(
     criticalChildren = [substitutionItems.critKid],
     resolvableRoots = { 'N-CRIT-ROOT': substitutionItems.critRoot },
     rootInBrowse = false,
+    rootChildCount,
   } = options;
 
   return (args: string[]): unknown => {
@@ -286,7 +298,11 @@ function substitutionRespond(
         err.code = 1;
         throw err;
       }
-      return substitutionWorklistPayload(requestedBrowseCount(args), { criticalChildren, rootInBrowse });
+      return substitutionWorklistPayload(requestedBrowseCount(args), {
+        criticalChildren,
+        rootInBrowse,
+        rootChildCount,
+      });
     }
     if (command === 'show') {
       const id = argAfter(args, 'show') ?? '';
@@ -719,5 +735,132 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(ids(byPriority)).toEqual(['N-CRIT']);
     expect([...ids(byStage), ...ids(byPriority)]).not.toContain('N-CRIT-ROOT');
     expect(calls.every((c) => commandOf(c.args) === 'list')).toBe(true);
+  });
+
+  // ── Substituted-root `childCount` (WL-0MWDDAQ0L009FLEF)` ──────────────
+  //
+  // The worklist's expand affordance is gated on `childCount > 0` (arrow,
+  // Tab toggle and the on-demand child fetch are ALL behind it). The ancestor
+  // resolution paths (`db.get` fast path and the `wl show` fallback) carry no
+  // childCount — only the `wl list`/`wl next`/`wl worklist` enrichments do —
+  // so a SUBSTITUTED root resolved outside the browse window used to render
+  // without an expand arrow, making its critical child unreachable. The fix
+  // enriches substituted roots with the same in-process `getChildCounts` pass
+  // the child read uses (fail-open: arrow absent if the read fails — today's
+  // behaviour, never a crash).
+
+  it('window pressure (othersLimit 0): in-process-resolved substituted root carries childCount (WL-0MWDDAQ0L009FLEF AC1/AC3a)', async () => {
+    const seeded = seedSubstitutionDb();
+    setWorklogDir(seeded.worklogDir);
+    const criticalChild = item(seeded.childId, { priority: 'critical', parentId: seeded.rootId });
+    const calls = mockWl(
+      substitutionRespond({ criticalChildren: [criticalChild], resolvableRoots: {} }),
+    );
+
+    // count 1: the mandatory subsets alone fill the window (othersLimit === 0)
+    // and the root is NOT in the browse feed — the pre-fix shape that lost its
+    // childCount because no enriched copy existed to keep in the merge.
+    const items = await fetchNextItems(1);
+    const root = items.find((i) => i.id === seeded.rootId);
+
+    expect(ids(items)).not.toContain(seeded.childId);
+    expect(ids(items)).toContain(seeded.rootId);
+    // The seeded root has exactly ONE direct child (the critical child), and
+    // getChildCounts is computed over ALL items (deleted included) exactly
+    // like the CLI's enrichment / readChildrenInProcess.
+    expect(root?.childCount).toBe(1);
+    // The whole refresh is the ONE consolidated read: the ancestor plus its
+    // childCount resolved in-process (no `wl show`, no `wl list`).
+    expect(calls).toHaveLength(1);
+  });
+
+  it('keeps the browse-sourced root childCount (no double-count, no clobber) (WL-0MWDDAQ0L009FLEF AC3b)', async () => {
+    // The root IS in the browse window this time, carrying the enriched
+    // `wl list`-style childCount. Substitution must not overwrite it:
+    // first-occurrence merge keeps the enriched copy, and the enrichment
+    // pass must only fill UNDEFINED counts.
+    mockWl(substitutionRespond({ rootInBrowse: true, rootChildCount: 9 }));
+
+    const items = await fetchNextItems(20);
+    const root = items.find((i) => i.id === 'N-CRIT-ROOT');
+
+    expect(items.filter((i) => i.id === 'N-CRIT-ROOT')).toHaveLength(1);
+    expect(root?.childCount).toBe(9);
+  });
+
+  it('children of the substituted root are reachable on demand (Tab/Enter fetch path) (WL-0MWDDAQ0L009FLEF AC2)', async () => {
+    const seeded = seedSubstitutionDb();
+    setWorklogDir(seeded.worklogDir);
+    const criticalChild = item(seeded.childId, { priority: 'critical', parentId: seeded.rootId });
+    const calls = mockWl(
+      substitutionRespond({ criticalChildren: [criticalChild], resolvableRoots: {} }),
+    );
+
+    const items = await fetchNextItems(25);
+    const root = items.find((i) => i.id === seeded.rootId);
+    expect(root?.childCount).toBe(1);
+
+    // The worklist's expand handler fetches children on demand via
+    // fetchChildrenForItem (the ONLY child-fetch entry, gated on
+    // childCount > 0) — the same call the substituted root's arrow unlocks.
+    const children = await fetchChildrenForItem(seeded.rootId);
+    expect(ids(children)).toContain(seeded.childId);
+    // No extra spawns: both the ancestor/childCount resolution and the
+    // children read are in-process.
+    expect(calls.some((c) => c.args.includes('show'))).toBe(false);
+    expect(calls.some((c) => c.args.includes('list'))).toBe(false);
+  });
+
+  it('enriches a wl show-resolved root (chain through a browsed middle node) with childCount (WL-0MWDDAQ0L009FLEF robustness)', async () => {
+    // The critical child's DIRECT parent is in the browse feed (so the
+    // in-process pre-walk is skipped), but the true root sits ABOVE it and is
+    // resolved via `wl show`. The post-walk pass must still give the root its
+    // childCount from the store.
+    const seeded = seedSubstitutionDb();
+    setWorklogDir(seeded.worklogDir);
+    const middle = item('N-MID-KNOWN', { priority: 'low', stage: 'idea', parentId: seeded.rootId });
+    const criticalChild = item('N-KID-VIA-SHOW', {
+      priority: 'critical',
+      stage: 'idea',
+      parentId: 'N-MID-KNOWN',
+    });
+    const calls = mockWl((args) => {
+      const command = commandOf(args);
+      if (command === 'worklist') {
+        const payload = substitutionWorklistPayload(requestedBrowseCount(args), {
+          criticalChildren: [criticalChild],
+        });
+        const subsets = payload.subsets as {
+          browse: unknown[];
+          critical: unknown[];
+          reviewQueue: unknown[];
+          inProgressRoots: unknown[];
+          blockedRoots: unknown[];
+        };
+        // The middle node rides in the browse feed; the root does not.
+        subsets.browse = [...subsets.browse, entry(middle, 'browse')];
+        return payload;
+      }
+      if (command === 'show') {
+        const id = argAfter(args, 'show') ?? '';
+        if (id === seeded.rootId) {
+          return { success: true, workItem: item(seeded.rootId, { priority: 'low' }) };
+        }
+        const err = new Error(`Work item not found: ${id}`) as Error & { code?: number };
+        err.code = 1;
+        throw err;
+      }
+      return legacyRespond(args);
+    });
+
+    const items = await fetchNextItems(25);
+    const root = items.find((i) => i.id === seeded.rootId);
+
+    // The root was resolved via `wl show` (no in-process ancestor read for
+    // this chain because the middle node covered the first hop)…
+    expect(calls.some((c) => c.args.includes('show') && c.args.includes(seeded.rootId))).toBe(true);
+    // …yet it still carries the store's childCount for the expand affordance.
+    expect(root?.childCount).toBe(1);
+    expect(ids(items)).not.toContain('N-KID-VIA-SHOW');
   });
 });
