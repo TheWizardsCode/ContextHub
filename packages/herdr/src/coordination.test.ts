@@ -474,13 +474,9 @@ describe('worklogRoot / directory compat', () => {
 // check-in — no v1 file is ever dropped by the upgrade. Legacy
 // `removeEntry` semantics are preserved (parent AC9).
 //
-// RED WITNESS. No v2 surface exists yet: `CoordinationEntry` still carries
-// one `workItemId`, `readCoordinationFile` rebuilds entries without `offers`,
-// and `COORDINATION_FILE_VERSION` is 1 — every spec below that pins the v2
-// shape is expected to fail. Schema implementation child
-// WL-0MWDVMVX50012RSU flips each `it.fails` to `it` and makes the body pass.
-// The GREEN spec below (legacy `removeEntry` semantics) already passes on v1
-// and must STAY green after the upgrade.
+// GREEN (F1, WL-0MWDVMVX50012RSU): the v2 surface landed — `CoordinationEntry`
+// carries the bounded `offers` payload, `readCoordinationFile` parses it and
+// migration-reads v1 files, and `COORDINATION_FILE_VERSION` is 2.
 
 import { classifyItemForDispatch } from './downtime-worker.gates.js';
 import {
@@ -530,12 +526,12 @@ function rawFile(): { version: number; entries: Array<Record<string, unknown>> }
   };
 }
 
-describe('v2 schema: bounded offers array (parent AC1, RED until F1)', () => {
-  it.fails('COORDINATION_FILE_VERSION is bumped to 2 for the tier-aware offer contract', () => {
+describe('v2 schema: bounded offers array (parent AC1)', () => {
+  it('COORDINATION_FILE_VERSION is bumped to 2 for the tier-aware offer contract', () => {
     expect(COORDINATION_FILE_VERSION).toBe(2);
   });
 
-  it.fails('duplicate (kind, workItemId) pairs collapse to one offer on every write seam', () => {
+  it('duplicate (kind, workItemId) pairs collapse to one offer on every write seam', () => {
     // upsertEntry (per-check-in upsert) ...
     expect(upsertEntry(testDir, v2EntryWitness('inst-1', DUPLICATE_V2_OFFERS))).toBe(true);
     // ... and mergeEntries (the batch check-in write seam) collapse the same way.
@@ -556,7 +552,7 @@ describe('v2 schema: bounded offers array (parent AC1, RED until F1)', () => {
     }
   });
 
-  it.fails('an offers array exceeding one-per-bucket or three-offer bounds is not persisted', () => {
+  it('an offers array exceeding one-per-bucket or three-offer bounds is not persisted', () => {
     // Two implements in one bucket — the write must keep at most the FIRST
     // (the canonical first item of the bucket; no second ranking).
     expect(upsertEntry(testDir, v2EntryWitness('inst-bucket', OVER_BUCKET_V2_OFFERS))).toBe(true);
@@ -577,8 +573,8 @@ describe('v2 schema: bounded offers array (parent AC1, RED until F1)', () => {
   });
 });
 
-describe('v1 migration-read and rewrite (parent AC1, RED until F1)', () => {
-  it.fails('a v1 file (single workItemId, no offers) is read as a one-offer entry whose kind is derived by the classifier', () => {
+describe('v1 migration-read and rewrite (parent AC1)', () => {
+  it('a v1 file (single workItemId, no offers) is read as a one-offer entry whose kind is derived by the classifier', () => {
     writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
     const data = readCoordinationFile(testDir);
     expect(data).not.toBe(null);
@@ -595,7 +591,7 @@ describe('v1 migration-read and rewrite (parent AC1, RED until F1)', () => {
     expect(entry.offers[0].kind).toBe('implement');
   });
 
-  it.fails('a v1 file is rewritten as v2 on the next check-in and never dropped', () => {
+  it('a v1 file is rewritten as v2 on the next check-in and never dropped', () => {
     writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
     // The owner's next check-in recomputes its tier-aware offers and upserts
     // the same instance's entry (the migrated one-offer shape).

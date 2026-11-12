@@ -17,7 +17,12 @@
  * that owns the offered item) so the leader can dispatch across roots.
  *
  *  - One entry per herdr instance: `{instanceId, workItemId, worklogRoot,
- *    directory (alias), assignedAt, lastUpdated}`.
+ *    directory (alias), assignedAt, lastUpdated}`. Since v2
+ *    (WL-0MWDDHQON0015T3P AC1) the offer payload is a bounded `offers` array
+ *    (at most one nominee per bucket, at most three total; duplicate
+ *    `(kind, workItemId)` pairs collapse) and `workItemId` mirrors the FIRST
+ *    offer so a v1-era leader keeps reading the first offer and ignoring the
+ *    rest (parent AC9 backward compatibility).
  *  - Safe concurrent access: writes happen under an exclusive lock file
  *    (`O_CREAT|O_EXCL` — the POSIX atomic create, equivalent to flock for
  *    the single-machine v1 scope) followed by an atomic tmp+rename write,
@@ -47,8 +52,16 @@ export const COORDINATION_FILE = 'downtime-coordination.json';
 /** Exclusive lock file name used to serialize read-modify-write cycles. */
 export const COORDINATION_LOCK_FILE = 'downtime-coordination.lock';
 
-/** Current coordination file format version. */
-export const COORDINATION_FILE_VERSION = 1;
+/**
+ * Current coordination file format version.
+ *
+ * v2 (WL-0MWDDHQON0015T3P AC1): the offer payload is the tier-aware bounded
+ * `offers` array (`implement` / `audit` / `prep` buckets). A v1 file (single
+ * top-level `workItemId`, no `offers`) is migration-read as a one-offer entry
+ * and rewritten as v2 on the next check-in; no v1 file is ever dropped by the
+ * upgrade (AC1).
+ */
+export const COORDINATION_FILE_VERSION = 2;
 
 /** Leader lock file name (mirrors `leader-election.ts`). */
 export const LEADER_LEASE_FILE = 'downtime-leader-lease.json';
@@ -69,7 +82,13 @@ export const DEFAULT_LEADER_BLOCK_STALE_MS = 600_000;
  * One instance's contribution to the shared coordination list.
  *
  * - `instanceId` — unique herdr instance identifier.
- * - `workItemId` — the instance's most-important work item id.
+ * - `workItemId` — the instance's most-important work item id. Since v2 it
+ *   mirrors the FIRST `offers` entry (backward compat: a v1-era leader reads
+ *   the first offer and ignores the rest — parent AC9).
+ * - `offers` — v2 tier-aware offer payload (bounded: one nominee per bucket,
+ *   at most three total; duplicate `(kind, workItemId)` pairs collapse).
+ *   OPTIONAL so a legacy v1 shape (no `offers`) stays a valid entry and old
+ *   writers/readers interoperate (parent AC1/AC9).
  * - `worklogRoot` — the worklog ROOT (parent of `.worklog`) this instance
  *   operates on; the leader dispatches work in that directory. Preferred
  *   field name for the machine-wide file (WL-0MTF0KLO10043YAN).
@@ -87,6 +106,42 @@ export interface CoordinationEntry {
   worklogRoot?: string;
   assignedAt: string;
   lastUpdated: string;
+  /** v2 tier-aware offer payload (optional for legacy v1-shape entries). */
+  offers?: CoordinationOffer[];
+}
+
+/**
+ * The v2 offer buckets (parent WL-0MWDDHQON0015T3P AC1): the classifier
+ * outputs with `plan` / `intake` / `risk-effort` unioning to `prep`. At most
+ * one nominee per bucket, so at most three offers per entry.
+ */
+export type CoordinationOfferKind = 'implement' | 'audit' | 'prep';
+
+/** The v2 per-bucket offer payload (one nominee per bucket, bounded total). */
+export interface CoordinationOffer {
+  kind: CoordinationOfferKind;
+  workItemId: string;
+}
+
+/** Canonical bucket order used by the bounded-offers normalisation. */
+export const COORDINATION_OFFER_BUCKETS: readonly CoordinationOfferKind[] = [
+  'implement',
+  'audit',
+  'prep',
+];
+
+/**
+ * Map a classifier skill kind — or an already-bucketed kind — to its v2
+ * offer bucket (parent AC1): `implement`/`audit` stay; `prep` stays
+ * (write paths feed bucket kinds directly); `plan`/`intake`/`risk-effort`
+ * union to `prep`; anything else (null / unknown) maps to null (no offer).
+ */
+export function toOfferBucket(
+  kind: string | null | undefined,
+): CoordinationOfferKind | null {
+  if (kind === 'implement' || kind === 'audit' || kind === 'prep') return kind;
+  if (kind === 'plan' || kind === 'intake' || kind === 'risk-effort') return 'prep';
+  return null;
 }
 
 /**
@@ -194,6 +249,13 @@ function resolveEffectiveDir(worklogDir: string): string | null {
  * caller creates it on the next write); an unreadable or corrupt file also
  * returns `null` so a broken coordination file can never crash an instance
  * or silently mislead a reader. Never throws.
+ *
+ * v2 (WL-0MWDDHQON0015T3P AC1): a v2 entry's `offers` payload is parsed
+ * (re-bounded fail-safe) and `workItemId` mirrors the first offer; a v1 file
+ * (declared version < {@link COORDINATION_FILE_VERSION}) is migration-read as
+ * a one-offer entry per instance — the v1 single `workItemId` becomes one
+ * offer whose kind is the `implement` bucket default (see
+ * {@link migratedV1Offer}) — so no v1 file is ever dropped by the upgrade.
  */
 export function readCoordinationFile(worklogDir: string): CoordinationData | null {
   try {
@@ -203,6 +265,12 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
     if (typeof parsed !== 'object' || parsed === null) return null;
     const data = parsed as Partial<CoordinationData>;
     if (!Array.isArray(data.entries)) return null;
+    const fileVersion = typeof data.version === 'number' ? data.version : COORDINATION_FILE_VERSION;
+    // A v1 file carries one top-level `workItemId` and NO `offers` payload;
+    // migration-read it as a one-offer entry (parent AC1). v2 files are
+    // parsed as-is; a v2 entry without `offers` is kept as its legacy shape
+    // (fail-safe) so round-trips and old writers never surprise a reader.
+    const migrateV1 = fileVersion < COORDINATION_FILE_VERSION;
     // Validate each entry minimally: it must be an object carrying an
     // instanceId string. Malformed entries are dropped (fail-safe).
     // `worklogRoot` is the machine-wide field (WL-0MTF0KLO10043YAN);
@@ -216,23 +284,85 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
       const rawRoot = typeof entry.worklogRoot === 'string' && entry.worklogRoot.length > 0
         ? entry.worklogRoot
         : typeof entry.directory === 'string' ? entry.directory : '';
-      entries.push({
+      const rawWorkItemId = typeof entry.workItemId === 'string' ? entry.workItemId : '';
+      const base = {
         instanceId: entry.instanceId,
-        workItemId: typeof entry.workItemId === 'string' ? entry.workItemId : '',
+        workItemId: rawWorkItemId,
         directory: rawRoot,
         worklogRoot: rawRoot,
         assignedAt: typeof entry.assignedAt === 'string' ? entry.assignedAt : new Date(0).toISOString(),
         lastUpdated: typeof entry.lastUpdated === 'string' ? entry.lastUpdated : new Date(0).toISOString(),
-      });
+      } as CoordinationEntry;
+      if (Array.isArray(entry.offers) && entry.offers.length > 0) {
+        // v2: parse the bounded offer payload (re-bounded fail-safe) and
+        // mirror the first offer into `workItemId` for v1-era readers.
+        const offers = boundOffers(entry.offers);
+        entries.push({
+          ...base,
+          offers,
+          workItemId: offers.length > 0 ? offers[0].workItemId : rawWorkItemId,
+        });
+      } else if (migrateV1 && rawWorkItemId.length > 0) {
+        // v1 migration-read: the single top-level `workItemId` becomes a
+        // one-offer entry — never dropped by the upgrade (parent AC1).
+        entries.push({ ...base, offers: [migratedV1Offer(rawWorkItemId)] });
+      } else {
+        entries.push(base);
+      }
     }
     return {
-      version: typeof data.version === 'number' ? data.version : COORDINATION_FILE_VERSION,
+      version: fileVersion,
       entries,
       ...parseLeader(data.leader),
     };
   } catch {
     return null; // missing / unreadable / corrupt → fail-safe
   }
+}
+
+/**
+ * The v1 migration-read offer (parent AC1): a legacy single `workItemId`
+ * becomes ONE offer carrying that item. The bucket defaults to `implement`
+ * because the v1 head was `computeMostImportantItem`'s single most-important
+ * offer, which resolved to the implement tier in the overwhelming majority of
+ * cases (open / plan_complete with populated risk+effort — exactly the
+ * LEGACY_V1_ITEM fixture). The classifier remains the single source of bucket
+ * truth (parent AC4) and re-resolves the kind at dispatch time (the leader
+ * re-fetches + classifies every offer) and at the owner's next check-in (the
+ * entry is rewritten as v2, AC1), so the read-time default is never the
+ * dispatch decision.
+ */
+function migratedV1Offer(workItemId: string): CoordinationOffer {
+  return { kind: 'implement', workItemId };
+}
+
+/**
+ * Bound an offers payload (parent AC1): at most one nominee per bucket
+ * (first in array order — the array is already the bucket's canonical
+ * ranking, no second ranking), at most three total, and duplicate
+ * `(kind, workItemId)` pairs collapse. Malformed offers (empty id, unknown
+ * kind) are dropped fail-safe. Used on both the write seam (so an
+ * over-bounds array is never persisted) and the read seam (fail-safe).
+ */
+function boundOffers(raw: readonly unknown[]): CoordinationOffer[] {
+  const seenKinds = new Set<CoordinationOfferKind>();
+  const seenPairs = new Set<string>();
+  const out: CoordinationOffer[] = [];
+  for (const o of raw) {
+    if (typeof o !== 'object' || o === null) continue;
+    const offer = o as Partial<CoordinationOffer>;
+    if (typeof offer.workItemId !== 'string' || offer.workItemId.length === 0) continue;
+    const kind = toOfferBucket(offer.kind);
+    if (kind === null) continue;
+    const pairKey = `${kind}\u0000${offer.workItemId}`;
+    if (seenPairs.has(pairKey)) continue; // duplicate (kind, workItemId) → collapse
+    seenPairs.add(pairKey);
+    if (seenKinds.has(kind)) continue; // already one nominee for this bucket
+    seenKinds.add(kind);
+    out.push({ kind, workItemId: offer.workItemId });
+    if (out.length >= COORDINATION_OFFER_BUCKETS.length) break; // at most three total
+  }
+  return out;
 }
 
 /**
@@ -259,12 +389,26 @@ function parseLeader(raw: unknown): { leader?: CoordinationLeader } {
   };
 }
 
-/** Normalize an entry so `directory` and `worklogRoot` are both populated (compat). */
+/** Normalize an entry so `directory`/`worklogRoot` and the v2 offer payload are consistent (compat). */
 function normalizeEntry(entry: CoordinationEntry): CoordinationEntry {
   const root = typeof entry.worklogRoot === 'string' && entry.worklogRoot.length > 0
     ? entry.worklogRoot
     : entry.directory;
-  return { ...entry, directory: root, worklogRoot: root };
+  const base = { ...entry, directory: root, worklogRoot: root };
+  if (!Array.isArray(entry.offers) || entry.offers.length === 0) {
+    // Legacy v1-shape entry — keep the single `workItemId` as-is; there is
+    // no offers payload to bound (old writers/readers interoperate, AC9).
+    return base;
+  }
+  // v2: bound (one per bucket, max three, duplicates collapse) and mirror
+  // the FIRST offer into `workItemId` so a v1-era leader keeps reading the
+  // first offer and ignores the rest (parent AC9).
+  const offers = boundOffers(entry.offers);
+  return {
+    ...base,
+    offers,
+    workItemId: offers.length > 0 ? offers[0].workItemId : '',
+  };
 }
 
 /**
@@ -272,6 +416,11 @@ function normalizeEntry(entry: CoordinationEntry): CoordinationEntry {
  * writer can never observe a partially-written JSON, and a crash between
  * the tmp write and the rename leaves the previous file intact.
  * Returns false on I/O failure (fail-safe, never throws).
+ *
+ * The persisted version is ALWAYS the current format
+ * {@link COORDINATION_FILE_VERSION} — the write path never echoes a legacy
+ * version read back from disk (parent AC1: a v1 file is rewritten as v2 on
+ * the next check-in).
  */
 export function writeCoordinationFile(worklogDir: string, data: CoordinationData): boolean {
   try {
@@ -280,9 +429,12 @@ export function writeCoordinationFile(worklogDir: string, data: CoordinationData
     const effDir = resolveEffectiveDir(worklogDir) ?? worklogDir;
     fs.mkdirSync(effDir, { recursive: true });
     // Normalize entries so both `directory` (legacy) and `worklogRoot`
-    // (machine-wide) are persisted — old and new readers interoperate.
+    // (machine-wide) are persisted — old and new readers interoperate —
+    // and the v2 offer payload is bounded (one per bucket, max three,
+    // duplicates collapse).
     const normalized: CoordinationData = {
       ...data,
+      version: COORDINATION_FILE_VERSION,
       entries: data.entries.map(normalizeEntry),
     };
     fs.writeFileSync(tmpPath, JSON.stringify(normalized), 'utf-8');
@@ -559,7 +711,10 @@ export function pruneStaleEntries(
 /**
  * Merge a set of instance entries into the file (batch upsert). Used at
  * startup / scheduled check-ins when multiple instances may need their
- * entries refreshed in one cycle. Returns the number of entries written.
+ * entries refreshed in one cycle. Returns the number of entries in the
+ * UPSERTED BATCH (the caller's entries), not the file's total — the batch
+ * size is the meaningful "written" count for a caller who knows what it
+ * asked to write (parent AC1 duplicate-collapse tests pin this).
  * Fail-safe: lock contention or I/O failure → 0.
  */
 export function mergeEntries(
@@ -578,6 +733,6 @@ export function mergeEntries(
       byId.set(entry.instanceId, entry);
     }
     const next = Array.from(byId.values());
-    return writeCoordinationFile(worklogDir, { ...data, entries: next }) ? next.length : 0;
+    return writeCoordinationFile(worklogDir, { ...data, entries: next }) ? normalized.length : 0;
   }) ?? 0;
 }

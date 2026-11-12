@@ -18,7 +18,7 @@
  * log, offer computation, attribution helper) — never the barrel.
  */
 
-import { getEntry, removeEntry, upsertEntry, type CoordinationEntry } from './coordination.js';
+import { getEntry, removeEntry, upsertEntry, toOfferBucket, type CoordinationEntry, type CoordinationOffer } from './coordination.js';
 import {
   appendCoordinationLogEntry,
   type CoordinationLogPolicy,
@@ -163,12 +163,20 @@ export async function runCoordinationCheckIn(
     // Defensive: a malformed result (stub/regression) keeps the entry.
     return { offered: current?.workItemId ?? null, updated: false };
   }
+  const entryKind = toOfferBucket(result.kind);
   const entry: CoordinationEntry = {
     instanceId: coordinator.instanceId,
     workItemId: result.candidate.id,
     directory: coordinator.cwd,
     assignedAt: current?.assignedAt ?? new Date(now).toISOString(),
     lastUpdated: new Date(now).toISOString(),
+    // v2 write path (parent WL-0MWDDHQON0015T3P AC1): the entry carries a
+    // bounded `offers` payload. Until the per-bucket computation lands (F2,
+    // WL-0MWDVMZNV0011FDT) the single candidate maps to its classifier bucket;
+    // `workItemId` (mirroring the first offer) keeps v1-era leaders reading it.
+    ...(entryKind !== null
+      ? { offers: [{ kind: entryKind, workItemId: result.candidate.id }] as CoordinationOffer[] }
+      : {}),
   };
   const updated = upsertEntry(coordinator.coordinationDir, entry);
   // Audit trail (WL-0MSXHAE290067VAL): log the offered item on every
