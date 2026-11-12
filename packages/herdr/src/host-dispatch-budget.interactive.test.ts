@@ -21,7 +21,7 @@
  * Run: npx vitest run packages/herdr/src/host-dispatch-budget.interactive.test.ts
  */
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
@@ -35,6 +35,7 @@ import {
 import {
   HOST_BUDGET_STALE_WINDOW_MS,
   freshCount,
+  type HostBudgetLivePanesResult,
 } from './host-dispatch-budget.js';
 import { readHostBudgetStatus } from './host-budget-status.js';
 import {
@@ -53,10 +54,23 @@ import {
   writeBudgetLedger,
   writeRawBudgetLedger,
   type FakeBudgetEntry,
+  type FakePaneSpec,
 } from './host-dispatch-budget.fixtures.js';
 
 const IMPLEMENT_CMD = '/skill:implement WL-0000000000000001';
 const AUDIT_CMD = '/skill:audit WL-0000000000000001';
+
+/**
+ * Wrap a pane list as the tri-state `ok:true` read — the production shape of
+ * a successful `hostBudgetLivePanes` (WL-0MW9VQX5T001GCUP). Pane specs are
+ * passed through to {@link makeLivePaneList} directly.
+ */
+function okPanes(...specs: FakePaneSpec[]): HostBudgetLivePanesResult {
+  return { ok: true, panes: makeLivePaneList(specs) };
+}
+
+/** A failed pane read: pane liveness is UNKNOWN, never "no panes". */
+const unknownPanes: HostBudgetLivePanesResult = { ok: false };
 
 /** Write `budget.json` into the isolated machine dir. */
 function writeBudgetConfig(dir: string, config: { maxImplement?: number; maxAudit?: number }): void {
@@ -82,7 +96,7 @@ function makeDeps(
     confirm,
     notify,
     claim,
-    readLivePanes: async () => makeLivePaneList([]),
+    readLivePanes: async () => okPanes(),
     root: '/repo/test',
     instanceId: 'instance-1',
     budget: { dir },
@@ -146,7 +160,7 @@ describe('under quota (AC2)', () => {
       ];
       writeBudgetLedger(dir, entries);
       const { deps, confirm } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList(['WL-OTHER-1']),
+        readLivePanes: async () => okPanes('WL-OTHER-1'),
       });
 
       const result = await prepareInteractiveAgentDispatch(IMPLEMENT_CMD, deps);
@@ -200,7 +214,7 @@ describe('at cap (AC4/AC6/AC7)', () => {
     await withMachineDir(async (dir) => {
       seedAtCap(dir);
       const { deps, confirm } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList(['WL-OTHER-1', 'WL-OTHER-2']),
+        readLivePanes: async () => okPanes('WL-OTHER-1', 'WL-OTHER-2'),
       });
       confirm.mockResolvedValueOnce('cancel');
 
@@ -226,7 +240,7 @@ describe('at cap (AC4/AC6/AC7)', () => {
       ]);
       const { deps, confirm } = makeDeps(dir, {
         readLivePanes: async () =>
-          makeLivePaneList(['WL-OTHER-1', 'WL-OTHER-2', 'WL-OTHER-3']),
+          okPanes('WL-OTHER-1', 'WL-OTHER-2', 'WL-OTHER-3'),
       });
 
       await prepareInteractiveAgentDispatch(IMPLEMENT_CMD, deps);
@@ -242,7 +256,7 @@ describe('at cap (AC4/AC6/AC7)', () => {
       seedAtCap(dir);
       const before = readBudgetLedger(dir);
       const { deps, confirm, claim } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList(['WL-OTHER-1', 'WL-OTHER-2']),
+        readLivePanes: async () => okPanes('WL-OTHER-1', 'WL-OTHER-2'),
       });
       confirm.mockResolvedValueOnce('cancel');
 
@@ -259,7 +273,7 @@ describe('at cap (AC4/AC6/AC7)', () => {
     await withMachineDir(async (dir) => {
       seedAtCap(dir);
       const { deps, confirm, claim } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList(['WL-OTHER-1', 'WL-OTHER-2']),
+        readLivePanes: async () => okPanes('WL-OTHER-1', 'WL-OTHER-2'),
       });
       confirm.mockResolvedValueOnce('proceed');
 
@@ -383,7 +397,7 @@ describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
         makeBudgetEntry({ kind: 'audit', itemId: 'WL-DEAD-1', paneId: 'pane-gone' }),
       ]);
       const { deps, confirm } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList([]),
+        readLivePanes: async () => okPanes(),
       });
 
       // Before the dispatch the dead entry is excluded from the display count.
@@ -410,7 +424,7 @@ describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
         makeBudgetEntry({ kind: 'audit', itemId: 'WL-LIVE-1', paneId: 'pane-1' }),
       ]);
       const { deps, confirm } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList(['WL-LIVE-1']),
+        readLivePanes: async () => okPanes('WL-LIVE-1'),
       });
 
       await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
@@ -432,7 +446,7 @@ describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
       // No paneId yet: the display rule still counts a fresh unconfirmed entry.
       seedBudgetLedger(dir, [makeBudgetEntry({ kind: 'audit', itemId: 'WL-UNCONF-1' })]);
       const { deps, confirm } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList([]),
+        readLivePanes: async () => okPanes(),
       });
 
       await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
@@ -454,7 +468,7 @@ describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
         }),
       ]);
       const { deps, confirm } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList(['WL-STALE-1']),
+        readLivePanes: async () => okPanes('WL-STALE-1'),
       });
 
       const result = await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
@@ -482,7 +496,7 @@ describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
         { paneId: 'pane-live', itemId: 'WL-MIX-LIVE' },
       ]);
       const { deps, confirm } = makeDeps(dir, {
-        readLivePanes: async () => livePanes,
+        readLivePanes: async () => ({ ok: true, panes: livePanes }),
       });
 
       await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
@@ -503,7 +517,7 @@ describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
         makeBudgetEntry({ kind: 'implement', itemId: 'WL-IMP-GONE', paneId: 'pane-gone' }),
       ]);
       const { deps, confirm } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList([]),
+        readLivePanes: async () => okPanes(),
       });
 
       const result = await prepareInteractiveAgentDispatch(IMPLEMENT_CMD, deps);
@@ -543,7 +557,7 @@ describe.each([
       writeBudgetConfig(dir, { maxImplement: 1 });
       writeBudgetLedger(dir, [makeBudgetEntry({ itemId: 'WL-OTHER-1', paneId: 'pane-1' })]);
       const { deps, confirm, claim } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList(['WL-OTHER-1']),
+        readLivePanes: async () => okPanes('WL-OTHER-1'),
       });
       confirm.mockResolvedValueOnce('cancel');
       const spawn = vi.fn();
@@ -562,7 +576,7 @@ describe.each([
       writeBudgetConfig(dir, { maxImplement: 1 });
       writeBudgetLedger(dir, [makeBudgetEntry({ itemId: 'WL-OTHER-1', paneId: 'pane-1' })]);
       const { deps, confirm, claim } = makeDeps(dir, {
-        readLivePanes: async () => makeLivePaneList(['WL-OTHER-1']),
+        readLivePanes: async () => okPanes('WL-OTHER-1'),
       });
       confirm.mockResolvedValueOnce('proceed');
       const spawn = vi.fn();
@@ -590,6 +604,72 @@ describe.each([
       expect(outcome).toEqual({ spawned: true, openPane });
       expect(confirm).not.toHaveBeenCalled();
       expect(spawn).toHaveBeenCalledWith({ openPane, override: undefined });
+    });
+  });
+});
+
+// ── Unknown pane state (WL-0MW9VQX5T001GCUP) ──────────────────────────
+//
+// The interactive gate receives the tri-state pane read: `{ok:false}` means
+// pane liveness is UNKNOWN — it must never be converted to an authoritative
+// empty list, because the implement branch's `liveCount` would then reap a
+// stale-but-live entry (AC1b) and the audit display count would invent a zero.
+
+describe('unknown pane state in the interactive gate (WL-0MW9VQX5T001GCUP)', () => {
+  it('AC1(b): a failed pane read never deletes — the implement gate counts by the freshness rule and never reaps', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { maxImplement: 1 });
+      seedBudgetLedger(dir, [
+        // A live implement (fresh, has a pane): the freshness rule counts it.
+        makeBudgetEntry({ kind: 'implement', itemId: 'WL-LIVE-IMP', paneId: 'pane-1' }),
+        // A stale, pane-less implement entry that a trusted empty read would
+        // reap — it must SURVIVE an unknown read.
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-STALE-IMP',
+          paneId: 'pane-gone',
+          heartbeatAt: new Date(Date.now() - HOST_BUDGET_STALE_WINDOW_MS - 1000).toISOString(),
+        }),
+      ]);
+      const before = readFileSync(budgetLedgerPath(dir), 'utf8');
+      const { deps, confirm } = makeDeps(dir, { readLivePanes: async () => unknownPanes });
+
+      await prepareInteractiveAgentDispatch(IMPLEMENT_CMD, deps);
+
+      // Unknown is NOT "no panes": the freshness rule counts the live entry,
+      // so the gate is AT cap and PROMPTS instead of silently admitting with a
+      // false zero.
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'implement', live: 1, max: 1 });
+      // Neither the stale entry was reaped NOR a reservation written (the gate
+      // prompts instead of reserving): the ledger is byte-identical.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    });
+  });
+
+  it('AC4/AC3: the audit dialog counts by the freshness rule on unknown (never an invented zero)', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { maxAudit: 1 });
+      // One STARTED audit (fresh, no pane) and one stale audit: the freshness
+      // fallback counts the fresh one, so the human is prompted rather than
+      // being told the tier is free.
+      seedBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-AUD-LIVE' }),
+        makeBudgetEntry({
+          kind: 'audit',
+          itemId: 'WL-AUD-STALE',
+          paneId: 'pane-gone',
+          heartbeatAt: new Date(Date.now() - HOST_BUDGET_STALE_WINDOW_MS - 1000).toISOString(),
+        }),
+      ]);
+      const { deps, confirm } = makeDeps(dir, { readLivePanes: async () => unknownPanes });
+
+      await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
+
+      // livePanesTrusted derives from the tri-state: `{ok:false}` ⇒ unknown,
+      // so the display count uses the marker-compatible freshness rule.
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'audit', live: 1, max: 1 });
     });
   });
 });

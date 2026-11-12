@@ -305,6 +305,29 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
     reduceLedgerCounts(entries, livePaneIdSet([]), NOW);
     expect(entries).toHaveLength(1);
   });
+
+  it('counts fresh entries by the freshness rule and never reaps when pane liveness is unknown (undefined)', () => {
+    // `undefined` pane ids = a FAILED/unparseable pane read: the pane-derived
+    // requirement is dropped, the documented freshness rule applies (fresh
+    // entries count) and NOTHING is reaped — an unknown read must never delete
+    // ledger state (WL-0MW9VQX5T001GCUP).
+    const entries = [
+      entry({ kind: 'implement', itemId: 'WL-FRESH', paneId: 'p1' }),
+      // Stale AND pane-less (would be reaped by a trusted empty read).
+      entry({
+        kind: 'implement',
+        itemId: 'WL-STALE',
+        paneId: 'p-gone',
+        heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString(),
+      }),
+      // Fresh but no pane yet (reserve→spawn window): the freshness rule counts it.
+      entry({ kind: 'audit', itemId: 'WL-SPAWNING' }),
+    ];
+    const reduction = reduceLedgerCounts(entries, undefined, NOW);
+    expect(reduction.counts).toEqual({ implement: 1, audit: 1 });
+    expect(reduction.reaped).toEqual([]);
+    expect(reduction.retained).toHaveLength(3);
+  });
 });
 
 describe('reduceMarkerCounts (pure marker-semantics reduction)', () => {
@@ -895,6 +918,83 @@ describe('reap and liveCount', () => {
     ]) {
       expect(result).toEqual({ ok: false, unknown: false, reason: 'no-coordination-dir' });
     }
+  });
+});
+
+// ── Unknown pane state (WL-0MW9VQX5T001GCUP) ──────────────────────────
+//
+// A failed/unparseable pane read must never be conflated with "no panes":
+// `undefined` pane liveness means UNKNOWN, so the documented freshness rule
+// counts (fresh entries, no pane requirement), nothing is reaped and the
+// ledger is never rewritten (AC1a/AC3). A trusted read that genuinely lacks
+// the pane still reaps (AC2) — the two directions are pinned together here so
+// they cannot drift apart.
+
+describe('unknown pane liveness (WL-0MW9VQX5T001GCUP)', () => {
+  /** Seed: a live implement, a crashed implement (stale, no pane) and a live audit. */
+  function seedMixedLedger(dir: string): void {
+    writeBudgetLedger(dir, [
+      makeBudgetEntry({
+        kind: 'implement',
+        itemId: 'WL-LIVE',
+        paneId: 'pane-1',
+        heartbeatAt: new Date(NOW - HOUR).toISOString(),
+      }),
+      makeBudgetEntry({
+        kind: 'implement',
+        itemId: 'WL-CRASHED',
+        paneId: 'pane-gone',
+        heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString(),
+      }),
+      makeBudgetEntry({
+        kind: 'audit',
+        itemId: 'WL-AUDIT',
+        paneId: 'pane-2',
+        heartbeatAt: new Date(NOW).toISOString(),
+      }),
+    ]);
+  }
+
+  it('AC1(a): a failed pane read never deletes — the admission read leaves the ledger byte-identical', async () => {
+    await withMachineDir((dir) => {
+      seedMixedLedger(dir);
+      const before = readFileSync(budgetLedgerPath(dir), 'utf8');
+
+      // `undefined` is what the admission layer passes when the pane read
+      // failed (`{ok:false}` tri-state): the freshness rule counts (fresh
+      // entries regardless of panes) and the stale, pane-less entry survives.
+      const count = liveCount('implement', undefined, { now: NOW });
+      expect(count).toEqual({
+        ok: true,
+        kind: 'implement',
+        count: 1,
+        counts: { implement: 1, audit: 1 },
+      });
+      expect(reap(undefined, { now: NOW })).toEqual({
+        ok: true,
+        reaped: 0,
+        counts: { implement: 1, audit: 1 },
+      });
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    });
+  });
+
+  it('AC2: a trusted read that genuinely lacks the pane still reaps the stale entry', async () => {
+    await withMachineDir((dir) => {
+      seedMixedLedger(dir);
+
+      // A SUCCESSFUL empty read is authoritative: the crashed entry is reaped
+      // exactly as before the tri-state change — existing behaviour preserved.
+      const result = reap([], { now: NOW });
+      expect(result).toEqual({ ok: true, reaped: 1, counts: { implement: 0, audit: 0 } });
+      const read = readBudget();
+      expect(read.ok).toBe(true);
+      if (!read.ok) return;
+      expect(read.ledger.entries.map((entry) => entry.itemId)).toEqual([
+        'WL-LIVE',
+        'WL-AUDIT',
+      ]);
+    });
   });
 });
 

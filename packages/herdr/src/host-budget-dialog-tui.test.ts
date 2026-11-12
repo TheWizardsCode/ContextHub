@@ -176,7 +176,10 @@ function startTui(
         const preparation = await prepareInteractiveAgentDispatch(command, {
           confirm: (request) => promptHost.ask(request),
           notify: (message) => notices.push(message),
-          readLivePanes: async () => opts.livePanes ?? makeLivePaneList([]),
+          readLivePanes: async () =>
+            opts.livePanes === undefined
+              ? { ok: false as const }
+              : { ok: true as const, panes: opts.livePanes },
           claim: (agentCommand) => claims(agentCommand),
           root: tmpDir,
           instanceId: 'test-instance',

@@ -119,7 +119,7 @@ import {
   type AuditBudgetLocalEvidence,
 } from './downtime-log-budget.js';
 
-export type { HostBudgetLivePane } from './host-dispatch-budget.js';
+export type { HostBudgetLivePane, HostBudgetLivePanesResult } from './host-dispatch-budget.js';
 
 /**
  * Refusal reason: the tier is at/over its machine-wide cap.
@@ -182,8 +182,13 @@ export interface HostBudgetAdmissionOptions extends HostBudgetOptions {
    * reserved implement entry count (the F1 liveness table), so the caller must
    * pass the machine-wide downtime pane list, not a per-root subset. The audit
    * tier uses the same list only to REPAIR an unreadable ledger (AC6).
+   *
+   * `undefined` = pane liveness UNKNOWN (a failed/unparseable pane read,
+   * WL-0MW9VQX5T001GCUP): the implement tier counts by the freshness rule and
+   * NEVER reaps or repairs on this state, and the audit repair is skipped — an
+   * unknown read must never rewrite a ledger or delete live entries.
    */
-  livePanes: readonly HostBudgetLivePane[];
+  livePanes: readonly HostBudgetLivePane[] | undefined;
   /**
    * Instance identity recorded on entries reconstructed by a repair
    * (diagnostics only). Defaults to this plugin process.
@@ -318,7 +323,9 @@ export function repairLedgerFromLivePanes(
  * (AC6): the dispatch loop calls this pre-check once per audit candidate, so an
  * eager pane-list subprocess would add a `herdr pane list` per candidate. Absent
  * panes means "cannot repair now" — the tick still fails closed, and the next
- * call that can supply panes repairs the ledger.
+ * call that can supply panes repairs the ledger. Absence is exactly the
+ * UNKNOWN pane state of WL-0MW9VQX5T001GCUP: an unknown read must never rewrite
+ * a corrupt ledger as empty, so "no list ⇒ no repair" is the safe arm.
  */
 export interface HostBudgetAuditStateOptions extends HostBudgetOptions {
   /** Live pane list used ONLY to repair an unreadable ledger (AC6). */
@@ -683,8 +690,12 @@ function admitAuditDispatch(
  *  1. resolve the effective cap (config + env, defaults absent a file);
  *  2. `max === 0` ⇒ refuse immediately with `live`/`max` `0/0` (AC4 — a
  *     disabled tier is refused regardless of what the ledger holds);
- *  3. count live dispatches (reaping stale, pane-less entries on read);
- *  4. unreadable ledger ⇒ repair from live panes and refuse (`unknown`);
+ *  3. count live dispatches (reaping stale, pane-less entries on read — but
+ *     with an UNKNOWN pane list (`livePanes: undefined`) the freshness rule
+ *     counts and nothing is reaped, WL-0MW9VQX5T001GCUP);
+ *  4. unreadable ledger ⇒ when the pane list is KNOWN, repair from live panes
+ *     and refuse (`unknown`); when it is unknown, refuse WITHOUT rewriting
+ *     (the next pane-carrying tick self-heals);
  *  5. at/over cap ⇒ refuse with the observed `live`/`max` (AC2);
  *  6. otherwise reserve the slot and admit.
  *
@@ -721,7 +732,13 @@ export function admitHostDispatch(
       // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
       return { admitted: true, live: 0, max };
     }
-    const repaired = repairLedgerFromLivePanes(opts.livePanes, input, ledgerOptions);
+    // Repair from observed live state ONLY when the pane read succeeded and
+    // the list is authoritative; an unknown pane state (failed read) must
+    // never rewrite a corrupt ledger from nothing (WL-0MW9VQX5T001GCUP AC1).
+    const repaired =
+      opts.livePanes === undefined
+        ? false
+        : repairLedgerFromLivePanes(opts.livePanes, input, ledgerOptions);
     return {
       admitted: false,
       live: 0,

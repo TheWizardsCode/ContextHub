@@ -308,7 +308,10 @@ function interactiveDeps(
       confirm,
       notify,
       claim,
-      readLivePanes: async () => opts.livePanes ?? [],
+      readLivePanes: async () =>
+        opts.livePanes === undefined
+          ? { ok: false as const }
+          : { ok: true as const, panes: opts.livePanes },
       root: INSTANCE_A_ROOT,
       instanceId: 'instance-a',
       budget: { dir, now: opts.now ?? T0, env: CLEAN_ENV },

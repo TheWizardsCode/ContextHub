@@ -75,13 +75,20 @@
  *  - `release(itemId)` — under the lock, remove that entry (idempotent:
  *    `removed: false` when absent). Called on pane close, dispatch failure and
  *    a failed claim.
- *  - `reap(livePanes)` — under the lock, drop entries whose heartbeat is stale
- *    **and** whose pane is not in the caller's live pane list.
- *  - `liveCount(kind, livePanes)` — the admission read: counts entries of that
+ *  - `reap(livePanes?)` — under the lock, drop entries whose heartbeat is stale
+ *    **and** whose pane is not in the caller's live pane list. `livePanes` of
+ *    `undefined` means pane liveness UNKNOWN (a failed/unparseable pane read,
+ *    WL-0MW9VQX5T001GCUP): nothing is reaped and nothing is written, so a
+ *    reap on unknown state is a pure read.
+ *  - `liveCount(kind, livePanes?)` — the admission read: counts entries of that
  *    kind whose heartbeat is fresh **and** whose `paneId` is in the live pane
  *    list, and reaps stale, pane-less entries on read so a crashed leader
- *    cannot wedge the host. A reap write is best-effort: the count already
- *    excludes those entries, so lock contention only defers the cleanup.
+ *    cannot wedge the host. With `livePanes` `undefined` (unknown) it counts
+ *    fresh entries by the freshness rule and reaps NOTHING — an admission
+ *    read on an unknown pane state is a pure read that never mutates the
+ *    ledger (AC1/AC3 of WL-0MW9VQX5T001GCUP). A reap write is best-effort: the
+ *    count already excludes those entries, so lock contention only defers the
+ *    cleanup.
  *  - `freshCount(kind)` — the AUDIT tier's **legacy/observability** read:
  *    counts every entry of that kind whose heartbeat is fresh, with no
  *    live-pane requirement, and reaps every stale entry. This is the semantics
@@ -106,6 +113,17 @@
  * | fresh     | no                | no      | no (spawn/reconcile window) |
  * | stale     | yes               | no      | no (pane still alive) |
  * | stale     | no                | no      | yes    |
+ *
+ * A pane list that is **UNKNOWN** (a failed/unparseable read — the tri-state
+ * `{ok:false}` from `hostBudgetLivePanes`, WL-0MW9VQX5T001GCUP) is NOT the
+ * same fact as "no panes": the pane-derived requirement is dropped, the
+ * freshness rule applies (fresh entries count) and NOTHING is reaped. Reap
+ * must never act on an unknown state — an empty list derived from a broken
+ * read would permanently delete entries for work that is still running
+ * (heartbeats are only written at reserve/confirm, so a reaped live entry
+ * never comes back). The same value therefore cannot serve admission and
+ * reap: admission fails open on unknown (never wedges dispatch), reap must
+ * fail safe (never delete on unknown).
  *
  * A CONFIRMED entry (non-empty `paneId`) whose pane is absent from a trusted
  * live list is additionally swept by {@link sweepClosedPanes} regardless of
@@ -247,6 +265,24 @@ export interface HostBudgetLivePane {
   paneId: string;
   title?: string;
 }
+
+/**
+ * The machine-wide live pane read for the dispatch budget — tri-state
+ * (mirroring the `InFlightPanes` precedent in `downtime-worker.types.ts`,
+ * WL-0MW9VQX5T001GCUP).
+ *
+ *  - `{ ok: true; panes: [...] }` — the read succeeded; the list is
+ *    AUTHORITATIVE. An empty list means "genuinely no downtime panes".
+ *  - `{ ok: false }` — the read failed, was unparseable (a malformed-but-`ok`
+ *    payload with neither `records` nor `paneIds`), or was not wired: pane
+ *    liveness is UNKNOWN. Unknown must never be conflated with "no panes":
+ *    the reap-bearing paths retain every entry and admission falls back to
+ *    the documented freshness rule, so a herdr hiccup can never delete ledger
+ *    state nor silently under-count in-flight work.
+ */
+export type HostBudgetLivePanesResult =
+  | { ok: true; panes: HostBudgetLivePane[] }
+  | { ok: false };
 
 /** Injected seams; every field falls back to production behaviour. */
 export interface HostBudgetOptions {
@@ -487,12 +523,20 @@ export function livePaneIdSet(
  * Reduce a ledger against a live pane list: per-tier live counts, surviving
  * entries and entries to reap (see the liveness table in the header).
  *
+ * `livePaneIds` of `undefined` means pane liveness is UNKNOWN (a failed or
+ * unparseable pane read, WL-0MW9VQX5T001GCUP): the pane-derived requirement
+ * is dropped and the documented FRESHNESS rule applies — fresh entries count
+ * with no pane requirement, every entry is retained and NOTHING is reaped.
+ * Unknown is never treated as "no panes", and reap must not act on it (a
+ * stale-but-live entry reaped on an unknown read is gone forever, because
+ * heartbeats are only written at reserve/confirm).
+ *
  * Pure — the single place the counting and reaping rules live, so
  * `liveCount`, `reap` and the future observability surfaces cannot drift.
  */
 export function reduceLedgerCounts(
   entries: readonly HostBudgetEntry[],
-  livePaneIds: ReadonlySet<string>,
+  livePaneIds: ReadonlySet<string> | undefined,
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
@@ -500,6 +544,13 @@ export function reduceLedgerCounts(
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
+    if (livePaneIds === undefined) {
+      // Pane liveness UNKNOWN: freshness rule only — count fresh entries
+      // (no pane requirement), retain everything, never reap.
+      retained.push(entry);
+      if (!isEntryStale(entry, now, staleWindowMs)) counts[entry.kind] += 1;
+      continue;
+    }
     const hasLivePane =
       typeof entry.paneId === 'string' &&
       entry.paneId.length > 0 &&
@@ -935,16 +986,21 @@ export function replaceBudget(
  * Fresh entries and entries whose pane is still live are retained. Writes
  * only when something is reaped, so an idle reap is a pure read. A corrupt
  * ledger is `unknown` and is never rewritten.
+ *
+ * `livePanes` of `undefined` means pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
+ * the freshness rule applies and NOTHING is reaped — no write at all, so a
+ * reap on an unknown pane state is a pure read. Reap must never act on an
+ * unknown state: an empty list from a broken read would delete live entries.
  */
 export function reap(
-  livePanes: readonly HostBudgetLivePane[],
+  livePanes: readonly HostBudgetLivePane[] | undefined,
   opts: HostBudgetOptions = {},
 ): ReapResult {
   const dir = resolveBudgetDir(opts);
   if (dir === null) return noDir();
   const now = opts.now ?? Date.now();
   const windowMs = staleWindowOf(opts);
-  const livePaneIds = livePaneIdSet(livePanes);
+  const livePaneIds = livePanes === undefined ? undefined : livePaneIdSet(livePanes);
   return withLedgerLock(dir, (ledger) => {
     const reduction = reduceLedgerCounts(ledger.entries, livePaneIds, now, windowMs);
     if (
@@ -1001,10 +1057,15 @@ export function sweepClosedPanes(
  * table). The reap write is best-effort: the returned count already excludes
  * reaped entries, so lock contention only defers cleanup — a crashed leader
  * can never wedge the host.
+ *
+ * `livePanes` of `undefined` means pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
+ * the admission read becomes a PURE READ — fresh entries count by the
+ * freshness rule and nothing is reaped, so an unknown pane state can never
+ * delete ledger state (a failed herdr read must not be treated as "no panes").
  */
 export function liveCount(
   kind: HostBudgetKind,
-  livePanes: readonly HostBudgetLivePane[],
+  livePanes: readonly HostBudgetLivePane[] | undefined,
   opts: HostBudgetOptions = {},
 ): LiveCountResult {
   const dir = resolveBudgetDir(opts);
@@ -1013,9 +1074,10 @@ export function liveCount(
   const windowMs = staleWindowOf(opts);
   const read = readBudgetAt(dir);
   if (!read.ok) return read;
+  const livePaneIds = livePanes === undefined ? undefined : livePaneIdSet(livePanes);
   const reduction = reduceLedgerCounts(
     read.ledger.entries,
-    livePaneIdSet(livePanes),
+    livePaneIds,
     now,
     windowMs,
   );

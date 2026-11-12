@@ -35,7 +35,7 @@
  * covered by `host-dispatch-budget.test.ts` (F1) and is not re-tested here.
  */
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -64,6 +64,7 @@ import {
   readActiveAuditMarker,
 } from './machine-coordination.js';
 import {
+  budgetLedgerPath,
   makeBudgetEntry,
   makeLivePaneList,
   readBudgetLedger,
@@ -734,4 +735,89 @@ describe('host dispatch budget — proxy-derived audit admission (WL-0MWAMSK9H00
     expect(isLegacyAuditBudgetEnabled({ HERDR_AUDIT_LOCAL_BUDGET: 'true' })).toBe(false);
     expect(isLegacyAuditBudgetEnabled({ HERDR_AUDIT_LOCAL_BUDGET: ' 1 ' })).toBe(true);
   });
+});
+
+// ── Unknown pane state (WL-0MW9VQX5T001GCUP) ──────────────────────────
+//
+// The admission layer receives the tri-state pane read: `undefined` means the
+// pane list is UNKNOWN (a failed/unparseable read), which must never be
+// conflated with an authoritative empty list. On unknown the implement tier
+// counts by the freshness rule (over-count, never delete), the audit repair
+// path skips the rewrite, and the unreadable-ledger repair is skipped — AC1(c)
+// pins BOTH repair sites (audit `readAuditBudgetState`, implement
+// `admitHostDispatch`).
+
+describe('unknown pane state in admission (WL-0MW9VQX5T001GCUP)', () => {
+  it('AC1(c) implement repair: an unreadable ledger plus an unknown pane read is NOT rewritten as empty', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2 });
+      writeRawBudgetLedger(dir, '{ this is not json');
+      const before = readFileSync(budgetLedgerPath(dir), 'utf8');
+
+      // `livePanes: undefined` = failed pane read: the repair must be skipped
+      // (an unknown read can never rewrite a ledger from nothing).
+      const refused = admitHostDispatch(
+        { kind: 'implement', itemId: 'WL-NEW', instanceId: INSTANCE_A, root: '/repo/test' },
+        { livePanes: undefined },
+      );
+      expect(refused).toMatchObject({
+        admitted: false,
+        live: 0,
+        max: 2,
+        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+        repaired: false,
+      });
+      // The corrupt ledger is left untouched — the next pane-carrying tick
+      // self-heals it instead of a failed pane read deleting everything.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    }));
+
+  it('AC1(a): the dispatcher admission read never deletes on an unknown pane read (freshness count)', () =>
+    withMachineDir((dir) => {
+      // max 1: the freshness fallback counts the fresh entry, so admission is
+      // at cap and must REFUSE — if unknown were folded into an empty list the
+      // read would report zero and over-admit.
+      writeBudgetConfig(dir, { maxImplement: 1 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-LIVE',
+          paneId: 'pane-1',
+        }),
+        // Stale and pane-less: would be reaped by a trusted empty read; must
+        // survive an unknown one, and must not be written away.
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-CRASHED',
+          paneId: 'pane-gone',
+          heartbeatAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+        }),
+      ]);
+      const before = readFileSync(budgetLedgerPath(dir), 'utf8');
+
+      const admission = admitHostDispatch(
+        { kind: 'implement', itemId: 'WL-NEW', instanceId: INSTANCE_A, root: '/repo/test' },
+        { livePanes: undefined },
+      );
+      expect(admission).toMatchObject({ admitted: false, live: 1, max: 1 });
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    }));
+
+  it('AC1(c) audit repair: an unreadable ledger plus an unknown pane read is NOT rewritten from nothing', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      writeRawBudgetLedger(dir, '{ this is not json');
+      const before = readFileSync(budgetLedgerPath(dir), 'utf8');
+
+      // `livePanes` absent/undefined already means "cannot repair now" on the
+      // audit pre-check; a failed pane read must select exactly that arm.
+      expect(readAuditBudgetState({ livePanes: undefined })).toEqual({
+        atCap: true,
+        live: 0,
+        max: 1,
+        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+        repaired: false,
+      });
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    }));
 });

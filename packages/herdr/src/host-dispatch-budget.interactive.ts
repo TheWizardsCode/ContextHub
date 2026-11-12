@@ -31,6 +31,12 @@
  * (WL-0MW8IQNY7003JIOL). Admission itself is unchanged and still uses the
  * marker-compatible `freshCount`/`readAuditBudgetState` rule.
  *
+ * The pane read is the tri-state (WL-0MW9VQX5T001GCUP): a FAILED read is
+ * UNKNOWN, not "no panes". On unknown the implement tier counts by the
+ * freshness rule (never reaps — a broken herdr read cannot delete ledger
+ * state) and the audit display falls back to the marker-compatible count,
+ * so the gate stays fail-open exactly as documented above.
+ *
  * The gate runs BEFORE the claim and BEFORE any pane/background spawn, so a
  * cancel leaves every observable unchanged (AC2/AC6).
  */
@@ -45,6 +51,7 @@ import {
   reserve,
   type HostBudgetKind,
   type HostBudgetLivePane,
+  type HostBudgetLivePanesResult,
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
 import { getMachineCoordinationDir } from './machine-coordination.js';
@@ -83,8 +90,14 @@ export interface InteractiveAgentDispatchDeps {
   confirm(request: HostBudgetPromptRequest): Promise<HostBudgetDialogChoice>;
   /** Visible notice channel for the fail-open path (stderr in production). */
   notify(message: string): void;
-  /** Machine-wide live pane list (the ledger's implement-tier liveness read). */
-  readLivePanes(): Promise<readonly HostBudgetLivePane[]>;
+  /**
+   * Machine-wide live pane read — the tri-state (WL-0MW9VQX5T001GCUP):
+   * `{ok:true}` carries an AUTHORITATIVE list, `{ok:false}` means pane
+   * liveness UNKNOWN. Unknown must never be treated as "no panes": the
+   * implement tier falls back to the freshness rule and nothing is ever
+   * reaped on this state.
+   */
+  readLivePanes(): Promise<HostBudgetLivePanesResult>;
   /** Claim the item before the spawn (index.claim's claim function). */
   claim(command: string): Promise<void>;
   /** Absolute worklog root recorded on the ledger entry. */
@@ -127,6 +140,11 @@ export interface InteractiveAgentDispatchPreparation {
  * still uses `freshCount`/`readAuditBudgetState` (fail-closed, marker-
  * compatible). This read is non-mutating: unlike `freshCount` it never reaps
  * or rewrites the ledger.
+ *
+ * `livePanes` of `undefined` = pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
+ * the implement branch counts by the freshness rule and never reaps, the
+ * audit branch falls back to the marker-compatible count — a failed pane
+ * read must neither delete entries nor invent a zero.
  */
 type CountReadout =
   | { state: 'counted'; live: number }
@@ -136,8 +154,7 @@ type CountReadout =
 function readTierCount(
   kind: HostBudgetKind,
   max: number,
-  livePanes: readonly HostBudgetLivePane[],
-  livePanesTrusted: boolean,
+  livePanes: readonly HostBudgetLivePane[] | undefined,
   dir: string | null,
   opts: HostBudgetOptions,
 ): CountReadout {
@@ -145,6 +162,9 @@ function readTierCount(
   // the prompt still quotes the documented 0/0 evidence.
   if (max === 0) return { state: 'counted', live: 0 };
   if (kind === 'implement') {
+    // `livePanes` `undefined` = pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
+    // `liveCount` counts by the freshness rule and NEVER reaps on this state,
+    // so the interactive gate cannot delete a stale-but-live entry.
     const result = liveCount(kind, livePanes, opts);
     if (!result.ok) {
       if (!result.unknown && result.reason === 'no-coordination-dir') {
@@ -157,8 +177,9 @@ function readTierCount(
 
   // Audit tier: pane-aware DISPLAY count, identical to the worklist header
   // (`readHostBudgetStatus` → `auditDisplayCount`). A trusted pane list lets
-  // a confirmed entry whose pane is gone be excluded; without one, fall back
-  // to the freshness rule rather than inventing a zero.
+  // a confirmed entry whose pane is gone be excluded; without one (an
+  // UNKNOWN pane read), fall back to the freshness rule rather than
+  // inventing a zero.
   const read = readBudget(opts);
   if (!read.ok) {
     if (!read.unknown && read.reason === 'no-coordination-dir') {
@@ -170,7 +191,7 @@ function readTierCount(
   const windowMs = opts.staleWindowMs ?? HOST_BUDGET_STALE_WINDOW_MS;
   const live = auditDisplayCount(
     read.ledger.entries,
-    livePanesTrusted ? livePaneIdSet(livePanes) : undefined,
+    livePanes === undefined ? undefined : livePaneIdSet(livePanes),
     now,
     windowMs,
     dir,
@@ -202,19 +223,20 @@ export async function prepareInteractiveAgentDispatch(
   const budgetOptions: HostBudgetOptions = { ...deps.budget };
   const { config } = readBudgetConfig(budgetOptions);
   const max = kind === 'implement' ? config.maxImplement : config.maxAudit;
-  // Fail-open liveness read: a pane-list hiccup must not block a human. We
-  // track whether the list is TRUSTED so the audit display count can fall
-  // back to the freshness rule (as the header does) instead of treating a
-  // failed read as "every pane is gone" (which would invent a zero).
-  let livePanes: readonly HostBudgetLivePane[] = [];
-  let livePanesTrusted = false;
+  // Fail-open liveness read: a pane-list hiccup must not block a human. The
+  // tri-state (WL-0MW9VQX5T001GCUP) distinguishes UNKNOWN (`undefined` here)
+  // from an authoritative empty list: unknown falls back to the freshness rule
+  // and never reaps, so a failed pane read cannot delete ledger state or
+  // invent a zero. Trust (the former `livePanesTrusted` heuristic) derives
+  // from the tri-state itself — `livePanes !== undefined` — not from a caught
+  // throw (a `{ok:false}` result never throws).
+  let livePanes: readonly HostBudgetLivePane[] | undefined = undefined;
   if (max !== 0) {
     try {
-      livePanes = await deps.readLivePanes();
-      livePanesTrusted = true;
+      const result = await deps.readLivePanes();
+      livePanes = result.ok ? result.panes : undefined;
     } catch {
-      livePanes = [];
-      livePanesTrusted = false;
+      livePanes = undefined; // a throwing seam is UNKNOWN too, never "no panes"
     }
   }
   const dir =
@@ -225,7 +247,6 @@ export async function prepareInteractiveAgentDispatch(
     kind,
     max,
     livePanes,
-    livePanesTrusted,
     dir,
     budgetOptions,
   );

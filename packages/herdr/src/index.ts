@@ -73,7 +73,7 @@ import {
   readAuditLocalEvidence,
   releaseHostDispatch as releaseHostBudgetDispatch,
   type AuditBudgetLogEvent,
-  type HostBudgetLivePane,
+  type HostBudgetLivePanesResult,
 } from './host-dispatch-budget.admission.js';
 import { isLegacyAuditBudgetEnabled, sweepClosedPanes } from './host-dispatch-budget.js';
 import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
@@ -381,29 +381,37 @@ export { configureWorklogTarget, uninitializedReport };
  * inventory. `records` (with labels) are preferred because the ledger's repair
  * path needs the work-item id suffix to reconstruct entries; a `paneIds`-only
  * payload still counts reserved entries, it just cannot repair a corrupt
- * ledger. Fail-open: a failed/unwired pane query yields an empty list, which
- * degrades admission to "no observed pane" exactly like today's liveness
- * philosophy (a herdr hiccup never silently wedges dispatch).
+ * ledger.
+ *
+ * Tri-state (WL-0MW9VQX5T001GCUP): a failed, unwired or UNPARSEABLE read
+ * (a malformed-but-`ok` payload with neither `records` nor `paneIds`) yields
+ * `{ ok: false }` — pane liveness is UNKNOWN, never "no panes". The fail-open
+ * *decision* is kept (admission degrades to the freshness rule instead of
+ * wedging dispatch), but the reason is no longer lost: the reap-bearing paths
+ * must NOT delete ledger state from an unknown read.
  */
 async function hostBudgetLivePanes(
   readRunningPanes: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']>,
   cwd: string,
-): Promise<HostBudgetLivePane[]> {
+): Promise<HostBudgetLivePanesResult> {
   try {
     const running = await readRunningPanes(cwd);
-    if (!running.ok) return [];
+    if (!running.ok) return { ok: false };
     if (Array.isArray(running.records)) {
-      return running.records.map((record) => ({
-        paneId: record.paneId,
-        ...(typeof record.label === 'string' ? { title: record.label } : {}),
-      }));
+      return {
+        ok: true,
+        panes: running.records.map((record) => ({
+          paneId: record.paneId,
+          ...(typeof record.label === 'string' ? { title: record.label } : {}),
+        })),
+      };
     }
     if (Array.isArray(running.paneIds)) {
-      return running.paneIds.map((paneId) => ({ paneId }));
+      return { ok: true, panes: running.paneIds.map((paneId) => ({ paneId })) };
     }
-    return [];
+    return { ok: false };
   } catch {
-    return [];
+    return { ok: false };
   }
 }
 
@@ -757,10 +765,14 @@ export function createDowntimeDeps(
             // self-heal.
             let state = readAuditBudgetState({ dir: coordinationDir, root: cwd });
             if (state.reason === 'host-budget-unknown') {
+              // Repair only when the pane read SUCCEEDED; a failed read is
+              // UNKNOWN and must not rewrite the corrupt ledger from nothing
+              // (WL-0MW9VQX5T001GCUP AC1c — the audit repair half).
+              const livePanes = await hostBudgetLivePanes(runningPanesResolver, cwd);
               state = readAuditBudgetState({
                 dir: coordinationDir,
                 root: cwd,
-                livePanes: await hostBudgetLivePanes(runningPanesResolver, cwd),
+                ...(livePanes.ok ? { livePanes: livePanes.panes } : {}),
               });
             }
             if (state.atCap) {
@@ -1472,7 +1484,10 @@ export function createDowntimeDeps(
           root: input.cwd,
         },
         {
-          livePanes,
+          // The tri-state is threaded through: on a failed pane read the
+          // admission sees `undefined` (UNKNOWN) — freshness counting, never
+          // reap, never repair (WL-0MW9VQX5T001GCUP).
+          livePanes: livePanes.ok ? livePanes.panes : undefined,
           ...(audit
             ? {
                 onAuditBudgetEvent: (event: AuditBudgetLogEvent) =>
@@ -1871,7 +1886,12 @@ export async function main(): Promise<void> {
           defaultRunningDowntimePanesResolver,
           targetCwd,
         );
-        return readHostBudgetStatus({ livePanes });
+        // Tri-state threaded through (WL-0MW9VQX5T001GCUP): on a failed read
+        // the display gets NO pane list (UNKNOWN) and both figures fall back
+        // to the freshness rule instead of folding unknown into an empty set.
+        return readHostBudgetStatus(
+          livePanes.ok ? { livePanes: livePanes.panes } : {},
+        );
       },
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
       onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
@@ -1975,6 +1995,9 @@ export async function main(): Promise<void> {
             notify: (message) => process.stderr.write(`[worklog-plugin] ${message}\n`),
             // The SAME machine-wide pane read the dispatcher's admission uses
             // (`herdr pane list` for the whole host, not this instance's panes).
+            // The tri-state (WL-0MW9VQX5T001GCUP) is threaded straight through:
+            // the gate derives trust from `{ok:true}` and treats `{ok:false}`
+            // as UNKNOWN — never as "no panes".
             readLivePanes: () => hostBudgetLivePanes(defaultRunningDowntimePanesResolver, targetCwd),
             claim: (agentCommand) => claimItemForAgentCommand(agentCommand),
             root: targetCwd,

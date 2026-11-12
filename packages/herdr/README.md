@@ -524,7 +524,16 @@ dispatches; the other herdr instances coordinate instead of polling:
     authoritative. Dispatcher-fired work over quota is a neutral skip
     (`host-budget-implement`), never a prompt and never a `no-candidate`
     cooldown; an unreadable ledger **fails closed** there
-    (`host-budget-unknown`, self-healing rewrite from the live pane list).
+    (`host-budget-unknown`). The self-healing rewrite from the live pane list
+    runs only when the pane read **succeeded**; a failed/unparseable pane read
+    makes liveness UNKNOWN and never rewrites, never reaps, never deletes
+    (WL-0MW9VQX5T001GCUP). The pane read is **tri-state**
+    (`{ok:true, panes}` authoritative vs `{ok:false}` unknown): on unknown both
+    the admission count and the worklist header figures fall back to the
+    documented **freshness rule** (fresh entries count, nothing is reaped), so
+    a transient herdr hiccup can neither wipe the ledger's record of running
+    work nor silently under-count it, and it never refuses a tick on its own
+    (the fail-open admission rationale is preserved).
   - **Audit tier is proxy-derived (cross-machine)** — the audit budget and the
     live audit-lease registry are **owned by the proxy** (the one local
     `llama-server` GPU every ContextHub host shares), and herdr queries

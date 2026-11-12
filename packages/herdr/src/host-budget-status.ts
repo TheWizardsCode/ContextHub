@@ -90,12 +90,14 @@ export interface HostBudgetStatus {
 /** Options for {@link readHostBudgetStatus} (ledger seams + the live pane list). */
 export interface HostBudgetStatusOptions extends HostBudgetOptions {
   /**
-   * The machine-wide live pane list. Consulted for the implement tier's
-   * live-pane rule and for the audit tier's pane-aware display rule; absent
-   * means "no observed pane", which under-counts (the display is read-only,
-   * never an admission decision). For the audit tier an absent list falls back
-   * to the marker-compatible freshness rule instead of excluding every
-   * confirmed entry.
+   * The machine-wide live pane list, when the pane read SUCCEEDED — an
+   * authoritative list is consulted for the implement tier's live-pane rule and
+   * for the audit tier's pane-aware display rule. `undefined` means pane
+   * liveness is UNKNOWN (a failed/unparseable read, WL-0MW9VQX5T001GCUP) and
+   * both figures fall back to the freshness rule (fresh entries count, no pane
+   * requirement) — an unknown read must not report a false zero. An empty
+   * AUTHORITATIVE list (`[]`) still reads as zero in-flight for both tiers
+   * (empty ≠ unknown). The read is non-mutating in every case.
    */
   livePanes?: readonly HostBudgetLivePane[];
 }
@@ -200,19 +202,28 @@ export function readHostBudgetStatus(
 
   const now = opts.now ?? Date.now();
   const windowMs = opts.staleWindowMs ?? HOST_BUDGET_STALE_WINDOW_MS;
-  const livePaneIds = livePaneIdSet(opts.livePanes ?? []);
-  const implement = reduceLedgerCounts(read.ledger.entries, livePaneIds, now, windowMs);
+  // `undefined` live panes = pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP): the
+  // implement figure drops the pane requirement and falls back to the
+  // freshness rule (fresh entries count) instead of folding unknown into an
+  // empty set and reporting zero implements. An authoritative empty list still
+  // reads as zero.
+  const implement = reduceLedgerCounts(
+    read.ledger.entries,
+    opts.livePanes === undefined ? undefined : livePaneIdSet(opts.livePanes),
+    now,
+    windowMs,
+  );
   // Pane-aware audit DISPLAY rule (WL-0MW8D4UQH002TWJV), shared with the
   // interactive over-quota dialog so the two surfaces cannot disagree
   // (WL-0MW8IQNY7003JIOL). A confirmed entry whose pane is gone is a dead
-  // audit and must not render as in flight. When the caller supplies no pane
-  // list we cannot distinguish "gone" from "unknown", so fall back to the
-  // marker-compatible freshness rule rather than inventing a zero (the
-  // production wiring always supplies a list). The legacy `active-audit`
-  // marker is included as one synthetic entry, exactly as before.
+  // audit and must not render as in flight. `undefined` live panes (UNKNOWN,
+  // WL-0MW9VQX5T001GCUP) cannot distinguish "gone" from "unknown", so both
+  // tiers fall back to the freshness rule rather than inventing a zero. The
+  // legacy `active-audit` marker is included as one synthetic entry, exactly
+  // as before.
   const audit = auditDisplayCount(
     read.ledger.entries,
-    opts.livePanes === undefined ? undefined : livePaneIds,
+    opts.livePanes === undefined ? undefined : livePaneIdSet(opts.livePanes),
     now,
     windowMs,
     dir,

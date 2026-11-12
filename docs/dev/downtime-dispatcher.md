@@ -2577,6 +2577,7 @@ entered and the next idle tick re-checks (as with `audit-budget-saturated`).
 | Tier | Condition (evaluated at admission) | Decision | Decision-log reason | Header token |
 |---|---|---|---|---|
 | implement | fresh entries whose pane is in the live pane list **<** `maxImplement` | admit + reserve | — | — |
+| implement | pane list UNKNOWN (failed/unparseable `hostBudgetLivePanes` read, WL-0MW9VQX5T001GCUP) | count fresh entries by the **freshness rule** (no pane requirement) — never reaps, never deletes, still decides (fail-open: a broken herdr read does not refuse a tick on its own) | — | — |
 | implement | at/over `maxImplement` (including `maxImplement: 0`) | skip that candidate and keep scanning — no claim, no pane | `host-budget-implement` | `budget-implement` |
 | audit | proxy availability read `available: true` | admit + reserve (the local entry is observability only) | — | — |
 | audit | proxy availability read `available: false` | skip that audit candidate and keep scanning (neutral) | `audit-budget-saturated` | `budget-audit` |
@@ -2585,7 +2586,7 @@ entered and the next idle tick re-checks (as with `audit-budget-saturated`).
 | audit (legacy path) | at cap with `maxAudit: 1` (default) | skip that candidate and keep scanning | `audit-host-saturated` (byte-identical to the retired marker) | `budget-audit` |
 | audit (legacy path) | at cap with any other `maxAudit` (including `0`) | skip that candidate and keep scanning | `host-budget-audit` | `budget-audit` |
 | audit (either path) | the proxy verdict and the local (observability-only) ledger disagree about capacity | decision unchanged — the proxy wins; ONE evidence entry with both sides' figures | `audit-budget-divergence` | — |
-| implement | ledger exists but cannot be trusted (corrupt/unreadable bytes, or the reservation lock/I/O failed) | **fail closed** — skip that candidate and keep scanning, then rewrite the ledger from the live pane list so the next tick can decide again | `host-budget-unknown` | `budget-unknown` |
+| implement | ledger exists but cannot be trusted (corrupt/unreadable bytes, or the reservation lock/I/O failed) | **fail closed** — skip that candidate and keep scanning, then rewrite the ledger from the live pane list **when the pane read succeeded**; an unknown pane read (failed `hostBudgetLivePanes`) skips the rewrite so the corrupt ledger is never replaced by an empty one (WL-0MW9VQX5T001GCUP) | `host-budget-unknown` | `budget-unknown` |
 | audit (legacy path) | ledger exists but cannot be trusted | **fail closed** — skip that candidate and keep scanning (pre-proxy semantics) | `host-budget-unknown` | `budget-unknown` |
 | audit (proxy path) | local ledger unreadable | **no effect on admission** — the proxy is authoritative, the local entry is observability only; the local ledger is never read to refuse an audit | — | — |
 | either | coordination dir unresolvable | admit — no ledger, no new failure mode; the audit tier still consults the proxy (degrades exactly as before the budget existed) | — | — |
@@ -2633,7 +2634,31 @@ decision, not an inconsistency:
 
 The fail-closed arm is deliberately self-healing rather than sticky: the
 rewrite rebuilds the ledger from the leader's live pane list, so one corrupt
-read costs at most one tick — a crashed leader cannot wedge the host.
+read costs at most one tick — a crashed leader cannot wedge the host. The
+rewrite is gated on a **known** pane list: a failed/unparseable pane read is
+UNKNOWN and must never rewrite a corrupt ledger as empty (WL-0MW9VQX5T001GCUP),
+so the next pane-carrying tick self-heals instead.
+
+**Empty vs unknown pane list (WL-0MW9VQX5T001GCUP).** The machine-wide pane
+read (`hostBudgetLivePanes`) is **tri-state**, mirroring the `InFlightPanes`
+precedent: `{ok:true, panes}` carries an **authoritative** list (an empty
+list genuinely means "no downtime panes"), while `{ok:false}` means pane
+liveness is **UNKNOWN** (a failed, unparseable or unwired read). The two must
+never be conflated — they fail in opposite directions:
+
+| State | Counting rule | Reap | Repair |
+|---|---|---|---|
+| pane list **known** (successful read) | fresh AND pane in list (implement) / pane-aware display (audit) | stale, pane-less entries reaped | unreadable ledger repaired from the list |
+| pane list **empty but known** (successful read, no panes) | zero in-flight | stale entries reaped (existing behaviour, pinned by AC2) | — |
+| pane list **UNKNOWN** (failed read) | fresh entries, no pane requirement (the freshness rule) | **never** — reaping on unknown would delete live entries (heartbeats are only written at reserve/confirm, so a reaped live entry never comes back) | skipped — a corrupt ledger stays corrupt until a pane-carrying tick |
+
+This is why the same value cannot serve both directions: admission is
+**fail-open** on unknown (a herdr hiccup never silently wedges dispatch — the
+existing rationale is preserved), while reap is **fail-safe** (never delete
+on unknown). When unknown, the implement tier's admission read is a **pure
+read** — no write at all — and the count is deliberately conservative
+(fresh entries count without the pane requirement, so a broken herdr
+over-counts rather than under-counts and cannot over-admit).
 
 **Audit tier fail direction (proxy-derived).** For the audit tier the
 fail-closed decision is the **proxy read**, not the ledger: any non-`ok`
@@ -2701,7 +2726,11 @@ phantom slot for the remainder of the 2 h window.
   fresh, so a just-reserved audit is not hidden.
 - An absent live-pane list falls back to the marker-compatible freshness rule
   (the display cannot distinguish "gone" from "unknown", and it never invents
-  a zero).
+  a zero). Since WL-0MW9VQX5T001GCUP **both** figures — the implement count
+  and the audit count — fall back to the freshness rule on an unknown pane
+  read, so a broken herdr read no longer reports zero implements either.
+  An **authoritative empty** list still reads as zero in-flight for both
+  tiers (empty ≠ unknown).
 - The display path remains strictly read-only: it never reaps or rewrites the
   ledger (the sweep/staleness release owns cleanup).
 - This deliberately diverges from **admission**, which continues to count a

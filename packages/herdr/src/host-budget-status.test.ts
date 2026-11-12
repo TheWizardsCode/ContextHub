@@ -272,6 +272,38 @@ describe('readHostBudgetStatus — one read-only reader (AC5)', () => {
     });
   });
 
+  it('the implement figure also falls back to the freshness rule on unknown (never an invented zero)', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { maxImplement: 2, maxAudit: 1 });
+      writeBudgetLedger(dir, [
+        // Fresh, no pane (reserve→spawn window): counted by the freshness rule.
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-FRESH',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+        // Stale and pane-less: excluded by the freshness rule, never reaped.
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-STALE',
+          paneId: 'pane-gone',
+          heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString(),
+        }),
+      ]);
+
+      // `livePanes` absent (undefined) = pane liveness UNKNOWN: the implement
+      // figure counts fresh entries WITHOUT the pane requirement — a broken
+      // herdr read must not report zero implements (C2/WL-0MW9VQX5T001GCUP).
+      const unknown = readHostBudgetStatus({ dir, now: NOW, env: cleanEnv });
+      expect(unknown?.implement).toEqual({ live: 1, max: 2 });
+
+      // An authoritative empty list still reads as zero implements: the
+      // empty-vs-unknown distinction is explicit on the display read too.
+      const empty = readHostBudgetStatus({ dir, livePanes: [], now: NOW, env: cleanEnv });
+      expect(empty?.implement).toEqual({ live: 0, max: 2 });
+    });
+  });
+
   it('is strictly read-only: a display read never reaps the stale entry', async () => {
     await withMachineDir((dir) => {
       writeCaps(dir, { maxImplement: 2, maxAudit: 1 });
