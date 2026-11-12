@@ -2,6 +2,30 @@
 
 ## v1.0.29 (2026-11-12)
 
+> **Release focus:** This release focuses on making work dispatch and scheduling more reliable, with idle leaders and workers now picking up eligible tasks across all configured roots and view-only instances able to share work with the fleet. It also tightens release and audit safeguards, including commit-accurate pre-push checks, serialized audits, and fixes to budget accounting and release gating.
+### Features
+- Shared and TUI package tests now run automatically, catching regressions before release. (WL-0MVODOJWB004G03J)
+- Idle leaders now pick up work from all your configured roots, even without a running instance. (WL-0MVR8GDJ3008WY3Y)
+- Pre-push checks now verify the exact commit being pushed, so a green push truly means your changes passed. (WL-0MW2A3NAP0088IE9)
+- Audit reports now reliably save even when the worklog database is out of date. (WL-0MW56RBFD003J5WB)
+- Producers can now approve or reject work items with separate, clear shortcuts. (WL-0MW6GBWDA000VWBR)
+- Marking items for producer review no longer opens a pointless command pane. (WL-0MW6GG2ID006ESFS)
+- Audits now run one at a time across all servers, so two can't collide on the same GPU. (WL-0MW95GBEG005ERHS)
+- Idle workers can now pick up any eligible task, not just ones visible in your sprint view. (WL-0MW9XS0XR007K1TH)
+- View-only instances can now share their available work with the fleet without running anything locally. (WL-0MWDDHOK6009GJCC)
+### Bug Fixes
+- Refused or cancelled dispatches no longer leave empty panes behind. (WL-0MW5JE0SZ0057K30)
+- Deleted items no longer appear as release candidates, so the release gate won't stall on items that can't be updated. (WL-0MW7S20IC001F3AP)
+- Audit prompts now show the same count as the header, so no more phantom "1 running" warnings. (WL-0MW8IQNY7003JIOL)
+- Long-running tasks now count correctly, so the host won't over-admit new work. (WL-0MW9VQ08W000SN63)
+- A brief Herdr glitch no longer wipes the budget ledger, so running work stays counted. (WL-0MW9VQX5T001GCUP)
+- A full implement budget no longer blocks planning and intake work from dispatching. (WL-0MW9X7EJ6009EL6E)
+- Critical child work items now appear under their parent in the Work Items pane, even when the list is crowded. (WL-0MWDDAQ0L009FLEF)
+### Other
+- Tests are now organized into smaller, focused files, making future updates and fixes faster and more reliable. (WL-0MVOA238A0078J2H)
+- New worktrees now start from the latest shared code, so your changes are tested against the right baseline. (WL-0MW3LTY9A007ZULJ)
+- Releases won't consume your dispatch budget, and code-freeze already blocks new work during a release. (WL-0MW7YIBG70021YI3)
+
 ## v1.0.28 (2026-11-09)
 > **Release focus:** This release focuses on improving workflow reliability and automation, with fixes ensuring pushes verify the exact commit, audits start promptly and don't block releases on save glitches, and daily routines run automatically at high priority. It also enhances session organization with grouped tabs and persistent worklists, improves GitHub sync and delegation handling, and adds support for numbered acceptance-criteria lists and deletion reasons.
 ### Features
