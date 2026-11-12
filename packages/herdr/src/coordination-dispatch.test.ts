@@ -1058,6 +1058,110 @@ describe('runCoordinationCheckIn', () => {
     expect(result.updated).toBe(false);
     expect(getEntry(testDir, 'inst-1')?.workItemId).toBe('WL-EXISTING');
   });
+
+  it('writes a bounded v2 offers array from the per-bucket nominees (one head read for all three buckets)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+        headItem({ id: 'WL-PREP', stage: 'intake_complete', status: 'open' }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    const result = await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    expect(result.offered).toBe('WL-IMP');
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    const entry = getEntry(testDir, 'inst-1');
+    expect(entry?.workItemId).toBe('WL-IMP');
+    // The v2 `offers` payload is the canonical per-bucket nominee array
+    // (implement → audit → prep) computed from the single head read.
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+      { kind: 'prep', workItemId: 'WL-PREP' },
+    ]);
+  });
+
+  it('orders the offers by canonical bucket, not window order — workItemId mirrors the first (implement) offer', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      // AUD appears first in the WINDOW (it is the window-first candidate),
+      // but the v2 offers payload follows the canonical bucket order
+      // implement → audit → prep (parent AC2: buckets, not a second ranking),
+      // and `workItemId` mirrors offers[0] so a v1-era leader reads the
+      // implement nominee (parent AC9).
+      items: [
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    const result = await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    expect(result.offered).toBe('WL-IMP');
+    const entry = getEntry(testDir, 'inst-1');
+    expect(entry?.workItemId).toBe('WL-IMP');
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+    ]);
+  });
+
+  it('offers only the buckets present in the window — no read to widen for a missing bucket', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    // The missing prep bucket nominated nothing and was NOT sought beyond the
+    // window (parent AC3): still exactly one head read.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    const entry = getEntry(testDir, 'inst-1');
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+    ]);
+  });
+
+  it('falls back to a single-offer entry when the visible window yields nothing and the offer comes from the whole-backlog extension', async () => {
+    // The only window item is freshly dispatched (marker exclusion filters the
+    // WHOLE window); the whole-backlog extension then finds the next
+    // implement. The entry carries ONE offer (the window partition is empty —
+    // AC3: the window is never widened to fill a bucket), so a v1-era leader
+    // keeps reading exactly the pre-tier-aware offer.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-checkin-ext-'));
+    try {
+      writeDowntimeLog(root, [
+        { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
+      ] as never);
+      const getHerdrListHead = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [headItem({ id: 'WL-IMP-1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' })],
+        })
+        .mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-IMP-1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-IMP-2', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+          ],
+        });
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+      const result = await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      expect(result.offered).toBe('WL-IMP-2');
+      const entry = getEntry(testDir, 'inst-1');
+      expect(entry?.workItemId).toBe('WL-IMP-2');
+      expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+        { kind: 'implement', workItemId: 'WL-IMP-2' },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Empty-offer attribution (WL-0MVR8FKMU009XTED AC1/AC5) ────────────
@@ -3872,6 +3976,211 @@ describe('host-wide dispatch budget (F3)', () => {
   });
 });
 
+// ── Audit-budget refusal on the offer path (WL-0MWDDHVF2004PTYX) ─────────
+//
+// The proxy-derived audit budget (`audit-budget-saturated` /
+// `audit-budget-unknown`) refuses an OFFERED audit at admission. Before
+// WL-0MWDDHVF2004PTYX those outcomes matched none of the offer loop's
+// special cases and fell through unmasked — a tick with only audit refusals
+// could report `host-budget-implement` (an implement hold recorded later in
+// the same scan) or `no-candidate`, hiding a missing proxy endpoint (the
+// 2026-11-12 incident: ~130 consecutive `host-budget-implement` ticks and
+// zero `audit-budget-*` entries while `/llama/local/audit/status` answered
+// 404). The audit refusal is now recorded as its OWN neutral hold
+// (`auditBudgetHold`, why-origin AC1), ranked ABOVE the implement/host rung
+// in the terminal chain (AC2), carries the failing exchange as `detail`
+// (AC3), and is attributed in the per-offer rejection payload (AC5).
+function auditRefusalDeps(
+  reason: string,
+  detail?: string,
+  live = 0,
+  max = 0,
+): { deps: ReturnType<typeof makeCoordinationDeps>; entry: CoordinationEntry } {
+  const entry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+  const deps = makeCoordinationDeps({
+    admitHostDispatch: vi.fn().mockResolvedValue({
+      admitted: false,
+      live,
+      max,
+      reason,
+      ...(detail !== undefined ? { detail } : {}),
+    }),
+    fetchItem: vi.fn().mockResolvedValue({
+      ok: true,
+      info: itemInfo({
+        id: 'WL-AUD',
+        status: 'completed',
+        stage: 'in_review',
+        updatedAt: new Date().toISOString(),
+      }),
+    }),
+  });
+  return { deps, entry };
+}
+
+describe('audit-budget refusal on the offer path (WL-0MWDDHVF2004PTYX)', () => {
+  it('AC1: an audit-only refusal reports the audit-budget reason with detail and attribution (never host-budget-implement, never no-candidate)', async () => {
+    const { deps, entry } = auditRefusalDeps('audit-budget-unknown', 'http-404');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+    });
+
+    // The tick names the AUDIT gate — the exact incident it fixes.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-budget-unknown');
+    // The failing exchange is emitted in the same decision entry (AC3).
+    expect(outcome.detail).toBe('http-404');
+    expect(outcome.reason).not.toBe('host-budget-implement');
+    expect(outcome.reason).not.toBe('no-candidate');
+    // AC4: neutral — no pane, no marker, no claim left stranded.
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    // AC5: the per-offer rejection payload names the audit gate.
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-AUD', worklogRoot: '/roots/audit', gate: 'audit-budget' },
+    ]);
+    // The offer is KEPT — still valid once the proxy answers.
+    expect(getEntry(testDir, 'inst-audit')).not.toBeNull();
+  });
+
+  it('AC2: an audit refusal OUTRANKS an implement refusal in the same tick', async () => {
+    const auditEntry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+    const implementEntry = makeEntry('inst-imp', 'WL-IMP', '/roots/impl');
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [auditEntry, implementEntry],
+    });
+    const deps = makeCoordinationDeps({
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'audit'
+          ? {
+              admitted: false,
+              live: 1,
+              max: 1,
+              reason: 'audit-budget-saturated',
+            }
+          : { admitted: false, live: 2, max: 2, reason: 'host-budget-implement' },
+      ),
+      fetchItem: vi.fn(async (itemId: string) => ({
+        ok: true as const,
+        info: itemInfo(
+          itemId === 'WL-AUD'
+            ? {
+                id: 'WL-AUD',
+                status: 'completed',
+                stage: 'in_review',
+                updatedAt: new Date().toISOString(),
+              }
+            : {
+                id: 'WL-IMP',
+                status: 'open',
+                stage: 'plan_complete',
+                risk: 'Low',
+                effort: 'S',
+              },
+        ),
+      })),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [auditEntry, implementEntry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      effectiveFreeSlots: 2,
+    });
+
+    // The audit rung beats the ambient implement-cap statement: the tick
+    // explains the TIER that is actually dead, not the one that is merely full.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-budget-saturated');
+    expect(outcome.budget).toEqual({ live: 1, max: 1 });
+    expect(outcome.reason).not.toBe('host-budget-implement');
+    // Both offers are attributed — the audit with its own gate token.
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-AUD', worklogRoot: '/roots/audit', gate: 'audit-budget' },
+    ]);
+  });
+
+  it('AC3: the failing exchange detail reaches the outcome for http-404, timeout and bad-body', async () => {
+    for (const detail of ['http-404', 'timeout', 'bad-body'] as const) {
+      const { deps, entry } = auditRefusalDeps('audit-budget-unknown', detail);
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+      });
+      expect(outcome.reason).toBe('audit-budget-unknown');
+      expect(outcome.detail).toBe(detail);
+    }
+  });
+
+  it('AC7: an audit refusal alongside a successful dispatch does not pollute the success outcome', async () => {
+    const auditEntry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+    const implementEntry = makeEntry('inst-imp', 'WL-IMP', '/roots/impl');
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [auditEntry, implementEntry],
+    });
+    const deps = makeCoordinationDeps({
+      // Refuse the audit offer; admit the implement offer so it dispatches.
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'audit'
+          ? {
+              admitted: false,
+              live: 1,
+              max: 1,
+              reason: 'audit-budget-unknown',
+              detail: 'seam-absent',
+            }
+          : { admitted: true, live: 0, max: 2 },
+      ),
+      fetchItem: vi.fn(async (itemId: string) => ({
+        ok: true as const,
+        info: itemInfo(
+          itemId === 'WL-AUD'
+            ? {
+                id: 'WL-AUD',
+                status: 'completed',
+                stage: 'in_review',
+                updatedAt: new Date().toISOString(),
+              }
+            : {
+                id: 'WL-IMP',
+                status: 'open',
+                stage: 'plan_complete',
+                risk: 'Low',
+                effort: 'S',
+              },
+        ),
+      })),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [auditEntry, implementEntry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      effectiveFreeSlots: 2,
+    });
+
+    // The implement offer dispatches; the recorded audit hold must NOT leak
+    // budget/detail/rejections onto the success outcome.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.reason).toBeUndefined();
+    expect(outcome.budget).toBeUndefined();
+    expect(outcome.detail).toBeUndefined();
+    expect(outcome.offerRejections).toBeUndefined();
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ── Per-bucket nominees from one head read (parent WL-0MWDDHQON0015T3P AC2/AC3) ──
 //
 // Tier-aware offers (WL-0MWDDHQON0015T3P): each instance advertises the head
@@ -3884,14 +4193,11 @@ describe('host-wide dispatch budget (F3)', () => {
 // the single-offer path's fail-open, stall-scan short-circuit and sequential
 // filters preserved per bucket.
 //
-// RED WITNESS. The per-bucket surface does not exist yet: today
-// `computeMostImportantItem` still returns a SINGLE offer (`{ok:true, kind,
-// candidate}`) with no `nominees` array. Each body below asserts the
-// post-implementation contract and is committed with `it.fails` — the suite
-// stays green because the bodies currently throw (the `nominees` surface is
-// absent). Implementation child WL-0MWDVMZNV0011FDT flips each `it.fails` to
-// `it` and makes the bodies pass; the two plain `it` bodies pin contracts
-// that are preserved unchanged (they pass today and must keep passing).
+// GREEN (F2, WL-0MWDVMZNV0011FDT): `computeMostImportantItem` now returns the
+// single offer (`{ok:true, kind, candidate}`) PLUS a `nominees` array — the
+// per-bucket candidates of the same window, in canonical bucket order. The
+// four bodies below (`it.fails` until this slice) now run as plain `it`; the
+// two plain `it` bodies pin contracts that are preserved unchanged.
 describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
   /**
    * Post-F2 per-bucket nominee — the v2 `offers` entry shape F1's check-in
@@ -3902,7 +4208,7 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     workItemId: string;
   }
 
-  /** Read the per-bucket surface through a narrow structural cast (absent today). */
+  /** Read the per-bucket surface from a computation result. */
   const nomineesOf = (result: unknown): NomineeWitness[] | undefined =>
     (result as { nominees?: NomineeWitness[] }).nominees;
 
@@ -3916,7 +4222,7 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
   const prepItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
     headItem({ id, title: `Prep ${id}`, status: 'open', stage: 'intake_complete', sortIndex });
 
-  it.fails('AC1: each nominee is the canonical FIRST item of its bucket in window order — a lower sortIndex later in the window never displaces it', async () => {
+  it('AC1: each nominee is the canonical FIRST item of its bucket in window order — a lower sortIndex later in the window never displaces it', async () => {
     const deps = makeCoordinationDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({
         ok: true,
@@ -3944,7 +4250,7 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     ]);
   });
 
-  it.fails('AC2: exactly ONE getHerdrListHead call computes all three nominees (no per-bucket wl spawn)', async () => {
+  it('AC2: exactly ONE getHerdrListHead call computes all three nominees (no per-bucket wl spawn)', async () => {
     const getHerdrListHead = vi.fn().mockResolvedValue({
       ok: true,
       items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1')],
@@ -3960,7 +4266,7 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     expect(getHerdrListHead).toHaveBeenCalledWith('/repo', expect.any(Number));
   });
 
-  it.fails('AC3: a bucket empty in the window nominates NOTHING and the window is not widened', async () => {
+  it('AC3: a bucket empty in the window nominates NOTHING and the window is not widened', async () => {
     const getHerdrListHead = vi.fn().mockResolvedValue({
       ok: true,
       // No idea / intake_complete / risk-effort item anywhere → the prep
@@ -3979,28 +4285,33 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     expect(getHerdrListHead).toHaveBeenCalledTimes(1);
   });
 
-  it.fails('AC3: per-bucket filters preserved — a fresh dispatch marker on the implement head skips to the NEXT offerable implement, other buckets unaffected', async () => {
+  it('AC3: per-bucket filters preserved — a fresh dispatch marker on the implement head skips to the NEXT offerable implement, other buckets unaffected', async () => {
     // WL-IMP-1 was just dispatched at its current stage → the implement-bucket
     // exclusion skips it and nominates the next offerable implement, while
     // the audit and prep buckets still nominate their own canonical heads
     // (the same sequential filters the single-offer path applies today).
-    writeDowntimeLog('/repo', [
-      { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
-    ] as never);
-    const deps = makeCoordinationDeps({
-      getHerdrListHead: vi.fn().mockResolvedValue({
-        ok: true,
-        items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1'), implementItem('WL-IMP-2')],
-      }),
-    });
+    const root = mkdtempSync(join(tmpdir(), 'herdr-nominees-'));
+    try {
+      writeDowntimeLog(root, [
+        { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
+      ] as never);
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1'), implementItem('WL-IMP-2')],
+        }),
+      });
 
-    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
-    expect(result.ok).toBe(true);
-    expect(nomineesOf(result)).toEqual([
-      { kind: 'implement', workItemId: 'WL-IMP-2' },
-      { kind: 'audit', workItemId: 'WL-AUD-1' },
-      { kind: 'prep', workItemId: 'WL-PREP-1' },
-    ]);
+      const result = await computeMostImportantItem(deps, root, Date.now(), 20);
+      expect(result.ok).toBe(true);
+      expect(nomineesOf(result)).toEqual([
+        { kind: 'implement', workItemId: 'WL-IMP-2' },
+        { kind: 'audit', workItemId: 'WL-AUD-1' },
+        { kind: 'prep', workItemId: 'WL-PREP-1' },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('AC3: preserve the {ok:false} fail-open contract — a head lookup failure yields no nominees and never throws (the caller keeps its entry)', async () => {

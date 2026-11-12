@@ -387,7 +387,15 @@ export async function dispatchClaimedTier(
         // Never a bare `undefined` reason: an admission seam that refuses
         // without a token still has to report why the tick stopped.
         reason: admission.reason ?? 'host-budget-unknown',
+        // The refused tier (WL-0MWDDHVF2004PTYX AC2): lets the caller split a
+        // tier-ambiguous `host-budget-unknown` between the audit and the
+        // implement rungs of the terminal-reason precedence.
+        kind,
         budget: budgetEvidence,
+        // The failing exchange on a fail-closed audit read
+        // (`audit-budget-unknown`): carried so the hold and the decision entry
+        // can name the broken proxy contract (AC3).
+        ...(admission.detail !== undefined ? { detail: admission.detail } : {}),
         ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
         // A failed rollback leaves the item claimed (no worse than the
         // pre-fix state) — it is still not a spawn.

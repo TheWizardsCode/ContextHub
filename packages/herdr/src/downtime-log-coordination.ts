@@ -147,6 +147,15 @@ export interface CoordinationLogEntry {
    */
   budget?: HostBudgetEvidence;
   /**
+   * Failing exchange on a fail-closed AUDIT-budget refusal
+   * (WL-0MWDDHVF2004PTYX AC3): `http-404` (endpoint-absent), `timeout` /
+   * `network` / `http-<status>` (unreachable), `bad-body` (unparsable) or
+   * `seam-absent` (no client wired), copied from the dispatch outcome so the
+   * decision entry names the broken proxy contract without reading code.
+   * Absent on every other entry (additive/optional schema).
+   */
+  detail?: string;
+  /**
    * Proxy/local audit-budget divergence evidence (WL-0MWAMSK9H005BOHD, parent
    * AC2): recorded on a `kind: 'decision'` entry whose `reason` is
    * `audit-budget-divergence`, carrying both the proxy's verdict/figures and

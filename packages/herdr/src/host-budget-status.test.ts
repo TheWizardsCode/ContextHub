@@ -82,6 +82,14 @@ describe('host-budget reason tokens and header mapping (AC1/AC2)', () => {
     expect(decisionHeaderToken(HOST_BUDGET_IMPLEMENT_REASON)).toBe('budget-implement');
     expect(decisionHeaderToken(HOST_BUDGET_AUDIT_REASON)).toBe('budget-audit');
     expect(decisionHeaderToken(HOST_BUDGET_UNKNOWN_REASON)).toBe('budget-unknown');
+    // The AUDIT tier's proxy-derived tokens quote the SAME header segments
+    // (`budget-audit` / `budget-unknown`) — the documented decision-reason
+    // table, so the header says why the audit tier stopped without one
+    // segment per source (WL-0MWDDHVF2004PTYX AC8). The legacy
+    // `audit-host-saturated` token keeps its raw header token (pinned by the
+    // orchestrator suite).
+    expect(decisionHeaderToken('audit-budget-saturated')).toBe('budget-audit');
+    expect(decisionHeaderToken('audit-budget-unknown')).toBe('budget-unknown');
     // AC2 consistency: the capacity-shaped stops keep their tokens, so an
     // operator-imposed budget stop is never read as a capacity stop.
     expect(decisionHeaderToken('proxy-contention')).toBe('contention');

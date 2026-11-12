@@ -52,7 +52,11 @@ import {
   dispatchClaimedTier,
   dispatchScheduledPrompt,
 } from './downtime-worker.dispatch-claims.js';
-import type { DowntimeDispatchOutcome } from './downtime-worker.dispatch-contract.js';
+import {
+  isAuditBudgetHoldOutcome,
+  isHostBudgetHoldReason,
+  type DowntimeDispatchOutcome,
+} from './downtime-worker.dispatch-contract.js';
 import {
   CPU_SATURATED_REASON,
   hostCpuGateEvidence,
@@ -148,18 +152,24 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
  *
  * ## Continuable holds and terminal-reason precedence
  *
- * A host-budget refusal is a CONTINUABLE HOLD (WL-0MWBT76WY00298AY): the offer
+ * A budget refusal is a CONTINUABLE HOLD (WL-0MWBT76WY00298AY): the offer
  * loop records the first refusal and keeps trying the remaining offers, and
- * the own-head scan records it on `HeadScanHolds.hostBudget` and steps to the
- * next candidate, so prep work ranked behind a budget-refused candidate still
- * dispatches. When nothing else dispatches, the terminal-reason chain folds
- * that hold in with a fixed precedence:
+ * the own-head scan records it on `HeadScanHolds.hostBudget` /
+ * `HeadScanHolds.auditBudget` and steps to the next candidate, so prep work
+ * ranked behind a budget-refused candidate still dispatches. When nothing
+ * else dispatches, the terminal-reason chain folds those holds in with a
+ * fixed precedence (WL-0MWDDHVF2004PTYX AC2 — the AUDIT rung was added
+ * ABOVE the host rung so an audit refusal with `detail: 'http-404'` — a
+ * broken proxy contract — is never masked by an ambient implement-cap
+ * statement):
  *
  *     code-freeze → CPU → review-queue → non-terminal cooldown →
- *     attempt budget → in-flight → leaf-audit pin → host budget → no-candidate
+ *     attempt budget → in-flight → leaf-audit pin → audit budget →
+ *     host budget → no-candidate
  *
- * so a budget hold reports the neutral refusal (never `no-candidate`) with its
- * `{live, max}` evidence — no strike, no cooldown, no attempt-budget charge.
+ * so a budget hold reports the neutral refusal (never `no-candidate`) with
+ * its `{live, max}` evidence — and, on an audit-budget refusal, the failing
+ * exchange on `detail` — no strike, no cooldown, no attempt-budget charge.
  */
 export async function dispatchFromCoordination(
   deps: CoordinationLeaderDeps,
@@ -404,6 +414,17 @@ async function dispatchFromCoordinationGated(
   // host is full) and the tick ends on the refusal, never 'no-candidate', so
   // no cooldown/strike is recorded and the next idle tick re-checks.
   let hostBudgetHold: DowntimeDispatchOutcome | undefined;
+  // Audit-budget hold (WL-0MWDDHVF2004PTYX): the first offer refused by the
+  // proxy-derived AUDIT budget (`audit-budget-saturated` /
+  // `audit-budget-unknown`, or the legacy `host-budget-audit` /
+  // `audit-host-saturated`). Mirrors `hostBudgetHold` — the offer is KEPT, the
+  // hold is neutral (no strike, no cooldown, no attempt-budget charge), and
+  // the tick ends on the refusal. Recorded SEPARATELY so the terminal chain
+  // can rank it ABOVE an implement refusal: an audit refusal with
+  // `detail: 'http-404'` is a broken proxy contract, not an ambient
+  // implement-cap statement (AC2). `rejectedOffers` attribution carries the
+  // `audit-budget` gate token (AC5).
+  let auditBudgetHold: DowntimeDispatchOutcome | undefined;
   const flaggedForBudget = new Set<string>();
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
@@ -657,11 +678,24 @@ async function dispatchFromCoordinationGated(
       // the item is back in the backlog — try the next offer.
       continue;
     }
-    if (outcome.reason === 'host-budget-implement' || outcome.reason === 'host-budget-unknown') {
-      // Machine-wide host budget (F3 AC5): NEUTRAL hold — keep the offer, no
-      // strike, no attempt budget, no cooldown. Other offers are still tried;
-      // if none dispatches the tick ends on this refusal.
-      hostBudgetHold ??= outcome;
+    if (isHostBudgetHoldReason(outcome.reason)) {
+      // Machine-wide budget refusal (F3 AC5 / WL-0MWDDHVF2004PTYX): NEUTRAL
+      // hold — keep the offer, no strike, no attempt budget, no cooldown
+      // (AC4). Other offers are still tried; if none dispatches the tick ends
+      // on this refusal. The rung is tier-decided: an IMPLEMENT refusal
+      // (`host-budget-implement`, or `host-budget-unknown` from an implement
+      // admission) records `hostBudgetHold`; an AUDIT refusal
+      // (`audit-budget-saturated` / `audit-budget-unknown` + `detail`, or the
+      // legacy `host-budget-audit` / `audit-host-saturated`) records
+      // `auditBudgetHold` on its own rung so it is NEVER masked by
+      // `host-budget-implement` (AC1/AC2) — and is attributed in the
+      // per-offer rejection payload with the `audit-budget` gate token (AC5).
+      if (isAuditBudgetHoldOutcome(outcome)) {
+        auditBudgetHold ??= outcome;
+        rejectOffer(entry, worklogRoot, 'audit-budget');
+      } else {
+        hostBudgetHold ??= outcome;
+      }
       continue;
     }
     if (outcome.reason === 'wl-error') {
@@ -843,16 +877,22 @@ async function dispatchFromCoordinationGated(
   // batch continuation) is folded in here so a filtered own-head backlog keeps
   // its neutral reason.
   //
-  // TERMINAL-REASON PRECEDENCE (module contract; WL-0MWBT76WY00298AY AC5):
-  // `code-freeze` → CPU → review-queue → non-terminal cooldown → attempt
-  // budget → in-flight → leaf-audit pin → host budget → `no-candidate`. A
-  // host-budget hold sits LAST because it is the weakest, most ambient
-  // statement: "some budgeted candidate was refused this tick". Any stronger
-  // hold that also fired keeps its own reason; with no other hold, the neutral
-  // refusal (and its `{live, max}` evidence) is reported instead of
-  // `no-candidate`, so no cooldown/strike is recorded. The offer path's
-  // `hostBudgetHold` (same seam, same neutral contract) keeps its position and
-  // is reported first when both paths recorded one.
+  // TERMINAL-REASON PRECEDENCE (module contract; WL-0MWBT76WY00298AY AC5,
+  // extended by WL-0MWDDHVF2004PTYX AC2): `code-freeze` → CPU →
+  // review-queue → non-terminal cooldown → attempt budget → in-flight →
+  // leaf-audit pin → AUDIT budget → host budget → `no-candidate`. The audit
+  // budget rung sits ABOVE the host budget rung because an audit refusal with
+  // `detail: 'http-404'` is a BROKEN PROXY CONTRACT, not the weakest ambient
+  // statement — it must never be masked by `host-budget-implement`. The host
+  // budget rung stays last: it is the weakest, most ambient statement
+  // ("some budgeted candidate was refused this tick"). Any stronger hold that
+  // also fired keeps its own reason; with no other hold, the neutral refusal
+  // (its `{live, max}` evidence, and the failing exchange on `detail` for an
+  // audit-budget refusal) is reported instead of `no-candidate`, so no
+  // cooldown/strike is recorded. The offer path's `hostBudgetHold` /
+  // `auditBudgetHold` (same seam, same neutral contract) keep their positions
+  // and are reported first when both a path hold and an own-head hold
+  // recorded one for the same rung.
   const terminal: DowntimeDispatchOutcome = frozen
     ? { dispatched: false, reason: 'code-freeze' }
     : cpuHold || ownHeadHolds.cpu
@@ -871,19 +911,38 @@ async function dispatchFromCoordinationGated(
             // the reason (parity with the direct path, C4/C5). Neutral, so no
             // no-candidate cooldown and no strike.
             ? { dispatched: false, reason: LEAF_AUDIT_PIN_HOLD_REASON }
-            // Host-budget refusal (F3 AC5): a machine-wide cap, not an empty
-            // backlog, stopped the budgeted tier. Neutral — no cooldown, no
-            // strike; the next idle tick re-checks the ledger.
-            : hostBudgetHold !== undefined
-              ? hostBudgetHold
-              : ownHeadHolds.hostBudget !== undefined
+            // AUDIT-budget refusal (WL-0MWDDHVF2004PTYX AC1/AC2): the
+            // proxy-owned audit budget stopped the audit tier. Neutral — no
+            // cooldown, no strike; the next idle tick re-checks. Reported
+            // BEFORE any implement/host-budget hold so a broken proxy
+            // contract (`audit-budget-unknown` + `detail: 'http-404'`) is
+            // never masked by `host-budget-implement`.
+            : auditBudgetHold !== undefined
+              ? auditBudgetHold
+              : ownHeadHolds.auditBudget !== undefined
                 ? {
                     dispatched: false,
-                    reason: ownHeadHolds.hostBudget.reason,
-                    ...(ownHeadHolds.hostBudget.budget !== undefined
-                      ? { budget: ownHeadHolds.hostBudget.budget }
+                    reason: ownHeadHolds.auditBudget.reason,
+                    ...(ownHeadHolds.auditBudget.budget !== undefined
+                      ? { budget: ownHeadHolds.auditBudget.budget }
+                      : {}),
+                    ...(ownHeadHolds.auditBudget.detail !== undefined
+                      ? { detail: ownHeadHolds.auditBudget.detail }
                       : {}),
                   }
-                : { dispatched: false, reason: 'no-candidate' };
+                // Host-budget refusal (F3 AC5): a machine-wide cap, not an
+                // empty backlog, stopped the budgeted tier. Neutral — no
+                // cooldown, no strike; the next idle tick re-checks the ledger.
+                : hostBudgetHold !== undefined
+                  ? hostBudgetHold
+                  : ownHeadHolds.hostBudget !== undefined
+                    ? {
+                        dispatched: false,
+                        reason: ownHeadHolds.hostBudget.reason,
+                        ...(ownHeadHolds.hostBudget.budget !== undefined
+                          ? { budget: ownHeadHolds.hostBudget.budget }
+                          : {}),
+                      }
+                    : { dispatched: false, reason: 'no-candidate' };
   return withOfferRejections(terminal, offerRejections);
 }

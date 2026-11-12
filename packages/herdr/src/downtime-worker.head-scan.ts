@@ -25,21 +25,24 @@
  * Continuable holds (WL-0MWBT76WY00298AY): a scan may only step past a
  * non-dispatched outcome when `isContinuableHoldOutcome` says so — a lost
  * claim (`claim-failed` / `claim-rolled-back`) or a neutral host-budget
- * refusal. A budget refusal is recorded on `HeadScanHolds.hostBudget` (reason
- * + `{live, max}` evidence) and the scan continues, so
- * `dispatchFromRegisteredRoots` crosses to the next root when a root only
- * offers refused candidates. The audit-batch continuation is the one
- * exception: it records the hold and ends the batch (never hops). Every other
- * outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
+ * refusal. A budget refusal is recorded on `HeadScanHolds.hostBudget`
+ * (IMPLEMENT tier) or `HeadScanHolds.auditBudget` (AUDIT tier, carrying the
+ * failing exchange on `detail`, WL-0MWDDHVF2004PTYX) and the scan
+ * continues, so `dispatchFromRegisteredRoots` crosses to the next root when
+ * a root only offers refused candidates. The audit-batch continuation is
+ * the one exception: it records the hold and ends the batch (never hops).
+ * Every other outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
  * `anchor-unavailable`, …) returns immediately, preserving the caller's
  * strike/skip semantics. In the caller's terminal-reason composition
- * `HeadScanHolds.hostBudget` is LAST (after code-freeze → CPU → review →
- * cooldown → attempt-budget → in-flight → leaf-audit pin).
+ * `HeadScanHolds.auditBudget` sits ABOVE `HeadScanHolds.hostBudget` (after
+ * code-freeze → CPU → review → cooldown → attempt-budget → in-flight →
+ * leaf-audit pin), and `hostBudget` is LAST (before `no-candidate`).
  */
 
 import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
 import { readOwnHeadWindow } from './downtime-worker.coordination-batch.js';
 import {
+  isAuditBudgetHoldOutcome,
   isContinuableHoldOutcome,
   isHostBudgetHoldReason,
   type DowntimeDispatchDeps,
@@ -92,14 +95,28 @@ export interface HeadScanHolds {
    *
    * A sibling of `budget` (the per-item ATTEMPT budget), `cooldown`,
    * `inFlight`, `review` and `cpu` — never conflated with them. On a
-   * continuable host-budget refusal the scan records the FIRST refusal's
-   * reason token and `{live, max}` evidence here and keeps scanning, so the
-   * caller can report the neutral refusal (never `no-candidate`) when nothing
-   * else dispatches. Precedence in the caller's terminal chain is documented
-   * at the composition site: this hold is LAST, after `code-freeze` → CPU →
-   * review → cooldown → attempt-budget → in-flight → leaf-audit pin.
+   * continuable IMPLEMENT-tier budget refusal the scan records the FIRST
+   * refusal's reason token and `{live, max}` evidence here and keeps
+   * scanning, so the caller can report the neutral refusal (never
+   * `no-candidate`) when nothing else dispatches. Precedence in the caller's
+   * terminal chain is documented at the composition site: this hold sits
+   * BELOW the audit-budget rung ({@link HeadScanHolds.auditBudget}), after
+   * `code-freeze` → CPU → review → cooldown → attempt-budget → in-flight →
+   * leaf-audit pin → audit budget (WL-0MWDDHVF2004PTYX AC2).
    */
   hostBudget?: { reason: string; budget?: { live: number; max: number } };
+  /**
+   * AUDIT-tier budget refusal recorded by this scan (WL-0MWDDHVF2004PTYX).
+   *
+   * The proxy-owned rung of the budget hold: `audit-budget-saturated` /
+   * `audit-budget-unknown` (or the legacy `host-budget-audit` /
+   * `audit-host-saturated`), recorded SEPARATELY from the implement hold so
+   * the caller's terminal chain can rank an audit refusal ABOVE an
+   * implement refusal — a refuse with `detail: 'http-404'` is a broken proxy
+   * contract, not an ambient implement-cap statement (AC2). `detail` names
+   * the failing exchange on a fail-closed read (AC3).
+   */
+  auditBudget?: { reason: string; budget?: { live: number; max: number }; detail?: string };
 }
 
 /**
@@ -347,16 +364,26 @@ export async function dispatchFromOwnHead(
     if (!isContinuableHoldOutcome(outcome)) return outcome;
     if (isHostBudgetHoldReason(outcome.reason)) {
       // Machine-wide budget refusal (WL-0MWBT76WY00298AY AC2): NEUTRAL — no
-      // strike, no cooldown, no attempt budget. Record the FIRST refusal (the
-      // ledger is host-wide, so later budgeted candidates report the same
-      // condition) and step on to the next candidate, which may be prep work
-      // the budget never gates. The batch continuation (`skipOnLostClaim`
-      // false) is the one exception: it records the hold and ENDS the batch
-      // (AC6) — a batch never hops to another audit target.
-      ctx.holds.hostBudget ??= {
+      // strike, no cooldown, no attempt budget. Record the FIRST refusal and
+      // step on to the next candidate, which may be prep work the budget never
+      // gates. AUDIT-tier refusals are recorded on their own rung
+      // (`holds.auditBudget`, with the failing exchange on `detail`) so the
+      // leader's terminal chain can rank them ABOVE an implement refusal — an
+      // audit refusal with `detail: 'http-404'` is a broken proxy contract,
+      // not an ambient implement-cap statement (WL-0MWDDHVF2004PTYX AC2/AC3).
+      // The batch continuation (`skipOnLostClaim` false) is the exception: it
+      // records the hold and ENDS the batch (AC6) — a batch never hops to
+      // another audit target.
+      const hold: { reason: string; budget?: { live: number; max: number }; detail?: string } = {
         reason: outcome.reason as string,
         ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
+        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
       };
+      if (isAuditBudgetHoldOutcome(outcome)) {
+        ctx.holds.auditBudget ??= hold;
+      } else {
+        ctx.holds.hostBudget ??= hold;
+      }
       if (!ctx.skipOnLostClaim) return outcome;
       continue;
     }
