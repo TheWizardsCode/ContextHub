@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.0.29 (2026-11-12)
+
 ## v1.0.28 (2026-11-09)
 > **Release focus:** This release focuses on improving workflow reliability and automation, with fixes ensuring pushes verify the exact commit, audits start promptly and don't block releases on save glitches, and daily routines run automatically at high priority. It also enhances session organization with grouped tabs and persistent worklists, improves GitHub sync and delegation handling, and adds support for numbered acceptance-criteria lists and deletion reasons.
 ### Features
