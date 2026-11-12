@@ -304,6 +304,37 @@ describe('readHostBudgetStatus — one read-only reader (AC5)', () => {
     });
   });
 
+  it('counts a stale-but-live implement entry and stays byte-identical (AC1 display + AC3)', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { maxImplement: 2, maxAudit: 1 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-LONG',
+          paneId: 'pane-1',
+          // Heartbeated 5 h ago — stale by the 2 h window, but the pane is
+          // still in the live list: pane-derived freshness keeps it counted.
+          heartbeatAt: new Date(NOW - 5 * HOUR).toISOString(),
+        }),
+      ]);
+      const before = readFileSync(budgetLedgerPath(dir), 'utf8');
+      const status = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-LONG' }]),
+        now: NOW,
+        env: cleanEnv,
+      });
+      expect(status).toEqual({
+        implement: { live: 1, max: 2 },
+        audit: { live: 0, max: 1 },
+      });
+      expect(hostBudgetStatusText(status)).toBe('[budget: implement 1/2 · audit 0/1]');
+      // AC3: the display read that COUNTED the stale-but-live entry never
+      // touched the ledger — it is a non-mutating read.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    });
+  });
+
   it('is strictly read-only: a display read never reaps the stale entry', async () => {
     await withMachineDir((dir) => {
       writeCaps(dir, { maxImplement: 2, maxAudit: 1 });

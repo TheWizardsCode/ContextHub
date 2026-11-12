@@ -19,7 +19,9 @@
  * `readHostBudgetStatus` is the ONLY counting entry point for the display
  * surfaces, and it does not count anything itself: it pairs the counts of the
  * SAME pure reductions the dispatcher's admission compares with the caps
- * (`reduceLedgerCounts` for the implement tier's live-pane rule,
+ * (`reduceLedgerCounts` for the implement tier's pane-derived live-pane rule
+ * — WL-0MW9VQ08W000SN63: a confirmed implement with a live pane counts
+ * regardless of heartbeat age —,
  * `reduceAuditDisplayCounts` for the audit tier's pane-aware DISPLAY rule, or
  * the marker-compatible `reduceMarkerCounts` when no live pane list is
  * supplied, plus `legacyActiveAuditCount`). There is therefore no second

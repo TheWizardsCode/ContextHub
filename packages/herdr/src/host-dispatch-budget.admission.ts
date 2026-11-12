@@ -41,9 +41,10 @@
  *
  * ## Per-tier counting (deliberate asymmetry)
  *
- *  - **implement** counts fresh entries whose pane is in the live pane list
- *    (`liveCount`). A reserved-but-unspawned entry is invisible until its pane
- *    id is confirmed.
+ *  - **implement** counts entries whose pane is in the live pane list
+ *    (`liveCount`) — pane-derived freshness since WL-0MW9VQ08W000SN63: a
+ *    confirmed entry with a live pane counts regardless of heartbeat age. A
+ *    reserved-but-unspawned entry is invisible until its pane id is confirmed.
  *  - **audit** counts fresh entries with NO live-pane requirement
  *    (`freshCount`), which is exactly the semantics of the retired host-wide
  *    `active-audit` marker: the slot is held from the reservation until a
@@ -783,12 +784,14 @@ export function admitHostDispatch(
 /**
  * Confirm a reserved entry with the spawned pane's id.
  *
- * For the implement tier, counted = fresh heartbeat AND a pane id in the live
- * pane list, so the entry is invisible to admission until the pane id is known.
- * The audit tier counts a fresh entry regardless (the marker semantics), so the
- * confirmation only records the pane id for observability. Best-effort: a
- * failing seam never affects the dispatch, and the release-by-item-id on pane
- * close (or the stale reap) remains the backstop.
+ * For the implement tier, counted = a pane id in the live pane list
+ * (pane-derived freshness since WL-0MW9VQ08W000SN63 — a live pane counts
+ * regardless of heartbeat age; a reserved-but-unspawned entry is invisible to
+ * admission until the pane id is known). The audit tier counts a fresh entry
+ * regardless (the marker semantics), so the confirmation only records the
+ * pane id for observability. Best-effort: a failing seam never affects the
+ * dispatch, and the release-by-item-id on pane close (or the stale reap)
+ * remains the backstop.
  */
 export function confirmHostDispatch(
   input: HostBudgetAdmissionInput,

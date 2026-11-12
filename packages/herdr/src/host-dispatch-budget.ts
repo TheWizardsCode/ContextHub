@@ -81,14 +81,15 @@
  *    WL-0MW9VQX5T001GCUP): nothing is reaped and nothing is written, so a
  *    reap on unknown state is a pure read.
  *  - `liveCount(kind, livePanes?)` — the admission read: counts entries of that
- *    kind whose heartbeat is fresh **and** whose `paneId` is in the live pane
- *    list, and reaps stale, pane-less entries on read so a crashed leader
- *    cannot wedge the host. With `livePanes` `undefined` (unknown) it counts
- *    fresh entries by the freshness rule and reaps NOTHING — an admission
- *    read on an unknown pane state is a pure read that never mutates the
- *    ledger (AC1/AC3 of WL-0MW9VQX5T001GCUP). A reap write is best-effort: the
- *    count already excludes those entries, so lock contention only defers the
- *    cleanup.
+ *    kind whose `paneId` is in the live pane list, and reaps stale, pane-less
+ *    entries on read so a crashed leader cannot wedge the host. With `livePanes`
+ *    `undefined` (unknown) it counts fresh entries by the freshness rule and
+ *    reaps NOTHING — an admission read on an unknown pane state is a pure read
+ *    that never mutates the ledger (AC1/AC3 of WL-0MW9VQX5T001GCUP). A reap
+ *    write is best-effort: the count already excludes those entries, so lock
+ *    contention only defers the cleanup. Since WL-0MW9VQ08W000SN63 the
+ *    IMPLEMENT tier counts a confirmed entry with a live pane REGARDLESS of
+ *    heartbeat age (pane-derived freshness — see the liveness table).
  *  - `freshCount(kind)` — the AUDIT tier's **legacy/observability** read:
  *    counts every entry of that kind whose heartbeat is fresh, with no
  *    live-pane requirement, and reaps every stale entry. This is the semantics
@@ -111,7 +112,7 @@
  * |-----------|-------------------|---------|--------|
  * | fresh     | yes               | yes     | no     |
  * | fresh     | no                | no      | no (spawn/reconcile window) |
- * | stale     | yes               | no      | no (pane still alive) |
+ * | stale     | yes               | yes¹    | no (pane still alive) |
  * | stale     | no                | no      | yes    |
  *
  * A pane list that is **UNKNOWN** (a failed/unparseable read — the tri-state
@@ -125,9 +126,20 @@
  * reap: admission fails open on unknown (never wedges dispatch), reap must
  * fail safe (never delete on unknown).
  *
+ * ¹ Pane-derived freshness (WL-0MW9VQ08W000SN63): for the IMPLEMENT tier a
+ * confirmed entry (non-empty `paneId`) whose pane is in the trusted live list
+ * counts regardless of heartbeat age — the pane is conclusive evidence the
+ * dispatch is still in flight, and `heartbeatAt` is only written at
+ * `reserve`/`confirmHostDispatch` (no refresh path), so a >2 h implement must
+ * not silently drop out of the counter or the cap. The AUDIT tier keeps the
+ * freshness rule (staleness is its release; see {@link reduceMarkerCounts}).
+ *
  * A CONFIRMED entry (non-empty `paneId`) whose pane is absent from a trusted
  * live list is additionally swept by {@link sweepClosedPanes} regardless of
  * freshness (WL-0MW5KC8J300942EA), so a closed pane cannot pin a budget slot.
+ * Since WL-0MW9VQ08W000SN63 the sweep applies pane-derived freshness to the
+ * implement tier too: a stale-but-live implement entry is retained (never
+ * swept), matching the counting rule.
  *
  * The window where a freshly reserved entry has no pane yet is why the
  * admission path must pass the `paneId` at reserve time whenever one exists;
@@ -520,6 +532,26 @@ export function livePaneIdSet(
 }
 
 /**
+ * True when a confirmed entry with a live pane counts for the implement tier
+ * (WL-0MW9VQ08W000SN63 pane-derived freshness — the ONE counting rule).
+ *
+ * The implement tier treats a confirmed entry (non-empty `paneId`) whose pane
+ * is in the trusted live list as fresh REGARDLESS of heartbeat age: the pane
+ * is conclusive evidence the dispatch is still in flight, and `heartbeatAt`
+ * is only written at `reserve`/`confirmHostDispatch` (there is no refresh
+ * path), so a >2 h implement would otherwise silently drop out of the counter
+ * and the cap while its pane is demonstrably alive. The audit tier keeps the
+ * freshness rule (staleness is its release; see {@link reduceMarkerCounts}).
+ */
+export function isImplementPaneFresh(
+  entry: { kind: HostBudgetKind },
+  hasLivePane: boolean,
+  stale: boolean,
+): boolean {
+  return hasLivePane && (entry.kind === 'implement' || !stale);
+}
+
+/**
  * Reduce a ledger against a live pane list: per-tier live counts, surviving
  * entries and entries to reap (see the liveness table in the header).
  *
@@ -561,7 +593,14 @@ export function reduceLedgerCounts(
       continue;
     }
     retained.push(entry);
-    if (!stale && hasLivePane) counts[entry.kind] += 1;
+    // Pane-derived freshness (WL-0MW9VQ08W000SN63): for the IMPLEMENT tier a
+    // confirmed entry whose pane is in the trusted live list is counted
+    // REGARDLESS of heartbeat age — a live pane is conclusive evidence the
+    // dispatch is still in flight, and `heartbeatAt` is only written at
+    // reserve/confirm (no refresh path), so a >2 h implement must not silently
+    // drop out of the cap. The AUDIT tier keeps the freshness rule here (its
+    // authoritative counts live in reduceMarkerCounts / reduceAuditDisplayCounts).
+    if (isImplementPaneFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }
@@ -664,7 +703,11 @@ export function reduceAuditDisplayCounts(
  * Entries with NO `paneId` are the reserve→spawn window: there is no pane
  * evidence to judge, so they are retained (and stay counted while fresh) —
  * exactly the behaviour the staleness rule already provides. Stale entries are
- * reaped as before.
+ * reaped as before, with one exception pinned by WL-0MW9VQ08W000SN63: an
+ * IMPLEMENT entry whose pane IS in the trusted live list is pane-derived
+ * fresh and is never reaped by staleness alone (mirroring the counting rule in
+ * {@link reduceLedgerCounts}), so the dead-pane sweep cannot drop a
+ * long-running implement off the ledger.
  *
  * Pure — the sibling of {@link reduceLedgerCounts} / {@link reduceMarkerCounts}.
  * `livePaneIds` MUST come from a trusted pane read; a failed read must not be
@@ -684,12 +727,16 @@ export function reduceClosedPaneSweep(
       typeof entry.paneId === 'string' && entry.paneId.length > 0;
     const hasLivePane = confirmed && livePaneIds.has(entry.paneId as string);
     const stale = isEntryStale(entry, now, staleWindowMs);
-    if (stale || (confirmed && !hasLivePane)) {
+    // Pane-derived freshness for the implement tier (WL-0MW9VQ08W000SN63):
+    // a stale-but-live implement entry is retained, never reaped on staleness.
+    const staleForImplement =
+      stale && (entry.kind !== 'implement' || !hasLivePane);
+    if (staleForImplement || (confirmed && !hasLivePane)) {
       reaped.push(entry);
       continue;
     }
     retained.push(entry);
-    if (!stale && hasLivePane) counts[entry.kind] += 1;
+    if (isImplementPaneFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }
@@ -1053,10 +1100,12 @@ export function sweepClosedPanes(
 /**
  * Count one tier's live dispatches and reap stale, pane-less entries on read.
  *
- * Counted = heartbeat fresh AND `paneId` in `livePanes` (see the header
- * table). The reap write is best-effort: the returned count already excludes
- * reaped entries, so lock contention only defers cleanup — a crashed leader
- * can never wedge the host.
+ * Counted = `paneId` in the trusted live pane list (see the header table):
+ * an IMPLEMENT entry with a live pane counts regardless of heartbeat age
+ * (pane-derived freshness, WL-0MW9VQ08W000SN63), while the audit tier keeps
+ * the fresh-plus-live rule here. The reap write is best-effort: the returned
+ * count already excludes reaped entries, so lock contention only defers
+ * cleanup — a crashed leader can never wedge the host.
  *
  * `livePanes` of `undefined` means pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
  * the admission read becomes a PURE READ — fresh entries count by the

@@ -284,7 +284,7 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
     expect(reduction.retained).toHaveLength(1);
   });
 
-  it('retains a stale entry while its pane is still alive (long-running dispatch)', () => {
+  it('counts a stale-but-live entry (pane-derived freshness, WL-0MW9VQ08W000SN63)', () => {
     const longRunning = entry({
       itemId: 'WL-LONG',
       paneId: 'p1',
@@ -293,6 +293,45 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
     const reduction = reduceLedgerCounts(
       [longRunning],
       livePaneIdSet(makeLivePaneList([{ paneId: 'p1', itemId: 'WL-LONG' }])),
+      NOW,
+    );
+    // AC1: a confirmed implement entry whose pane is in the live list is
+    // counted regardless of heartbeat age — a >2 h run must not silently drop
+    // out of the cap while its pane is demonstrably alive.
+    expect(reduction.counts).toEqual({ implement: 1, audit: 0 });
+    expect(reduction.reaped).toEqual([]);
+    expect(reduction.retained).toHaveLength(1);
+  });
+
+  it('counts an entry heartbeated 5 h ago when its pane is live (AC1 fixed clock)', () => {
+    const longRunning = entry({
+      itemId: 'WL-5H',
+      paneId: 'p1',
+      heartbeatAt: new Date(NOW - 5 * HOUR).toISOString(),
+    });
+    const reduction = reduceLedgerCounts(
+      [longRunning],
+      livePaneIdSet(makeLivePaneList([{ paneId: 'p1', itemId: 'WL-5H' }])),
+      NOW,
+    );
+    expect(reduction.counts).toEqual({ implement: 1, audit: 0 });
+    expect(reduction.reaped).toEqual([]);
+  });
+
+  it('keeps the freshness rule for the AUDIT tier inside the shared reduction', () => {
+    // Pane-derived freshness is implement-scoped (AC5): a stale-but-live
+    // AUDIT entry is retained but not counted by this reduction (the audit
+    // tier's authoritative counts are reduceMarkerCounts /
+    // reduceAuditDisplayCounts).
+    const staleAudit = entry({
+      kind: 'audit',
+      itemId: 'WL-AUDIT-LONG',
+      paneId: 'p1',
+      heartbeatAt: new Date(NOW - 3 * HOUR).toISOString(),
+    });
+    const reduction = reduceLedgerCounts(
+      [staleAudit],
+      livePaneIdSet(makeLivePaneList([{ paneId: 'p1', itemId: 'WL-AUDIT-LONG' }])),
       NOW,
     );
     expect(reduction.counts).toEqual({ implement: 0, audit: 0 });
@@ -842,7 +881,7 @@ describe('reap and liveCount', () => {
     });
   });
 
-  it('retains fresh pane-less and stale-but-live entries without counting them', async () => {
+  it('counts a stale-but-live entry and retains a fresh pane-less one (pane-derived freshness)', async () => {
     await withMachineDir((dir) => {
       writeBudgetLedger(dir, [
         makeBudgetEntry({
@@ -856,8 +895,11 @@ describe('reap and liveCount', () => {
           heartbeatAt: new Date(NOW - 3 * HOUR).toISOString(),
         }),
       ]);
-      expect(liveCount('implement', panes, { now: NOW })).toMatchObject({ count: 0 });
-      expect(reap(panes, { now: NOW })).toMatchObject({ ok: true, reaped: 0, counts: { implement: 0 } });
+      // WL-LIVE is stale (3 h > the 2 h window) but its pane is in the live
+      // list: pane-derived freshness counts it (AC1). WL-SPAWNING is fresh but
+      // pane-less: still in the spawn window, never counted.
+      expect(liveCount('implement', panes, { now: NOW })).toMatchObject({ count: 1 });
+      expect(reap(panes, { now: NOW })).toMatchObject({ ok: true, reaped: 0, counts: { implement: 1 } });
       const read = readBudget();
       expect(read.ok).toBe(true);
       if (!read.ok) return;
@@ -1062,7 +1104,7 @@ describe('sweepClosedPanes — confirmed entries whose pane closed', () => {
     });
   });
 
-  it('reaps stale entries even when their pane is live', async () => {
+  it('retains a stale-but-live IMPLEMENT entry (pane-derived freshness, WL-0MW9VQ08W000SN63)', async () => {
     await withMachineDir((dir) => {
       writeBudgetLedger(dir, [
         makeBudgetEntry({
@@ -1072,7 +1114,14 @@ describe('sweepClosedPanes — confirmed entries whose pane closed', () => {
           heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString(),
         }),
       ]);
-      expect(sweepClosedPanes(panes, { now: NOW })).toMatchObject({ ok: true, reaped: 1 });
+      // A >2 h implement whose pane is still in the live list is pane-derived
+      // fresh: the dead-pane sweep must NOT delete it off the ledger (that was
+      // the under-count mechanism). It is retained and counted.
+      expect(sweepClosedPanes(panes, { now: NOW })).toMatchObject({
+        ok: true,
+        reaped: 0,
+        counts: { implement: 1, audit: 0 },
+      });
     });
   });
 

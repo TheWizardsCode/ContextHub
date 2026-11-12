@@ -72,6 +72,7 @@ import {
   budgetConfigPath,
   clampHostBudget,
   computeOverQuota,
+  liveCount,
   readBudget,
   release,
   reap,
@@ -87,6 +88,7 @@ import {
   withMachineDir,
   writeBudgetLedger,
   writeRawBudgetLedger,
+  type FakeBudgetEntry,
 } from './host-dispatch-budget.fixtures.js';
 import {
   HOST_BUDGET_UNREADABLE_NOTICE,
@@ -1135,6 +1137,107 @@ describe('audit divergence logged by the real pre-check (WL-0MWAMSK9H005BOHD AC2
           local: { live: 0, maxAudit: 5 },
         });
       });
+    });
+  });
+});
+
+// ── WL-0MW9VQ08W000SN63 — pane-derived freshness for stale-but-live
+// ── implement entries (the >2 h under-count fix) ───────────────────────
+
+describe('pane-derived freshness: stale-but-live implement entries (WL-0MW9VQ08W000SN63)', () => {
+  /** An implement ledger entry heartbeated `ageMs` before T0. */
+  function implementEntry(itemId: string, paneId: string, ageMs: number): FakeBudgetEntry {
+    return makeBudgetEntry({
+      kind: 'implement',
+      itemId,
+      paneId,
+      heartbeatAt: new Date(T0 - ageMs).toISOString(),
+    });
+  }
+
+  it('AC4: admission (liveCount) and display (readHostBudgetStatus) agree on stale-but-live entries', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { maxImplement: 8, maxAudit: 1 });
+      const panes = Array.from({ length: 4 }, (_, i) => livePane(`pane-${i + 1}`, `WL-IMP-${i + 1}`));
+      writeBudgetLedger(dir, [
+        // One fresh entry and three stale-but-live entries (5 h old heartbeats).
+        implementEntry('WL-IMP-1', 'pane-1', HOUR),
+        implementEntry('WL-IMP-2', 'pane-2', 5 * HOUR),
+        implementEntry('WL-IMP-3', 'pane-3', 5 * HOUR),
+        implementEntry('WL-IMP-4', 'pane-4', 5 * HOUR),
+      ]);
+
+      // One shared rule: the admission read and the display reader count the
+      // same 4 — the stale-but-live three must NOT be silently dropped.
+      const admission = liveCount('implement', panes, { dir, now: T0, env: CLEAN_ENV });
+      expect(admission.ok).toBe(true);
+      if (!admission.ok) return;
+      expect(admission.count).toBe(4);
+
+      const display = readHostBudgetStatus({ dir, livePanes: panes, now: T0, env: CLEAN_ENV });
+      expect(display?.implement.live).toBe(4);
+      expect(hostBudgetStatusText(display)).toBe('[budget: implement 4/8 · audit 0/1]');
+    });
+  });
+
+  it('AC6: 3 fresh + 5 stale-but-live implement panes → counter reads 8, not 3 (regression)', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { maxImplement: 8, maxAudit: 1 });
+      const panes = Array.from({ length: 8 }, (_, i) => livePane(`pane-${i + 1}`, `WL-IMP-${i + 1}`));
+      writeBudgetLedger(dir, [
+        // 3 fresh entries (1 h old) …
+        ...panes.slice(0, 3).map((pane, i) => implementEntry(`WL-IMP-${i + 1}`, pane.paneId, HOUR)),
+        // … and 5 panes heartbeated 5 h ago whose panes are still live.
+        ...panes.slice(3).map((pane, i) =>
+          implementEntry(`WL-IMP-${i + 4}`, pane.paneId, 5 * HOUR),
+        ),
+      ]);
+
+      // The observed scenario: every stale-but-live pane was dropped from the
+      // counter (reading 3); pane-derived freshness must count all 8.
+      const display = readHostBudgetStatus({ dir, livePanes: panes, now: T0, env: CLEAN_ENV });
+      expect(display?.implement.live).toBe(8);
+      expect(hostBudgetStatusText(display)).toBe('[budget: implement 8/8 · audit 0/1]');
+
+      // Admission agrees: at 8/8 the host is saturated — a ninth implement is
+      // refused with 8/8 evidence (no silent over-admission).
+      const ninth = admitHostDispatch(
+        { kind: 'implement', itemId: 'WL-IMP-9', instanceId: 'instance-a', root: INSTANCE_A_ROOT },
+        { dir, livePanes: panes, now: T0, env: CLEAN_ENV },
+      );
+      expect(ninth).toEqual({
+        admitted: false,
+        live: 8,
+        max: 8,
+        reason: HOST_BUDGET_IMPLEMENT_REFUSAL,
+      });
+    });
+  });
+
+  it('AC5: stale + pane-not-live implement entries are still reaped/uncounted', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { maxImplement: 8, maxAudit: 1 });
+      // Panes 1–2 live (one fresh, one stale-but-live); pane-3 is closed.
+      const panes = [livePane('pane-1', 'WL-IMP-1'), livePane('pane-2', 'WL-IMP-2')];
+      writeBudgetLedger(dir, [
+        implementEntry('WL-IMP-1', 'pane-1', HOUR),
+        implementEntry('WL-IMP-2', 'pane-2', 5 * HOUR),
+        implementEntry('WL-IMP-3', 'pane-3', 5 * HOUR), // stale + pane gone
+      ]);
+
+      const display = readHostBudgetStatus({ dir, livePanes: panes, now: T0, env: CLEAN_ENV });
+      expect(display?.implement.live).toBe(2);
+
+      // The stale, pane-less entry is reaped by the admission read, exactly as
+      // before the fix — best-effort cleanup of a crashed/closed pane.
+      const admission = liveCount('implement', panes, { dir, now: T0, env: CLEAN_ENV });
+      expect(admission.ok).toBe(true);
+      if (!admission.ok) return;
+      expect(admission.count).toBe(2);
+      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual([
+        'WL-IMP-1',
+        'WL-IMP-2',
+      ]);
     });
   });
 });

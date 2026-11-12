@@ -2576,7 +2576,7 @@ entered and the next idle tick re-checks (as with `audit-budget-saturated`).
 
 | Tier | Condition (evaluated at admission) | Decision | Decision-log reason | Header token |
 |---|---|---|---|---|
-| implement | fresh entries whose pane is in the live pane list **<** `maxImplement` | admit + reserve | — | — |
+| implement | entries whose pane is in the live pane list **<** `maxImplement` (a confirmed implement with a live pane counts regardless of heartbeat age — pane-derived freshness, WL-0MW9VQ08W000SN63) | admit + reserve | — | — |
 | implement | pane list UNKNOWN (failed/unparseable `hostBudgetLivePanes` read, WL-0MW9VQX5T001GCUP) | count fresh entries by the **freshness rule** (no pane requirement) — never reaps, never deletes, still decides (fail-open: a broken herdr read does not refuse a tick on its own) | — | — |
 | implement | at/over `maxImplement` (including `maxImplement: 0`) | skip that candidate and keep scanning — no claim, no pane | `host-budget-implement` | `budget-implement` |
 | audit | proxy availability read `available: true` | admit + reserve (the local entry is observability only) | — | — |
@@ -2699,7 +2699,12 @@ ends:
   that pane (`ReaperDeps.releasePaneBudget`), for both `implement` and
   `audit`;
 - **staleness** — the ledger's own 2 h heartbeat-staleness reap remains the
-  final backstop.
+  final backstop. Since WL-0MW9VQ08W000SN63 this reap is **pane-derived** for
+  the implement tier: a stale heartbeat alone never releases a confirmed
+  implement entry whose pane is still in the trusted live list (the pane is
+  conclusive evidence of in-flight work, and `heartbeatAt` is only written at
+  reserve/confirm — there is no refresh path). The entry is released by
+  staleness only once its pane is also gone.
 
 A pane can still be closed *outside* those paths (the operator closes it in
 herdr, a session crashes, the window is torn down). Because the audit tier
@@ -2708,9 +2713,12 @@ would otherwise hold `maxAudit` until the 2 h window expired — the 2026-11-06
 incident. The reaper therefore runs one **dead-pane sweep** per pass
 (`sweepClosedPanes`) with the pane list it already read: any **confirmed**
 entry (non-empty `paneId`) whose pane is absent from that trusted list is
-reaped regardless of heartbeat freshness. Entries with no `paneId` (the
-reserve→spawn window) are retained, and a failed/unparseable pane read never
-sweeps (a synthetic empty list would over-reap and over-admit).
+reaped regardless of heartbeat freshness (and, since WL-0MW9VQ08W000SN63, an
+IMPLEMENT entry whose pane IS in the trusted list is never swept by staleness
+alone — the sweep applies the same pane-derived freshness as the count).
+Entries with no `paneId` (the reserve→spawn window) are retained, and a
+failed/unparseable pane read never sweeps (a synthetic empty list would
+over-reap and over-admit).
 
 **The header's audit count is pane-aware (WL-0MW8D4UQH002TWJV).** Admission
 keeps the marker's liveness-free rule on purpose (a slot is held from dispatch
@@ -2844,7 +2852,7 @@ disagree:
 | Worklist header counter | read-only `[budget: implement n/max · audit n/max]`, rendered from already-available state; it never spawns `wl`, never mutates and never changes a dispatch decision, and renders nothing when the budget is unavailable (no chrome in the common case) | `readHostBudgetStatus` (`host-budget-status.ts`) |
 
 `readHostBudgetStatus` counts with the **same pure reductions admission
-uses** (`reduceLedgerCounts` for the implement live-pane rule,
+uses** (`reduceLedgerCounts` for the implement pane-derived live-pane rule,
 `reduceMarkerCounts` + `legacyActiveAuditCount` for the audit rule), so the
 counter, the header token, the stderr line and the decision entry quote the
 same ledger and the same caps. The display read is deliberately non-mutating
@@ -3025,15 +3033,18 @@ the pane-aware `auditDisplayCount`/`reduceAuditDisplayCounts` for the audit
 dialog, matching the header — WL-0MW8IQNY7003JIOL), prompts only at/over cap,
 then claims.
 
-**Known limitation.** The implement tier counts an entry only while its
-`paneId` is in the machine-wide live pane list (the F1 liveness table). The
-pane branch confirms the reservation with the captured pane id once
-`send-to-pi.sh` reports the split; a headless `open_pane: false` dispatch never
-gains a pane, so its entry is recorded (and carries the override) but never
-counts toward the implement cap. The audit dialog's count is pane-aware (the
-header's display rule, WL-0MW8IQNY7003JIOL) while its **admission** stays
-marker-compatible — the two rules differ only by dead (pane-gone) confirmed
-entries.
+**Known limitation.** The implement tier counts an entry whenever its
+`paneId` is in the machine-wide live pane list (the F1 liveness table) —
+including stale-but-live entries: since WL-0MW9VQ08W000SN63 a confirmed
+implement whose pane is in the trusted live list counts regardless of
+heartbeat age (pane-derived freshness), so a >2 h run is never silently
+dropped from the counter or the cap. The pane branch confirms the
+reservation with the captured pane id once `send-to-pi.sh` reports the
+split; a headless `open_pane: false` dispatch never gains a pane, so its
+entry is recorded (and carries the override) but never counts toward the
+implement cap. The audit dialog's count is pane-aware (the header's display
+rule, WL-0MW8IQNY7003JIOL) while its **admission** stays marker-compatible —
+the two rules differ only by dead (pane-gone) confirmed entries.
 
 **Tests.** `host-budget-dialog.test.ts` pins the copy/overshoot arithmetic and
 every key path; `host-dispatch-budget.interactive.test.ts` pins the gate

@@ -24,12 +24,14 @@
  *    means no ledger and no new failure mode (parent AC11).
  *
  * Counting semantics are the ledger's, never re-derived here: the implement
- * tier uses `liveCount` (fresh heartbeat AND pane in the machine-wide live
- * pane list). The audit tier quotes the pane-aware DISPLAY count the worklist
- * header shows (`auditDisplayCount` → `reduceAuditDisplayCounts`), so the
- * over-quota dialog never claims an audit is running when its pane is gone
- * (WL-0MW8IQNY7003JIOL). Admission itself is unchanged and still uses the
- * marker-compatible `freshCount`/`readAuditBudgetState` rule.
+ * tier uses `liveCount` (pane-derived freshness since WL-0MW9VQ08W000SN63 —
+ * a confirmed implement with a pane in the machine-wide live pane list
+ * counts regardless of heartbeat age). The audit tier quotes the pane-aware
+ * DISPLAY count the worklist header shows (`auditDisplayCount` →
+ * `reduceAuditDisplayCounts`), so the over-quota dialog never claims an audit
+ * is running when its pane is gone (WL-0MW8IQNY7003JIOL). Admission itself is
+ * unchanged and still uses the marker-compatible `freshCount`/`readAuditBudgetState`
+ * rule.
  *
  * The pane read is the tri-state (WL-0MW9VQX5T001GCUP): a FAILED read is
  * UNKNOWN, not "no panes". On unknown the implement tier counts by the
@@ -132,11 +134,13 @@ export interface InteractiveAgentDispatchPreparation {
  * for the unresolvable-coordination-dir case is handled by the caller via
  * `noLedger`, because that case must NOT produce a notice (parent AC11).
  *
- * The implement tier uses the admission rule `liveCount` (fresh heartbeat AND
- * pane in the live list). The audit tier quotes the pane-aware DISPLAY count
- * the worklist header shows (WL-0MW8IQNY7003JIOL): a confirmed audit whose
- * pane is gone must not inflate the dialog, so the operator sees the same
- * number on both surfaces. Admission itself is untouched — the dispatcher
+ * The implement tier uses the admission rule `liveCount` (pane-derived
+ * freshness since WL-0MW9VQ08W000SN63: a confirmed implement whose pane is
+ * in the live list counts regardless of heartbeat age). The audit tier quotes
+ * the pane-aware DISPLAY count the worklist header shows
+ * (WL-0MW8IQNY7003JIOL): a confirmed audit whose pane is gone must not
+ * inflate the dialog, so the operator sees the same number on both surfaces.
+ * Admission itself is untouched — the dispatcher
  * still uses `freshCount`/`readAuditBudgetState` (fail-closed, marker-
  * compatible). This read is non-mutating: unlike `freshCount` it never reaps
  * or rewrites the ledger.
