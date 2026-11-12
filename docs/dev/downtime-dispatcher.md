@@ -1917,10 +1917,13 @@ Two mechanisms, in this order of preference:
 1. **Never provision before admission.** `resolveDispatchPlacement` (in
    `downtime-worker.dispatch-placement.ts`) runs after the CAS claim, the
    reservation gate and the host-budget admission, and immediately before the
-   marker write. A claim loss, a reservation refusal, a TTL-below-bound
-   reservation or a host-budget refusal therefore returns **before any tab is
-   created** — there is no pane to leak. This covers the automated dispatcher's
-   `implement` and `audit` tiers alike.
+   marker write. A claim loss, a reservation refusal or a host-budget refusal
+   therefore returns **before any tab is created** — there is no pane to leak.
+   A TTL-below-bound reservation is the one gate that does *not* abort: it
+   fails open (no ticket forwarded, recorded `reservationUnavailable:
+   'ttl-below-bound'`) and the pipeline continues to provision, so the tab
+   that is created is the one the dispatch pane lands in — never an orphan.
+   This covers the automated dispatcher's `implement` and `audit` tiers alike.
 2. **Defence in depth on the aborts that DID provision.** Once the item tab
    exists, every remaining pre-spawn abort closes the placeholder root pane via
    `closePlaceholderRootPaneBestEffort`: marker-write failure

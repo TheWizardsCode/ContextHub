@@ -22,6 +22,12 @@
  *     failure leave no orphan: the placeholder root pane is closed
  *     (fail-safe — a reused live anchor and unavailable liveness are left
  *     open) and the claim/budget reservation are rolled back.
+ *  3. **The pre-placement aborts never provision at all** — a lost claim
+ *     (`claim-failed`) and a local-capacity reservation refusal return
+ *     before the placement block, so there is no tab and therefore no pane
+ *     to leak; and a TTL-below-bound grant is NOT an abort (it fails open
+ *     with no ticket forwarded) — provisioning continues and the tab
+ *     becomes the dispatch pane, so nothing is orphaned there either.
  *
  * Shared scaffolding (`makeDeps`, etc.) is imported from
  * `downtime-worker.fixtures.ts`; no setup logic is re-implemented here.
@@ -230,6 +236,107 @@ describe('no orphaned placeholder pane — pre-spawn aborts (WL-0MW5JE0SZ0057K30
       '/repo',
     );
     expect(deps.releaseHostDispatch).toHaveBeenCalledWith(IMPLEMENT_CANDIDATE.id, '/repo');
+  });
+});
+
+// ── AC2: pre-placement aborts — nothing to leak ─────────────────────
+
+describe('no orphaned placeholder pane — pre-placement aborts (WL-0MW5JE0SZ0057K30)', () => {
+  it('AC2: a lost claim (claim-failed) returns before any provisioning — no tab, no pane, no cleanup', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(IMPLEMENT_CANDIDATE),
+      claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+      ...placementDeps(),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('claim-failed');
+    // The claim was never won (a concurrent agent got there first): the
+    // pipeline returns before the reservation/admission/placement gates, so
+    // no tab (or placeholder root pane) is ever created and nothing needs
+    // closing — the no-orphan guarantee holds by construction.
+    expect(deps.resolveProjectWorkspace).not.toHaveBeenCalled();
+    expect(deps.getItemTabAnchor).not.toHaveBeenCalled();
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // Nothing was won, so there is nothing to roll back either.
+    expect(deps.rollbackClaim).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a local-capacity reservation refusal returns before any provisioning — no tab, no pane, no cleanup', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(IMPLEMENT_CANDIDATE),
+      reserveLocalCapacity: vi.fn().mockResolvedValue({
+        status: 'refused',
+        refusal: { reason: 'queue-full', retryAfterSeconds: 12 },
+      }),
+      ...placementDeps(),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('queue-full');
+    expect(outcome.reservation).toMatchObject({
+      admit: false,
+      retryAfterS: 12,
+      projectedWaitS: 12,
+    });
+    // The refusal returns before the placement block: no tab/placeholder
+    // pane is ever created, so the no-orphan guarantee holds by construction.
+    expect(deps.resolveProjectWorkspace).not.toHaveBeenCalled();
+    expect(deps.getItemTabAnchor).not.toHaveBeenCalled();
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // The claim is rolled back so the item is re-selectable next idle period.
+    expect(deps.rollbackClaim).toHaveBeenCalledWith(
+      IMPLEMENT_CANDIDATE.id,
+      { status: 'open', stage: 'plan_complete' },
+      '/repo',
+    );
+  });
+
+  it('AC2/AC5: a TTL-below-bound grant fails open and provisions — the tab becomes the dispatch pane, never an orphan', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(IMPLEMENT_CANDIDATE),
+      reserveLocalCapacity: vi.fn().mockResolvedValue({
+        status: 'granted',
+        ticket: { ticketId: 'tkt-low-ttl', ttlSeconds: 5 },
+      }),
+      ...placementDeps(),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // TTL-below-bound is NOT a refusal (AC9): a ticket with less than the
+    // documented usable window is never treated as capacity, so the grant
+    // fails open — no ticket forwarded — and the pipeline CONTINUES to
+    // provision rather than aborting before placement.
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.resolveProjectWorkspace).toHaveBeenCalled();
+    expect(deps.getItemTabAnchor).toHaveBeenCalled();
+    // The short-lived ticket is never forwarded to the pane…
+    expect(deps.spawnAgentPane).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reservationTicketId: expect.anything() }),
+    );
+    // …but the anchor still lands the dispatch pane in the provisioned tab,
+    // so the placeholder becomes the real pane rather than an orphan.
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: ANCHOR_PANE_ID }),
+    );
+    // The marker records WHY no ticket was forwarded (AC4 exchange naming).
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationUnavailable: 'ttl-below-bound' }),
+    );
+    expect(deps.rollbackClaim).not.toHaveBeenCalled();
   });
 });
 
