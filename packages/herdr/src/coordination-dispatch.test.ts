@@ -3872,6 +3872,211 @@ describe('host-wide dispatch budget (F3)', () => {
   });
 });
 
+// ── Audit-budget refusal on the offer path (WL-0MWDDHVF2004PTYX) ─────────
+//
+// The proxy-derived audit budget (`audit-budget-saturated` /
+// `audit-budget-unknown`) refuses an OFFERED audit at admission. Before
+// WL-0MWDDHVF2004PTYX those outcomes matched none of the offer loop's
+// special cases and fell through unmasked — a tick with only audit refusals
+// could report `host-budget-implement` (an implement hold recorded later in
+// the same scan) or `no-candidate`, hiding a missing proxy endpoint (the
+// 2026-11-12 incident: ~130 consecutive `host-budget-implement` ticks and
+// zero `audit-budget-*` entries while `/llama/local/audit/status` answered
+// 404). The audit refusal is now recorded as its OWN neutral hold
+// (`auditBudgetHold`, why-origin AC1), ranked ABOVE the implement/host rung
+// in the terminal chain (AC2), carries the failing exchange as `detail`
+// (AC3), and is attributed in the per-offer rejection payload (AC5).
+function auditRefusalDeps(
+  reason: string,
+  detail?: string,
+  live = 0,
+  max = 0,
+): { deps: ReturnType<typeof makeCoordinationDeps>; entry: CoordinationEntry } {
+  const entry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+  const deps = makeCoordinationDeps({
+    admitHostDispatch: vi.fn().mockResolvedValue({
+      admitted: false,
+      live,
+      max,
+      reason,
+      ...(detail !== undefined ? { detail } : {}),
+    }),
+    fetchItem: vi.fn().mockResolvedValue({
+      ok: true,
+      info: itemInfo({
+        id: 'WL-AUD',
+        status: 'completed',
+        stage: 'in_review',
+        updatedAt: new Date().toISOString(),
+      }),
+    }),
+  });
+  return { deps, entry };
+}
+
+describe('audit-budget refusal on the offer path (WL-0MWDDHVF2004PTYX)', () => {
+  it('AC1: an audit-only refusal reports the audit-budget reason with detail and attribution (never host-budget-implement, never no-candidate)', async () => {
+    const { deps, entry } = auditRefusalDeps('audit-budget-unknown', 'http-404');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+    });
+
+    // The tick names the AUDIT gate — the exact incident it fixes.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-budget-unknown');
+    // The failing exchange is emitted in the same decision entry (AC3).
+    expect(outcome.detail).toBe('http-404');
+    expect(outcome.reason).not.toBe('host-budget-implement');
+    expect(outcome.reason).not.toBe('no-candidate');
+    // AC4: neutral — no pane, no marker, no claim left stranded.
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    // AC5: the per-offer rejection payload names the audit gate.
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-AUD', worklogRoot: '/roots/audit', gate: 'audit-budget' },
+    ]);
+    // The offer is KEPT — still valid once the proxy answers.
+    expect(getEntry(testDir, 'inst-audit')).not.toBeNull();
+  });
+
+  it('AC2: an audit refusal OUTRANKS an implement refusal in the same tick', async () => {
+    const auditEntry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+    const implementEntry = makeEntry('inst-imp', 'WL-IMP', '/roots/impl');
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [auditEntry, implementEntry],
+    });
+    const deps = makeCoordinationDeps({
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'audit'
+          ? {
+              admitted: false,
+              live: 1,
+              max: 1,
+              reason: 'audit-budget-saturated',
+            }
+          : { admitted: false, live: 2, max: 2, reason: 'host-budget-implement' },
+      ),
+      fetchItem: vi.fn(async (itemId: string) => ({
+        ok: true as const,
+        info: itemInfo(
+          itemId === 'WL-AUD'
+            ? {
+                id: 'WL-AUD',
+                status: 'completed',
+                stage: 'in_review',
+                updatedAt: new Date().toISOString(),
+              }
+            : {
+                id: 'WL-IMP',
+                status: 'open',
+                stage: 'plan_complete',
+                risk: 'Low',
+                effort: 'S',
+              },
+        ),
+      })),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [auditEntry, implementEntry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      effectiveFreeSlots: 2,
+    });
+
+    // The audit rung beats the ambient implement-cap statement: the tick
+    // explains the TIER that is actually dead, not the one that is merely full.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-budget-saturated');
+    expect(outcome.budget).toEqual({ live: 1, max: 1 });
+    expect(outcome.reason).not.toBe('host-budget-implement');
+    // Both offers are attributed — the audit with its own gate token.
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-AUD', worklogRoot: '/roots/audit', gate: 'audit-budget' },
+    ]);
+  });
+
+  it('AC3: the failing exchange detail reaches the outcome for http-404, timeout and bad-body', async () => {
+    for (const detail of ['http-404', 'timeout', 'bad-body'] as const) {
+      const { deps, entry } = auditRefusalDeps('audit-budget-unknown', detail);
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+      });
+      expect(outcome.reason).toBe('audit-budget-unknown');
+      expect(outcome.detail).toBe(detail);
+    }
+  });
+
+  it('AC7: an audit refusal alongside a successful dispatch does not pollute the success outcome', async () => {
+    const auditEntry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+    const implementEntry = makeEntry('inst-imp', 'WL-IMP', '/roots/impl');
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [auditEntry, implementEntry],
+    });
+    const deps = makeCoordinationDeps({
+      // Refuse the audit offer; admit the implement offer so it dispatches.
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'audit'
+          ? {
+              admitted: false,
+              live: 1,
+              max: 1,
+              reason: 'audit-budget-unknown',
+              detail: 'seam-absent',
+            }
+          : { admitted: true, live: 0, max: 2 },
+      ),
+      fetchItem: vi.fn(async (itemId: string) => ({
+        ok: true as const,
+        info: itemInfo(
+          itemId === 'WL-AUD'
+            ? {
+                id: 'WL-AUD',
+                status: 'completed',
+                stage: 'in_review',
+                updatedAt: new Date().toISOString(),
+              }
+            : {
+                id: 'WL-IMP',
+                status: 'open',
+                stage: 'plan_complete',
+                risk: 'Low',
+                effort: 'S',
+              },
+        ),
+      })),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [auditEntry, implementEntry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      effectiveFreeSlots: 2,
+    });
+
+    // The implement offer dispatches; the recorded audit hold must NOT leak
+    // budget/detail/rejections onto the success outcome.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.reason).toBeUndefined();
+    expect(outcome.budget).toBeUndefined();
+    expect(outcome.detail).toBeUndefined();
+    expect(outcome.offerRejections).toBeUndefined();
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ── Per-bucket nominees from one head read (parent WL-0MWDDHQON0015T3P AC2/AC3) ──
 //
 // Tier-aware offers (WL-0MWDDHQON0015T3P): each instance advertises the head

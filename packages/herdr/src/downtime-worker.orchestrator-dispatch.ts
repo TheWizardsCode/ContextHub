@@ -706,6 +706,13 @@ export async function performDispatch(
           // outcome — one set of numbers for every surface. Absent on every
           // non-budget outcome, so existing entry shapes are unchanged.
           ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
+          // Failing exchange on a fail-closed audit-budget refusal
+          // (`audit-budget-unknown`): the decision entry names the broken
+          // proxy contract (`http-404` / `timeout` / `network` / `bad-body` /
+          // `seam-absent`) without reading code (WL-0MWDDHVF2004PTYX AC3).
+          // Absent on every other outcome, so existing entry shapes are
+          // unchanged.
+          ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
           // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
           // slice C2): a refusal carries its reason as the decision reason
           // (distinct header token) plus `admit: false`, `retryAfterS` and

@@ -2615,7 +2615,16 @@ to the next candidate ONLY for an allow-listed **continuable hold**:
   `host-budget-unknown`, `audit-budget-saturated`, `audit-budget-unknown`,
   `audit-host-saturated`: the candidate is budgeted, but a prep candidate
   ranked behind it (`plan` / `intake` / `risk-effort`) is not, so the scan
-  records the hold (reason + `{live, max}`) and keeps scanning.
+  records the hold (reason + `{live, max}`) and keeps scanning. The hold is
+  recorded on TWO rungs (WL-0MWDDHVF2004PTYX): an **audit** refusal
+  (`audit-budget-*`, or the legacy `host-budget-audit` /
+  `audit-host-saturated`) lands on `HeadScanHolds.auditBudget` (carrying the
+  failing exchange as `detail` when the proxy read failed closed), an
+  **implement/host** refusal on `HeadScanHolds.hostBudget` — so the leader's
+  terminal chain can rank an audit refusal ABOVE an implement one: a tick
+  whose audit budget refused (`audit-budget-unknown` + `detail: 'http-404'`)
+  must say so, never `host-budget-implement` (a broken proxy contract is not
+  an ambient implement-cap statement).
 
 Everything else is **terminal/strike-worthy** and returns immediately, ending
 the tick exactly as before: `wl-error`, `spawn-failed`, `marker-write-failed`,
@@ -2853,7 +2862,7 @@ disagree:
 
 | Surface | What it shows | Source |
 |---|---|---|
-| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement` for implement; `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier; the legacy `host-budget-audit` / `host-budget-unknown` / `audit-host-saturated` under `HERDR_AUDIT_LOCAL_BUDGET=1`) plus a `budget` evidence figure (`live`/`max` for the tier), and the `audit-budget-divergence` / `audit-budget-legacy` evidence entries | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
+| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement` for implement; `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier; the legacy `host-budget-audit` / `host-budget-unknown` / `audit-host-saturated` under `HERDR_AUDIT_LOCAL_BUDGET=1`) plus a `budget` evidence figure (`live`/`max` for the tier) and, on a fail-closed audit read, the failing exchange as `detail` (`http-404` / `timeout` / `network` / `bad-body` / `seam-absent`) — the decision entry names the broken proxy contract without reading code (WL-0MWDDHVF2004PTYX AC3); plus the `audit-budget-divergence` / `audit-budget-legacy` evidence entries | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
 | Herdr header token | `budget-implement` / `budget-audit` / `budget-unknown`, from the shared `decisionHeaderToken` mapping, so the header says *why* the tick stopped — consistent with `contention` / `slot-owner` / `saturated` | `downtime-worker.constants.ts` |
 | stderr skip line | `[worklog-plugin] Downtime <tier> tier skipped: <reason> (live=n, max=m)` (`tier` is `budget` for `audit-budget-unknown` / `host-budget-unknown`) | `hostBudgetSkipLine` (`host-budget-status.ts`) |
 | Worklist header counter | read-only `[budget: implement n/max · audit n/max]`, rendered from already-available state; it never spawns `wl`, never mutates and never changes a dispatch decision, and renders nothing when the budget is unavailable (no chrome in the common case) | `readHostBudgetStatus` (`host-budget-status.ts`) |
@@ -4242,7 +4251,9 @@ strings: `soft-deleted`, `producer-review`, `assignee-hold`,
 `not-dispatchable`, `audit-fresh`, `audit-recency`, `effort-cap`,
 `dispatched-marker`, `attempt-budget-exhausted`, `non-terminal-cooldown`,
 `code-freeze`, `cpu-saturated`, `audit-slot-min`, `review-queue-hold`,
-`in-flight-pane`, `slots-unavailable`, `wl-error`.
+`in-flight-pane`, `slots-unavailable`, `audit-budget` (the proxy-derived
+audit budget refused the audit offer — the per-offer counterpart of the
+`auditBudgetHold` terminal hold, WL-0MWDDHVF2004PTYX AC5), `wl-error`.
 
 **The result semantics are unchanged.** A fully-held window is still
 `noCandidate` (the 60-minute no-candidate cooldown behaves exactly as before,

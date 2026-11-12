@@ -248,6 +248,15 @@ export interface HostBudgetAdmission {
   max: number;
   /** Present only on a refusal. */
   reason?: HostBudgetRefusalReason;
+  /**
+   * The failing exchange on a fail-closed AUDIT refusal
+   * (`audit-budget-unknown`): `http-404`, `timeout`, `network`,
+   * `http-<status>`, `bad-body` or `seam-absent` — verbatim from
+   * {@link AuditAvailabilityDecision.detail}, so the decision entry can name
+   * the broken proxy contract (WL-0MWDDHVF2004PTYX AC3). Absent on an
+   * implement refusal and on a `saturated` (proxy answered) audit refusal.
+   */
+  detail?: string;
   /** True when an unreadable ledger was rewritten from live state (AC6). */
   repaired?: boolean;
 }
@@ -671,6 +680,10 @@ function admitAuditDispatch(
       live: decision.budget?.live ?? 0,
       max: decision.budget?.max ?? 0,
       reason: decision.reason ?? AUDIT_BUDGET_UNKNOWN_REASON,
+      // The failing exchange on a fail-closed read (`audit-budget-unknown`):
+      // carried so the terminal reason and the decision entry can name the
+      // broken proxy contract (WL-0MWDDHVF2004PTYX AC3).
+      ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
     };
   }
 

@@ -197,8 +197,17 @@ export function decisionHeaderToken(reason: string): string {
     case HOST_BUDGET_IMPLEMENT_REASON:
       return 'budget-implement';
     case HOST_BUDGET_AUDIT_REASON:
+      // The AUDIT tier's proxy-derived token `audit-budget-saturated` quotes
+      // the same header segment `budget-audit` as the ledger's
+      // `host-budget-audit` (the documented decision-reason table,
+      // WL-0MWDDHVF2004PTYX AC8). The legacy `audit-host-saturated` token
+      // keeps its raw header token, pinned by the orchestrator suite.
+    case 'audit-budget-saturated':
       return 'budget-audit';
     case HOST_BUDGET_UNKNOWN_REASON:
+    case 'audit-budget-unknown':
+      // `audit-budget-unknown` (a fail-closed proxy read) is a budget stop
+      // like `host-budget-unknown`, so both quote `budget-unknown`.
       return 'budget-unknown';
     case 'prefill-gate':
     case 'prefill-cap':
@@ -376,6 +385,14 @@ export interface DecisionEntryFields extends CapacityEvidence {
   capacityBudget?: number;
   effectiveFreeSlots?: number;
   skippedTier?: string;
+  /**
+   * Failing exchange on a fail-closed audit-budget refusal
+   * (`audit-budget-unknown`): `http-404` / `timeout` / `network` /
+   * `http-<status>` / `bad-body` / `seam-absent`, copied from the dispatch
+   * outcome so the decision entry names the broken proxy contract without
+   * reading code (WL-0MWDDHVF2004PTYX AC3). Absent on every other entry.
+   */
+  detail?: string;
   /**
    * Leaf-audit tick-admission evidence (WL-0MVV1F0HK009JQAP C4). On the
    * non-blocking `leaf-audit-admission` observation: the pinned audit item and

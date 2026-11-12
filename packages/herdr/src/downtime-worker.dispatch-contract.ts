@@ -230,6 +230,17 @@ export interface DowntimeHostBudgetAdmission {
    * `host-budget-audit` / `audit-host-saturated` / `host-budget-unknown`.
    */
   reason?: string;
+  /**
+   * The failing exchange on a fail-closed audit-budget refusal
+   * (`audit-budget-unknown`): the name the proxy read failed with
+   * (`http-404`, `timeout`, `network`, `http-<status>`, `bad-body`,
+   * `seam-absent`) — see {@link AuditAvailabilityOutcome}. Absent on an
+   * implement refusal and on a `saturated` (proxy answered) audit refusal,
+   * where there is no failing exchange. Carried through to the decision entry
+   * so the log names the broken contract without reading code
+   * (WL-0MWDDHVF2004PTYX AC3).
+   */
+  detail?: string;
   /** True when an unreadable ledger was rewritten from live panes (AC6). */
   repaired?: boolean;
 }
@@ -451,6 +462,16 @@ export interface DowntimeDispatchOutcome {
    */
   budget?: { live: number; max: number };
   /**
+   * Failing exchange on a fail-closed AUDIT-budget refusal
+   * (`audit-budget-unknown`): `http-404` (endpoint-absent), `timeout` /
+   * `network` / `http-<status>` (unreachable), `bad-body` (unparsable) or
+   * `seam-absent` (no client wired). Copied from the admission seam's
+   * {@link DowntimeHostBudgetAdmission.detail} so the terminal reason and the
+   * decision entry can name the broken proxy contract; absent on every other
+   * outcome (WL-0MWDDHVF2004PTYX AC3).
+   */
+  detail?: string;
+  /**
    * Spawn-level error message ('spawn-failed' trace, e.g. ENOENT on
    * send-to-pi.sh — WL-0MSLWJ3I70031Z8U AC2).
    */
@@ -575,6 +596,12 @@ export const LOST_CLAIM_REASONS: ReadonlySet<string> = new Set([
  *  - `audit-budget-saturated` / `audit-budget-unknown` (the proxy-owned
  *    availability verdict) plus the one-release legacy `audit-host-saturated`.
  *
+ * This set is the UNION allow-list that keeps every budget refusal a
+ * continuable hold; the terminal-reason precedence further splits it into
+ * the AUDIT rung ({@link AUDIT_BUDGET_HOLD_REASONS} — "this host's audit
+ * tier was refused") and the implement/host rung below it
+ * (WL-0MWDDHVF2004PTYX AC2).
+ *
  * Prep work (`plan` / `intake` / `risk-effort`) is never budget-gated, which
  * is exactly why a refusal must not end the scan: the prep candidate ranked
  * behind the refused budgeted candidate is still dispatchable.
@@ -588,9 +615,54 @@ export const HOST_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
   'audit-host-saturated',
 ]);
 
+/**
+ * The AUDIT tier's budget-refusal tokens — the subset of
+ * {@link HOST_BUDGET_HOLD_REASONS} that names a refusal of the audit tier
+ * (proxy-derived `audit-budget-*`, plus the one-release legacy
+ * `host-budget-audit` / `audit-host-saturated`). A refusal quoted with one of
+ * these is a statement about the AUDIT tier and therefore OUTRANKS an
+ * implement-tier refusal in the terminal-reason precedence
+ * (WL-0MWDDHVF2004PTYX AC2): an audit refusal with `detail: 'http-404'` is a
+ * broken proxy contract, not an ambient implement-cap statement.
+ *
+ * `host-budget-unknown` is DELIBERATELY absent: both tiers quote it when the
+ * ledger cannot be trusted, so the refusing tier is decided from the
+ * outcome's `kind` by {@link isAuditBudgetHoldOutcome}.
+ */
+export const AUDIT_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
+  'audit-budget-saturated',
+  'audit-budget-unknown',
+  'host-budget-audit',
+  'audit-host-saturated',
+]);
+
 /** True when `reason` is one of the host-budget refusal tokens. */
 export function isHostBudgetHoldReason(reason: string | undefined): boolean {
   return reason !== undefined && HOST_BUDGET_HOLD_REASONS.has(reason);
+}
+
+/** True when `reason` is one of the AUDIT tier's budget-refusal tokens. */
+export function isAuditBudgetHoldReason(reason: string | undefined): boolean {
+  return reason !== undefined && AUDIT_BUDGET_HOLD_REASONS.has(reason);
+}
+
+/**
+ * True when a budget-refusal OUTCOME refused the AUDIT tier.
+ *
+ * Unambiguous tokens are decided by {@link AUDIT_BUDGET_HOLD_REASONS}; the one
+ * tier-ambiguous token (`host-budget-unknown` — both tiers fail closed to it
+ * when the ledger cannot be trusted) is decided by the outcome's `kind`
+ * (carried on the refusal by `dispatchClaimedTier`, WL-0MWDDHVF2004PTYX),
+ * falling back to the implement/host rung when no kind was recorded.
+ */
+export function isAuditBudgetHoldOutcome(outcome: {
+  reason?: string;
+  kind?: string;
+}): boolean {
+  if (!isHostBudgetHoldReason(outcome.reason)) return false;
+  if (isAuditBudgetHoldReason(outcome.reason)) return true;
+  // `host-budget-unknown` — the refusing tier decides (fallback: host rung).
+  return outcome.kind === 'audit';
 }
 
 /** True when `reason` is one of the lost-claim tokens. */
