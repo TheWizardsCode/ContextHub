@@ -2,6 +2,11 @@ import type { WorkItem } from '../types.js';
 import type { StatusStageRules } from '../status-stage-rules.js';
 import { normalizeStageValue, normalizeStatusValue } from '../status-stage-rules.js';
 import { getAllowedStagesForStatus, getAllowedStatusesForStage, isStatusStageCompatible } from '../status-stage-validation.js';
+// Shared soft-delete predicate (WL-0MW7S20IC001F3AP): a soft-deleted row is
+// retired — its retained status/stage is intentional (wl delete keeps the
+// stage for UI continuity) and must not be reported as an incompatible
+// combination. Doctor findings are for live, actionable rows.
+import { isSoftDeleted } from '@worklog/shared/predicates';
 
 export type DoctorSeverity = 'info' | 'warning' | 'error';
 
@@ -63,6 +68,13 @@ export function validateStatusStageItems(items: WorkItem[], rules: StatusStageRu
   const findings: DoctorFinding[] = [];
 
   for (const item of items) {
+    // Soft-deleted rows (status=deleted OR non-empty deletedBy) are retired and
+    // excluded from normal workflows; their retained status/stage must not
+    // surface as a doctor finding (WL-0MW7S20IC001F3AP AC2).
+    if (isSoftDeleted(item)) {
+      continue;
+    }
+
     const status = resolveStatus(item.status, rules);
     const stageValue = item.stage ?? '';
     const stage = resolveStage(stageValue, rules);

@@ -29,6 +29,12 @@ import {
 } from './downtime-worker.coordination-batch.js';
 import { computeMostImportantItem, toCoordinationCandidate, type CoordinationDeps } from './downtime-worker.coordination.js';
 import {
+  dispatchFromOwnHead,
+  dispatchFromRegisteredRoots,
+  type HeadScanBase,
+  type HeadScanHolds,
+} from './downtime-worker.head-scan.js';
+import {
   withOfferRejections,
   type CoordinationOfferRejection,
   type DispatchGateToken,
@@ -56,11 +62,8 @@ import {
   REVIEW_QUEUE_HOLD_REASON,
   auditItemEligible,
   auditPinAdmits,
-  classifyItemForDispatch,
   classifyItemForDispatchDetail,
   computeAuditEligibleDepth,
-  evaluateCriticalFirstGuard,
-  fetchExtendedHerdrItems,
   finalizeAuditBatchOutcome,
   flagBudgetExhausted,
   isAttemptBudgetExhausted,
@@ -69,11 +72,8 @@ import {
   type ReviewQueueGateResult,
 } from './downtime-worker.gates.js';
 import {
-  dispatchedItemMarkers as _dispatchedMarkers,
   isNonTerminalCooldownActive as _isNonTerminalCooldownActive,
-  markerStillExcludes as _markerStillExcludes,
   readDowntimeLogEntries as _readDowntimeEntries,
-  type DispatchMarker,
 } from './downtime-log.js';
 import { resolveInFlightPanes } from './downtime-worker.pane.js';
 import {
@@ -81,11 +81,8 @@ import {
   resumeStalledWorkIfAble,
 } from './downtime-worker.stalled-resume.js';
 import type {
-  DowntimeHerdrItem,
   DowntimeHerdrListResult,
   DowntimeItemResult,
-  DowntimeSkillKind,
-  DowntimeStage,
   InFlightPanes,
 } from './downtime-worker.types.js';
 import type { LocalPreference, LocalPreferenceMode } from './local-preference.js';
@@ -148,6 +145,21 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
  * `wl-error` only when EVERY entry failed (a fully broken lookup — a
  * strike); a per-entry failure skips that entry (fail-open per instance,
  * parent risk mitigation — one broken worklog must not starve the rest).
+ *
+ * ## Continuable holds and terminal-reason precedence
+ *
+ * A host-budget refusal is a CONTINUABLE HOLD (WL-0MWBT76WY00298AY): the offer
+ * loop records the first refusal and keeps trying the remaining offers, and
+ * the own-head scan records it on `HeadScanHolds.hostBudget` and steps to the
+ * next candidate, so prep work ranked behind a budget-refused candidate still
+ * dispatches. When nothing else dispatches, the terminal-reason chain folds
+ * that hold in with a fixed precedence:
+ *
+ *     code-freeze → CPU → review-queue → non-terminal cooldown →
+ *     attempt budget → in-flight → leaf-audit pin → host budget → no-candidate
+ *
+ * so a budget hold reports the neutral refusal (never `no-candidate`) with its
+ * `{live, max}` evidence — no strike, no cooldown, no attempt-budget charge.
  */
 export async function dispatchFromCoordination(
   deps: CoordinationLeaderDeps,
@@ -170,7 +182,11 @@ export async function dispatchFromCoordination(
      * non-audit offer is ineligible (`slots-unavailable`) and the audit tier
      * admits no other candidate. `undefined` = no relaxation (unchanged).
      */
-    pinnedAuditItemId?: string },
+    pinnedAuditItemId?: string;
+    /**
+     * Resolved `downtimeWorklogRoots` roots the leader may sweep (WL-0MVR8GDJ3008WY3Y O1): already validated/normalised by `loadSettings`; absent/empty ⇒ no sweep (AC6).
+     */
+    registeredRoots?: readonly string[] },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1–AC5):
@@ -210,189 +226,6 @@ export async function dispatchFromCoordination(
     auditBatchContinuation: true,
     ownBacklogDispatch: finalized.dispatched && batchEnded,
   };
-}
-
-/**
- * Own-head candidate scan shared by the leader's own-backlog fallback
- * (parent WL-0MUU4XFU90008E24) and the audit-batch continuation (parent
- * WL-0MVEDM8OT007WDRS AC4).
- *
- * Factored out so the continuation applies the EXACT same sequential filter
- * chain as the fallback — classify → dispatched-marker exclusion (id-guard) →
- * attempt budget → non-terminal cooldown → code-freeze → audit slot minimum →
- * critical in-flight guard → review-queue hold — with no duplicated gate
- * logic. The scan never ranks: `window.head` + `window.tail` is the canonical
- * order.
- *
- * Returns `null` when no candidate was dispatched or attempted (the caller
- * keeps its original terminal reason), otherwise the dispatch outcome with
- * `ownBacklogDispatch` deliberately LEFT UNSET — the caller decides the
- * leadership hand-off semantics (the fallback hands off immediately, the
- * batch continuation defers it to batch end).
- */
-async function dispatchFromOwnHead(
-  deps: CoordinationLeaderDeps,
-  opts: { model: string; cwd: string; localPreference?: LocalPreference; localPreferenceMode?: LocalPreferenceMode },
-  ctx: {
-    window: { head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] };
-    frozen: boolean;
-    /**
-     * Host-CPU gate state (WL-0MVK0UO3Q002TXW6 AC2): while saturated this scan
-     * refuses audit/implement kinds in the same place as the code freeze, so
-     * the own-backlog fallback and the audit-batch continuation are gated too.
-     */
-    cpuSaturated: boolean;
-    /** Raw free-slot budget the per-item leaf-aware audit gate reads (C3). */
-    auditSlotBudget: number | undefined;
-    /** False when a relaxed leaf-audit pin reserves the single free slot. */
-    panesEligible: boolean;
-    /** Relaxed-tick pin (C4): only this audit item may consume the slot. */
-    pinnedAuditItemId: string | undefined;
-    markerStaleWindowMs: number;
-    maxAttempts: number;
-    cooldownMs: number;
-    cooldownEntriesForRoot(root: string): Promise<DowntimeLogEntry[]>;
-    inFlightForRoot(root: string): Promise<InFlightPanes>;
-    reviewGateForRoot(root: string): Promise<ReviewQueueGateResult | null>;
-    /** Kinds this scan may dispatch; `null` = every classified kind. */
-    kinds: readonly DowntimeSkillKind[] | null;
-    /** Batch-local exclusion set (never re-selected within one batch). */
-    excludeIds: ReadonlySet<string>;
-    /** Selection reason recorded on the dispatch pipeline. */
-    selectionReason: string;
-    /** `claim-failed`/`claim-rolled-back` → try the next item (fallback) or end the scan (continuation). */
-    skipOnLostClaim: boolean;
-    /** Holds reported back to the caller's terminal-reason composition. */
-    holds: {
-      budget: boolean;
-      cooldown: boolean;
-      inFlight: boolean;
-      review: boolean;
-      cpu: boolean;
-    };
-    /** Producer-review flag writes already performed this cycle (deduped). */
-    flaggedForBudget: Set<string>;
-  },
-  now: number,
-): Promise<DowntimeDispatchOutcome | null> {
-  const { head, tail } = ctx.window;
-  const ownTail = tail.filter(item => !ctx.excludeIds.has(item.id));
-  if (ownTail.length === 0) return null;
-  const ownEntries = await ctx.cooldownEntriesForRoot(opts.cwd);
-  const ownMarkerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
-    audit: _dispatchedMarkers(ownEntries, 'audit'),
-    implement: _dispatchedMarkers(ownEntries, 'implement'),
-    plan: _dispatchedMarkers(ownEntries, 'plan'),
-    intake: _dispatchedMarkers(ownEntries, 'intake'),
-    'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
-  };
-  const ownInFlight = await ctx.inFlightForRoot(opts.cwd);
-  void head; // the extension alone is the supplement; `head` is the ranked prefix
-  for (const item of ownTail) {
-    // Sequential filters — the same contract as the offer path.
-    const kind = classifyItemForDispatch(item, now);
-    if (kind === null) continue;
-    if (ctx.kinds !== null && !ctx.kinds.includes(kind)) continue;
-    const marker = ownMarkerMaps[kind]?.get(item.id);
-    if (
-      marker !== undefined &&
-      _markerStillExcludes(
-        marker,
-        item.stage,
-        now,
-        ctx.markerStaleWindowMs,
-        kind === 'audit' || kind === 'implement' ? 'id-guard' : 'stage-guard',
-      )
-    ) {
-      continue;
-    }
-    if (isAttemptBudgetExhausted(ownEntries, item.id, kind, item.stage, ctx.maxAttempts)) {
-      if (!ctx.flaggedForBudget.has(item.id)) {
-        ctx.flaggedForBudget.add(item.id);
-        await flagBudgetExhausted(deps, item.id, opts.cwd);
-      }
-      ctx.holds.budget = true;
-      continue;
-    }
-    if (_isNonTerminalCooldownActive(ownEntries, item.id, kind, item.stage, ctx.cooldownMs, now)) {
-      ctx.holds.cooldown = true;
-      continue;
-    }
-    if (ctx.frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) continue;
-    // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2): refuse NEW audit/implement work
-    // while the host is saturated; plan/intake/risk-effort still dispatch.
-    // After the freeze so a dual-gated tick reports `code-freeze`.
-    if (ctx.cpuSaturated && (kind === 'audit' || kind === 'implement')) {
-      ctx.holds.cpu = true;
-      continue;
-    }
-    // Leaf-aware per-item audit minimum + relaxed-tick pin (C3/C4) — the same
-    // helpers as the offer loop above, so the own-backlog fallback and the
-    // audit-batch continuation can never dispatch a candidate the offer path
-    // would skip.
-    if (ctx.pinnedAuditItemId !== undefined && kind !== 'audit') continue;
-    if (kind !== 'audit' && !ctx.panesEligible) continue;
-    if (kind === 'audit' && !auditPinAdmits(ctx.pinnedAuditItemId, item.id)) continue;
-    if (
-      kind === 'audit' &&
-      !(await auditItemEligible(deps, item, ctx.auditSlotBudget, opts.cwd))
-    ) {
-      continue;
-    }
-    if (item.priority === 'critical') {
-      const guard = evaluateCriticalFirstGuard(
-        item.id,
-        ownInFlight,
-        marker?.dispatchedAt,
-        now,
-        ctx.markerStaleWindowMs,
-      );
-      if (!guard.escalate) {
-        ctx.holds.inFlight = true;
-        continue;
-      }
-    }
-    if (kind === 'implement') {
-      const gate = await ctx.reviewGateForRoot(opts.cwd);
-      if (isImplementHeldByReviewGate(kind, item, gate)) {
-        ctx.holds.review = true;
-        continue;
-      }
-    }
-    const outcome = await dispatchClaimedTier(
-      deps,
-      kind,
-      {
-        id: item.id,
-        title: item.title,
-        stage: kind === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
-        status: item.status,
-        priority: item.priority,
-        sortIndex: item.sortIndex,
-      },
-      {
-        model: opts.model,
-        cwd: opts.cwd,
-        localPreference: opts.localPreference,
-        localPreferenceMode: opts.localPreferenceMode,
-        selectionPath: 'own-backlog',
-        selectionReason: ctx.selectionReason,
-      },
-    );
-    if (outcome.dispatched) return outcome;
-    // A lost CAS race / marker-recovery rollback applies to one candidate.
-    if (
-      ctx.skipOnLostClaim &&
-      (outcome.reason === 'claim-failed' || outcome.reason === 'claim-rolled-back')
-    ) {
-      continue;
-    }
-    // Any other terminal outcome (or, for a continuation, ANY non-dispatched
-    // outcome — AC3: a batch never hops to another target) is returned
-    // unchanged so the caller's strike/skip semantics are preserved.
-    return outcome;
-  }
-  return null;
 }
 
 /**
@@ -628,7 +461,7 @@ async function dispatchFromCoordinationGated(
   // True when at least one non-critical implement offer was held this cycle
   // by the review-queue depth gate (drives the terminal reason).
   let reviewHold = false;
-  const ownHeadHolds = {
+  const ownHeadHolds: HeadScanHolds = {
     budget: false,
     cooldown: false,
     inFlight: false,
@@ -887,73 +720,114 @@ async function dispatchFromCoordinationGated(
   //
   // WL-0MVFE1DD8000D8T2: the filter chain lives in `dispatchFromOwnHead` so
   // the audit-batch continuation above applies it byte-for-byte identically
-  // (no duplicated gates, no second ranking).
-  {
-    // Fail-open (AC9): a thrown own-root lookup must leave the original
-    // terminal reason unchanged and never panic.
-    const ownWindow = await readOwnHeadWindow(deps, opts.cwd, opts.browseItemCount);
-    if (ownWindow !== null) {
-      batchRuntime.setDepth(computeAuditEligibleDepth([...ownWindow.head, ...ownWindow.tail], now));
-      const sharedScan = {
-        window: ownWindow,
-        frozen,
-        cpuSaturated,
-        auditSlotBudget,
-        panesEligible,
-        pinnedAuditItemId,
-        markerStaleWindowMs,
-        maxAttempts,
-        cooldownMs,
-        cooldownEntriesForRoot,
-        inFlightForRoot,
-        reviewGateForRoot,
-        holds: ownHeadHolds,
-        flaggedForBudget,
-      };
-      // ── Audit-batch continuation (parent WL-0MVEDM8OT007WDRS AC4) ──
-      // While a batch is armed the leader continues the audit drain from its
-      // OWN head — the same bounded window EXTENSION and the same sequential
-      // filter chain as the fallback below — instead of waiting for the offer
-      // list to be re-populated. AUDIT-kind only, distinct targets (marker
-      // exclusion + the batch-local exclusion set), exactly one dispatch per
-      // invocation, and any non-`dispatched` outcome ENDS the batch (AC3): a
-      // continuation never hops to another target. Armed only when the worker
-      // passed a live budget (`auditBatchRemaining > 0`) and batching is on
-      // (`cap > 1`); otherwise the unchanged fallback runs.
-      if (batchRemainingBefore > 0 && batchCap > 1) {
-        const continuation = await dispatchFromOwnHead(
-          deps,
-          { model: opts.model, cwd: opts.cwd, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode },
-          {
-            ...sharedScan,
-            kinds: ['audit'],
-            excludeIds: new Set(opts.auditBatchDispatchedIds ?? []),
-            selectionReason: 'own-backlog-audit-batch-continuation',
-            skipOnLostClaim: false,
-          },
-          now,
-        );
-        if (continuation !== null) return { ...continuation, auditBatchContinuation: true };
-      }
-      const ownOutcome = await dispatchFromOwnHead(
+  // (no duplicated gates, no second ranking). WL-0MW4ZOSD6004SAVD moved it to
+  // `downtime-worker.head-scan.ts` so the registered-root sweep reuses it too.
+  // The per-root gate closures below stay here (they own the per-tick caches).
+  const headScanBase: HeadScanBase = {
+    cpuSaturated,
+    auditSlotBudget,
+    panesEligible,
+    pinnedAuditItemId,
+    markerStaleWindowMs,
+    maxAttempts,
+    cooldownMs,
+    cooldownEntriesForRoot,
+    inFlightForRoot,
+    reviewGateForRoot,
+    holds: ownHeadHolds,
+    flaggedForBudget,
+  };
+  const scanOptions = {
+    model: opts.model,
+    cwd: opts.cwd,
+    localPreference: opts.localPreference,
+    localPreferenceMode: opts.localPreferenceMode,
+  };
+  // Fail-open (AC9): a thrown own-root lookup must leave the original
+  // terminal reason unchanged and never panic.
+  const ownWindow = await readOwnHeadWindow(deps, opts.cwd, opts.browseItemCount);
+  if (ownWindow !== null) {
+    batchRuntime.setDepth(computeAuditEligibleDepth([...ownWindow.head, ...ownWindow.tail], now));
+    // ── Audit-batch continuation (parent WL-0MVEDM8OT007WDRS AC4) ──
+    // While a batch is armed the leader continues the audit drain from its
+    // OWN head — the same bounded window EXTENSION and the same sequential
+    // filter chain as the fallback below — instead of waiting for the offer
+    // list to be re-populated. AUDIT-kind only, distinct targets (marker
+    // exclusion + the batch-local exclusion set), exactly one dispatch per
+    // invocation, and any non-`dispatched` outcome ENDS the batch (AC3): a
+    // continuation never hops to another target. Armed only when the worker
+    // passed a live budget (`auditBatchRemaining > 0`) and batching is on
+    // (`cap > 1`); otherwise the unchanged fallback runs.
+    if (batchRemainingBefore > 0 && batchCap > 1) {
+      const continuation = await dispatchFromOwnHead(
         deps,
-        { model: opts.model, cwd: opts.cwd, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode },
+        scanOptions,
         {
-          ...sharedScan,
-          kinds: null,
-          excludeIds: new Set<string>(),
-          selectionReason: 'own-backlog-fallback',
-          skipOnLostClaim: true,
+          ...headScanBase,
+          root: opts.cwd,
+          window: ownWindow,
+          frozen,
+          kinds: ['audit'],
+          excludeIds: new Set(opts.auditBatchDispatchedIds ?? []),
+          selectionPath: 'own-backlog',
+          selectionReason: 'own-backlog-audit-batch-continuation',
+          skipOnLostClaim: false,
+          includeHead: false,
         },
         now,
       );
-      if (ownOutcome !== null) {
-        if (ownOutcome.dispatched) return { ...ownOutcome, ownBacklogDispatch: true };
-        // Any other terminal outcome (wl-error / spawn-failed /
-        // anchor-unavailable / marker-write-failed) is returned unchanged so
-        // the caller's strike/skip semantics are preserved.
-        return ownOutcome;
-      }
+      if (continuation !== null) return { ...continuation, auditBatchContinuation: true };
+    }
+  }
+
+  // ── Registered-root sweep (parent WL-0MVR8GDJ3008WY3Y O1, AC1–AC6) ──
+  // ONLY when the offer list yielded nothing dispatchable. Sweeps the resolved
+  // `downtimeWorklogRoots` registry in round-robin order through the SAME
+  // canonical ranking (`readOwnHeadWindow` → `getHerdrListHead`) and the FULL
+  // sequential filter chain, so a root with dispatchable work but no running
+  // herdr instance becomes reachable without bypassing any gate. Served BEFORE
+  // the leader's own out-of-view backlog so a busy leader root cannot starve
+  // the registry (AC4). Absent/empty registry ⇒ no-op (AC6); unreadable roots
+  // are skipped without a strike (AC5). A dispatched sweep never sets
+  // `ownBacklogDispatch` — the leader must not hand off leadership for it.
+  const sweptOutcome = await dispatchFromRegisteredRoots(
+    deps,
+    {
+      ...scanOptions,
+      coordinationDir: opts.coordinationDir,
+      ...(opts.registeredRoots !== undefined ? { registeredRoots: opts.registeredRoots } : {}),
+      ...(opts.browseItemCount !== undefined ? { browseItemCount: opts.browseItemCount } : {}),
+      frozen,
+    },
+    headScanBase,
+    now,
+  );
+  if (sweptOutcome !== null) return sweptOutcome;
+
+  if (ownWindow !== null) {
+    const ownOutcome = await dispatchFromOwnHead(
+      deps,
+      scanOptions,
+      {
+        ...headScanBase,
+        root: opts.cwd,
+        window: ownWindow,
+        frozen,
+        kinds: null,
+        excludeIds: new Set<string>(),
+        selectionPath: 'own-backlog',
+        selectionReason: 'own-backlog-fallback',
+        skipOnLostClaim: true,
+        includeHead: false,
+      },
+      now,
+    );
+    if (ownOutcome !== null) {
+      if (ownOutcome.dispatched) return { ...ownOutcome, ownBacklogDispatch: true };
+      // Any other terminal outcome (wl-error / spawn-failed /
+      // anchor-unavailable / marker-write-failed) is returned unchanged so
+      // the caller's strike/skip semantics are preserved.
+      return ownOutcome;
     }
   }
 
@@ -965,8 +839,20 @@ async function dispatchFromCoordinationGated(
   // empty BACKLOG. A deep-queue hold is reported as the neutral
   // 'review-queue-hold' (never 'no-candidate' — the cooldown must not fire
   // while audits are draining the queue; the gate may lift at any moment).
-  // A hold reported by the own-head scan (fallback or batch continuation) is
-  // folded in here so a filtered own-head backlog keeps its neutral reason.
+  // A hold reported by the own-head scan (fallback, registered-root sweep or
+  // batch continuation) is folded in here so a filtered own-head backlog keeps
+  // its neutral reason.
+  //
+  // TERMINAL-REASON PRECEDENCE (module contract; WL-0MWBT76WY00298AY AC5):
+  // `code-freeze` → CPU → review-queue → non-terminal cooldown → attempt
+  // budget → in-flight → leaf-audit pin → host budget → `no-candidate`. A
+  // host-budget hold sits LAST because it is the weakest, most ambient
+  // statement: "some budgeted candidate was refused this tick". Any stronger
+  // hold that also fired keeps its own reason; with no other hold, the neutral
+  // refusal (and its `{live, max}` evidence) is reported instead of
+  // `no-candidate`, so no cooldown/strike is recorded. The offer path's
+  // `hostBudgetHold` (same seam, same neutral contract) keeps its position and
+  // is reported first when both paths recorded one.
   const terminal: DowntimeDispatchOutcome = frozen
     ? { dispatched: false, reason: 'code-freeze' }
     : cpuHold || ownHeadHolds.cpu
@@ -986,10 +872,18 @@ async function dispatchFromCoordinationGated(
             // no-candidate cooldown and no strike.
             ? { dispatched: false, reason: LEAF_AUDIT_PIN_HOLD_REASON }
             // Host-budget refusal (F3 AC5): a machine-wide cap, not an empty
-            // backlog, stopped the implement tier. Neutral — no cooldown, no
+            // backlog, stopped the budgeted tier. Neutral — no cooldown, no
             // strike; the next idle tick re-checks the ledger.
             : hostBudgetHold !== undefined
               ? hostBudgetHold
-              : { dispatched: false, reason: 'no-candidate' };
+              : ownHeadHolds.hostBudget !== undefined
+                ? {
+                    dispatched: false,
+                    reason: ownHeadHolds.hostBudget.reason,
+                    ...(ownHeadHolds.hostBudget.budget !== undefined
+                      ? { budget: ownHeadHolds.hostBudget.budget }
+                      : {}),
+                  }
+                : { dispatched: false, reason: 'no-candidate' };
   return withOfferRejections(terminal, offerRejections);
 }

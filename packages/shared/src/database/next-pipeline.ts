@@ -52,6 +52,11 @@ import {
   riskOrdinal,
 } from './priority.js';
 import { handleCriticalEscalation } from './critical-escalation.js';
+// Shared soft-delete predicate (WL-0MW7S20IC001F3AP): the selection feeds must
+// use the same "soft-deleted" definition as the read/write paths so a row is
+// never selected while `wl update` rejects it. `work-items.ts` imports only
+// context/types/status-stage-rules, so this sibling import is acyclic.
+import { isSoftDeleted } from './work-items.js';
 /**
  * Consolidated filter pipeline for wl next candidate selection.
  *
@@ -109,8 +114,9 @@ export function filterCandidates(
     hooks.debug(`${debugPrefix} filter: after stage=${stage}=${pool.length}`);
   }
 
-  // 2. Remove deleted items
-  pool = pool.filter(item => item.status !== 'deleted');
+  // 2. Remove soft-deleted items (status=deleted OR non-empty deletedBy) — one
+  //    shared definition with `wl list` and `wl update` (WL-0MW7S20IC001F3AP).
+  pool = pool.filter(item => !isSoftDeleted(item));
   hooks.debug(`${debugPrefix} filter: after deleted=${pool.length}`);
 
   // 3. Remove completed items (unless stage filter was applied - user is

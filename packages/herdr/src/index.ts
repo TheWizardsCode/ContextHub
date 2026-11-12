@@ -33,6 +33,7 @@ import {
   rollbackClaimWorkItem,
   markNeedsProducerReviewWorkItem,
   getExecFileAsync,
+  getWorklogDir,
   buildWlArgs,
   buildWlArgsForRoot,
   extractJson,
@@ -66,11 +67,16 @@ import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSett
 import {
   admitHostDispatch as admitHostBudgetDispatch,
   confirmHostDispatch as confirmHostBudgetDispatch,
+  decideAuditAvailability,
+  detectAuditDivergence,
   readAuditBudgetState,
+  readAuditLocalEvidence,
   releaseHostDispatch as releaseHostBudgetDispatch,
-  type HostBudgetLivePane,
+  type AuditBudgetLogEvent,
+  type HostBudgetLivePanesResult,
 } from './host-dispatch-budget.admission.js';
-import { sweepClosedPanes } from './host-dispatch-budget.js';
+import { isLegacyAuditBudgetEnabled, sweepClosedPanes } from './host-dispatch-budget.js';
+import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
 // User-fired (interactive) host-budget gate (WL-0MVXY0Z93002HKCZ F4): the
 // counterpart of the dispatcher's admission. At/over cap it asks first — with
 // the bottom-anchored dialog the worklist renders — and only a deliberate
@@ -135,6 +141,7 @@ import {
   DOWNTIME_AUDIT_STALE_WINDOW_MS,
   parseInProgressOutput,
   type DowntimeActiveAuditResult,
+  createAuditAvailabilityClient,
   withTransientRetry,
   parseHerdrPaneListOutput,
   isSafeDowntimePaneToClose,
@@ -143,6 +150,7 @@ import {
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import type { AuditCandidateScopeResult } from './downtime-worker.gates.js';
 import {
+  appendCoordinationLogEntry,
   appendDowntimeLogEntry,
   appendPaneCloseLogEntry,
   auditDispatchedItemIds,
@@ -373,30 +381,68 @@ export { configureWorklogTarget, uninitializedReport };
  * inventory. `records` (with labels) are preferred because the ledger's repair
  * path needs the work-item id suffix to reconstruct entries; a `paneIds`-only
  * payload still counts reserved entries, it just cannot repair a corrupt
- * ledger. Fail-open: a failed/unwired pane query yields an empty list, which
- * degrades admission to "no observed pane" exactly like today's liveness
- * philosophy (a herdr hiccup never silently wedges dispatch).
+ * ledger.
+ *
+ * Tri-state (WL-0MW9VQX5T001GCUP): a failed, unwired or UNPARSEABLE read
+ * (a malformed-but-`ok` payload with neither `records` nor `paneIds`) yields
+ * `{ ok: false }` — pane liveness is UNKNOWN, never "no panes". The fail-open
+ * *decision* is kept (admission degrades to the freshness rule instead of
+ * wedging dispatch), but the reason is no longer lost: the reap-bearing paths
+ * must NOT delete ledger state from an unknown read.
  */
 async function hostBudgetLivePanes(
   readRunningPanes: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']>,
   cwd: string,
-): Promise<HostBudgetLivePane[]> {
+): Promise<HostBudgetLivePanesResult> {
   try {
     const running = await readRunningPanes(cwd);
-    if (!running.ok) return [];
+    if (!running.ok) return { ok: false };
     if (Array.isArray(running.records)) {
-      return running.records.map((record) => ({
-        paneId: record.paneId,
-        ...(typeof record.label === 'string' ? { title: record.label } : {}),
-      }));
+      return {
+        ok: true,
+        panes: running.records.map((record) => ({
+          paneId: record.paneId,
+          ...(typeof record.label === 'string' ? { title: record.label } : {}),
+        })),
+      };
     }
     if (Array.isArray(running.paneIds)) {
-      return running.paneIds.map((paneId) => ({ paneId }));
+      return { ok: true, panes: running.paneIds.map((paneId) => ({ paneId })) };
     }
-    return [];
+    return { ok: false };
   } catch {
-    return [];
+    return { ok: false };
   }
+}
+
+/**
+ * Append one audit-budget decision entry (WL-0MWAMSK9H005BOHD).
+ *
+ * The admission module emits an `AuditBudgetLogEvent` on a proxy/local
+ * divergence (both sides' evidence) or on the one-release legacy path; this
+ * adapter turns it into the decision-log entry the operator sees. Fire-and-forget
+ * and fail-closed: the append helper itself never throws, and logging must never
+ * affect a dispatch.
+ */
+function appendAuditBudgetLogEntry(cwd: string, event: AuditBudgetLogEvent): void {
+  const at = new Date().toISOString();
+  const entry =
+    event.event === 'divergence'
+      ? {
+          kind: 'decision',
+          operation: 'audit-budget-divergence',
+          reason: event.reason,
+          auditBudget: event.divergence,
+          at,
+        }
+      : {
+          kind: 'decision',
+          operation: 'audit-budget-legacy',
+          reason: event.reason,
+          error: event.message,
+          at,
+        };
+  void appendCoordinationLogEntry(cwd, entry);
 }
 
 /**
@@ -531,9 +577,19 @@ export function createDowntimeDeps(
     // caller that passes no limit; it defaults to the sprint-view default so an unwindowed head
     // is never produced. `fetchNextItems` applies mandatory-always, browseItemCount windowing,
     // and regroupWorkItems grouping — the sole ranking path.
-    getHerdrListHead: async (_cwd: string, limit?: number): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
+    //
+    // ROOT-AWARE (WL-0MVR8GDJ3008WY3Y AC3): `cwd` is the worklog ROOT whose head is
+    // read. The read targets `<cwd>/.worklog` explicitly (`--worklog-dir`) so the
+    // registered-root sweep ranks a FOREIGN root through the SAME canonical path
+    // instead of the leader pane's module-configured database. When `cwd` already
+    // resolves to the module root the override is omitted, keeping the leader's own
+    // read byte-for-byte unchanged (including the bundle/snapshot cache keys).
+    getHerdrListHead: async (cwd: string, limit?: number): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
       try {
-        const items = await fetchNextItems(limit ?? defaultSettings.browseItemCount);
+        const ownDir = getWorklogDir();
+        const rootDir = join(cwd, '.worklog');
+        const dirOverride = ownDir === rootDir ? undefined : rootDir;
+        const items = await fetchNextItems(limit ?? defaultSettings.browseItemCount, dirOverride);
         return { ok: true, items };
       } catch (err) {
         return { ok: false, error: String(err) };
@@ -672,48 +728,99 @@ export function createDowntimeDeps(
         return { ok: false };
       }
     },
-    async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
+    async getActiveAudit(
+      this: DowntimeWorkerDeps,
+      cwd: string,
+    ): Promise<DowntimeActiveAuditResult> {
       try {
-        // Host-wide audit admission (WL-0MVXY0XPF006YUHA F2): FIRST consult the
-        // machine-scoped dispatch-budget ledger where the retired
-        // `active-audit` marker used to be read. `readAuditBudgetState` counts
-        // fresh `kind: audit` entries against `maxAudit` (plus a non-stale
-        // legacy marker as ONE synthetic entry, so a mixed-version host is still
-        // serialised) and returns the refusal token the dispatcher reports:
-        // `audit-host-saturated` at `maxAudit: 1` (the legacy token, unchanged
-        // for existing consumers), `host-budget-audit` at any other cap
-        // (including `0`, with 0/0 evidence), and `host-budget-unknown` when an
-        // unreadable ledger had to be repaired. The check coordinates audits
-        // ACROSS projects and herdr instances on the same host — the per-worklog
-        // check below cannot see audits dispatched by other projects'
-        // dispatchers, which is what allowed host-wide saturation
-        // (2026-09-26 incident). Fail-open: if the coordination dir cannot be
-        // resolved the host-wide check is skipped and the per-worklog check
-        // below still runs (the legacy behaviour is preserved).
-        const coordinationDir = getMachineCoordinationDir();
-        if (coordinationDir !== null) {
-          // Cheap read first: the ledger + cap only, NO pane-list subprocess (the
-          // dispatch loop runs this check once per audit candidate). A pane list
-          // is read only on the rare unreadable-ledger path, to self-heal.
-          let state = readAuditBudgetState({ dir: coordinationDir, root: cwd });
-          if (state.reason === 'host-budget-unknown') {
-            state = readAuditBudgetState({
-              dir: coordinationDir,
-              root: cwd,
-              livePanes: await hostBudgetLivePanes(runningPanesResolver, cwd),
-            });
+        // Proxy-derived audit admission (WL-0MWAMSDNW000SL0E, WL-0MWAMSK9H005BOHD,
+        // parent AC1/AC2/AC3): the audit tier's capacity decision is the proxy's
+        // shared local resource, NOT the per-host `budget.json` `maxAudit` cap.
+        // The proxy owns the audit budget and the live audit-lease registry, so
+        // two ContextHub hosts can no longer each believe they are under their
+        // own cap while contending for the single local llama-server GPU
+        // (2026-11-03 incident).
+        //
+        // The pre-check maps the availability read through the SAME helper
+        // (`decideAuditAvailability`) that `admitHostDispatch` uses, so a
+        // refusal before selection and a refusal at admission agree and quote
+        // the SAME token (parent AC2). `readAuditBudgetState` is deliberately
+        // NOT called on this path.
+        //
+        // Fail closed on every non-`ok` outcome (AC3): `endpoint-absent` /
+        // `unreachable` / `unparsable` stops audit dispatch with the named
+        // `audit-budget-unknown` reason and the failing exchange (`detail`)
+        // rather than silently reverting to the per-host cap. A missing seam
+        // fails closed too, never open.
+        //
+        // ONE-RELEASE legacy escape hatch (parent AC3): `HERDR_AUDIT_LOCAL_BUDGET=1`
+        // restores the pre-change `budget.json` + local-ledger decision for the
+        // audit tier and never consults the proxy.
+        if (isLegacyAuditBudgetEnabled()) {
+          const coordinationDir = getMachineCoordinationDir();
+          if (coordinationDir !== null) {
+            // Cheap read first: the ledger + cap only, NO pane-list subprocess
+            // (the dispatch loop runs this check once per audit candidate). A
+            // pane list is read only on the rare unreadable-ledger path, to
+            // self-heal.
+            let state = readAuditBudgetState({ dir: coordinationDir, root: cwd });
+            if (state.reason === 'host-budget-unknown') {
+              // Repair only when the pane read SUCCEEDED; a failed read is
+              // UNKNOWN and must not rewrite the corrupt ledger from nothing
+              // (WL-0MW9VQX5T001GCUP AC1c — the audit repair half).
+              const livePanes = await hostBudgetLivePanes(runningPanesResolver, cwd);
+              state = readAuditBudgetState({
+                dir: coordinationDir,
+                root: cwd,
+                ...(livePanes.ok ? { livePanes: livePanes.panes } : {}),
+              });
+            }
+            if (state.atCap) {
+              // Legacy host-wide budget refusal: an audit is already in flight
+              // (dispatched by this or another instance/project), or the tier
+              // is disabled/unreadable. Report with the legacy host-wide source
+              // so the worker logs the legacy reason token specifically.
+              return {
+                ok: true,
+                active: true,
+                source: 'host-wide',
+                ...(state.reason !== undefined ? { reason: state.reason } : {}),
+                budget: { live: state.live, max: state.max },
+              };
+            }
           }
-          if (state.atCap) {
-            // Host-wide budget refusal: an audit is already in flight
-            // (dispatched by this or another instance/project), or the tier is
-            // disabled/unreadable. Report with source so the worker logs the
-            // host-budget reason token specifically.
+        } else {
+          const outcome =
+            this.readAuditAvailability === undefined
+              ? undefined
+              : await this.readAuditAvailability();
+          const decision = decideAuditAvailability(outcome);
+          if (decision.active) {
+            // AC2 inverse divergence: the proxy REFUSES while the local ledger
+            // is below its cap. Admission will not run (the tier is skipped
+            // before selection), so the pre-check records the evidence here.
+            // The forward case (proxy admits / local at cap) is logged by
+            // admission when the candidate is actually dispatched, so the
+            // two cannot double-log.
+            const divergence = detectAuditDivergence(
+              outcome,
+              readAuditLocalEvidence(),
+              decision,
+            );
+            if (divergence !== null) {
+              appendAuditBudgetLogEntry(cwd, {
+                event: 'divergence',
+                reason: AUDIT_BUDGET_DIVERGENCE_REASON,
+                divergence,
+              });
+            }
             return {
               ok: true,
               active: true,
-              source: 'host-wide',
-              ...(state.reason !== undefined ? { reason: state.reason } : {}),
-              budget: { live: state.live, max: state.max },
+              source: 'proxy',
+              ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+              ...(decision.budget !== undefined ? { budget: decision.budget } : {}),
+              ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
             };
           }
         }
@@ -734,9 +841,8 @@ export function createDowntimeDeps(
           DOWNTIME_AUDIT_STALE_WINDOW_MS,
         );
         if (auditCandidateIds.size === 0) {
-          // Cheap fast-path: no non-stale audit markers → no active audit
-          // (no worklog query needed). Source is per-worklog.
-          return { ok: true, active: false, source: 'per-worklog' };
+          // Cheap fast-path: no non-stale audit markers → no active audit.
+          return { ok: true, active: false, source: 'proxy' };
         }
         // Intersect with the worklog's in_progress items: a marker only
         // counts as an ACTIVE audit while its item is still in_progress
@@ -1356,16 +1462,40 @@ export function createDowntimeDeps(
     // `instanceId` is a per-process diagnostic label only (the ledger's
     // single-flight semantics never depend on it). Every seam is best-effort
     // and must never throw into the claim pipeline.
-    async admitHostDispatch(input) {
+    async admitHostDispatch(
+      this: DowntimeWorkerDeps,
+      input,
+    ) {
       const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
+      const audit = input.kind === 'audit';
+      // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD): read the SAME
+      // availability the dispatcher's pre-check read and hand the typed outcome
+      // to admission, so both reach the SAME decision. The one-release legacy
+      // flag skips the proxy entirely.
+      const auditAvailability =
+        audit && !isLegacyAuditBudgetEnabled() && this.readAuditAvailability !== undefined
+          ? await this.readAuditAvailability()
+          : undefined;
       return admitHostBudgetDispatch(
         {
-          kind: input.kind === 'audit' ? 'audit' : 'implement',
+          kind: audit ? 'audit' : 'implement',
           itemId: input.itemId,
           instanceId: `herdr:${process.pid}`,
           root: input.cwd,
         },
-        { livePanes },
+        {
+          // The tri-state is threaded through: on a failed pane read the
+          // admission sees `undefined` (UNKNOWN) — freshness counting, never
+          // reap, never repair (WL-0MW9VQX5T001GCUP).
+          livePanes: livePanes.ok ? livePanes.panes : undefined,
+          ...(audit
+            ? {
+                onAuditBudgetEvent: (event: AuditBudgetLogEvent) =>
+                  appendAuditBudgetLogEntry(input.cwd, event),
+                ...(auditAvailability !== undefined ? { auditAvailability } : {}),
+              }
+            : {}),
+        },
       );
     },
     async confirmHostDispatch(itemId, kind, paneId, cwd): Promise<void> {
@@ -1614,6 +1744,14 @@ export async function main(): Promise<void> {
   // via `claimItemForAgentCommand`.
   const downtimeDeps = createDowntimeDeps(SEND_TO_PI_SCRIPT, DISPATCHER_ASSIGNEE);
   downtimeDeps.reserveLocalCapacity = createLocalReserver(runSettings.downtimeProxyUrl);
+  // Proxy-derived audit admission (WL-0MWAMSDNW000SL0E): same wiring point as
+  // the reserve client, so the audit gate reads the proxy URL from the SAME
+  // `runSettings` snapshot. A missing/older proxy answers 404 → the client
+  // resolves `endpoint-absent` → the audit gate fails CLOSED as
+  // `audit-budget-unknown` (never a silent revert to the per-host cap).
+  downtimeDeps.readAuditAvailability = createAuditAvailabilityClient(
+    runSettings.downtimeProxyUrl,
+  );
 
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
@@ -1682,7 +1820,18 @@ export async function main(): Promise<void> {
         // escape hatch on/off applies without a plugin restart. Default OFF —
         // the fail-closed C4 admission (full idle threshold) is unchanged.
         leafAuditImmediate: s.downtimeLeafAuditImmediate,
+        // Offer-only mode (WL-0MWDDHOK6009GJCC): re-read each tick like the
+        // other downtime settings, so a settings change applies without a
+        // plugin restart. When dispatch is disabled and this is ON the
+        // instance still checks in and offers its root to the fleet leader
+        // (never polling/claiming/spawning).
+        offerOnly: s.downtimeOfferOnly,
         browseItemCount: s.browseItemCount,
+        // Registered-root discovery (parent WL-0MVR8GDJ3008WY3Y O1): the
+        // already-clamped/validated `downtimeWorklogRoots` registry, re-read
+        // each tick like the other downtime settings so registry edits apply
+        // without a plugin restart. Absent/empty ⇒ no sweep (AC6).
+        registeredRoots: s.downtimeWorklogRoots,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable
         // `paneCloseIdleThresholdMinutes` (default 30). The worker only
@@ -1743,7 +1892,12 @@ export async function main(): Promise<void> {
           defaultRunningDowntimePanesResolver,
           targetCwd,
         );
-        return readHostBudgetStatus({ livePanes });
+        // Tri-state threaded through (WL-0MW9VQX5T001GCUP): on a failed read
+        // the display gets NO pane list (UNKNOWN) and both figures fall back
+        // to the freshness rule instead of folding unknown into an empty set.
+        return readHostBudgetStatus(
+          livePanes.ok ? { livePanes: livePanes.panes } : {},
+        );
       },
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
       onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
@@ -1847,6 +2001,9 @@ export async function main(): Promise<void> {
             notify: (message) => process.stderr.write(`[worklog-plugin] ${message}\n`),
             // The SAME machine-wide pane read the dispatcher's admission uses
             // (`herdr pane list` for the whole host, not this instance's panes).
+            // The tri-state (WL-0MW9VQX5T001GCUP) is threaded straight through:
+            // the gate derives trust from `{ok:true}` and treats `{ok:false}`
+            // as UNKNOWN — never as "no panes".
             readLivePanes: () => hostBudgetLivePanes(defaultRunningDowntimePanesResolver, targetCwd),
             claim: (agentCommand) => claimItemForAgentCommand(agentCommand),
             root: targetCwd,

@@ -359,3 +359,72 @@ describe('wl worklist: pure read (read-cache state counter)', { timeout: 60_000 
     expect(second.stdout).toBe(first.stdout);
   });
 });
+
+// ── WL-0MW7S20IC001F3AP: soft-delete predicate consistency ───────────────
+//
+// The bug: a live row that retains a non-empty `deletedBy` is "visible but
+// immutable" — it is returned by the worklist/next selection feeds while
+// `wl update` rejects it as `deleted-item`, blocking the release gate.
+//
+// Assertions pin the FIXED behaviour and are written test-first (`it.fails`)
+// while the bug is live. The selection-path item (WL-0MW8EVNPN001FCR2) applies
+// the shared predicate and flips them to `it`.
+describe('wl worklist / wl next exclude soft-deleted rows (WL-0MW7S20IC001F3AP)', () => {
+  let tempState: { tempDir: string; originalCwd: string };
+
+  beforeEach(() => {
+    tempState = enterTempDir();
+    writeConfig(tempState.tempDir, 'Soft-delete worklist', 'SD');
+    writeInitSemaphore(tempState.tempDir);
+  });
+
+  afterEach(() => {
+    leaveTempDir(tempState);
+  });
+
+  /**
+   * Seed the bug shape for the selection feeds: an OPEN item that carries a
+   * non-empty `deletedBy`. `wl update --deleted-by` is legal here because the
+   * item is not yet soft-deleted, so this reproduces the "repaired/attributed
+   * but still live" row the release gate chokes on.
+   */
+  async function createAttributedOpen(title: string): Promise<string> {
+    const { stdout } = await execAsync(`tsx ${cliPath} --json create -t "${title}" --priority critical`);
+    const id = JSON.parse(stdout).workItem.id as string;
+    const upd = await execAsync(
+      `tsx ${cliPath} --json update ${id} --deleted-by "repairer@example.com" --delete-reason "deletion intent retained"`,
+    );
+    expect(JSON.parse(upd.stdout).success).toBe(true);
+    return id;
+  }
+
+  /** Extract ids from a list subset (plain items) or a feed subset (`{workItem}`). */
+  function subsetIds(entries: Array<any>): string[] {
+    return entries.map((e) => e?.workItem?.id ?? e?.id).filter(Boolean) as string[];
+  }
+
+  it('wl next does not return a live row that retains a non-empty deletedBy', async () => {
+    const id = await createAttributedOpen('Attributed next candidate');
+    const { stdout } = await execAsync(`tsx ${cliPath} --json next -n 10`);
+    const payload = JSON.parse(stdout);
+    expect(subsetIds(payload.results ?? payload.workItems ?? [])).not.toContain(id);
+  });
+
+  it('no worklist subset returns a live row that retains a non-empty deletedBy', async () => {
+    const id = await createAttributedOpen('Attributed worklist row');
+    const payload = await worklist();
+    expect(payload.success).toBe(true);
+    for (const key of SUBSET_KEYS) {
+      expect(subsetIds(payload.subsets[key]), `subset ${key} leaked the soft-deleted row`).not.toContain(id);
+    }
+  });
+
+  it('still excludes status=deleted rows from every worklist subset (no regression)', async () => {
+    const id = await createAttributedOpen('Row that will be deleted');
+    await execAsync(`tsx ${cliPath} --json delete ${id} --no-sync`);
+    const payload = await worklist();
+    for (const key of SUBSET_KEYS) {
+      expect(subsetIds(payload.subsets[key]), `subset ${key} leaked a status=deleted row`).not.toContain(id);
+    }
+  });
+});

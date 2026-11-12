@@ -154,6 +154,10 @@ function makeWorker(opts: {
   cooldownMs?: number;
   /** checkInIntervalMs (default 5 min, WL-0MTMPSCL8000O45H). */
   checkInIntervalMs?: number;
+  /** `downtimeEnabled` (offer-only mode, WL-0MWDDHOK6009GJCC). Default true. */
+  enabled?: boolean;
+  /** `downtimeOfferOnly` (WL-0MWDDHOK6009GJCC). Default false. */
+  offerOnly?: boolean;
 }): DowntimeWorker {
   const fetcher = vi.fn(async () => {
     const payload = idlePayload();
@@ -178,7 +182,8 @@ function makeWorker(opts: {
     poller: createDowntimePoller('http://localhost:8000', fetcher as never, 5000),
     deps: opts.deps,
     config: () => ({
-      enabled: true,
+      enabled: opts.enabled ?? true,
+      offerOnly: opts.offerOnly,
       thresholdMs: 60_000,
       requiredFreeSlots: 1,
       model: 'plan',
@@ -244,6 +249,63 @@ describe('integration: leader election → coordination → dispatch', () => {
       vi.setSystemTime(20_000_000 + 31 * 60_000);
       await workerB.tick();
       expect(getEntry(sharedCoord, 'inst-b')?.workItemId).toBe('WL-B2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('dispatches an offer written by a disabled + offer-only instance with no local capacity (WL-0MWDDHOK6009GJCC AC7)', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(40_000_000);
+    try {
+      // B is dispatch-disabled and offer-only: it never polls the proxy
+      // (its poller is never called), never takes the leader lease, never
+      // spawns — it ONLY checks in and offers its root's work.
+      const depsB = baseDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [{ id: 'WL-P1', title: 'Passive one', status: 'open', stage: 'intake_complete' }],
+        }),
+      });
+      const depsA = baseDeps({
+        // The leader re-validates the offer at dispatch time exactly as for
+        // an active instance (AC6 — the dispatch-time contract is unchanged).
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-P1', 'intake_complete') }),
+      });
+      const workerB = makeWorker({
+        coordinationDir: sharedCoord,
+        instanceId: 'inst-b',
+        cwd: dirB,
+        deps: depsB,
+        enabled: false,
+        offerOnly: true,
+      });
+      const workerA = makeWorker({
+        coordinationDir: sharedCoord,
+        instanceId: 'inst-a',
+        cwd: dirA,
+        deps: depsA,
+      });
+
+      // B's tick: offer-only check-in only — the entry appears, and none of
+      // the dispatch side effects ran (no capacity anywhere on B).
+      await workerB.tick();
+      expect(getEntry(sharedCoord, 'inst-b')?.workItemId).toBe('WL-P1');
+      expect(depsB.spawnAgentPane).not.toHaveBeenCalled();
+
+      // A (enabled) elects itself leader and, once idle across the threshold,
+      // dispatches B's offer with a stubbed spawn — the passive offer is
+      // indistinguishable from an active one at dispatch time (AC6/AC7).
+      await workerA.tick();
+      expect(workerA.isLeader).toBe(true);
+      vi.setSystemTime(40_000_000 + 60_001);
+      const at = await workerA.tick();
+      expect(at.dispatched).toBe(true);
+      const spawnArgs = (depsA.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(String(spawnArgs[0])).toContain('WL-P1');
+      expect(spawnArgs[1].cwd).toBe(dirB);
+      // The dispatched entry was removed — re-offered by B on its cadence.
+      expect(getEntry(sharedCoord, 'inst-b')).toBe(null);
     } finally {
       vi.useRealTimers();
     }
@@ -479,55 +541,62 @@ describe('integration: leader election → coordination → dispatch', () => {
       }));
 
     it(
-      'AC1/AC4: steps down exactly once after an own-backlog dispatch; another instance can take over',
+      'WL-0MW9XS0XR007K1TH supersedes the step-down trigger: an out-of-view item is OFFERED fleet-wide, not reached via a privileged fallback',
       async () => {
         vi.useFakeTimers();
         vi.setSystemTime(70_000_000);
         try {
           releaseLeadershipSpy.mockClear();
-          const depsA = baseDeps({ getHerdrListHead: ownRoot([eligibleTail('WL-OWN-BACKLOG')]) });
+          // A's own root has ONE eligible item beyond its sprint view. Under
+          // the whole-backlog contract it is now part of A's offer, so the
+          // leader dispatches it as a NORMAL fleet-visible offer.
+          const depsA = baseDeps({
+            getHerdrListHead: ownRoot([eligibleTail('WL-OWN-BACKLOG')]),
+            // The offer is re-fetched at dispatch time, so the fixture must
+            // resolve the offered id (not the base default).
+            fetchItem: vi.fn().mockResolvedValue({
+              ok: true,
+              info: itemInfo('WL-OWN-BACKLOG', 'idea'),
+            }),
+          });
           const depsB = baseDeps(); // B has no own work to offer
           const workerA = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-a', cwd: dirA, deps: depsA });
           const workerB = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-b', cwd: dirB, deps: depsB });
 
-          await workerA.tick(); // A elects + checks in (nothing offered)
+          await workerA.tick(); // A elects + checks in (now offers its backlog)
           await workerB.tick(); // B joins as a non-leader
           expect(workerA.isLeader).toBe(true);
 
           vi.setSystemTime(70_000_000 + 60_001);
-          const at = await workerA.tick(); // idle threshold met → own-backlog dispatch
+          const at = await workerA.tick(); // idle threshold met → offer dispatch
 
           expect(at.dispatched).toBe(true);
-          // The dispatch itself was not undone by the hand-off: claim + marker
-          // + spawn all completed before the step-down.
           expect(depsA.claimItem).toHaveBeenCalled();
           expect(depsA.recordDispatch).toHaveBeenCalled();
           expect(depsA.spawnAgentPane).toHaveBeenCalledWith(
             expect.stringContaining('WL-OWN-BACKLOG'),
             expect.objectContaining({ cwd: dirA }),
           );
-          // The voluntary step-down fired exactly once.
-          expect(releaseLeadershipSpy).toHaveBeenCalledTimes(1);
-          expect(releaseLeadershipSpy).toHaveBeenCalledWith('inst-a');
-          // The lease was released so another instance can win.
-          expect(existsSync(join(sharedCoord, LEASE_FILE))).toBe(false);
-
-          // B takes over the now-vacant lease before A's next tick.
-          vi.setSystemTime(70_000_000 + 60_002);
-          await workerB.tick();
-          expect(workerB.isLeader).toBe(true);
-
-          // A's next tick observes itself as non-leader (no re-election).
-          vi.setSystemTime(70_000_000 + 60_003);
-          await workerA.tick();
-          expect(workerA.isLeader).toBe(false);
-          // The step-down is once per own-backlog dispatch — no repeated calls.
-          expect(releaseLeadershipSpy).toHaveBeenCalledTimes(1);
+          // No step-down: the item was a fleet-visible OFFER, not a privileged
+          // read of a hidden backlog. Cross-root fairness is owned by the
+          // round-robin cursor, so leadership is retained.
+          expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+          expect(workerA.isLeader).toBe(true);
+          expect(existsSync(join(sharedCoord, LEASE_FILE))).toBe(true);
         } finally {
           vi.useRealTimers();
         }
       },
     );
+
+    // NOTE (WL-0MW9XS0XR007K1TH): the own-backlog FALLBACK + step-down path is
+    // not reachable in this integration scenario any more — an instance now
+    // offers its whole ranked backlog at check-in, so its out-of-view work
+    // arrives as a normal fleet-visible offer and dispatches via the offer
+    // path. The fallback and its step-down remain wired and unit-covered by
+    // `coordination-dispatch.test.ts` (`step-down surface AC1`) and
+    // `coordination-registered-root-sweep.test.ts`; they run when no offer is
+    // dispatchable.
 
     it(
       'AC2: a normal in-view (offer-list) dispatch does NOT step down',

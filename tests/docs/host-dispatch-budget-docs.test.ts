@@ -31,6 +31,13 @@ const REPO_ROOT = path.resolve(
 const DISPATCHER_DOC = path.join(REPO_ROOT, 'docs', 'dev', 'downtime-dispatcher.md');
 const HERDR_README = path.join(REPO_ROOT, 'packages', 'herdr', 'README.md');
 const CONFIG_DOC = path.join(REPO_ROOT, 'CONFIG.md');
+const MACHINE_COORDINATION_SRC = path.join(
+  REPO_ROOT,
+  'packages',
+  'herdr',
+  'src',
+  'machine-coordination.ts',
+);
 
 function read(file: string): string {
   return fs.readFileSync(file, 'utf8');
@@ -40,6 +47,7 @@ function read(file: string): string {
 const dispatcherDoc = read(DISPATCHER_DOC);
 const readme = read(HERDR_README);
 const configDoc = read(CONFIG_DOC);
+const machineCoordination = read(MACHINE_COORDINATION_SRC);
 
 describe('downtime-dispatcher deep-dive documents the host-wide budget', () => {
   it('has the module-table row for the ledger module', () => {
@@ -162,5 +170,87 @@ describe('CONFIG.md documents the host budget configuration', () => {
     expect(configDoc).toMatch(/`maxAudit`\s*\|\s*`1`/);
     expect(configDoc).toContain('0`–`32');
     expect(configDoc).toContain('kill switch');
+  });
+});
+
+describe('proxy-derived audit admission is documented (WL-0MW95GBEG005ERHS)', () => {
+  it('records the proxy-owned audit budget, the two reason tokens and the removal-side sibling item', () => {
+    for (const token of [
+      'audit-budget-saturated',
+      'audit-budget-unknown',
+      'audit-budget-divergence',
+      'audit-budget-legacy',
+      'LP-0MW95FYMH006XYNK',
+    ]) {
+      expect(dispatcherDoc).toContain(token);
+    }
+    expect(dispatcherDoc).toContain('HERDR_AUDIT_LOCAL_BUDGET');
+    expect(dispatcherDoc).toContain('/llama/local/audit/status');
+  });
+
+  it('has a gate table with the proxy-derived audit rows and the one-release flag', () => {
+    expect(dispatcherDoc).toMatch(/\| audit \| proxy availability read `available: true` \|/);
+    expect(dispatcherDoc).toMatch(/\| audit \| proxy availability read `available: false` \|/);
+    expect(dispatcherDoc).toMatch(
+      /\| audit \| proxy read not `ok` — `endpoint-absent` \/ `unreachable` \/ `unparsable`/,
+    );
+    expect(dispatcherDoc).toContain(
+      '| audit (one-release legacy path, `HERDR_AUDIT_LOCAL_BUDGET=1`)',
+    );
+    expect(dispatcherDoc).toContain('| audit (either path) |');
+  });
+
+  it('does not present budget.json maxAudit as the audit-admission authority', () => {
+    // The machine-dir file table and the audit sections must say so explicitly.
+    expect(dispatcherDoc).toContain('**not** the audit-admission authority');
+    expect(dispatcherDoc).toContain('Audit entries are observability-only for admission');
+    expect(configDoc).toContain('**not** the audit-admission authority');
+    expect(configDoc).not.toMatch(/maxAudit`?\s*(?:is|as) the audit[- ]cap/i);
+  });
+
+  it('documents the machine-dir ledger audit entries as observability-only and the endpoint', () => {
+    expect(dispatcherDoc).toMatch(
+      /\| `~\/\.herdr\/downtime\/dispatch-budget\.json` \|.*observability-only for admission/,
+    );
+    expect(dispatcherDoc).toContain('GET {proxyUrl}/llama/local/audit/status');
+    expect(dispatcherDoc).toContain('LP-0MW95FYMH006XYNK');
+  });
+
+  it('has an operator runbook for raising the audit cap and the one-release fallback', () => {
+    expect(dispatcherDoc).toContain(
+      "change the proxy's audit-budget configuration",
+    );
+    expect(dispatcherDoc).toContain('`HERDR_AUDIT_LOCAL_BUDGET=1` to restore');
+    expect(dispatcherDoc).toContain('raising `budget.json` `maxAudit` has **no effect**');
+  });
+
+  it('records the removal release for the legacy flag', () => {
+    expect(dispatcherDoc).toMatch(
+      /removed in the release\s+> \*\*after\*\* the proxy side/s,
+    );
+  });
+
+  it('supersedes the single-machine out-of-scope note in machine-coordination.ts', () => {
+    expect(machineCoordination).not.toMatch(/multi-machine \(flock\/NFS\) is out of scope/i);
+    expect(machineCoordination).toContain('cross-machine');
+    expect(machineCoordination).toContain('proxy');
+    expect(machineCoordination).toContain('Proxy-derived audit admission');
+  });
+
+  it('README documents the new flag and the proxy availability read', () => {
+    expect(readme).toContain('HERDR_AUDIT_LOCAL_BUDGET');
+    expect(readme).toContain('audit-budget-saturated');
+    expect(readme).toContain('audit-budget-unknown');
+    expect(readme).toContain('downtimeProxyUrl');
+    expect(readme).toContain('proxy-derived');
+    expect(readme).not.toMatch(/`maxAudit`, default `1`; see \*Host-wide dispatch budget\*/);
+  });
+
+  it('CONFIG.md documents the new flag, the proxy URL source and the non-authoritative cap', () => {
+    expect(configDoc).toContain('HERDR_AUDIT_LOCAL_BUDGET');
+    expect(configDoc).toContain('downtimeProxyUrl');
+    expect(configDoc).toContain('audit-budget-saturated');
+    expect(configDoc).toContain('audit-budget-unknown');
+    expect(configDoc).toContain('proxy-owned budget');
   });
 });

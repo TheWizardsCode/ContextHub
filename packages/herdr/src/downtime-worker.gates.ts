@@ -41,6 +41,7 @@ import {
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_AUDIT_RECENCY_WINDOW_MS,
   DOWNTIME_DISPATCH_EXTEND_MAX,
+  DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS,
   DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
 } from './downtime-worker.constants.js';
 import {
@@ -732,17 +733,23 @@ export function isImplementHeldByReviewGate(
 // ── Critical-only dispatch-window escape hatch (WL-0MUNS8X97007C9H9) ─────────────────
 /**
  * Fetch the CRITICAL-ONLY extended Herdr head for dispatch
- * (WL-0MU6UL3GQ0015AA5, restricted by WL-0MUNS8X97007C9H9 AC2/AC4).
+ * (WL-0MU6UL3GQ0015AA5; widened to the whole backlog by WL-0MW9XS0XR007K1TH,
+ * superseding the sprint-view-only restriction of WL-0MUNS8X97007C9H9).
  *
  * The dispatcher consumes the Herdr list head produced by the canonical
  * ranking path (fetcher → smart-selection → grouping), windowed to the live
- * `browseItemCount` so the head equals the rendered sprint view. Every
- * `critical` item is mandatory in that view, so this helper is a DEFENSIVE
- * safety net: it re-reads the SAME ranking path with a larger window
- * (`current.length + DOWNTIME_DISPATCH_EXTEND_MAX`) and returns only the
- * `critical` items NOT already present in `current`, preserving the canonical
- * order. NON-CRITICAL items beyond the sprint view are never returned — the
- * operator must be able to see any work the dispatcher acts on.
+ * `browseItemCount`. The window bounds only RENDERING: every ranked work item
+ * is a dispatch candidate (WL-0MW9XS0XR007K1TH AC1), so this helper re-reads
+ * the SAME ranking path with a larger window and returns the items NOT already
+ * present in `current`, preserving the canonical order. Both critical and
+ * non-critical items are returned (AC2).
+ *
+ * The window grows geometrically — `max(current.length +
+ * DOWNTIME_DISPATCH_EXTEND_MAX, current.length * 2)` — so reaching a deep
+ * item costs O(log n) reads rather than one read per 30 items (AC8: the
+ * spawn cost of the wider candidate universe stays bounded). Callers that
+ * need the WHOLE backlog loop this helper until it returns `[]`
+ * ({@link fetchWholeBacklogTail}).
  *
  * It is a WINDOW EXTENSION, never a second ranking: the same
  * `selectWorkItems` / `regroupWorkItems` contract decides the order, just
@@ -762,23 +769,55 @@ export async function fetchExtendedHerdrItems(
   opts: { includeNonCritical?: boolean } = {},
 ): Promise<DowntimeHerdrItem[]> {
   try {
-    const extended = await deps.getHerdrListHead(
-      cwd,
+    // Geometric growth: the next window is at least one EXTEND step larger and
+    // at least double, so a deep item is reached in O(log n) reads instead of
+    // one read per EXTEND_MAX items (WL-0MW9XS0XR007K1TH AC8).
+    const nextWindow = Math.max(
       current.length + DOWNTIME_DISPATCH_EXTEND_MAX,
+      current.length * 2,
     );
+    const extended = await deps.getHerdrListHead(cwd, nextWindow);
     if (!extended.ok) return [];
     const seen = new Set(current.map((i) => i.id));
-    // Critical-only escape hatch: a non-critical item beyond the sprint view
-    // is never dispatchable (WL-0MUNS8X97007C9H9 AC2/AC4). When
-    // `includeNonCritical` is true (used by the own-backlog fallback — parent
-    // WL-0MUU4XFU90008E24), the filter is lifted so any ranked item in the
-    // extended tail is returned.
-    return extended.items.filter((i) =>
-      !seen.has(i.id) && (opts.includeNonCritical === true || i.priority === 'critical'),
-    );
+    // EVERY ranked item beyond `current` is returned — non-critical included.
+    // The `includeNonCritical` option is retained for call-site compatibility
+    // and is now a no-op (the whole backlog is always eligible,
+    // WL-0MW9XS0XR007K1TH AC1/AC2).
+    return extended.items.filter((i) => !seen.has(i.id));
   } catch {
     return []; // fail-open: the extension never breaks a defined outcome
   }
+}
+
+/**
+ * Collect the WHOLE ranked backlog beyond `current` by repeatedly applying
+ * {@link fetchExtendedHerdrItems}.
+ *
+ * Used where the caller wants every candidate in canonical order before
+ * applying its own sequential filter chain (the leader own-head fallback,
+ * audit-batch continuation and registered-root sweep). Dispatch sites that
+ * should stop at the first dispatchable candidate loop the single-step helper
+ * themselves so they never read further than necessary.
+ *
+ * Terminates when an extension adds nothing (the backlog is exhausted) or a
+ * lookup fails — the real `getHerdrListHead` returns the whole requested
+ * window once the limit exceeds the backlog, so the final read yields `[]`.
+ * Fail-open: a failed read stops the walk and returns what was collected.
+ */
+export async function fetchWholeBacklogTail(
+  deps: DowntimeGateDeps,
+  cwd: string,
+  current: DowntimeHerdrItem[],
+): Promise<DowntimeHerdrItem[]> {
+  const collected: DowntimeHerdrItem[] = [];
+  let seen = current;
+  for (let round = 0; round < DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS; round += 1) {
+    const next = await fetchExtendedHerdrItems(deps, cwd, seen);
+    if (next.length === 0) break;
+    collected.push(...next);
+    seen = [...seen, ...next];
+  }
+  return collected;
 }
 
 /**

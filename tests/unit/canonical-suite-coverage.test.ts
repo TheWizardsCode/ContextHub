@@ -110,3 +110,73 @@ describe('canonical suite coverage (WL-0MVG4FF9200346NR)', () => {
     ).toEqual([]);
   });
 });
+
+/**
+ * Regression guard: the canonical full suite must also execute the
+ * `packages/` test files it is responsible for.
+ *
+ * ## Why a second guard
+ *
+ * WL-0MVODOJWB004G03J (child WL-0MW47HM8S008UELT) closed the remaining
+ * `packages/` gap by adding `packages/shared` and `packages/tui/extensions`
+ * to `suiteCommands` — the same standard WL-0MVG4FF9200346NR applied to
+ * `tests/`. `packages/herdr` is a deliberate exclusion (producer decision
+ * WL-0MVFZVIA50062TJ8, won't-fix), so it must stay out of `suiteCommands`.
+ *
+ * Without this guard a future narrowing of `suiteCommands` could silently
+ * drop the two package filters and re-open the gap, exactly as it could for
+ * `tests/` before the first guard landed.
+ *
+ * ## What is checked
+ *
+ * 1. Every `*.test.ts` file under `packages/shared` and `packages/tui` is
+ *    matched by at least one command's positional filter.
+ * 2. No positional filter matches a `packages/herdr` test file — the
+ *    documented producer exclusion is never accidentally re-included.
+ */
+describe('canonical suite coverage — packages/ (WL-0MVODOJWB004G03J)', () => {
+  /** `packages/*` directories whose tests the canonical suite must execute. */
+  const COVERED_PACKAGE_DIRS = ['packages/shared', 'packages/tui'];
+
+  it('executes every packages/{shared,tui}/**/*.test.ts file', () => {
+    const filters = suiteCommands().flatMap(positionalFilters);
+    expect(filters.length, 'suiteCommands carry no positional filter to match').toBeGreaterThan(0);
+
+    const uncovered: string[] = [];
+    for (const dir of COVERED_PACKAGE_DIRS) {
+      const abs = path.join(repoRoot, dir);
+      if (!fs.existsSync(abs)) continue;
+      for (const file of testFiles(abs)) {
+        const rel = path.relative(repoRoot, file).split(path.sep).join('/');
+        if (!filters.some((f) => rel.includes(f))) uncovered.push(rel);
+      }
+    }
+
+    expect(
+      uncovered,
+      'these *.test.ts files under packages/{shared,tui} are NOT executed by the canonical ' +
+        'full suite (suiteCommands in .pi/test-config.json). Every packages/shared and ' +
+        'packages/tui test file must be covered (WL-0MVODOJWB004G03J); packages/herdr is the ' +
+        'only sanctioned exclusion (WL-0MVFZVIA50062TJ8):'
+    ).toEqual([]);
+  });
+
+  it('does not re-include the sanctioned packages/herdr exclusion', () => {
+    const filters = suiteCommands().flatMap(positionalFilters);
+    const herdrDir = path.join(repoRoot, 'packages', 'herdr');
+    if (!fs.existsSync(herdrDir)) return;
+
+    const wronglyCovered: string[] = [];
+    for (const file of testFiles(herdrDir)) {
+      const rel = path.relative(repoRoot, file).split(path.sep).join('/');
+      if (filters.some((f) => rel.includes(f))) wronglyCovered.push(rel);
+    }
+
+    expect(
+      wronglyCovered,
+      'the canonical full suite now matches packages/herdr test files, but that package is ' +
+        'excluded by producer decision (WL-0MVFZVIA50062TJ8, won\'t-fix). Run it via ' +
+        '--type herdr / --group herdr instead of widening suiteCommands:'
+    ).toEqual([]);
+  });
+});

@@ -14,6 +14,21 @@
  * `CriticalFirstCandidate` are consumer-facing and re-exported from the
  * barrel; the filter itself is internal to the dispatch entry. No behaviour
  * change: filter order, hold reasons and log lines are identical.
+ *
+ * Continuable holds (WL-0MWBT76WY00298AY): both loops of
+ * `dispatchFromHerdrList` (normal and critical-first) continue past exactly
+ * the outcomes `isContinuableHoldOutcome` allow-lists — lost claims
+ * (`claim-failed` / `claim-rolled-back`) and neutral host-budget refusals
+ * (`host-budget-implement` / `host-budget-audit` / `host-budget-unknown` /
+ * `audit-budget-saturated` / `audit-budget-unknown` /
+ * `audit-host-saturated`). A budget refusal is recorded on
+ * `flags.hostBudgetReason` / `flags.hostBudget` (reason + `{live, max}`
+ * evidence) and the scan steps to the next candidate, so prep work ranked
+ * behind the refused budgeted candidate still dispatches and the caller can
+ * report the neutral terminal reason when nothing else does. Every other
+ * non-dispatched outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
+ * `anchor-unavailable`, …) returns immediately, preserving the strike/skip
+ * semantics.
  */
 
 import {
@@ -34,7 +49,12 @@ import {
   type DispatchMarker,
 } from './downtime-log.js';
 import type { LocalPreference, LocalPreferenceMode } from './local-preference.js';
-import type { DowntimeDispatchDeps, DowntimeDispatchOutcome } from './downtime-worker.dispatch-contract.js';
+import {
+  isContinuableHoldOutcome,
+  isHostBudgetHoldReason,
+  type DowntimeDispatchDeps,
+  type DowntimeDispatchOutcome,
+} from './downtime-worker.dispatch-contract.js';
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
 import type {
   DowntimeCandidate,
@@ -101,7 +121,11 @@ export async function dispatchFromHerdrList(
   deps: DowntimeDispatchDeps,
   items: DowntimeHerdrItem[],
   ctx: { cwd: string; model: string; localPreference?: LocalPreference; localPreferenceMode?: LocalPreferenceMode; freeSlots?: number; frozen: boolean; cpuSaturated: boolean; panesEligible: boolean; auditSlotBudget: number | undefined; pinnedAuditItemId?: string; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean; auditHostSaturated: boolean; hostBudgetReason?: string; hostBudget?: { live: number; max: number } },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean;
+    auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean;
+    cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean;
+    auditHostSaturated: boolean; hostBudgetReason?: string;
+    hostBudget?: { live: number; max: number }; hostBudgetDetail?: string },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -198,12 +222,17 @@ export async function dispatchFromHerdrList(
       selectionReason: guard.reason,
     });
     if (outcome.dispatched) return outcome;
-    // A lost CAS race / marker-recovery rollback applies to one candidate:
-    // try the next critical candidate, then fall through to the normal loop.
-    if (outcome.reason === 'claim-failed' || outcome.reason === 'claim-rolled-back') continue;
-    // Any other terminal outcome (wl-error, spawn-failed, anchor-unavailable)
-    // is returned unchanged so the caller's strike/skip semantics are kept.
-    return outcome;
+    // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): a host-budget refusal
+    // is NEUTRAL and candidate-scoped, so record the FIRST refusal's token and
+    // `{live, max}` evidence in `flags` and try the next critical candidate
+    // instead of ending the scan. Lost claims keep today's continue. Every
+    // other terminal outcome (wl-error, spawn-failed, anchor-unavailable) is
+    // returned unchanged so the caller's strike/skip semantics are kept.
+    if (!isContinuableHoldOutcome(outcome)) return outcome;
+    if (isHostBudgetHoldReason(outcome.reason)) {
+      flags.hostBudgetReason ??= outcome.reason;
+      if (outcome.budget !== undefined) flags.hostBudget ??= outcome.budget;
+    }
   }
 
   for (const item of items) {
@@ -237,13 +266,15 @@ export async function dispatchFromHerdrList(
     // still be the active-audit item that should cause the skip).
     if (k === 'audit') {
       const active = await deps.getActiveAudit(ctx.cwd);
-      // Host-wide budget refusal (WL-0MVXY0XPF006YUHA F2): the source tells the
-      // host-wide ledger/marker check from the per-worklog marker check, and
-      // `reason`/`budget` carry the cap decision (`audit-host-saturated` at
-      // maxAudit 1, `host-budget-audit` otherwise, `host-budget-unknown` on a
-      // fail-closed ledger) plus its live/max evidence, so the terminal reason
-      // is reported rather than inferred here.
-      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide') { flags.auditHostSaturated = true; if (typeof active.reason === 'string') { flags.hostBudgetReason = active.reason; } if (active.budget !== undefined) { flags.hostBudget = active.budget; } } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
+      // Audit-budget refusal (WL-0MWAMSDNW000SL0E, proxy-derived; formerly the
+      // host-wide ledger, WL-0MVXY0XPF006YUHA F2): the source tells the
+      // proxy/host-wide budget refusal from the per-worklog marker check, and
+      // `reason`/`budget` carry the cap decision (`audit-budget-saturated` /
+      // `audit-budget-unknown` on the proxy path; the legacy `audit-host-saturated` /
+      // `host-budget-audit` / `host-budget-unknown` tokens for any host-wide
+      // source) plus its live/max evidence, so the terminal reason is reported
+      // rather than inferred here. `detail` records the failing proxy exchange.
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide' || active.source === 'proxy') { flags.auditHostSaturated = true; if (typeof active.reason === 'string') { flags.hostBudgetReason = active.reason; } if (active.budget !== undefined) { flags.hostBudget = active.budget; } if (typeof active.detail === 'string') { flags.hostBudgetDetail = active.detail; } } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
     }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
@@ -351,9 +382,16 @@ export async function dispatchFromHerdrList(
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
     });
     if (outcome.dispatched) return outcome;
-    if (outcome.reason === 'claim-failed') continue;
-    if (outcome.reason === 'claim-rolled-back') continue; // marker-write recovery (WL-0MT32F908002YFFA)
-    return outcome;
+    // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): record the first
+    // host-budget refusal's token + `{live, max}` evidence in `flags` and keep
+    // scanning — the prep work ranked behind a budget-refused candidate is not
+    // budget-gated and must still dispatch. Lost claims continue as before;
+    // every other terminal outcome is returned unchanged.
+    if (!isContinuableHoldOutcome(outcome)) return outcome;
+    if (isHostBudgetHoldReason(outcome.reason)) {
+      flags.hostBudgetReason ??= outcome.reason;
+      if (outcome.budget !== undefined) flags.hostBudget ??= outcome.budget;
+    }
   }
   return null;
 }

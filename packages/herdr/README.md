@@ -130,8 +130,9 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `s` — Insert a search command
    - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A pre-dialog guard first checks that no other live agent pane is working on a project work item; if one is, a blocked notice lists the offending panes and nothing is dispatched. Otherwise a typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
 
-5. Review chords (press `r` then a key):
-   - Press `r`, `p` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
+5. Review chords (press `r` then a key, then optionally a third key):
+   - Press `r`, `p`, `r` — Toggle 'Needs Producer Review' flag (Producer Reject)
+   - Press `r`, `p`, `a` — Approve the selected item with an "LGTM" comment (Producer Approve)
    - Press `r`, `i` — Walk through outstanding interview questions on the selected item (`wl interview`); the new pane is **focused** so you can answer immediately (see **Focused shortcuts via `focus: true`** below)
 
 6. Priority update chords (press `u` then `p` then a priority key):
@@ -263,7 +264,8 @@ The plugin respects the following environment variables:
 - `WL_COUNT` — Number of work items to fetch (default: 20, now superseded by `browseItemCount` in settings)
 - `HERDR_SOCKET_PATH` — Path to the herdr Unix socket used by the event subscription (default `~/.config/herdr/herdr.sock`). When unset/unreachable the plugin falls back to polling.
 - `HERDR_COORDINATION_DIR` — Machine coordination directory override (default `~/.herdr/downtime`); the host dispatch-budget ledger and its `budget.json` live here.
-- `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — Per-tier machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. Values clamp to `0`–`32`; `0` disables that tier host-wide (a per-tier kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`). See *Host-wide dispatch budget* under the downtime worker.
+- `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — Per-tier machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. Values clamp to `0`–`32`; `0` disables that tier host-wide (a per-tier kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`). `HERDR_HOST_MAX_IMPLEMENT` governs the implement tier; **`maxAudit` / `HERDR_HOST_MAX_AUDIT` are implement-tier-only for audit admission** — the audit budget is owned by the proxy (below), and `maxAudit` is only the one-release legacy cap and the local observability figure. See *Host-wide dispatch budget* under the downtime worker.
+- `HERDR_AUDIT_LOCAL_BUDGET` — **one-release** escape hatch (`=1`) restoring the pre-proxy audit decision (`budget.json` `maxAudit` + the local ledger, never consulting the proxy). It is removed in the release after the proxy side (`LP-0MW95FYMH006XYNK`) ships. Unset → the proxy-owned audit budget is authoritative. The proxy URL is `downtimeProxyUrl` in `~/.config/herdr/worklog-plugin.json` (default `http://192.168.0.199:8000`), the same URL the status poller and reserve client use.
 
 #### Plugin Settings (config file)
 
@@ -410,12 +412,16 @@ dispatches; the other herdr instances coordinate instead of polling:
   (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview ===
   true`, above-caps, or otherwise not currently dispatchable) is **removed
   eagerly without pane or dispatched marker**, and dispatch continues to
-  the next offer. If no offer is dispatchable, the leader may fall back to
-  its **own backlog** — a bounded window extension of the same ranking
-  beyond the sprint view, own root only — and, on a successful own-backlog
-  dispatch, voluntarily steps down via `releaseLeadership()` so another
-  instance can take over (WL-0MUU4XFU90008E24; see the *Own-backlog
-  fallback & leadership hand-off* paragraph below). The dispatched entry is
+  the next offer. If no offer is dispatchable, the leader first **sweeps the
+  registered worklog roots** (`downtimeWorklogRoots`) in round-robin order —
+  extra roots with no running instance, read through the same canonical
+  ranking and the same sequential safety gates (see *Registered-root
+  discovery* below) — and then may fall back to its **own backlog** — a
+  bounded window extension of the same ranking beyond the sprint view, own
+  root only — and, on a successful own-backlog dispatch, voluntarily steps
+  down via `releaseLeadership()` so another instance can take over
+  (WL-0MUU4XFU90008E24; see the *Own-backlog fallback & leadership hand-off*
+  paragraph below). The dispatched entry is
   **removed**; its owner re-offers its next Herdr head at the next
   check-in. There is **no TTL-based pruning**. **Every per-entry `wl`
   invocation — the dispatch-time
@@ -490,8 +496,9 @@ dispatches; the other herdr instances coordinate instead of polling:
   the local model is idle. At or above `downtimeCpuGatePercent` (default
   75 %, `0` disables) measured host CPU utilisation, the dispatcher refuses
   NEW **audit** and **implement** dispatch on every path (direct Herdr head,
-  critical-first scan, coordination offers, own-backlog fallback and
-  audit-batch continuation) and does **not** resume a stalled pane; intake,
+  critical-first scan, coordination offers, registered-root sweep,
+  own-backlog fallback and audit-batch continuation) and does **not** resume
+  a stalled pane; intake,
   plan and risk-effort keep dispatching and a manual/operator dispatch is
   never gated. The reading is `/proc/stat` delta utilisation normalised
   across all cores, falling back to `1-min load average ÷ cores × 100` when
@@ -502,34 +509,73 @@ dispatches; the other herdr instances coordinate instead of polling:
   never a `no-candidate` cooldown, never an evicted coordination entry, and
   deliberately NOT counted as local-model capacity starvation. See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-cpu-dispatch-gate-wl-0mvk0uo3q002txw6).
-- **Host-wide dispatch budget (WL-0MVXWQFGV000D2AB, F1–F5)** — the operator
-  can cap how many `implement` and `audit` panes this **machine** runs at
-  once, regardless of how many herdr instances or projects are open. The
-  budget is a machine-scoped ledger
-  (`~/.herdr/downtime/dispatch-budget.json`, one entry per in-flight dispatch)
-  with per-tier caps in `~/.herdr/downtime/budget.json` (`{"maxImplement":
-  2, "maxAudit": 1}`; `0` disables a tier host-wide), overridable by
-  `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — **not** a per-instance
-  `settings.json` key, deliberately: a host cap stored per instance drifts by
-  construction (which is why `downtimeRequiredFreeSlots` cannot express it),
-  while one elected leader already dispatches for every root so a machine
-  file is authoritative. Dispatcher-fired work over quota is a neutral skip
-  (`host-budget-implement` / `host-budget-audit` /
-  `audit-host-saturated`), never a prompt and never a `no-candidate`
-  cooldown; an unreadable ledger **fails closed** there
-  (`host-budget-unknown`, self-healing rewrite from the live pane list).
-  User-fired `/skill:implement` / `/skill:audit` shortcuts (pane **and**
-  headless `open_pane: false`) instead open a bottom-anchored dialog when the
-  tier is at cap — `Enter`/`y` proceeds, `Esc`/`n` cancels;
-  cancel is the state on open; a proceed records `override: { by: "user" }`
-  on the ledger entry so a deliberate human override is distinguishable from
-  drift; that path **fails open with a visible notice** if the ledger is corrupt.
-  The budget only ever reduces concurrency below the free-slot/prefill gates
-  (the WL-0MU2EP6JL006A1U3 "no client-side pane cap" boundary is preserved —
-  the inner limiter is unchanged), and it is not capacity starvation. The
-  retired `active-audit` marker is read for exactly one release of
-  compatibility. See
-  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope).
+- **Host-wide dispatch budget (WL-0MVXWQFGV000D2AB, F1–F5; audit admission
+  proxy-derived by WL-0MW95GBEG005ERHS)** — the operator can cap how many
+  agent panes this **machine** runs at once, regardless of how many herdr
+  instances or projects are open.
+  - **Implement tier** — a machine-scoped ledger
+    (`~/.herdr/downtime/dispatch-budget.json`, one entry per in-flight
+    dispatch) with the cap in `~/.herdr/downtime/budget.json` (`maxImplement:
+    2`; `0` disables the tier host-wide), overridable by
+    `HERDR_HOST_MAX_IMPLEMENT` — **not** a per-instance `settings.json` key,
+    deliberately: a host cap stored per instance drifts by construction (which
+    is why `downtimeRequiredFreeSlots` cannot express it), while one elected
+    leader already dispatches for every root so a machine file is
+    authoritative. Dispatcher-fired work over quota is a neutral skip
+    (`host-budget-implement`), never a prompt and never a `no-candidate`
+    cooldown; an unreadable ledger **fails closed** there
+    (`host-budget-unknown`). The self-healing rewrite from the live pane list
+    runs only when the pane read **succeeded**; a failed/unparseable pane read
+    makes liveness UNKNOWN and never rewrites, never reaps, never deletes
+    (WL-0MW9VQX5T001GCUP). The pane read is **tri-state**
+    (`{ok:true, panes}` authoritative vs `{ok:false}` unknown): on unknown both
+    the admission count and the worklist header figures fall back to the
+    documented **freshness rule** (fresh entries count, nothing is reaped), so
+    a transient herdr hiccup can neither wipe the ledger's record of running
+    work nor silently under-count it, and it never refuses a tick on its own
+    (the fail-open admission rationale is preserved).
+  - **Audit tier is proxy-derived (cross-machine)** — the audit budget and the
+    live audit-lease registry are **owned by the proxy** (the one local
+    `llama-server` GPU every ContextHub host shares), and herdr queries
+    `GET {proxyUrl}/llama/local/audit/status` (URL from `downtimeProxyUrl`),
+    mapping the verdict to a refusal with the proxy's own tokens
+    (`audit-budget-saturated`; or `audit-budget-unknown` when the read fails
+    closed). A proxy/local disagreement is logged with both sides' evidence
+    (`audit-budget-divergence`). The local ledger's audit entries are
+    **observability only** (header/dialog/sweep) and can never refuse an
+    audit; `budget.json` `maxAudit` / `HERDR_HOST_MAX_AUDIT` are
+    implement-tier-only for admission. The one-release
+    `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
+    decision for a single release.
+  - **A refusal is a continuable hold on that candidate, not a whole-tick
+    stop.** Both head-scan paths record the refusal (reason + `live`/`max`
+    evidence) and keep scanning, so `plan`/`intake` ranked behind a refused
+    `implement` — or a `plan`/`intake` behind a refused `audit` — keep
+    dispatching. A budget refusal therefore costs only *budgeted* throughput;
+    when nothing else dispatches the tick's terminal reason is still the
+    neutral refusal (never `no-candidate`, never a strike, never a cooldown).
+    See *Continuable vs terminal outcomes* in
+    [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#continuable-vs-terminal-outcomes-wl-0mwbt76wy00298ay).
+  - User-fired `/skill:implement` / `/skill:audit` shortcuts (pane **and**
+    headless `open_pane: false`) instead open a bottom-anchored dialog when the
+    tier is at cap — `Enter`/`y` proceeds, `Esc`/`n` cancels;
+    cancel is the state on open; a proceed records `override: { by: "user" }`
+    on the ledger entry so a deliberate human override is distinguishable from
+    drift; that path **fails open with a visible notice** if the ledger is corrupt.
+    The audit dialog quotes the same pane-aware count the worklist header shows,
+    so a dead (pane-gone) audit no longer inflates the prompt (WL-0MW8IQNY7003JIOL).
+  - The budget only ever reduces concurrency below the free-slot/prefill gates
+    (the WL-0MU2EP6JL006A1U3 "no client-side pane cap" boundary is preserved —
+    the inner limiter is unchanged), and it is not capacity starvation. The
+    retired `active-audit` marker is read for exactly one release of
+    compatibility. See
+    [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope).
+  The ledger covers **dispatched agent panes** only: a release's own
+  subprocesses (`audit_runner.py`, `run_tests.py`, `git`/`gh`) and the
+  `/skill:ship` command bypass it entirely, and the per-root **code-freeze**
+  gate — not a budget slot — is what pauses implement/audit dispatch while a
+  release runs. See
+  [release-dispatch-budget-evaluation.md](../../docs/dev/release-dispatch-budget-evaluation.md).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -564,8 +610,9 @@ the head equals the rendered worklist (mandatory items always included, remainin
 filled from "other" items). Non-critical work outside the view is never dispatched by
 the normal paths: when the head yields no candidate the dispatcher reports the in-view
 terminal reason (`no-candidate`, `review-queue-hold`, `code-freeze`, …) and does not scan
-hidden backlog — except via the coordination own-backlog fallback below, which then hands
-off leadership.
+hidden backlog — except via the coordination leader's registered-root sweep and
+own-backlog fallback below; the sweep serves an explicitly registered root without
+handing off leadership, and the own-backlog fallback then hands off.
 A bounded out-of-window escape hatch (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional
 items) re-reads the **same ranking path** but returns **only** `critical` items — because
 critical items are already mandatory in the view this is normally a no-op, and it can
@@ -587,6 +634,24 @@ after a normal in-view dispatch, and a fallback that finds nothing retains
 leadership and the original terminal reason. **Legacy mode** (no
 `leaderManager`) is unchanged. See
 [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#own-backlog-fallback--leadership-hand-off-wl-0muu4xfu90008e24).
+
+**Registered-root discovery (`downtimeWorklogRoots`, parent
+WL-0MVR8GDJ3008WY3Y, option O1):** a root that holds dispatchable work but has
+**no running herdr instance** writes no coordination entry, so the offer path
+can never see it. The setting registers extra worklog **roots** (the parent of
+`.worklog/`, absolute) that the leader sweeps when the offer list yields
+nothing dispatchable — before its own out-of-view backlog. Each root is read
+through the **same canonical ranking window** (`getHerdrListHead` plus the
+bounded extension) with the **full sequential filter chain** applied against
+that root's own state (freeze, review queue, in-flight panes, cooldown log,
+claim target). The sweep starts at the least-recently-served registry root via
+the `downtime-round-robin-by-root` cursor and visits the rest in registry
+order, so no single root can monopolise the leader. An unreadable/missing root
+is skipped without a strike, and a swept dispatch is recorded with
+`selectionPath: registered-root-sweep` and does **not** hand off leadership.
+An **absent or empty registry is a no-op** — the candidate universe stays
+today's `offers ∪ ownBacklog` byte-for-byte. See
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#registered-root-discovery--sweeping-roots-with-no-running-instance-parent-wl-0mvr8gdj3008wy3y-option-o1).
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
@@ -674,8 +739,9 @@ pacing* below).
   audit) is at or above `browseItemCount`, one continuous idle window may
   issue this many **sequential** audits because the dispatcher's own
   post-dispatch reset is deferred between them (a busy poll still requires a
-  fresh idle run). At most **`maxAudit`** audits are active at a time host-wide
-  (default `1`, see *Single-active-audit guarantee* below); the cap only drains
+  fresh idle run). At most the **proxy's audit cap** audits are active at a
+  time across hosts (the proxy-owned budget; `maxAudit` only on the one-release
+  legacy path — see *Single-active-audit guarantee* below); the cap only drains
   a deep queue faster. `1` disables batching and restores the legacy
   single-dispatch-per-idle-window behaviour (default: `2`, clamped to 1 – 5)
 - `downtimeStallScanEnabled` — Enable the pre-dispatch stalled-work scan
@@ -723,6 +789,40 @@ pacing* below).
   Boolean; absent/malformed → `false`; re-read live on every tick, and the
   decision log records `leafAuditImmediate` on the `leaf-audit-admission`
   token
+- `downtimeOfferOnly` — **Opt-in, default `false`** (WL-0MWDDHOK6009GJCC).
+  When dispatch is **disabled** (`downtimeEnabled: false` or a live manual
+  `d` disable marker) AND this is `true`, the instance still performs the
+  coordination **check-in**: it writes/refreshes its `entries` offer with
+  its computed most-important item (same computation, filters and staleness
+  semantics as an active instance), so the fleet leader can see — and
+  dispatch — this root's work even though the local instance never polls the
+  llama proxy, takes the leader lease, claims an item, reserves capacity or
+  spawns a pane. It is strictly a check-in concern: a passive instance can
+  never dispatch, claim, reserve or lead (fail closed in code, not by
+  convention). Use it for instances that must never run agents locally
+  (no local model capacity, contested GPU, machine in use) but whose worklog
+  root should still be served by the fleet leader — **prefer it over
+  `downtimeWorklogRoots` when the root's instance is running but passive**;
+  keep the registry for roots with no running instance at all (the two
+  mechanisms are independent and compose). Boolean; absent/malformed →
+  `false`; re-read live on every tick. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#offer-only-mode-downtimeofferonly---wl-0mwddhok6009gjcc)
+- `downtimeWorklogRoots` — Registered worklog roots the leader may sweep for
+  dispatchable work even when **no herdr instance is running** in them
+  (default: `[]`). Each entry is a worklog ROOT — the parent of `.worklog/`,
+  matching the `worklogRoot`/`opts.cwd` semantics, not the `.worklog`
+  directory itself — and must be an absolute path. At settings load the list
+  is clamped (`clampDowntimeWorklogRoots`: non-array → `[]`, non-string/
+  blank/duplicate entries dropped, bounded to **32** entries) and then
+  validated (`resolveDowntimeWorklogRoots`): an entry survives only when it
+  realpath-resolves to a directory containing `.worklog/worklog.db`, and the
+  stored value is that realpath so a symlinked root can never dispatch into
+  an unexpected workspace. Validation is per entry — an invalid/unreadable
+  root is dropped on its own and never invalidates a good neighbour. **Empty
+  registry is the fail-safe default:** absent, empty or wholly unresolvable
+  leaves the candidate universe byte-for-byte unchanged (offers +
+  own-backlog only). Re-read each tick, so registry edits apply without a
+  plugin restart. See *Registered-root discovery* above
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's
@@ -1031,21 +1131,25 @@ log is treated as empty (fail-safe), so audit dispatch keeps working on a
 fresh worklog. Every dispatch tier — audit, critical, implement, plan,
 and intake — additionally excludes items with `needsProducerReview === true`
 (WL-0MTIAL65N004T22F): items flagged for producer review are never
-auto-dispatched (the `r p` chord / `wl update --needs-producer-review true`),
+auto-dispatched (the `r p r` chord / `wl update --needs-producer-review true`),
 so the worker never consumes local slots on items awaiting a human decision.
 Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
 makes the item dispatchable again on the next idle poll.
 
 > **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV; host-wide cap
-> generalised by WL-0MVXY0XPF006YUHA F2):** exactly one
-> audit is dispatched at a time during downtime dispatch by **default** —
-> strictly sequential, never fan-out across candidates. The host-wide
-> **dispatch budget** is the outermost audit-concurrency gate
-> (`maxAudit`, default `1`; see *Host-wide dispatch budget* above), counted
-> by the machine-scoped ledger with the retired `active-audit` marker read as
-> one synthetic entry for a release of compatibility. Beneath it, before the
+> generalised by WL-0MVXY0XPF006YUHA F2; proxy-derived by WL-0MW95GBEG005ERHS):**
+> exactly one audit is dispatched at a time during downtime dispatch by
+> **default** — strictly sequential, never fan-out across candidates. The
+> **proxy-owned audit budget** is the outermost audit-concurrency gate
+> (see *Host-wide dispatch budget* above): the proxy owns the cap and the live
+> audit-lease registry, and herdr reads its verdict from
+> `GET {proxyUrl}/llama/local/audit/status`, refusing with
+> `audit-budget-saturated` (or `audit-budget-unknown` when the read fails
+> closed). The local ledger's audit entries are **observability only** — they
+> can never refuse an audit; `budget.json` `maxAudit` is only the one-release
+> legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`). Beneath the proxy gate, before the
 > audit tier selects a candidate, the worker runs the host-wide audit-budget
-> check (`getActiveAudit`, which reads the machine-scoped ledger first and the
+> check (`getActiveAudit`, which reads the proxy availability first and the
 > per-worklog dispatch log beneath it): it reads the shared
 > `.worklog/downtime-dispatches.log`
 > (the cross-instance source of truth — an audit dispatched by ANY
@@ -1089,8 +1193,9 @@ makes the item dispatchable again on the next idle poll.
 > exclusion) and any non-`dispatched` outcome ends the batch. A busy poll
 > (including the audit pane's own proxy activity) resets the idle run and ends
 > the batch window, so the batch never relaxes the idle-duration gate. The
-> guarantee above is unchanged: with the default `maxAudit: 1`, exactly one
-> audit runs at a time, and batching is not concurrency relaxation. In
+> guarantee above is unchanged: with the proxy's default audit cap of one
+> lease, exactly one audit runs at a time, and batching is not concurrency
+> relaxation. In
 > coordination mode the leader continues
 > from its own Herdr head and defers its own-backlog leadership hand-off to
 > batch end. Set `downtimeAuditBatchMax` to `1` to restore
@@ -1411,8 +1516,9 @@ fallback decision instead of a silent ~120 s proxy-side wait.
   consuming remote capacity); `medium`/`high`/`critical` and scheduled prompts
   (no work item, therefore no priority) keep the deployment default
   `remote-ok`. The resolution happens once in `dispatchClaimedTier`, so the
-  coordination offer, own-backlog fallback, audit-batch continuation,
-  critical-first/normal scan and the legacy tier chain all agree.
+  coordination offer, registered-root sweep, own-backlog fallback,
+  audit-batch continuation, critical-first/normal scan and the legacy tier
+  chain all agree.
   Explicitness is derived by `loadSettings`
   (`downtimeLocalPreferenceExplicit`) and never persisted; the persisted
   alphabet and the `X-Local-Preference` wire contract are both
@@ -2739,7 +2845,7 @@ packages/herdr/
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
 - **Selection-list dispatch keeps focus** — Every pane spawned from the worklist selection list (pi agent panes via `send-to-pi.sh`, and command-output panes via `run-in-pane.sh`) opens **without moving focus** by default (WL-0MSHIA53D009DJOT): the dispatch passes `--no-focus` to both launchers, so the final zoom/focus step is skipped and the selection list keeps the keyboard focus. The user can read dispatch feedback via toasts and inspect the opened pane with herdr pane navigation (`prefix+o`, `prefix+x` to close). The `P n` and `r i` shortcuts opt in to **focus the new pane immediately** (see **Focused shortcuts via `focus: true`** below). Out of scope and unchanged: the downtime worker (already `--no-focus`), the `open-pi-agent` unbound plugin action, and `open.sh`/`toggle.sh`.
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right (or, when the command carries a work-item ID, the item-ID tab's anchor pane — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs)), creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". The dispatch passes `--no-focus` (selection-list dispatch keeps focus, see above) unless the shortcut opts in to **focus the new pane** (`focus: true`, see **Focused shortcuts via `focus: true`** above), in which case `--focus` is passed and the new pane is zoomed. Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
-- **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled quiet state-change shortcuts use it: `a-y` audit approve, `a-r` audit reject (whose `<reason>` placeholder is collected by the form dialog before the background dispatch — WL-0MV6J4HQ0009OJPQ), `c-q` quick create (whose `<title>`/`<description>`/`<priority>` placeholders are collected by the form dialog first, then `wl create` runs in the background and the list refreshes on completion — WL-0MV6J5JXL002D8C4), `u-p-*` priority updates, and `x-c`/`x-d` close/delete — they complete silently and the worklist refresh shows the updated state. If a background command exits non-zero, a **failure toast** is shown with the command, its exit code (or termination signal) and a short excerpt of its output (WL-0MUEBQLRD00288VV); the full output remains in the per-run log file. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
+- **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled quiet state-change shortcuts use it: `a-y` audit approve, `a-r` audit reject (whose `<reason>` placeholder is collected by the form dialog before the background dispatch — WL-0MV6J4HQ0009OJPQ), `c-q` quick create (whose `<title>`/`<description>`/`<priority>` placeholders are collected by the form dialog first, then `wl create` runs in the background and the list refreshes on completion — WL-0MV6J5JXL002D8C4), `r-p-r` producer reject (whose `<producer_comment>`/`<author>` placeholders are collected by the form dialog first — WL-0MW6GG2ID006ESFS), `r-p-a` producer approve, `u-p-*` priority updates, and `x-c`/`x-d` close/delete — they complete silently and the worklist refresh shows the updated state. If a background command exits non-zero, a **failure toast** is shown with the command, its exit code (or termination signal) and a short excerpt of its output (WL-0MUEBQLRD00288VV); the full output remains in the per-run log file. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
 - **Focused shortcuts via `focus: true`** — A shortcut entry may carry an optional `focus: true` flag (WL-0MT70LC6B009TL3Q) to **focus the newly opened pane** immediately after it spawns. When absent or `false` (the default) the selection list keeps focus (the behaviour above). The flag is orthogonal to `open_pane: false` (no pane → focus is moot) and invalid values are logged and treated as absent (no-focus). Focus is applied to the pane's **tab** as well as the pane itself (`run-in-pane.sh` resolves the new pane's tab via `herdr pane get` and runs `herdr tab focus` before the pane zoom, WL-0MURJ0LFH002O95I): a focused ID-carrying dispatch is anchored to the work-item-ID tab (see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs)), and `pane zoom` alone cannot switch tabs — without the tab focus the new pane would open in a background tab and the selection list would keep focus. The bundled entries with the flag are `P n` (new Pi session — blank `/prompt:`) and `r i` (producer interview — `wl interview`): `P n` puts the cursor straight in the new Pi pane for immediate typing, and `r i` puts the cursor straight in the interview pane so the producer can answer outstanding questions without an extra `prefix+o` step. Any future shortcut can opt in with the same field without a schema change.
 - **Model lease release on pane close** — Pi agent panes launched by `send-to-pi.sh` or `open-pi-agent.sh` run pi via `shared/run-pi-agent.sh`, which gives the session a deterministic id (`pi --session-id herdr-<timestamp>-<pid>-<rand>`) and registers EXIT/TERM/HUP/INT traps. When the pi session ends — normal exit or pane close (`prefix+x`) — the wrapper runs `shared/release-lease-on-exit.mjs`, which posts to the Local Proxy's `POST {baseUrl}/leases/release` using the **same shared implementation** as the Pi extension (`@worklog/shared/lease-release`), so the proxy's dispatch lease is reclaimed promptly instead of lingering until timeout. The release is strictly best-effort: failures (unreachable proxy, missing `~/.pi/agent/models.json`, unconfigured provider) are silently discarded, a 5s request timeout bounds the pane-close path, and the wrapper always propagates pi's exit status (WL-0MSGI7UIH008USVB).
 - **Worklog tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-worklog-tab` action wraps the same pane-open command and renames the created tab to "Worklog" via `herdr tab rename` (socket API, not session-state editing), so the worklog pane is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.
@@ -2848,7 +2954,7 @@ Semantics:
   and `i` (implement) carry `work_item_types: ["bug","docs","feature",
   "task","chore","epic"]`, so they are hidden on non-code and non-docs types
   (e.g. `podcast`). All other bundled shortcuts (audit `a-*`, producer review
-  `r-p`/`r-i`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
+  `r-p-r`/`r-p-a`/`r-i`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
   available on all types. Consumer projects can add their own type-gated
   chords (e.g. a `w` chord leader → `wiki-podcast-script` for `podcast`
   items) via the project-local `shortcuts.json` mechanism above.
@@ -2897,6 +3003,7 @@ Semantics:
   opens) — a bad value never hides or breaks a shortcut.
 - Bundled quiet state-change shortcuts carry `"open_pane": false`: `a-y`
   (audit approve), `a-r` (audit reject), `c-q` (quick create),
+  `r-p-r` (producer reject), `r-p-a` (producer approve),
   `u-p-l/m/h/c` (priority updates), and `x-c`/`x-d` (close/delete). They run
   to completion in the background and the worklist refresh shows the updated
   state — including `a-r` and `c-q`, whose placeholders

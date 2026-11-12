@@ -105,4 +105,107 @@ describe('wl list --stage in_review -F concise ordering (WL-0MUWDW0N6003KF6G)', 
     expect(highPos).toBeLessThan(mediumFailedPos);
     expect(mediumFailedPos).toBeLessThan(mediumNoAuditPos);
   });
+
+  // ── WL-0MW7S20IC001F3AP: soft-delete predicate consistency ───────────
+  //
+  // The bug: `wl list` excluded only `status === 'deleted'` while `wl update`
+  // rejected any non-empty `deletedBy`. A repaired row (live status,
+  // `deletedBy` retained) was therefore *visible but immutable* — the release
+  // gate's `wl update --status in_progress` failed with `deleted-item` on a
+  // row `wl list --stage in_review` returned.
+  //
+  // These assertions pin the FIXED behaviour. They are written test-first and
+  // marked `it.fails` while the bug is live; the list read-path item
+  // (WL-0MW8EU3IQ006XY1U) applies the shared predicate and flips them to `it`.
+  describe('soft-deleted rows are excluded from --stage in_review (WL-0MW7S20IC001F3AP)', () => {
+    /**
+     * Seed the exact bug shape: a live (completed/in_review) row that retains a
+     * non-empty `deletedBy`. This is producible through the CLI because the
+     * soft-delete guard only blocks attribution changes on an *already*
+     * soft-deleted row; attaching attribution to a still-live row is allowed.
+     */
+    async function createAttributedInReview(title: string): Promise<string> {
+      const createRes = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} create -t "${title}"`,
+      );
+      const created = JSON.parse(createRes.stdout);
+      expect(created.success).toBe(true);
+      const id = created.workItem.id as string;
+      const advance = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} update ${id} --stage in_review --status completed`,
+      );
+      expect(JSON.parse(advance.stdout).success).toBe(true);
+      const attribute = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} update ${id} --deleted-by "repairer@example.com" --delete-reason "deletion intent retained"`,
+      );
+      expect(JSON.parse(attribute.stdout).success).toBe(true);
+      return id;
+    }
+
+    async function listInReviewIds(): Promise<string[]> {
+      const res = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} list --stage in_review`,
+      );
+      expect(res.exitCode).toBe(0);
+      return JSON.parse(res.stdout).workItems.map((i: { id: string }) => i.id);
+    }
+
+    it(
+      'does not return a completed/in_review row that retains a non-empty deletedBy (AC1)',
+      async () => {
+        const id = await createAttributedInReview('Attributed review row');
+        expect(await listInReviewIds()).not.toContain(id);
+      },
+    );
+
+    it(
+      'never returns a row that wl update --status in_progress rejects as deleted-item (AC2)',
+      async () => {
+        const id = await createAttributedInReview('Attributed review row invariant');
+        const listedIds = await listInReviewIds();
+
+        const listed = listedIds.includes(id);
+        let mutable = true;
+        if (listed) {
+          const upd = await runInProcess(
+            `tsx ${cliPath} --json --worklog-dir ${wlDir} update ${id} --status in_progress`,
+          );
+          const parsed = JSON.parse(upd.stdout || upd.stderr);
+          mutable = parsed.success === true && parsed.error !== 'deleted-item';
+        }
+        // A row must never be simultaneously visible and immutable.
+        expect(listed && !mutable).toBe(false);
+      },
+    );
+
+    it('still excludes status=deleted rows from --stage in_review (AC3, no regression)', async () => {
+      const id = await createAttributedInReview('Row that will be hard-deleted');
+      const del = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} delete ${id} --no-sync`,
+      );
+      // `wl delete` succeeded (or reported a non-fatal skip); status is now
+      // 'deleted' and the row must stay out of the normal list.
+      expect([0, null]).toContain(del.exitCode);
+      expect(await listInReviewIds()).not.toContain(id);
+    });
+
+    it('--deleted still returns soft-deleted rows (status=deleted and live+deletedBy) (AC3)', async () => {
+      // A live-but-attributed row (soft-deleted via deletedBy).
+      const softDeletedId = await createAttributedInReview('Soft-deleted attributed row');
+      // A hard-deleted row (status=deleted).
+      const hardDeletedId = await createAttributedInReview('Hard-deleted row');
+      const del = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} delete ${hardDeletedId} --no-sync`,
+      );
+      expect([0, null]).toContain(del.exitCode);
+
+      const res = await runInProcess(
+        `tsx ${cliPath} --json --worklog-dir ${wlDir} list --deleted`,
+      );
+      expect(res.exitCode).toBe(0);
+      const ids = JSON.parse(res.stdout).workItems.map((i: { id: string }) => i.id);
+      expect(ids).toContain(softDeletedId);
+      expect(ids).toContain(hardDeletedId);
+    });
+  });
 });

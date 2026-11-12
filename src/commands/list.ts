@@ -6,6 +6,10 @@ import type { PluginContext } from '../plugin-types.js';
 import type { ListOptions } from '../cli-types.js';
 import type { WorkItem, WorkItemQuery, WorkItemStatus, WorkItemPriority } from '../types.js';
 import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
+// Shared soft-delete predicate (WL-0MW7S20IC001F3AP): visibility here and
+// mutability in `wl update` must use one definition, so a row is never both
+// visible and immutable.
+import { isSoftDeleted } from '@worklog/shared/predicates';
 import { createListEnricher } from '../list-enrichment.js';
 import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, createHierarchyOrderComparator } from './helpers.js';
 import { compareInReviewItems } from './grouping.js';
@@ -130,7 +134,9 @@ export default function register(ctx: PluginContext): void {
       // machine-readable (JSON) outputs.
       const includeDeleted = Boolean(options.deleted);
       if (!includeDeleted) {
-        items = items.filter(item => item.status !== 'deleted');
+        // One shared definition of "soft-deleted" (status=deleted OR non-empty
+        // deletedBy) so `wl list` agrees with `wl update` (WL-0MW7S20IC001F3AP).
+        items = items.filter(item => !isSoftDeleted(item));
       }
 
       if (search) {

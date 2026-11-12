@@ -62,13 +62,17 @@ function coordPath(): string {
 }
 
 function makeEntry(instanceId: string, workItemId: string, root = '/repo/a'): CoordinationEntry {
+  // `lastUpdated` is FRESH (now) so liveness-aware `hasPeerOffer` sees the
+  // entry as live (WL-0MVR8GDJ3008WY3Y AC7). Leader-block semantics — the
+  // concern of this suite — are independent of entry liveness.
+  const now = new Date().toISOString();
   return {
     instanceId,
     workItemId,
     directory: root,
     worklogRoot: root,
-    assignedAt: '2026-11-04T00:00:00.000Z',
-    lastUpdated: '2026-11-04T00:00:00.000Z',
+    assignedAt: now,
+    lastUpdated: now,
   };
 }
 

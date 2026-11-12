@@ -20,7 +20,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { HostBudgetEvidence } from './downtime-log-budget.js';
+import type { AuditBudgetDivergence, HostBudgetEvidence } from './downtime-log-budget.js';
 import {
   COORDINATION_LOG_FILE,
   appendRollingJsonl,
@@ -146,6 +146,14 @@ export interface CoordinationLogEntry {
    * fabricated 0/0).
    */
   budget?: HostBudgetEvidence;
+  /**
+   * Proxy/local audit-budget divergence evidence (WL-0MWAMSK9H005BOHD, parent
+   * AC2): recorded on a `kind: 'decision'` entry whose `reason` is
+   * `audit-budget-divergence`, carrying both the proxy's verdict/figures and
+   * the local ledger's figures. Additive and optional — every earlier entry
+   * shape is unchanged.
+   */
+  auditBudget?: AuditBudgetDivergence;
   /** The wl/CLI error that caused an entry-kept check-in (`reason: 'wl-error'`). */
   error?: string;
   /**

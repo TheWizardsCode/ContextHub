@@ -79,12 +79,16 @@ export async function checkWlAvailable(): Promise<boolean> {
  * in-progress root items (WL-0MV6KV22S004NYIU) and all status=blocked root
  * items (WL-0MV71WBHB007D8ZE).
  *
+ * `dirOverride` is the `.worklog` directory of a FOREIGN root the read must
+ * target (registered-root sweep, WL-0MVR8GDJ3008WY3Y); absent means the
+ * module-configured root (unchanged behaviour).
+ *
  * These are fetched explicitly via `wl list` because `wl next -n N` hard-caps
  * at 32 items — even `-n 500` returns only 32, so a large superset cannot
  * capture all critical/in_review/in-progress/blocked items. Runs the four
  * queries in parallel to mitigate refresh latency.
  */
-async function fetchMandatorySubsets(): Promise<WorkItem[]> {
+async function fetchMandatorySubsets(dirOverride?: string): Promise<WorkItem[]> {
   // Critical items: fetch ALL critical items across all statuses (open,
   // in-progress, blocked, completed) at EVERY parent level (no --root-only).
   // This ensures child critical items that block releases (e.g. untriaged
@@ -122,10 +126,10 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   // is still shown (WL-0MV71WBHB007D8ZE). The query is NOT merged into
   // reviewQueueArgs() (the review queue is stage-scoped; blocked spans stages).
   const [criticalOutput, reviewOutput, activeOutput, blockedOutput] = await Promise.all([
-    runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed']),
-    runWl(reviewQueueArgs()),
-    runWl(['list', '--status', 'in-progress', '--root-only']),
-    runWl(['list', '--status', 'blocked', '--root-only']),
+    runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed'], true, undefined, dirOverride),
+    runWl(reviewQueueArgs(), true, undefined, dirOverride),
+    runWl(['list', '--status', 'in-progress', '--root-only'], true, undefined, dirOverride),
+    runWl(['list', '--status', 'blocked', '--root-only'], true, undefined, dirOverride),
   ]);
   const criticalItems = extractItems(extractJson(criticalOutput));
   const reviewItems = extractItems(extractJson(reviewOutput));
@@ -154,7 +158,13 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
  * instead (both fetch paths share {@link mergeMandatoryAndSelect},
  * WL-0MVN4WESM007T4XI).
  */
-export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
+export async function fetchNextItems(count?: number, dirOverride?: string): Promise<WorkItem[]> {
+  // A `dirOverride` (the `.worklog` directory of a foreign root) targets THAT
+  // root's database for the whole read — the registered-root sweep's canonical
+  // ranking seam (WL-0MVR8GDJ3008WY3Y AC3). Absent ⇒ module-configured root,
+  // i.e. byte-for-byte today's behaviour.
+  const itemDetails = (id: string): Promise<WorkItem | null> =>
+    dirOverride === undefined ? fetchItemDetails(id) : fetchItemDetails(id, dirOverride);
   // ── Consolidated read (WL-0MVI0IT4S0070G78) ───────────────────────
   // One `wl worklist` spawn returns the browse feed AND the four mandatory
   // subsets, replacing five spawns per refresh tick. Any failure (older `wl`
@@ -162,8 +172,12 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // falls through to the per-subset path below with unchanged behaviour.
   try {
     // A count-less call must mirror `wl next`'s default window (1 item).
-    const bundle = await fetchWorklistBundle(count === undefined ? 1 : count);
-    return await assembleDefaultWorklist(bundle, fetchItemDetails, count);
+    const bundle = await fetchWorklistBundle(
+      count === undefined ? 1 : count,
+      undefined,
+      dirOverride,
+    );
+    return await assembleDefaultWorklist(bundle, itemDetails, count, dirOverride);
   } catch (error) {
     // A hung `wl` is not "unavailable": propagating the timeout keeps the
     // refresh latency bounded instead of paying the timeout again per subset.
@@ -195,9 +209,12 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // the count-less path returns the base selection unchanged.
   const needMandatory = count !== undefined;
   const mandatoryPromise: Promise<WorkItem[]> = needMandatory
-    ? fetchMandatorySubsets()
+    ? fetchMandatorySubsets(dirOverride)
     : Promise.resolve([] as WorkItem[]);
-  const [output, mandatory] = await Promise.all([runWl(args), mandatoryPromise]);
+  const [output, mandatory] = await Promise.all([
+    runWl(args, true, undefined, dirOverride),
+    mandatoryPromise,
+  ]);
   const payload = extractJson(output);
   const items = extractItems(payload);
   if (count === undefined) {
@@ -211,7 +228,7 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // Identical tail to the consolidated bundle path (the SAME critical-child
   // root substitution, audit-metadata merge and regroup) via
   // {@link mergeMandatoryAndSelect} (WL-0MVN4WESM007T4XI).
-  return mergeMandatoryAndSelect(items, mandatory, count, fetchItemDetails);
+  return mergeMandatoryAndSelect(items, mandatory, count, itemDetails, dirOverride);
 }
 
 /**
@@ -302,10 +319,17 @@ export async function fetchItemsByPriority(priority: string): Promise<WorkItem[]
 
 /**
  * Fetch details for a single work item by ID (via `wl show`).
+ *
+ * `dirOverride` (a `.worklog` directory) targets a FOREIGN root — used by the
+ * registered-root sweep so an ancestor lookup reads the item's own database
+ * (WL-0MVR8GDJ3008WY3Y).
  */
-export async function fetchItemDetails(id: string): Promise<WorkItem | null> {
+export async function fetchItemDetails(
+  id: string,
+  dirOverride?: string,
+): Promise<WorkItem | null> {
   try {
-    const output = await runWl(['show', id]);
+    const output = await runWl(['show', id], true, undefined, dirOverride);
     const payload = extractJson(output);
     const items = extractItems(payload);
     return items.length > 0 ? items[0] : null;

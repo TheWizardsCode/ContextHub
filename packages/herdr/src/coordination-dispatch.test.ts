@@ -32,6 +32,7 @@ import {
   coordinationTierRank,
   DOWNTIME_AUDIT_RECENCY_WINDOW_MS,
   DOWNTIME_DISPATCH_EXTEND_MAX,
+  DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS,
   type DowntimeWorker,
   type DowntimeWorkerDeps,
   type DowntimeItemInfo,
@@ -2761,7 +2762,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
   );
 
   it(
-    'AC9: the fallback window is bounded by DOWNTIME_DISPATCH_EXTEND_MAX',
+    'AC9: the fallback window grows geometrically and is capped by the round bound',
     async () => {
       const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BOUNDED')]);
       const deps = makeCoordinationDeps({ getHerdrListHead });
@@ -2772,9 +2773,14 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
         (call) => call[1] as number,
       );
       expect(limits.length).toBeGreaterThan(0);
-      // The largest window requested is the sprint view plus the bounded
-      // extension — never an unbounded backlog read.
-      expect(Math.max(...limits)).toBe(SPRINT + DOWNTIME_DISPATCH_EXTEND_MAX);
+      // WL-0MW9XS0XR007K1TH AC2 supersedes the bounded critical-only extension:
+      // the fallback walks the WHOLE ranked backlog, so one geometry step
+      // legitimately exceeds `SPRINT + DOWNTIME_DISPATCH_EXTEND_MAX`.
+      // What must hold is that the walk is a growing window over the SAME
+      // ranking path, and that it stays bounded by the round cap.
+      expect(limits[0]).toBe(SPRINT);
+      expect(limits[1]).toBeGreaterThanOrEqual(SPRINT + DOWNTIME_DISPATCH_EXTEND_MAX);
+      expect(limits.length).toBeLessThanOrEqual(DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS + 1);
     },
   );
 

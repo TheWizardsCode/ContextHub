@@ -124,7 +124,13 @@ Regression guard: `tests/cli/update-audit-text-schema-drift.test.ts` drives the
 real `wl update --audit-text` command — and the `wl audit-set` →
 `wl update --audit-text` sequence the audit skill's persister uses — against a
 `schemaVersion=8` database whose `audit_results.fingerprint` column has been
-dropped. Both tests fail if the connect-time repair is removed
+dropped. Both tests fail if the connect-time repair is removed. A third test
+(`red/green witness: connect-time repair restores the fingerprint column so
+saveAuditResult works`) opens `SqlitePersistentStore` directly against the same
+drifted shape, proves the exact `saveAuditResult` INSERT fails with
+`no column named fingerprint` **before** the store opens (the repair-disabled
+failure mode — red), then proves the connect-time repair restores the column,
+sets the `audit_fingerprint_added` sentinel and lets the write succeed (green).
 (WL-0MW56RBFD003J5WB, AH-0MW4W2CAJ000NUJZ).
 
 ### Pruning deleted items (`wl doctor prune`)

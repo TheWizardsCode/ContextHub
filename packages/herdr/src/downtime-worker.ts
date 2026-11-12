@@ -35,6 +35,7 @@ export type { CoordinationEntry } from './coordination.js';
 
 // ── Constants, types, clamps (WL-0MVN6UUEH009GID8) ────────────────────
 export {
+  AUDIT_AVAILABILITY_PATH,
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
@@ -44,6 +45,7 @@ export {
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  DEFAULT_DOWNTIME_OFFER_ONLY,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_PROXY_URL,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -56,6 +58,7 @@ export {
   DOWNTIME_AUDIT_STALE_WINDOW_MS,
   DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS,
   DOWNTIME_DISPATCH_EXTEND_MAX,
+  DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS,
   DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS,
   DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS,
   DOWNTIME_MAX_ATTEMPTS_MAX,
@@ -114,6 +117,8 @@ export {
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeStallThresholdMs,
+  clampDowntimeWorklogRoots,
+  MAX_DOWNTIME_WORKLOG_ROOTS,
 } from './downtime-worker.clamps.js';
 
 // ── Selection + parsers (WL-0MVLIHYOU000YQ0R) ─────────────────────────
@@ -185,6 +190,7 @@ export {
   computeAuditEligibleDepth,
   evaluateCriticalFirstGuard,
   fetchExtendedHerdrItems,
+  fetchWholeBacklogTail,
   finalizeAuditBatchOutcome,
   isAttemptBudgetExhausted,
   readReviewQueueGate,
@@ -214,6 +220,31 @@ export {
   createLocalReserver,
   parseLocalReservationResponse,
 } from './downtime-worker.local-reservation.js';
+
+// ── Proxy audit-availability wire contract (WL-0MWAMS1PW000O3OS) ───────
+// Pinned BEFORE the proxy endpoint exists (sibling LP-0MW95FYMH006XYNK, still
+// 404 on the live proxy). No production dispatch path imports these yet; the
+// client (WL-0MWAMSCOP003R837) and the audit gate (WL-0MWAMSDNW000SL0E) are
+// their first consumers. Re-exported here only for the names those children
+// need.
+export {
+  AUDIT_BUDGET_SATURATED_REASON,
+  AUDIT_BUDGET_UNKNOWN_REASON,
+  parseAuditAvailabilityResponse,
+} from './downtime-worker.audit-availability.contract.js';
+export type {
+  AuditAvailability,
+  AuditAvailabilityLease,
+} from './downtime-worker.audit-availability.contract.js';
+// The fail-closed client (WL-0MWAMSCOP003R837): one bounded GET per call,
+// resolved as a typed outcome. Not called on the dispatch path yet — the audit
+// gate (WL-0MWAMSDNW000SL0E) is its first consumer.
+export { createAuditAvailabilityClient } from './downtime-worker.audit-availability.js';
+export type {
+  AuditAvailabilityClient,
+  AuditAvailabilityFetcher,
+  AuditAvailabilityOutcome,
+} from './downtime-worker.audit-availability.js';
 
 // ── Observed routing outcome (WL-0MVWEZF4Z004UNYT AC10) ──────────────
 // Reader + split computation over the bounded route log (`local-route.log`,

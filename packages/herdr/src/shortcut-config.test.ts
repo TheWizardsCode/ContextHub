@@ -126,24 +126,37 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
       expect(entry?.workItemTypes).toEqual(codeTypes);
     }
     // Generic chords stay untyped.
-    expect(registry.lookupChordEntry(['r', 'p'], 'list')?.workItemTypes).toBeUndefined();
+    expect(registry.lookupChordEntry(['r', 'p'], 'list')).toBeUndefined(); // split into r-p-r/r-p-a
+    expect(registry.lookupChordEntry(['r', 'p', 'r'], 'list')?.workItemTypes).toBeUndefined();
+    expect(registry.lookupChordEntry(['r', 'p', 'a'], 'list')?.workItemTypes).toBeUndefined();
     expect(registry.lookupChordEntry(['c'], 'list')?.workItemTypes).toBeUndefined();
     expect(registry.lookupChordEntry(['a', 'a'], 'list')?.workItemTypes).toBeUndefined();
   });
 
-  it('registers r-p Producer Review and r-i interview under the r prefix, removing the single-key r shortcut (WL-0MU95SGEB006HQAM)', () => {
+  it('registers r-p-r (Producer Reject) and r-p-a (Producer Approve) under the r-p prefix, and r-i interview (WL-0MU95SGEB006HQAM, WL-0MW6GBWDA000VWBR)', () => {
     const registry = loadShortcutConfig();
 
     // The old single-key `r` shortcut is gone — `r` is now a pure chord
     // prefix (axis leader) for the review workflow family.
     expect(registry.lookupChordEntry(['r'], 'list', undefined, false)).toBeUndefined();
 
-    const producerReview = registry.lookupChordEntry(['r', 'p'], 'list', undefined, false);
-    expect(producerReview).toBeDefined();
-    expect(producerReview?.command).toBe(
+    // The old `r-p` chord no longer exists — it has been split into r-p-r and r-p-a.
+    expect(registry.lookupChordEntry(['r', 'p'], 'list', undefined, false)).toBeUndefined();
+
+    const producerReject = registry.lookupChordEntry(['r', 'p', 'r'], 'list', undefined, false);
+    expect(producerReject).toBeDefined();
+    expect(producerReject?.command).toBe(
       "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>' --author <author>",
     );
-    expect(producerReview?.label).toBe('Producer Review');
+    expect(producerReject?.label).toBe('Producer Reject');
+
+    const producerApprove = registry.lookupChordEntry(['r', 'p', 'a'], 'list', undefined, false);
+    expect(producerApprove).toBeDefined();
+    expect(producerApprove?.command).toBe(
+      "!!wl reviewed <id> && wl comment add <id> --body 'LGTM' --author producer",
+    );
+    expect(producerApprove?.label).toBe('Producer Approve');
+    expect(producerApprove?.openPane).toBe(false);
 
     const interview = registry.lookupChordEntry(['r', 'i'], 'list', undefined, false);
     expect(interview).toBeDefined();
@@ -151,14 +164,24 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(interview?.label).toBe('interview');
   });
 
-  it('shows the r-p and r-i hints when r is pressed as a prefix (WL-0MU95SGEB006HQAM)', () => {
+  it('shows the r-p and r-i hints when r is pressed as a prefix (WL-0MU95SGEB006HQAM, WL-0MW6GBWDA000VWBR)', () => {
     const registry = loadShortcutConfig();
     const nextChords = registry.getChordByLeader('r', 'list', false);
-    expect(nextChords).toHaveLength(2);
+    expect(nextChords).toHaveLength(3);
 
     const hints = formatChordHints(nextChords, ['r']);
-    expect(hints).toContain('p:Review');
+    expect(hints).toContain('p:Reject...');
     expect(hints).toContain('i:interview');
+  });
+
+  it('shows r-p-r and r-p-a hints when r-p is pressed as a prefix (WL-0MW6GBWDA000VWBR)', () => {
+    const registry = loadShortcutConfig();
+    const nextChords = registry.getChordByPrefix(['r', 'p'], 'list', undefined, false);
+    expect(nextChords).toHaveLength(2);
+
+    const hints = formatChordHints(nextChords, ['r', 'p']);
+    expect(hints).toContain('r:Reject');
+    expect(hints).toContain('a:Approve');
   });
 
   it('registers the f s s sprint chord to return to the default view (WL-0MSGSE15000746F7, WL-0MSKC8T46006999S)', () => {
@@ -254,13 +277,15 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
   it('marks the quiet state-change shortcuts with open_pane false (WL-0MSJLD1I70045ZUL)', () => {
     const registry = loadShortcutConfig();
     // Chords deliberately configured to run in the background (no pane):
-    // audit approve/reject, priority updates, close/delete, and quick
-    // create (WL-0MV6J5JXL002D8C4). Every other bundled shortcut omits the
-    // flag (default opens a pane).
+    // audit approve/reject, producer approve/reject, priority updates,
+    // close/delete, and quick create (WL-0MV6J5JXL002D8C4). Every other
+    // bundled shortcut omits the flag (default opens a pane).
     const expectedNoPane = new Set([
       'a,y', // audit approve
       'a,r', // audit reject
       'c,q', // create quick
+      'r,p,a', // producer approve (LGTM)
+      'r,p,r', // producer reject
       'u,p,l', // update priority low
       'u,p,m', // update priority medium
       'u,p,h', // update priority high

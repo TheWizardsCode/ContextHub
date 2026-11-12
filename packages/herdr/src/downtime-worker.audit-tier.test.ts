@@ -653,6 +653,108 @@ describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
   });
 });
 
+// ── Proxy-derived audit admission (WL-0MWAMSDNW000SL0E) ──────────────
+//
+// The audit tier's capacity decision is the proxy's shared-resource verdict,
+// not the per-host `budget.json` cap. These tests pin the dispatcher side: a
+// proxy refusal is reported with the proxy's OWN vocabulary and its live/cap
+// evidence, a failed read fails CLOSED (`audit-budget-unknown`), and the
+// legacy host-budget tokens are never produced on the proxy path.
+describe('dispatch proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
+  const proxySaturated: DowntimeActiveAuditResult = {
+    ok: true,
+    active: true,
+    source: 'proxy',
+    reason: 'audit-budget-saturated',
+    budget: { live: 1, max: 1 },
+  };
+  const proxyUnknown: DowntimeActiveAuditResult = {
+    ok: true,
+    active: true,
+    source: 'proxy',
+    reason: 'audit-budget-unknown',
+    detail: 'timeout',
+  };
+  const proxyAvailable: DowntimeActiveAuditResult = {
+    ok: true,
+    active: false,
+    source: 'proxy',
+  };
+
+  it('a proxy saturated verdict skips the audit tier and reports audit-budget-saturated with live/cap evidence', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const deps = makeDeps({
+        getActiveAudit: vi.fn().mockResolvedValue(proxySaturated),
+        getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, {
+        model: 'plan',
+        cwd: '/repo',
+        freeSlots: 2,
+        contentionQueueDepth: 0,
+      });
+
+      expect(outcome.dispatched).toBe(false);
+      // One vocabulary (parent AC2): the proxy's own refusal token.
+      expect(outcome.reason).toBe('audit-budget-saturated');
+      expect(outcome.reason).not.toBe('audit-host-saturated');
+      expect(outcome.reason).not.toBe('host-budget-audit');
+      expect(outcome.budget).toEqual({ live: 1, max: 1 });
+      expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+      // The refusal is operator-visible with its evidence.
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Downtime audit tier skipped: audit-budget-saturated'),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('a failed proxy read fails closed as audit-budget-unknown and logs the failing exchange', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const deps = makeDeps({
+        getActiveAudit: vi.fn().mockResolvedValue(proxyUnknown),
+        getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      // Never a permissive active:false — an unanswerable proxy stops audits.
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('audit-budget-unknown');
+      expect(outcome.reason).not.toBe('host-budget-unknown');
+      expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('audit-budget-unknown'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('detail=timeout'));
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('a proxy available verdict proceeds to candidate selection (source proxy is not a skip)', async () => {
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(proxyAvailable),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-AUD', title: 'Audit me', stage: 'audit' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('WL-AUD');
+  });
+});
+
 describe('dispatch tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3)', () => {
   const auditCandidate: DowntimeCandidate = {
     id: 'WL-AUD',

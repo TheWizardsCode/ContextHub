@@ -2403,12 +2403,12 @@ describe('issue-type shortcut filtering — worklist integration', () => {
     expect(chords).toContain('aa');
     expect(chords).toContain('ay');
     expect(chords).toContain('ar');
-    // Producer Review is the generic housekeeping chord; its binding is `r p`
-    // (WL-0MU95SGEB006HQAM) — the former single-key `r` chord was split into
-    // `r p` (producer review, WL-0MU95SGEB006HQAM) and `r i` (interview),
-    // which is why this expects the joined two-key chord here
-    // (WL-0MUKDBVFP008ARY6).
-    expect(chords).toContain('rp');
+    // Producer Reject/Approve are the generic housekeeping chords; their
+    // bindings are `r p r` and `r p a` (WL-0MU95SGEB006HQAM, split from the
+    // former `r p` chord in WL-0MW6GBWDA000VWBR) — joined here into their
+    // three-key chord strings (WL-0MUKDBVFP008ARY6).
+    expect(chords).toContain('rpr');
+    expect(chords).toContain('rpa');
   });
 
   it('excludes a type-gated local chord on non-matching types via the merged registry', () => {
@@ -6803,6 +6803,41 @@ describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', (
     const line = formatItemLine({ id: 'WL-999', title: 'No Stage', status: 'open', priority: 'high' } as WorkItem, 200, false, false);
     // id with no stage should render as plain (no stage escape) or default grey
     expect(line).toContain('WL-999');
+  });
+});
+
+// ── Expand arrow gated on childCount (WL-0MWDDAQ0L009FLEF AC1) ─────────
+// The worklist renders `▶`/`▼` only when `childCount > 0` (formatItemLine,
+// the Tab toggle and the on-demand child fetch all gate on it). A
+// SUBSTITUTED root injected by substituteCriticalRoots therefore MUST carry
+// childCount — a stripped ancestor would render with a blank two-cell slot
+// and its critical child would be unreachable. This pins the render half of
+// the contract; the fetcher tests pin that substituted roots actually carry
+// the count.
+describe('formatItemLine — expand arrow for childCount-bearing rows (WL-0MWDDAQ0L009FLEF AC1)', () => {
+  it('renders ▶ for a row whose childCount > 0', () => {
+    const root = makeItem('ROOT-C', 'idea');
+    root.childCount = 3;
+    const line = formatItemLine(root, 160);
+    expect(line).toContain('▶');
+    expect(line).not.toContain('▼');
+  });
+
+  it('renders ▼ for an expanded row whose childCount > 0', () => {
+    const root = makeItem('ROOT-E', 'idea');
+    root.childCount = 3;
+    root._expanded = true;
+    const line = formatItemLine(root, 160);
+    expect(line).toContain('▼');
+  });
+
+  it('renders the blank two-cell slot (no arrow) when childCount is absent or 0', () => {
+    // The pre-fix substituted-root shape: resolved via db.get / wl show,
+    // which carry no childCount. Such a row is not expandable.
+    expect(formatItemLine(makeItem('ROOT-NONE', 'idea'), 160)).not.toContain('▶');
+    const zero = makeItem('ROOT-ZERO', 'idea');
+    zero.childCount = 0;
+    expect(formatItemLine(zero, 160)).not.toContain('▶');
   });
 });
 

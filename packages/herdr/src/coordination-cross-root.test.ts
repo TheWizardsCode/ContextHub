@@ -281,3 +281,80 @@ describe('F4 cross-root offer-list dispatch', () => {
     expect((d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1].cwd).toBe(root);
   }));
 });
+
+// ---------------------------------------------------------------------------
+// Registered-root registry — fail-safe candidate universe (test-first
+// WL-0MW4ZNYSV002LJDZ, parent WL-0MVR8GDJ3008WY3Y AC6)
+//
+// `downtimeWorklogRoots` lets the leader sweep EXTRA roots. It is strictly
+// additive: with an absent/empty (or wholly unresolvable) registry the
+// candidate universe must stay exactly `offerList ∪ ownBacklog(opts.cwd)`.
+//
+// These two specs are GREEN today (the leader ignores the unknown opt) and
+// must stay green after the sweep lands (WL-0MW4ZOSD6004SAVD): they pin that
+// an empty registry adds NO root reads and NO second ranking. They are the
+// regression guard for the fail-safe leg of the contract.
+// ---------------------------------------------------------------------------
+
+describe('registered-root registry fail-safe (parent AC6)', () => {
+  /** Opts carrying the (future) registered-root registry. */
+  type RegistryOpts = Parameters<typeof dispatchFromCoordination>[2] & {
+    registeredRoots?: readonly string[];
+  };
+
+  it('an empty registry reads ONLY the leader\u2019s own backlog root', withShared(async () => {
+    const leaderRoot = '/leader/repo';
+    const headCalls: string[] = [];
+    const d = deps({
+      getHerdrListHead: vi.fn(async (cwd: string) => {
+        headCalls.push(cwd);
+        return { ok: true, items: [] };
+      }),
+    });
+
+    const opts: RegistryOpts = {
+      model: 'plan',
+      cwd: leaderRoot,
+      coordinationDir: shared,
+      registeredRoots: [],
+    };
+    const out = await dispatchFromCoordination(d, [], opts);
+
+    expect(out.dispatched).toBe(false);
+    // No sweep: every canonical-ranking read is the leader's own root.
+    expect(headCalls.length).toBeGreaterThan(0);
+    expect([...new Set(headCalls)]).toEqual([leaderRoot]);
+  }));
+
+  it('an absent registry adds no root beyond the offers and the own backlog', withShared(async () => {
+    const leaderRoot = '/leader/repo';
+    const offerRoot = '/peer/repo';
+    const headCalls: string[] = [];
+    const d = deps({
+      getHerdrListHead: vi.fn(async (cwd: string) => {
+        headCalls.push(cwd);
+        return { ok: true, items: [] };
+      }),
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: info({ id: 'WL-OFFER', status: 'open', stage: 'idea' }),
+      }),
+    });
+
+    const out = await dispatchFromCoordination(d, [entry('peer-1', 'WL-OFFER', offerRoot)], {
+      model: 'plan',
+      cwd: leaderRoot,
+      coordinationDir: shared,
+    });
+
+    // The offer dispatches from its own root (today's behaviour) ...
+    expect(out.dispatched).toBe(true);
+    const spawn = (d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(spawn[1].cwd).toBe(offerRoot);
+    // ... and no registered-root sweep read any root as a canonical-ranking
+    // head: with an absent registry the only possible head read is the
+    // leader's own backlog (never reached here — the offer dispatched).
+    expect(headCalls).not.toContain(offerRoot);
+    expect(headCalls.filter((cwd) => cwd !== leaderRoot)).toEqual([]);
+  }));
+});

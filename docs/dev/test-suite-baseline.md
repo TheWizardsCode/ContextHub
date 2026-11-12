@@ -34,19 +34,28 @@ The **canonical full suite** is declared in `.pi/test-config.json`
 
 ```bash
 npm --silent test -- tests
+npm --silent test -- packages/shared
+npm --silent test -- packages/tui/extensions
 ```
 
-Since **WL-0MVG4FF9200346NR** this is a single umbrella command that
-executes **all 277 `tests/` test files** in one vitest run — the 77
-root-level files plus the `bench/`, `debug/`, `extensions/`, `herdr/`,
-`integration/`, `lib/` and `scripts/` sub-suite files. It replaced the two
-narrow commands (`tests/cli` + `tests/unit`), which left 117 files executed
-by no full-suite gate. Vitest positional filters are substring matches on
-the repository-relative path, so the `tests` filter grabs exactly the
-`tests/` files and nothing outside them, and a single run de-duplicates its
-own file set (the shared-basename unit-vs-CLI variants — e.g.
-`tests/audit.test.ts` + `tests/cli/audit.test.ts` — each execute exactly
-once).
+Since **WL-0MVG4FF9200346NR** the first command is a single umbrella that
+executes every `tests/` test file in one vitest run — root-level files plus
+the `bench/`, `debug/`, `extensions/`, `herdr/`, `integration/`, `lib/` and
+`scripts/` sub-suite files. It replaced the two narrow commands (`tests/cli`
++ `tests/unit`), which left 117 files executed by no full-suite gate.
+**WL-0MVODOJWB004G03J** (child WL-0MW47HM8S008UELT) then added the
+`packages/shared` and `packages/tui/extensions` filters, closing the remaining
+`packages/` coverage gap — only `packages/herdr` stays excluded, by producer
+decision — see
+[`packages/` coverage](#packages-coverage-wl-0mvodojwb004g03j).
+Vitest positional filters are substring matches on the
+repository-relative path, so `tests` grabs exactly the `tests/` files,
+`packages/shared` matches only the 13 shared test files, and
+`packages/tui/extensions` matches only the 30 tui test files (all tui tests
+live under `extensions/`); none of the three filters matches a
+`packages/herdr` path. Each run de-duplicates its own file set (the
+shared-basename unit-vs-CLI variants — e.g. `tests/audit.test.ts` +
+`tests/cli/audit.test.ts` — each execute exactly once).
 
 > **The `pre-push` hook enforces the full canonical suite on a `dev`/`main`
 > push** (WL-0MVHP5S01006GDDV). When a pushed remote ref is `refs/heads/dev`
@@ -211,6 +220,85 @@ serial-concurrency contract lives in
 `packages/herdr/src/fetcher-spawn-cap.test.ts`) — triaged as the critical
 test-failure item **WL-0MVOERBM5001VUPY**, closed inline by this item's
 commit. The remainder of the widened suite was green on the first run.
+
+### `packages/` coverage (WL-0MVODOJWB004G03J)
+
+**2026-11-09 (child WL-0MW47HM8S008UELT).** The `tests/` widening above
+deliberately left `packages/` out of scope, so `packages/tui/**` (30 files)
+and `packages/shared/**` (13 files) were executed by no full-suite gate —
+they only ran under a bare `npx vitest` / CI. `packages/herdr` stays excluded
+by producer decision (WL-0MVFZVIA50062TJ8, won't-fix), which this change does
+not re-litigate.
+
+The fix adds two precise positional filters to `suiteCommands`:
+
+```bash
+npm --silent test -- packages/shared          # 13 files
+npm --silent test -- packages/tui/extensions  # 30 files (all tui tests)
+```
+
+Both are substring matches on the repository-relative path; neither matches a
+`packages/herdr` path (verified against `git ls-files`: 0 overlapping matches).
+All 30 tui test files live under `extensions/`, so the
+`packages/tui/extensions` filter is exact.
+
+#### Coverage table (2026-11-09, `git ls-files` + measured run)
+
+| Location | Test files | In canonical suite? |
+|---|---|---|
+| `tests/` | 344 | Yes (since WL-0MVG4FF9200346NR) |
+| `packages/shared` | 13 | **Yes** (was No) |
+| `packages/tui` | 30 | **Yes** (was No) |
+| `packages/herdr` | 164 | No — producer decision WL-0MVFZVIA50062TJ8 (won't-fix); opt-in `--type herdr` / `--group herdr` |
+| **Repository total** | **551** | **387 (70 %)** |
+
+Executed by the canonical full suite: **387 of 551** files (344 `tests/` +
+13 `packages/shared` + 30 `packages/tui`). Excluded: **164**
+(`packages/herdr`) by the standing producer decision above. No other
+`packages/` test file exists.
+
+The earlier 2026-10-25 table's `packages/tui` 22 / `packages/shared` 12 rows
+and its "tracked in WL-0MVODOJWB004G03J" note are the historical gap snapshot;
+that gap is closed here (counts have since grown to 30 + 13).
+
+#### Runtime (measured with `run_tests.py`, 16-core shared host)
+
+Run through the test skill's runner (`--type full`, scope `full`), so the run is
+cache-recorded as full-suite evidence:
+
+| Run | Command resolved | Files | Tests | Vitest duration | Runner elapsed |
+|---|---|---|---|---|---|
+| Before (tests only) | `npm --silent test -- tests` | 344 | 4825 passed + 5 skipped | 327.87 s | — |
+| After (three commands) | `tests` + `packages/shared` + `packages/tui/extensions` | **387** | **5935 passed + 5 skipped** | 327.87 + 2.68 + 5.30 = **335.85 s** | **339.85 s** |
+
+Per-command breakdown of the after run:
+
+| Command | Files | Tests | Vitest duration |
+|---|---|---|---|
+| `npm --silent test -- tests` | 344 (343 passed + 1 skipped) | 4825 passed + 5 skipped | 327.87 s |
+| `npm --silent test -- packages/shared` | 13 passed | 254 passed | 2.68 s |
+| `npm --silent test -- packages/tui/extensions` | 30 passed | 851 passed | 5.30 s |
+
+Adding `packages/shared` and `packages/tui` costs **~8 s** of vitest time
+(2.4 % of the suite) for **+43 files / +1,105 tests** — negligible against the
+`timeoutPerCommand: 3600` headroom.
+
+#### Verification
+
+The `--type full` run reports `Test Files 343 passed | 1 skipped (344)` for
+`tests`, `13 passed (13)` for `packages/shared` and `30 passed (30)` for
+`packages/tui/extensions`, so every newly covered file executes. Exit code 0
+on all three commands; no newly surfaced failures (so no `test-failure` items
+to triage).
+
+#### Worktree dist note
+
+The two package suites resolve `@worklog/shared` through the worktree's own
+`packages/shared` (`node_modules/@worklog/shared` → the worktree package), so
+`npm run build` must run **in the worktree** before the suite — building only
+the main checkout leaves the worktree's `packages/shared/dist` absent and every
+`@worklog/shared/<subpath>` import fails to resolve. This is a worktree-setup
+prerequisite, not a suite defect.
 
 ## Test file count (baseline)
 
