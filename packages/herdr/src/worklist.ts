@@ -1373,7 +1373,8 @@ export function keyToAction(key: string): KeyAction {
     case '\x12':
       return 'refresh';
     // '/' filter prompt removed — use f-* chords instead
-    // 'r' is a single-key Producer Review shortcut — resolved via ShortcutRegistry
+    // 'r' is a chord leader: r-p-r (Producer Reject) / r-p-a (Producer Approve)
+    // and r-i (interview) — all resolved via ShortcutRegistry, not here.
     // 'S' is the Ship It shortcut — resolved via ShortcutRegistry (opens the
     // typed-confirmation dialog, WL-0MSGG5N5Z0074TLY). The manual-sync 'S'
     // binding was removed; auto-sync on the timer is unaffected.

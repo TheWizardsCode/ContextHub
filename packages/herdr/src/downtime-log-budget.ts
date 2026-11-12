@@ -75,3 +75,57 @@ export interface HostBudgetEvidence {
   live: number;
   max: number;
 }
+
+// ── Proxy-derived audit budget (WL-0MWAMSK9H005BOHD) ──────────────────
+
+/**
+ * Decision token marking a PROXY/LOCAL disagreement about audit capacity
+ * (parent AC2, WL-0MWAMSK9H005BOHD).
+ *
+ * The proxy's verdict is authoritative for the audit tier; the local
+ * `dispatch-budget.json` ledger is observability-only. When the two views
+ * disagree (the proxy admits while the local fresh audit count is at/over
+ * `maxAudit`, or the proxy refuses while the local count is below it) ONE
+ * decision entry is written with both sides' evidence so a release decision
+ * has an evidence trail. The entry never changes the admission answer.
+ */
+export const AUDIT_BUDGET_DIVERGENCE_REASON = 'audit-budget-divergence';
+
+/**
+ * Decision token marking the ONE-RELEASE legacy audit-budget path
+ * (`HERDR_AUDIT_LOCAL_BUDGET=1`, parent AC3). The legacy path restores the
+ * per-host `budget.json` `maxAudit` + local-ledger decision and never consults
+ * the proxy; the warning entry makes a host still running it visible in the
+ * log so it can be removed after the release.
+ */
+export const AUDIT_BUDGET_LEGACY_REASON = 'audit-budget-legacy';
+
+/** The proxy's side of a divergence: its verdict and the evidence behind it. */
+export interface AuditBudgetProxyEvidence {
+  /** Live audit leases the proxy reported. */
+  live: number;
+  /** The proxy's audit cap. */
+  cap: number;
+  /** The proxy's own availability verdict. */
+  available: boolean;
+}
+
+/** The local ledger's side of a divergence: the observability-only view. */
+export interface AuditBudgetLocalEvidence {
+  /** Fresh (non-stale) audit entries the local ledger holds. */
+  live: number;
+  /** The local `budget.json` `maxAudit` cap. */
+  maxAudit: number;
+}
+
+/**
+ * Both sides' evidence for one proxy/local audit-budget divergence.
+ *
+ * Recorded on a `kind: 'decision'` entry whose `reason` is
+ * {@link AUDIT_BUDGET_DIVERGENCE_REASON}. The proxy is authoritative; this
+ * shape is the evidence trail, never a gate.
+ */
+export interface AuditBudgetDivergence {
+  proxy: AuditBudgetProxyEvidence;
+  local: AuditBudgetLocalEvidence;
+}

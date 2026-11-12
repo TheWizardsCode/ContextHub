@@ -58,6 +58,7 @@ const OWNERSHIP: ReadonlyArray<{
       ['update', 'update'],
       ['delete', 'deleteWorkItem'],
       ['deleteSingle', 'deleteSingle'],
+      ['isSoftDeleted', 'isSoftDeleted'],
       ['list', 'list'],
       ['compareTrackedFields', 'compareTrackedFields'],
       ['hasWorkItemChanged', 'hasWorkItemChanged'],

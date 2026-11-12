@@ -172,20 +172,23 @@ is an environment variable, not a Worklog config key.
 
 ## Host-wide dispatch budget (herdr downtime worker)
 
-The herdr downtime worker limits how many `implement` and `audit` panes one
-**machine** runs at once, across every herdr instance and project
-(WL-0MVXWQFGV000D2AB). The budget is machine-scoped — **not** a per-instance
-`~/.config/herdr/worklog-plugin.json` key — so it cannot drift per instance.
-The authoritative record is the ledger
-`~/.herdr/downtime/dispatch-budget.json` (one entry per in-flight dispatch);
-the caps are configured beside it.
+The herdr downtime worker limits how many agent panes one **machine** runs at
+once, across every herdr instance and project (WL-0MVXWQFGV000D2AB). The
+**implement tier**'s budget is machine-scoped — **not** a per-instance
+`~/.config/herdr/worklog-plugin.json` key — so it cannot drift per instance;
+the authoritative record is the ledger
+`~/.herdr/downtime/dispatch-budget.json` (one entry per in-flight dispatch)
+with the cap configured beside it. The **audit tier** is deliberately
+**cross-machine** and proxy-owned (WL-0MW95GBEG005ERHS): see *Audit tier —
+proxy-owned budget* below.
 
 | Setting | Default | Range / meaning |
 |---|---|---|
 | `budget.json` → `maxImplement` | `2` | clamp `0`–`32`; `0` disables the implement tier host-wide |
-| `budget.json` → `maxAudit` | `1` | clamp `0`–`32`; `0` disables the audit tier host-wide; `1` reproduces the previous single-flight audit behaviour exactly |
+| `budget.json` → `maxAudit` | `1` | clamp `0`–`32`; **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local observability/divergence figure. `0` disables the legacy audit tier host-wide |
 | `HERDR_HOST_MAX_IMPLEMENT` | unset | Overrides `maxImplement`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning) |
-| `HERDR_HOST_MAX_AUDIT` | unset | Overrides `maxAudit`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning) |
+| `HERDR_HOST_MAX_AUDIT` | unset | Overrides `maxAudit`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning). Implement-tier-only for audit admission — the proxy owns the default audit cap |
+| `HERDR_AUDIT_LOCAL_BUDGET` | unset | **One-release** flag (`=1`) restoring the pre-proxy audit decision (`maxAudit` + local ledger, never consulting the proxy); removed in the release after the proxy side (`LP-0MW95FYMH006XYNK`) ships |
 | `HERDR_COORDINATION_DIR` | `~/.herdr/downtime` | Machine coordination directory holding the ledger and `budget.json` |
 
 `budget.json` shape (both keys optional; an absent file yields the defaults
@@ -217,6 +220,34 @@ proceed records `override: { "by": "user" }` on the ledger entry. See
 [`docs/dev/downtime-dispatcher.md`](docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope)
 for the gate table, reason tokens, audit-cap unification and the rolling-window
 out-of-scope note.
+
+### Audit tier — proxy-owned budget (WL-0MW95GBEG005ERHS)
+
+Audit admission is **proxy-derived** and therefore **cross-machine**: the proxy
+owns the audit budget and the live audit-lease registry, and herdr queries
+`GET {proxyUrl}/llama/local/audit/status` for the verdict. This is what stops
+two ContextHub hosts from each believing they are under their own cap while
+contending for the one local `llama-server` GPU.
+
+- The URL is `downtimeProxyUrl` in `~/.config/herdr/worklog-plugin.json`
+  (default `http://192.168.0.199:8000`) — the same URL the status poller and
+  reserve client use; it is a plugin setting, not a Worklog config key.
+- A saturated proxy is a neutral skip with the proxy's own token
+  **`audit-budget-saturated`**; an unreachable / `404` / unparsable read
+  **fails closed** as **`audit-budget-unknown`**. A proxy/local disagreement is
+  logged with both sides' evidence as `audit-budget-divergence`.
+- The local `dispatch-budget.json` audit entries and `budget.json` `maxAudit`
+  are **observability only** for admission (header/dialog/sweep) and can never
+  refuse an audit. **To raise the audit cap, change the proxy's audit-budget
+  configuration** (sibling llm item `LP-0MW95FYMH006XYNK`) — raising
+  `maxAudit` has no effect on default audit admission.
+- **Fallback for one release:** `HERDR_AUDIT_LOCAL_BUDGET=1` restores the
+  pre-proxy `maxAudit` + local-ledger decision (with the legacy
+  `audit-host-saturated` / `host-budget-audit` / `host-budget-unknown` tokens
+  and an `audit-budget-legacy` warning entry).
+
+The **implement tier** (`maxImplement`, `HERDR_HOST_MAX_IMPLEMENT` and the
+per-instance-free machine ledger) is unchanged.
 
 ## Configuration Override System
 

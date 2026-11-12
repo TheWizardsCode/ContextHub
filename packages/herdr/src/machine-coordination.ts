@@ -25,7 +25,13 @@
  * cannot drift. This module re-exports the shared constant and delegates
  * `getMachineCoordinationDir()` to `resolveMachineCoordinationDir()`.
  *
- * Single-machine v1 only; multi-machine (flock/NFS) is out of scope.
+ * Coordination scope. This resolver, and the local ledger it locates, is
+ * single-machine: flock/NFS coordination across machines is NOT used. The
+ * cross-machine mechanism for the one resource that actually needs it — the
+ * audit budget — is the PROXY's audit budget and live audit-lease registry,
+ * queried by herdr over HTTP (`GET {proxyUrl}/llama/local/audit/status`). See
+ * `docs/dev/downtime-dispatcher.md` → "Proxy-derived audit admission". This
+ * supersedes the older "multi-machine is out of scope" note.
  */
 
 import * as fs from 'node:fs';
@@ -176,7 +182,10 @@ export function machineCoordinationDirExists(dir: string | null): boolean {
  * A marker older than `DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS` is treated as stale
  * (the audit pane may have crashed without cleanup) and ignored.
  *
- * Single-machine v1 only; multi-machine (flock/NFS) is out of scope.
+ * The machine dir (and this retired marker) is single-machine only; the
+ * cross-machine audit budget lives in the proxy's audit-availability read
+ * (see the module header and `docs/dev/downtime-dispatcher.md` →
+ * "Proxy-derived audit admission").
  */
 export const DOWNTIME_HOST_AUDIT_MARKER_FILE = 'active-audit';
 

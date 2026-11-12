@@ -18,6 +18,12 @@
  * store's repair, would leave that unit test green. These tests drive the real
  * CLI command.
  *
+ * Red/green witness (AC-5): a test that directly opens `SqlitePersistentStore`
+ * against a drifted DB, verifying the connect-time repair restores the
+ * `fingerprint` column so `saveAuditResult` succeeds. Without the repair, the
+ * write throws "no column named fingerprint" — the test fails (red). With it,
+ * the column is restored and the write succeeds (green).
+ *
  * Everything is local and deterministic: a temp worklog directory, drift
  * applied directly to *that copy's* SQLite file, and the CLI run in-process /
  * bundled. No live worklog, network or `pi` calls.
@@ -25,6 +31,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as path from 'path';
+import * as fs from 'fs';
 import Database from 'better-sqlite3';
 import {
   cliPath,
@@ -34,6 +41,8 @@ import {
   writeConfig,
   writeInitSemaphore,
 } from './cli-helpers.js';
+import { createTempDir, cleanupTempDir } from '../test-utils.js';
+import { SqlitePersistentStore } from '@worklog/shared/persistent-store';
 
 describe('wl update --audit-text on a drifted-but-repairable DB (WL-0MW56RBFD003J5WB)', () => {
   let tempState: { tempDir: string; originalCwd: string };
@@ -144,6 +153,126 @@ Drift regression guard (AH-0MW4W2CAJ000NUJZ).`;
     expect(audit.summary).toContain('Drift regression guard');
     expect(audit.ready_to_close).toBe(1);
     expect(audit.fingerprint).toBeTruthy();
+  });
+
+  // =====================================================================
+  // Red/green witness (AC-5): proves the connect-time repair is active.
+  // If the repair were disabled, opening the store would succeed but
+  // saveAuditResult would throw "table audit_results has no column named
+  // fingerprint" — the test would fail (red). With the repair, the column
+  // is restored and the write succeeds (green).
+  // =====================================================================
+
+  it('red/green witness: connect-time repair restores the fingerprint column so saveAuditResult works', () => {
+    // Create a minimal valid database (schemaVersion=9) so the store opens,
+    // then drift it to the pre-fingerprint shape (schemaVersion=8, no column).
+    const tempDir = createTempDir();
+    const dbPath = path.join(tempDir, '.worklog', 'worklog.db');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
+    // Initialise a fresh DB so the schema tables exist at current-version, and
+    // insert the witness work item the FK on audit_results.work_item_id needs.
+    const fresh = new SqlitePersistentStore(dbPath);
+    fresh.close();
+    const witnessId = 'drift-witness-1';
+    const now = new Date().toISOString();
+    const rawSeed = new Database(dbPath);
+    try {
+      rawSeed
+        .prepare(
+          `INSERT INTO workitems (id, title, description, status, priority, sortIndex, createdAt, updatedAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          witnessId, 'Drift witness', 'red/green witness item', 'open', 'medium', 0,
+          now, now, '[]', '', 'idea', 'task', 'test', '', '', '', '',
+        );
+    } finally {
+      rawSeed.close();
+    }
+
+    // Downgrade to the drifted state: schemaVersion=8, drop fingerprint.
+    const raw = new Database(dbPath);
+    try {
+      raw.exec('ALTER TABLE audit_results DROP COLUMN fingerprint');
+      raw.prepare("DELETE FROM metadata WHERE key = 'audit_fingerprint_added'").run();
+      raw.prepare("UPDATE metadata SET value = '8' WHERE key = 'schemaVersion'").run();
+    } finally {
+      raw.close();
+    }
+
+    // Verify the fixture is genuinely drifted before opening the store.
+    const preOpen = new Database(dbPath, { readonly: true });
+    try {
+      const cols = preOpen
+        .prepare("PRAGMA table_info('audit_results')")
+        .all() as Array<{ name: string }>;
+      expect(cols.map((c) => String(c.name))).not.toContain('fingerprint');
+      expect(preOpen
+        .prepare("SELECT value FROM metadata WHERE key = 'schemaVersion'")
+        .get() as { value?: string }
+      ).toHaveProperty('value', '8');
+    } finally {
+      preOpen.close();
+    }
+
+    // RED: prove the exact write path fails on the drifted schema. This is the
+    // same INSERT statement `saveAuditResult` runs; with the `fingerprint`
+    // column absent it throws SQLITE_ERROR "table audit_results has no column
+    // named fingerprint" — the 2026-11-06 release failure. (If the connect-time
+    // repair were disabled, the saveAuditResult assertion below would hit this
+    // same error and fail, which is the regression this test guards.)
+    const driftedWrite = new Database(dbPath);
+    try {
+      expect(() =>
+        driftedWrite
+          .prepare(
+            `INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author, fingerprint)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(witnessId, 0, now, 'pre-repair', null, 'drift-test', 'witness-fp'),
+      ).toThrow(/no column named fingerprint/i);
+    } finally {
+      driftedWrite.close();
+    }
+
+    // GREEN: opening the store triggers connect-time repair.
+    const store = new SqlitePersistentStore(dbPath);
+    try {
+      // The repair must have added the column and set the sentinel.
+      const afterOpen = new Database(dbPath, { readonly: true });
+      try {
+        const cols = afterOpen
+          .prepare("PRAGMA table_info('audit_results')")
+          .all() as Array<{ name: string }>;
+        expect(cols.map((c) => String(c.name))).toContain('fingerprint');
+        const sentinel = afterOpen
+          .prepare("SELECT value FROM metadata WHERE key = 'audit_fingerprint_added'")
+          .get() as { value?: string } | undefined;
+        expect(sentinel?.value).toBe('1');
+      } finally {
+        afterOpen.close();
+      }
+
+      // saveAuditResult must succeed — without the repair this line throws
+      // "no column named fingerprint", making this test fail (red).
+      expect(() => {
+        store.saveAuditResult({
+          workItemId: witnessId,
+          readyToClose: false,
+          auditedAt: new Date().toISOString(),
+          summary: 'red/green witness check',
+          rawOutput: null,
+          author: 'drift-test',
+          fingerprint: 'witness-fp',
+        });
+      }).not.toThrow();
+    } finally {
+      store.close();
+    }
+
+    // Clean up the temp directory.
+    cleanupTempDir(tempDir);
   });
 
   // =====================================================================

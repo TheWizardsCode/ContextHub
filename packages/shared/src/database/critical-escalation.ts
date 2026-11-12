@@ -32,6 +32,11 @@
 import { NextWorkItemResult, WorkItem } from '../types.js';
 import { EdgeCache, SelectionHooks } from './context.js';
 import { matchesRiskEffort } from './priority.js';
+// Shared soft-delete predicate (WL-0MW7S20IC001F3AP): this stage runs on the
+// FULL item set and bypasses filterCandidates, so it must apply the same
+// definition or an attributed critical item would be re-surfaced. work-items
+// imports only context/types/status-stage-rules — acyclic.
+import { isSoftDeleted } from './work-items.js';
 /**
  * Handle critical-path escalation (Stage 2 of the next-item algorithm).
  *
@@ -84,7 +89,7 @@ export function handleCriticalEscalation(
   const criticalItems = allItems.filter(
     item =>
       item.priority === 'critical' &&
-      item.status !== 'deleted' &&
+      !isSoftDeleted(item) &&
       (item.status !== 'completed' || item.stage === 'in_review') &&
       item.stage !== 'done' &&
       (includeInProgress || item.status !== 'in-progress')

@@ -25,6 +25,7 @@ import {
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+  DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS,
   DISPATCH_PIPELINE_SINGLE_FLIGHT,
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS,
@@ -94,21 +95,25 @@ function logHostAuditSaturation(
   contentionQueueDepth: number | undefined,
   budget?: { live: number; max: number },
   reason: string = 'audit-host-saturated',
+  detail?: string,
 ): void {
   try {
     const slots = typeof freeSlots === 'number' ? freeSlots : 'unknown';
     const contention = typeof contentionQueueDepth === 'number' ? contentionQueueDepth : 'unknown';
-    // The audit tier now counts the machine-scoped ledger: report the observed
-    // concurrent audits and cap when the caller has them (WL-0MVXY0XPF006YUHA
-    // F2), falling back to the retired marker's single-flight figures so the
-    // line shape is unchanged for callers without ledger evidence. `reason` is
-    // the token the caller actually refused with (WL-0MVXY0ZYW009NEJD F5), so
-    // the line never quotes the retired marker's token for a budget stop.
+    // The audit tier's admission is proxy-derived (WL-0MWAMSDNW000SL0E) or, on
+    // the retained legacy source, counts the machine-scoped ledger: report the
+    // observed concurrent audits and cap when the caller has them, falling back
+    // to the retired marker's single-flight figures so the line shape is
+    // unchanged for callers without ledger evidence. `reason` is the token the
+    // caller actually refused with, so the line never quotes the retired
+    // marker's token for a budget stop. `detail` names the failing proxy
+    // exchange when the read failed closed (`audit-budget-unknown`).
     const concurrent = budget !== undefined ? budget.live : 1;
     const cap = budget !== undefined ? `, maxAudit=${budget.max}` : '';
+    const errorDetail = detail !== undefined ? `, detail=${detail}` : '';
     process.stderr.write(
       `[worklog-plugin] Downtime audit tier skipped: ${reason} ` +
-        `(concurrentAudits=${concurrent}${cap}, freeSlots=${slots}, contentionQueueDepth=${contention})\n`,
+        `(concurrentAudits=${concurrent}${cap}, freeSlots=${slots}, contentionQueueDepth=${contention}${errorDetail})\n`,
     );
   } catch {
     // fail-closed: logging must never crash the worker
@@ -428,18 +433,21 @@ export async function dispatchDowntimeWork(
     let auditInFlight = false;
     let auditCheckFailed = false;
     let freshnessSkip = false;
-    // Host-wide audit admission (WL-0MVXY0XPF006YUHA F2; formerly the marker,
-    // WL-0MUIVE0YG000UVIA): true when the machine-scoped dispatch-budget ledger
-    // (another project/instance on this host), or its disabled/unreadable
-    // state, caused the audit-tier skip — as opposed to a per-worklog
-    // in-flight audit. Drives the host-budget reason/log token.
+    // Audit-budget refusal (WL-0MWAMSDNW000SL0E proxy-derived; formerly the
+    // host-wide ledger, WL-0MVXY0XPF006YUHA F2): true when the proxy's
+    // availability verdict refuses (or its read fails closed) or the
+    // machine-scoped dispatch-budget ledger (another project/instance on this
+    // host) is at/over cap — as opposed to a per-worklog in-flight audit.
+    // Drives the budget reason/log token.
     let auditHostSaturated = false;
-    // The host-budget refusal token and its live/max evidence, when the audit
-    // pre-check reported them: `audit-host-saturated` at maxAudit 1 (the retired
-    // marker's token), `host-budget-audit` at any other cap, and
-    // `host-budget-unknown` when an unreadable ledger was repaired.
+    // The budget refusal token and its live/max evidence, when the audit
+    // pre-check reported them: `audit-budget-saturated` / `audit-budget-unknown`
+    // on the proxy path, or the legacy `audit-host-saturated` / `host-budget-audit`
+    // / `host-budget-unknown` tokens on the retained host-wide source.
     let auditHostBudgetReason: string | undefined;
     let auditHostBudget: { live: number; max: number } | undefined;
+    // Failing proxy exchange on a fail-closed audit read (audit-budget-unknown).
+    let auditHostBudgetDetail: string | undefined;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
@@ -511,7 +519,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated, hostBudgetReason: auditHostBudgetReason, hostBudget: auditHostBudget };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated, hostBudgetReason: auditHostBudgetReason, hostBudget: auditHostBudget, hostBudgetDetail: auditHostBudgetDetail };
       const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -538,28 +546,34 @@ export async function dispatchDowntimeWork(
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return finalize(herdrOutcome);
 
-        // ── Extended dispatch window (WL-0MU6UL3GQ0015AA5) ──
-        // The initial head is windowed (mandatory items always included, the
-        // remaining slots filled from "other" items), so when the mandatory
-        // set is large the first genuinely dispatchable candidate can fall
-        // outside it and the dispatcher would report 'no-candidate' despite a
-        // healthy backlog (the 2026-09-18 31-hour starvation). Re-read the
-        // SAME ranking path with a bounded larger window and filter ONLY the
-        // newly visible items — a window extension, never a second ranking.
+        // ── Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH) ──
+        // The initial head is windowed to the rendered sprint view, so a
+        // genuinely dispatchable candidate can rank beyond it. Re-read the
+        // SAME ranking path with a growing window and scan only the newly
+        // visible items — a window extension, never a second ranking. Both
+        // critical and non-critical candidates are eligible (supersedes the
+        // sprint-view-only restriction of WL-0MUNS8X97007C9H9), and the walk
+        // stops as soon as a candidate dispatches, so the extra reads are paid
+        // only when the visible window yields nothing.
+        //
         // Runs for every filtered-exhaustion reason (including a code-freeze,
         // where plan/intake work can still lie beyond the window); the
         // terminal reason below is unchanged when the extension adds nothing,
         // so no defined outcome is ever converted into a new failure.
-        const extendedItems = await fetchExtendedHerdrItems(deps, opts.cwd, head.items);
-        if (extendedItems.length > 0) {
+        let seenItems = head.items;
+        for (let round = 0; round < DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS; round += 1) {
+          const extendedItems = await fetchExtendedHerdrItems(deps, opts.cwd, seenItems);
+          if (extendedItems.length === 0) break;
           const extendedOutcome = await dispatchFromHerdrList(deps, extendedItems, ctx, flags);
           if (extendedOutcome !== null) return finalize(extendedOutcome);
+          seenItems = [...seenItems, ...extendedItems];
         }
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
         auditHostSaturated = flags.auditHostSaturated;
         auditHostBudgetReason = flags.hostBudgetReason;
         auditHostBudget = flags.hostBudget;
+        auditHostBudgetDetail = flags.hostBudgetDetail;
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
@@ -593,6 +607,7 @@ export async function dispatchDowntimeWork(
               opts.contentionQueueDepth,
               auditHostBudget,
               auditHostBudgetReason ?? 'audit-host-saturated',
+              auditHostBudgetDetail,
             );
             return finalize({
               dispatched: false,
@@ -618,14 +633,14 @@ export async function dispatchDowntimeWork(
         // continues so other work still dispatches and the flag write is
         // retried if it failed.
         if (budgetExhausted) return finalize({ dispatched: false, reason: 'attempt-budget-exhausted' });
-        // A relaxed leaf-audit tick reserves its single free slot for the
-        // pinned audit item: when nothing dispatched, that reservation — not
-        // an empty backlog — is the reason (WL-0MVV1F0HK009JQAP C4). Neutral
-        // reason, so no no-candidate cooldown and no strike.
-        return finalize({
-          dispatched: false,
-          reason: pinnedAuditItemId !== undefined ? LEAF_AUDIT_PIN_HOLD_REASON : 'no-candidate',
-        });
+        // Pin beats an ambient budget hold (C4); otherwise report the
+        // continuable host-budget refusal the filter recorded (AC5) with its
+        // {live, max} evidence — never 'no-candidate'. Nothing else dispatched,
+        // so the tick is neutral: no cooldown, no strike.
+        if (auditHostBudgetReason !== undefined && pinnedAuditItemId === undefined) {
+          return finalize({ dispatched: false, reason: auditHostBudgetReason, ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}) });
+        }
+        return finalize({ dispatched: false, reason: pinnedAuditItemId !== undefined ? LEAF_AUDIT_PIN_HOLD_REASON : 'no-candidate' });
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
       // legacy chain (test-compat path; flags still drive the terminal reason).
@@ -634,6 +649,7 @@ export async function dispatchDowntimeWork(
       auditHostSaturated = flags.auditHostSaturated;
       auditHostBudgetReason = flags.hostBudgetReason;
       auditHostBudget = flags.hostBudget;
+      auditHostBudgetDetail = flags.hostBudgetDetail;
       freshnessSkip = flags.freshnessSkip;
     }
 
@@ -689,16 +705,19 @@ export async function dispatchDowntimeWork(
         if (activeAudit.ok) {
           if (activeAudit.active) {
             auditInFlight = true;
-            auditHostSaturated = activeAudit.source === 'host-wide';
+            auditHostSaturated =
+              activeAudit.source === 'host-wide' || activeAudit.source === 'proxy';
             if (auditHostSaturated) {
               auditHostBudgetReason = activeAudit.reason;
               auditHostBudget = activeAudit.budget;
+              auditHostBudgetDetail = activeAudit.detail;
             }
-            // Host-wide budget refusal (WL-0MVXY0XPF006YUHA F2; formerly the
-            // marker) vs per-worklog: distinct reason strings for
-            // observability. The `source` field is set by getActiveAudit:
-            // 'host-wide' when the machine-scoped ledger reports the audit tier
-            // at/over maxAudit (or disabled/unreadable), 'per-worklog' when a
+            // Audit-budget refusal (proxy-derived, WL-0MWAMSDNW000SL0E;
+            // formerly the host-wide ledger, WL-0MVXY0XPF006YUHA F2) vs
+            // per-worklog: distinct reason strings for observability. The
+            // `source` field is set by getActiveAudit: 'proxy' when the proxy's
+            // availability verdict refuses (or the read fails closed),
+            // 'host-wide' on the legacy ledger source, 'per-worklog' when a
             // per-worklog dispatch marker maps to an in_progress item.
             const skipReason = auditHostSaturated
               ? (auditHostBudgetReason ?? 'audit-host-saturated')
@@ -709,6 +728,7 @@ export async function dispatchDowntimeWork(
                 opts.contentionQueueDepth,
                 auditHostBudget,
                 skipReason,
+                auditHostBudgetDetail,
               );
             } else {
               process.stderr.write(

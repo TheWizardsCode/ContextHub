@@ -11,7 +11,8 @@
  *     (`WL-0MU72WJ8C0005GIE`),
  *   - RCA in-flight critical re-dispatch and one-dispatch-per-in-flight
  *     guarantees (`WL-0MUBEZ6PE002WLP4`, `WL-0MUBVKS5I007LSWB`),
- *   - the sprint-view-only dispatch window (`WL-0MUNS8X97007C9H9`),
+ *   - the whole-backlog dispatch window (`WL-0MW9XS0XR007K1TH`, which
+ *     supersedes the sprint-view-only restriction of `WL-0MUNS8X97007C9H9`),
  *   - dispatched success-marker staleness (`WL-0MU6UL0RJ008IHGT`), and
  *   - the non-terminal pane-close cooldown (`WL-0MUKYERLZ006ELL5`).
  *
@@ -762,7 +763,7 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
 // path too — the field is threaded into `classifyItemForDispatch` as of
 // WL-0MU72WJ8C0005GIE / 022f1b24.)
 
-describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0MU6UL3GQ0015AA5 AC1/AC4)', () => {
+describe('whole-backlog dispatch window (WL-0MW9XS0XR007K1TH; supersedes the sprint-view-only restriction of WL-0MUNS8X97007C9H9)', () => {
   const OLD = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
   /**
@@ -888,46 +889,45 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
   });
 
   describe('AC3 — regression: the dispatchable item beyond the window cap is found', () => {
-    it('regression (WL-0MU6UL3GQ0015AA5 updated): a non-critical item beyond the sprint view is NOP, not dispatched', async () => {
+    it('regression (WL-0MU6UL3GQ0015AA5, restored by WL-0MW9XS0XR007K1TH): a non-critical item beyond the sprint view IS dispatched', async () => {
       const initialHead = fullHead();
       const target = dispatchableIntake('CG-0MTZO0YIM000VAIQ');
       const getHerdrListHead = vi.fn()
         .mockResolvedValueOnce({ ok: true, items: initialHead })
-        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] });
+        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] })
+        // The walk continues until an extension adds nothing.
+        .mockResolvedValue({ ok: true, items: [...initialHead, target] });
       const deps = makeDeps({ getHerdrListHead });
 
       const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
 
-      // The out-of-window item is NON-critical: the sprint-view-only contract
-      // reports no-candidate instead of dispatching hidden backlog work
-      // (supersedes WL-0MU6UL3GQ0015AA5 for non-critical work).
-      expect(outcome.dispatched).toBe(false);
-      expect(outcome.reason).toBe('no-candidate');
-      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-      expect(deps.claimItem).not.toHaveBeenCalled();
-      // The critical-only extension still consulted the SAME ranking path
-      // (never a second ranking).
-      expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+      // WL-0MW9XS0XR007K1TH AC1: every ranked work item is a dispatch
+      // candidate, so hidden backlog work is dispatchable again (supersedes the
+      // sprint-view-only NOP of WL-0MUNS8X97007C9H9).
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('CG-0MTZO0YIM000VAIQ');
+      // The extension consulted the SAME ranking path (never a second ranking)
+      // with a window grown geometrically from the head size.
+      expect(getHerdrListHead.mock.calls.length).toBeGreaterThanOrEqual(2);
       // Observable contract: Nth ordering assertion — proves browseItemCount re-read per dispatch cycle; outcome cannot prove the per-cycle sequence
-      expect(getHerdrListHead).toHaveBeenNthCalledWith(
-        2,
-        '/repo',
+      expect(getHerdrListHead.mock.calls[1][0]).toBe('/repo');
+      expect(getHerdrListHead.mock.calls[1][1]).toBeGreaterThanOrEqual(
         initialHead.length + DOWNTIME_DISPATCH_EXTEND_MAX,
       );
     });
 
-    it('the coordination check-in offer (computeMostImportantItem) also no-ops on a non-critical out-of-window item', async () => {
+    it('the coordination check-in offer (computeMostImportantItem) surfaces a non-critical out-of-window item', async () => {
       const initialHead = fullHead();
       const target = dispatchableIntake('CG-OFFER');
       const getHerdrListHead = vi.fn()
         .mockResolvedValueOnce({ ok: true, items: initialHead })
-        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] });
+        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] })
+        .mockResolvedValue({ ok: true, items: [...initialHead, target] });
       const deps = makeDeps({ getHerdrListHead });
 
       const result = await computeMostImportantItem(deps, '/repo');
 
-      expect(result).toMatchObject({ ok: true, noCandidate: true });
-      expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+      expect(result).toMatchObject({ ok: true, kind: 'intake', candidate: { id: 'CG-OFFER' } });
     });
 
     it('prefers an in-window candidate over the extended window (no extra lookup when the head suffices)', async () => {
@@ -943,15 +943,28 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
       expect(getHerdrListHead).toHaveBeenCalledTimes(1);
     });
 
-    it('stays code-freeze under a freeze even when a non-critical item lies beyond the window', async () => {
-      // Under a freeze, audit/implement candidates are paused; a non-critical
-      // item beyond the sprint view is not an escape hatch, so the terminal
-      // reason stays derived from the in-view flags.
+    it('stays code-freeze under a freeze when the out-of-window item is an implement candidate', async () => {
+      // Under a freeze, audit/implement candidates are paused (split-by-skill).
+      // Widening the candidate universe (WL-0MW9XS0XR007K1TH) does not weaken
+      // that: an out-of-window IMPLEMENT candidate stays paused, so the terminal
+      // reason is still derived from the in-view flags. (An out-of-window
+      // plan/intake candidate DOES dispatch under a freeze — pinned in
+      // `downtime-worker.any-item-dispatch.test.ts` AC5.)
       const initialHead = fullHead();
-      const target = dispatchableIntake('CG-FROZEN-OUT-OF-WINDOW');
+      const target: DowntimeHerdrItem = {
+        id: 'CG-FROZEN-OUT-OF-WINDOW',
+        title: 'Frozen implement',
+        status: 'open',
+        stage: 'plan_complete',
+        priority: 'high',
+        risk: 'Low',
+        effort: 'S',
+        sortIndex: 999,
+      };
       const getHerdrListHead = vi.fn()
         .mockResolvedValueOnce({ ok: true, items: initialHead })
-        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] });
+        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] })
+        .mockResolvedValue({ ok: true, items: [...initialHead, target] });
       const deps = makeDeps({
         readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
         getHerdrListHead,
@@ -1036,7 +1049,7 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
     });
   });
 
-  describe('fetchExtendedHerdrItems — critical-only escape hatch primitive', () => {
+  describe('fetchExtendedHerdrItems — whole-backlog extension primitive', () => {
     const item = (id: string, priority = 'medium'): DowntimeHerdrItem => ({
       id,
       title: `Item ${id}`,
@@ -1045,7 +1058,9 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
       priority,
     });
 
-    it('returns only newly visible CRITICAL items, preserving the canonical order', async () => {
+    it('returns EVERY newly visible item (critical and non-critical), preserving the canonical order', async () => {
+      // WL-0MW9XS0XR007K1TH AC2 supersedes the sprint-view-only critical filter:
+      // any ranked item beyond the head is a dispatch candidate.
       const current = [item('A')];
       const dep = vi.fn().mockResolvedValue({
         ok: true,
@@ -1055,13 +1070,13 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
 
       const extended = await fetchExtendedHerdrItems(deps, '/repo', current);
 
-      expect(extended.map((i) => i.id)).toEqual(['C', 'E']);
-      expect(extended.every((i) => i.priority === 'critical')).toBe(true);
+      expect(extended.map((i) => i.id)).toEqual(['B', 'C', 'D', 'E']);
+      // The window grows geometrically from the current size.
       // Observable contract: `dep` injected boundary adapter — proves extended-window count forwarded
-      expect(dep).toHaveBeenCalledWith('/repo', 1 + DOWNTIME_DISPATCH_EXTEND_MAX);
+      expect(dep).toHaveBeenCalledWith('/repo', Math.max(1 + DOWNTIME_DISPATCH_EXTEND_MAX, 2));
     });
 
-    it('never returns a non-critical item beyond the sprint view (AC4)', async () => {
+    it('returns non-critical items beyond the head (AC2)', async () => {
       const current = [item('A')];
       const dep = vi.fn().mockResolvedValue({
         ok: true,
@@ -1069,7 +1084,11 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
       });
       const deps = makeDeps({ getHerdrListHead: dep });
 
-      expect(await fetchExtendedHerdrItems(deps, '/repo', current)).toEqual([]);
+      expect((await fetchExtendedHerdrItems(deps, '/repo', current)).map((i) => i.id)).toEqual([
+        'B',
+        'C',
+        'D',
+      ]);
     });
 
     it('returns [] when the extended head adds nothing (limit-ignoring dep)', async () => {

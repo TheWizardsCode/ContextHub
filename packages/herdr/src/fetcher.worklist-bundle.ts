@@ -111,17 +111,24 @@ function parseWorklistBundle(payload: unknown): WorklistBundle {
  * plus the four mandatory `wl list` queries. The command is a pure read: it
  * never re-sorts, so this adds no write byproduct and the result is cacheable
  * by the CLI read cache (WL-0MVI0IS6Y0028KTO).
+ *
+ * `dirOverride` (a `.worklog` directory) targets a FOREIGN root's database —
+ * the registered-root sweep's canonical head read (WL-0MVR8GDJ3008WY3Y AC3).
+ * Absent ⇒ the module-configured root (byte-for-byte today's behaviour). A
+ * foreign read is keyed by its own dir so it can never satisfy a snapshot /
+ * in-flight lookup for the module root.
  */
 export async function fetchWorklistBundle(
   count?: number,
   timeoutMs?: number,
+  dirOverride?: string,
 ): Promise<WorklistBundle> {
   const args = ['worklist'];
   if (count !== undefined) {
     args.push('-n', String(count));
   }
-  const dirKey = worklogDirKey();
-  const promise = runWl(args, true, timeoutMs).then((output) => {
+  const dirKey = dirOverride ?? worklogDirKey();
+  const promise = runWl(args, true, timeoutMs, dirOverride).then((output) => {
     const bundle = parseWorklistBundle(extractJson(output));
     lastWorklistBundle = { dirKey, at: Date.now(), bundle };
     return bundle;

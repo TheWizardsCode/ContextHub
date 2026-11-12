@@ -44,6 +44,7 @@ import {
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import { LEASE_FILE, LEADER_LOCK_FILE, isLeaseValid } from './leader-election.js';
 import { writeCoordinationFile, getEntry } from './coordination.js';
+import { writeDisableMarker } from './downtime-disable-marker.js';
 import {
   idleAllSlotsFree,
   perSlotAllFree,
@@ -88,6 +89,7 @@ vi.mock('./leader-election.js', async (importOriginal) => {
 describe('downtime worker orchestrator (createDowntimeWorker)', () => {
   function makeWorker(overrides: {
     enabled?: boolean;
+    offerOnly?: boolean;
     thresholdMs?: number;
     cooldownMs?: number;
     status?: unknown;
@@ -95,6 +97,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
   } = {}) {
     const cfg = {
       enabled: overrides.enabled ?? true,
+      offerOnly: overrides.offerOnly,
       thresholdMs: overrides.thresholdMs ?? DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
       requiredFreeSlots: 0,
       model: 'plan',
@@ -2763,5 +2766,251 @@ describe('audit-batch worker loop (parent AC6e)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ── Offer-only mode (downtimeOfferOnly, WL-0MWDDHOK6009GJCC) ──────────
+//
+// A dispatch-DISABLED instance (`downtimeEnabled: false` or a live manual
+// disable marker) still performs the coordination check-in and offers its
+// most-important item to the fleet leader when `downtimeOfferOnly` is on —
+// without ever polling the proxy, taking the leader lease, claiming an item,
+// reserving capacity or spawning a pane. OFF by default: a disabled instance
+// stays silent (no check-in, no entry) exactly as before.
+
+describe('downtime offer-only mode (downtimeOfferOnly, WL-0MWDDHOK6009GJCC)', () => {
+  const offerTmpDirs = createTempDirTracker();
+
+  /**
+   * One coordination-mode worker with a real (tmp) worklog root, so the
+   * disable marker and the coordination file both have a place to live.
+   */
+  function makeOfferWorker(overrides: {
+    enabled?: boolean;
+    offerOnly?: boolean;
+    /** Write the durable `.herdr-downtime-disabled` marker BEFORE construction. */
+    marker?: boolean;
+    deps?: Partial<DowntimeWorkerDeps>;
+  } = {}) {
+    const coordDir = offerTmpDirs.make('oo-coord-');
+    const cwd = offerTmpDirs.make('oo-cwd-');
+    const instanceId = 'inst-oo';
+    if (overrides.marker) writeDisableMarker(cwd);
+    const cfg = {
+      enabled: overrides.enabled ?? false,
+      offerOnly: overrides.offerOnly,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd,
+      noCandidateCooldownMs: 3_600_000,
+    };
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      // The check-in offers from the Herdr list head: default ONE dispatchable
+      // item so an offer-only tick demonstrably writes its offer.
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [{ id: 'WL-O1', title: 'Offer one', status: 'open', stage: 'intake_complete' }],
+      }),
+      // fetchItem is REQUIRED for the leader's coordination dispatch
+      // (dispatchFromCoordination re-validates every offer at dispatch
+      // time — the AC6 leader-side contract under test).
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: { id: 'WL-O1', title: 'Offer one', status: 'open', stage: 'intake_complete' },
+      }),
+      ...overrides.deps,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      coordinationDir: coordDir,
+      instanceId,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg, fetcher, coordDir, cwd, instanceId };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    offerTmpDirs.cleanup();
+  });
+
+  const STOPPED = { polled: false, dispatched: false, idle: false };
+
+  it('combination (enabled, offerOnly absent): dispatches exactly as before', async () => {
+    // AC4a — dispatch enabled ⇒ unchanged, whatever `downtimeOfferOnly` says
+    // (absent here = the default false).
+    const { worker, deps, fetcher } = makeOfferWorker({ enabled: true });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick(); // election + check-in + first poll (idle run starts)
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalled();
+  });
+
+  it('combination (enabled, offerOnly true): offerOnly never gates an enabled worker (AC4a)', async () => {
+    const { worker, deps, fetcher } = makeOfferWorker({ enabled: true, offerOnly: true });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    const at = await worker.tick();
+    expect(at.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalled();
+  });
+
+  it('combination (disabled, offerOnly absent): no check-in, no entry, no poll (unchanged)', async () => {
+    // AC4b — dispatch disabled + offerOnly off ⇒ today's behaviour exactly.
+    const { worker, deps, fetcher, coordDir, instanceId } = makeOfferWorker({ enabled: false });
+    const result = await worker.tick();
+    expect(result).toEqual(STOPPED);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(getEntry(coordDir, instanceId)).toBeNull();
+  });
+
+  it('combination (disabled, offerOnly true): checks in, writes its offer, never dispatches (AC2/AC3)', async () => {
+    const { worker, deps, fetcher, coordDir, instanceId } = makeOfferWorker({
+      enabled: false,
+      offerOnly: true,
+      deps: { reserveLocalCapacity: vi.fn().mockResolvedValue(null) },
+    });
+    const result = await worker.tick();
+    expect(result).toEqual(STOPPED);
+    // AC2 — the coordination entry carries this instance's computed offer.
+    expect(getEntry(coordDir, instanceId)?.workItemId).toBe('WL-O1');
+    // AC3 — none of the dispatch side effects ran (structural, not early
+    // returns: the tick returned before poll/election/dispatch).
+    expect(fetcher).not.toHaveBeenCalled(); // no proxy capacity poll
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled(); // no pane spawn
+    expect(deps.claimItem).not.toHaveBeenCalled(); // no CAS claim
+    expect(deps.recordDispatch).not.toHaveBeenCalled(); // no dispatch marker
+    expect(deps.reserveLocalCapacity).not.toHaveBeenCalled(); // no reservation
+    expect(existsSync(join(coordDir, LEASE_FILE))).toBe(false); // no leader lease
+    expect(worker.isLeader).toBe(false);
+  });
+
+  it('offer-only refreshes the entry on the normal check-in cadence, not every tick (AC2)', async () => {
+    const { worker, coordDir, instanceId } = makeOfferWorker({ enabled: false, offerOnly: true });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    const first = getEntry(coordDir, instanceId)!;
+    expect(first.lastUpdated).toBe(new Date(start).toISOString());
+
+    // A tick inside the check-in interval must NOT rewrite the entry.
+    vi.setSystemTime(start + 60_000);
+    await worker.tick();
+    expect(getEntry(coordDir, instanceId)?.lastUpdated).toBe(first.lastUpdated);
+
+    // After the 5-minute check-in interval elapses the entry is refreshed.
+    vi.setSystemTime(start + 5 * 60_000 + 1_000);
+    await worker.tick();
+    expect(getEntry(coordDir, instanceId)?.lastUpdated).toBe(
+      new Date(start + 5 * 60_000 + 1_000).toISOString(),
+    );
+  });
+
+  it('a live manual disable marker also enters offer-only mode (AC2)', async () => {
+    // A marker toggled by ANOTHER process while this worker runs — no
+    // in-memory override, so the marker gate decides — still offers when
+    // offerOnly is on.
+    const { worker, deps, fetcher, coordDir, instanceId, cwd } = makeOfferWorker({
+      enabled: true, // the marker, not the setting, disables dispatch here
+      offerOnly: true,
+    });
+    writeDisableMarker(cwd); // live marker appears mid-run
+    const result = await worker.tick();
+    expect(result).toEqual(STOPPED);
+    expect(getEntry(coordDir, instanceId)?.workItemId).toBe('WL-O1');
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('a construction-time durable marker + offerOnly still offers (AC2)', async () => {
+    const { worker, coordDir, instanceId } = makeOfferWorker({
+      enabled: true,
+      offerOnly: true,
+      marker: true,
+    });
+    await worker.tick();
+    expect(getEntry(coordDir, instanceId)?.workItemId).toBe('WL-O1');
+  });
+
+  it('re-reads the offerOnly knob every tick — applies without a plugin restart (AC1)', async () => {
+    const { worker, cfg, coordDir, instanceId } = makeOfferWorker({ enabled: false });
+    // Disabled + offerOnly off (default): silent, no entry.
+    await worker.tick();
+    expect(getEntry(coordDir, instanceId)).toBeNull();
+    // The operator flips the setting live...
+    cfg.offerOnly = true;
+    // ...and the very next tick checks in and offers.
+    await worker.tick();
+    expect(getEntry(coordDir, instanceId)?.workItemId).toBe('WL-O1');
+  });
+
+  it('fail-open: a failed offer computation keeps the previous entry and never removes a peer (AC5)', async () => {
+    const { worker, coordDir, instanceId } = makeOfferWorker({
+      enabled: false,
+      offerOnly: true,
+      deps: {
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: false, error: 'wl CLI failed' }),
+      },
+    });
+    const at = new Date(1_000_000 - 60_000).toISOString();
+    writeCoordinationFile(coordDir, {
+      version: 1,
+      entries: [
+        { instanceId, workItemId: 'WL-PREV', directory: '/repo', assignedAt: at, lastUpdated: at },
+        {
+          instanceId: 'inst-peer',
+          workItemId: 'WL-PEER',
+          directory: '/repo-peer',
+          assignedAt: at,
+          lastUpdated: at,
+        },
+      ],
+    });
+    // The tick never throws, never removes this instance's entry (fail-open
+    // on the `{ok:false}` computation) and never touches another's.
+    await expect(worker.tick()).resolves.toEqual(STOPPED);
+    expect(getEntry(coordDir, instanceId)?.workItemId).toBe('WL-PREV');
+    expect(getEntry(coordDir, 'inst-peer')?.workItemId).toBe('WL-PEER');
+  });
+
+  it('offer-only without a coordination dir (legacy mode) is a no-op stop', async () => {
+    // Legacy mode (no coordinationDir) has no shared file to check in to —
+    // an offer-only disabled tick is a pure stop, never a poll/dispatch.
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const deps = makeDeps();
+    const worker = createDowntimeWorker({
+      poller: createDowntimePoller('http://proxy:8000', fetcher),
+      deps,
+      config: () => ({
+        enabled: false,
+        offerOnly: true,
+        thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
+      }),
+    });
+    const result = await worker.tick();
+    expect(result).toEqual(STOPPED);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });

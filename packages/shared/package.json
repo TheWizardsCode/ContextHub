@@ -34,6 +34,10 @@
       "types": "./dist/fields.d.ts",
       "import": "./dist/fields.js"
     },
+    "./predicates": {
+      "types": "./dist/predicates.d.ts",
+      "import": "./dist/predicates.js"
+    },
     "./persistent-store": {
       "types": "./dist/persistent-store.d.ts",
       "import": "./dist/persistent-store.js"

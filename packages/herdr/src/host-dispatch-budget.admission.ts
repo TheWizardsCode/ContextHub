@@ -11,11 +11,40 @@
  * (read/reserve/release/reap, configuration, liveness table) lives in
  * `host-dispatch-budget.ts` and is not restated here.
  *
+ * ## Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, parent
+ * ## WL-0MW95GBEG005ERHS)
+ *
+ * The **audit** tier's capacity decision is the proxy's audit-availability
+ * verdict (the shared local resource), NOT the per-host `budget.json`
+ * `maxAudit` cap. `admitHostDispatch` maps the proxy read through
+ * {@link decideAuditAvailability} — the same helper the dispatcher's
+ * `getActiveAudit` pre-check uses — so the pre-check and admission can never
+ * disagree and the refusal tokens are the proxy's (`audit-budget-saturated` /
+ * `audit-budget-unknown`). A proxy read that cannot be trusted fails CLOSED as
+ * `audit-budget-unknown` with the failing exchange recorded.
+ *
+ * The local `dispatch-budget.json` ledger is **observability only** for the
+ * audit tier: an admitted audit is still reserved (and confirmed/released on
+ * the existing paths) so the worklist header, the interactive dialog, the
+ * closed-pane sweep and every release path keep working unchanged — but a
+ * local entry is NEVER read to refuse an audit, and a reservation failure
+ * never turns a proxy admission into a refusal.
+ *
+ * When the proxy and the local ledger disagree (proxy admits while the local
+ * fresh count is at/over `maxAudit`, or proxy refuses while the local count is
+ * below it) ONE decision entry is emitted with both sides' evidence; an
+ * agreeing state emits none (no log noise). The proxy always wins.
+ *
+ * `HERDR_AUDIT_LOCAL_BUDGET=1` restores the pre-change local decision for ONE
+ * RELEASE (read per tick, documented in `host-dispatch-budget.ts`) and marks
+ * the legacy path in the decision log.
+ *
  * ## Per-tier counting (deliberate asymmetry)
  *
- *  - **implement** counts fresh entries whose pane is in the live pane list
- *    (`liveCount`). A reserved-but-unspawned entry is invisible until its pane
- *    id is confirmed.
+ *  - **implement** counts entries whose pane is in the live pane list
+ *    (`liveCount`) — pane-derived freshness since WL-0MW9VQ08W000SN63: a
+ *    confirmed entry with a live pane counts regardless of heartbeat age. A
+ *    reserved-but-unspawned entry is invisible until its pane id is confirmed.
  *  - **audit** counts fresh entries with NO live-pane requirement
  *    (`freshCount`), which is exactly the semantics of the retired host-wide
  *    `active-audit` marker: the slot is held from the reservation until a
@@ -61,6 +90,8 @@
 
 import {
   freshCount,
+  HERDR_AUDIT_LOCAL_BUDGET_ENV,
+  isLegacyAuditBudgetEnabled,
   liveCount,
   readBudgetConfig,
   release,
@@ -77,8 +108,19 @@ import {
   HOST_BUDGET_IMPLEMENT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
 } from './downtime-log.js';
+import {
+  AUDIT_BUDGET_SATURATED_REASON,
+  AUDIT_BUDGET_UNKNOWN_REASON,
+} from './downtime-worker.audit-availability.contract.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import {
+  AUDIT_BUDGET_DIVERGENCE_REASON,
+  AUDIT_BUDGET_LEGACY_REASON,
+  type AuditBudgetDivergence,
+  type AuditBudgetLocalEvidence,
+} from './downtime-log-budget.js';
 
-export type { HostBudgetLivePane } from './host-dispatch-budget.js';
+export type { HostBudgetLivePane, HostBudgetLivePanesResult } from './host-dispatch-budget.js';
 
 /**
  * Refusal reason: the tier is at/over its machine-wide cap.
@@ -110,13 +152,17 @@ export type HostBudgetRefusalReason =
   | typeof HOST_BUDGET_IMPLEMENT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
-  | typeof HOST_BUDGET_UNKNOWN_REFUSAL;
+  | typeof HOST_BUDGET_UNKNOWN_REFUSAL
+  | typeof AUDIT_BUDGET_SATURATED_REASON
+  | typeof AUDIT_BUDGET_UNKNOWN_REASON;
 
 /** The refusal tokens the AUDIT tier can report (never `host-budget-implement`). */
 export type HostBudgetAuditRefusalReason =
   | typeof HOST_BUDGET_AUDIT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
-  | typeof HOST_BUDGET_UNKNOWN_REFUSAL;
+  | typeof HOST_BUDGET_UNKNOWN_REFUSAL
+  | typeof AUDIT_BUDGET_SATURATED_REASON
+  | typeof AUDIT_BUDGET_UNKNOWN_REASON;
 
 /** One dispatch asking the host for a slot. */
 export interface HostBudgetAdmissionInput {
@@ -137,8 +183,13 @@ export interface HostBudgetAdmissionOptions extends HostBudgetOptions {
    * reserved implement entry count (the F1 liveness table), so the caller must
    * pass the machine-wide downtime pane list, not a per-root subset. The audit
    * tier uses the same list only to REPAIR an unreadable ledger (AC6).
+   *
+   * `undefined` = pane liveness UNKNOWN (a failed/unparseable pane read,
+   * WL-0MW9VQX5T001GCUP): the implement tier counts by the freshness rule and
+   * NEVER reaps or repairs on this state, and the audit repair is skipped — an
+   * unknown read must never rewrite a ledger or delete live entries.
    */
-  livePanes: readonly HostBudgetLivePane[];
+  livePanes: readonly HostBudgetLivePane[] | undefined;
   /**
    * Instance identity recorded on entries reconstructed by a repair
    * (diagnostics only). Defaults to this plugin process.
@@ -146,7 +197,47 @@ export interface HostBudgetAdmissionOptions extends HostBudgetOptions {
   instanceId?: string;
   /** Worklog root recorded on entries reconstructed by a repair. */
   root?: string;
+  /**
+   * The proxy's audit-availability read for THIS dispatch attempt
+   * (WL-0MWAMSK9H005BOHD). Consumed ONLY by the audit branch's proxy path: the
+   * caller awaits the availability client and passes its typed outcome, so the
+   * pre-check ({@link decideAuditAvailability}) and admission reach the SAME
+   * decision from the SAME state and can never disagree.
+   *
+   * `undefined` means the read is unavailable (seam absent or the legacy path
+   * skipped the proxy) and fails CLOSED with `audit-budget-unknown`.
+   */
+  auditAvailability?: AuditAvailabilityOutcome;
+  /**
+   * Audit-budget decision-log sink (WL-0MWAMSK9H005BOHD). Invoked at most once
+   * per admission: a `divergence` event when the proxy and the local ledger
+   * disagree about audit capacity, and a `legacy` event when the one-release
+   * `HERDR_AUDIT_LOCAL_BUDGET=1` path is active. Production wires this to the
+   * coordination/decision log; tests inject a spy. Never throws into the
+   * admission (a throwing sink is swallowed — logging is not a gate).
+   */
+  onAuditBudgetEvent?: (event: AuditBudgetLogEvent) => void;
 }
+
+/**
+ * One audit-budget decision-log event (WL-0MWAMSK9H005BOHD).
+ *
+ *  - `divergence` — the proxy and the local (observability-only) audit ledger
+ *    disagree; carries both sides' evidence. The proxy always wins.
+ *  - `legacy` — the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` path decided the
+ *    audit tier locally and the proxy was NOT consulted.
+ */
+export type AuditBudgetLogEvent =
+  | {
+      event: 'divergence';
+      reason: typeof AUDIT_BUDGET_DIVERGENCE_REASON;
+      divergence: AuditBudgetDivergence;
+    }
+  | {
+      event: 'legacy';
+      reason: typeof AUDIT_BUDGET_LEGACY_REASON;
+      message: string;
+    };
 
 /** The admission verdict. `live`/`max` are the evidence the caller reports. */
 export interface HostBudgetAdmission {
@@ -233,7 +324,9 @@ export function repairLedgerFromLivePanes(
  * (AC6): the dispatch loop calls this pre-check once per audit candidate, so an
  * eager pane-list subprocess would add a `herdr pane list` per candidate. Absent
  * panes means "cannot repair now" — the tick still fails closed, and the next
- * call that can supply panes repairs the ledger.
+ * call that can supply panes repairs the ledger. Absence is exactly the
+ * UNKNOWN pane state of WL-0MW9VQX5T001GCUP: an unknown read must never rewrite
+ * a corrupt ledger as empty, so "no list ⇒ no repair" is the safe arm.
  */
 export interface HostBudgetAuditStateOptions extends HostBudgetOptions {
   /** Live pane list used ONLY to repair an unreadable ledger (AC6). */
@@ -264,8 +357,119 @@ export interface HostBudgetAuditState {
 }
 
 /**
- * The audit tier's admission read — the pre-check the dispatcher's
- * `getActiveAudit` consults where the retired `active-audit` marker was read.
+ * The audit tier's proxy-derived admission decision (WL-0MWAMSK9H005BOHD).
+ *
+ * The SINGLE mapping from the proxy's audit-availability read to an admission
+ * answer. Both the dispatcher's pre-check (`getActiveAudit`) and
+ * `admitHostDispatch` consume it, so a refusal before selection and a refusal
+ * at admission agree and quote the SAME token (parent AC2).
+ *
+ *  - `undefined` (seam absent / legacy path) ⇒ refuse `audit-budget-unknown`
+ *    with `detail: 'seam-absent'` (fail closed, never permissive).
+ *  - a non-`ok` outcome (`endpoint-absent` / `unreachable` / `unparsable`) ⇒
+ *    refuse `audit-budget-unknown` naming the failing exchange in `detail`
+ *    (AC3 fail-safe).
+ *  - `available: false` ⇒ refuse `audit-budget-saturated` with the proxy's
+ *    `live`/`cap` as evidence.
+ *  - `available: true` ⇒ admit with the proxy's `live`/`cap` as evidence.
+ */
+export interface AuditAvailabilityDecision {
+  /** `true` when the audit tier is refused. */
+  active: boolean;
+  /** The proxy's refusal token (absent when admitted). */
+  reason?: typeof AUDIT_BUDGET_SATURATED_REASON | typeof AUDIT_BUDGET_UNKNOWN_REASON;
+  /** The proxy's `live`/`cap` evidence (absent when the read failed closed). */
+  budget?: { live: number; max: number };
+  /** The failing exchange when the read failed closed. */
+  detail?: string;
+}
+
+/** Map one proxy audit-availability read to the shared admission decision. */
+export function decideAuditAvailability(
+  outcome: AuditAvailabilityOutcome | undefined,
+): AuditAvailabilityDecision {
+  if (outcome === undefined) {
+    return { active: true, reason: AUDIT_BUDGET_UNKNOWN_REASON, detail: 'seam-absent' };
+  }
+  if (outcome.status !== 'ok') {
+    return { active: true, reason: AUDIT_BUDGET_UNKNOWN_REASON, detail: outcome.reason };
+  }
+  const { availability } = outcome;
+  const budget = { live: availability.live, max: availability.cap };
+  if (availability.available === false) {
+    return { active: true, reason: AUDIT_BUDGET_SATURATED_REASON, budget };
+  }
+  return { active: false, budget };
+}
+
+/**
+ * Read the LOCAL audit ledger for divergence evidence only (parent AC2).
+ *
+ * Returns `null` when the local ledger cannot be trusted, so a divergence is
+ * only reported when both sides are actually observable (never a fabricated
+ * zero). The callers use this ONLY to decide whether to log; the value never
+ * changes the admission answer — the proxy is authoritative.
+ */
+export function readAuditLocalEvidence(
+  opts: HostBudgetOptions = {},
+): AuditBudgetLocalEvidence | null {
+  const count = freshCount('audit', opts);
+  if (!count.ok) return null;
+  const { config } = readBudgetConfig(opts);
+  return { live: count.count, maxAudit: config.maxAudit };
+}
+
+/**
+ * Compare a proxy verdict with the local (observability-only) ledger and
+ * return the evidence when they DISAGREE about audit capacity (parent AC2).
+ *
+ * `null` for an agreeing state, a failed-closed proxy read (no proxy evidence
+ * to compare) or an untrustworthy local ledger (no local evidence). The proxy
+ * always wins; this is the evidence trail only.
+ */
+export function detectAuditDivergence(
+  outcome: AuditAvailabilityOutcome | undefined,
+  local: AuditBudgetLocalEvidence | null,
+  decision: AuditAvailabilityDecision,
+): AuditBudgetDivergence | null {
+  if (outcome === undefined || outcome.status !== 'ok' || local === null) return null;
+  const localAtCap = local.live >= local.maxAudit;
+  // `decision.active` = the proxy refuses. One side at saturation and the
+  // other not is exactly the disagreement the log must record.
+  if (decision.active === localAtCap) return null;
+  return {
+    proxy: {
+      live: outcome.availability.live,
+      cap: outcome.availability.cap,
+      available: outcome.availability.available,
+    },
+    local,
+  };
+}
+
+/**
+ * Invoke the audit-budget log sink, swallowing a throwing sink: a decision log
+ * must never turn into a dispatch failure.
+ */
+function emitAuditBudgetEvent(
+  opts: HostBudgetAdmissionOptions,
+  event: AuditBudgetLogEvent,
+): void {
+  try {
+    opts.onAuditBudgetEvent?.(event);
+  } catch {
+    // fail-closed: logging must never crash the admission path
+  }
+}
+
+/**
+ * The audit tier's LEGACY budget read (WL-0MVXY0XPF006YUHA F2) — the one-release
+ * `HERDR_AUDIT_LOCAL_BUDGET=1` pre-check and the local evidence source.
+ *
+ * Since WL-0MW95GBEG005ERHS the DEFAULT audit pre-check is the proxy's
+ * availability read (`decideAuditAvailability`); this local read is no longer
+ * consulted on that path. It remains the legacy decision when the flag is set,
+ * and `readAuditLocalEvidence` still uses its count for divergence evidence.
  *
  * Never throws and never reserves. The order is significant:
  *
@@ -340,6 +544,145 @@ export function readAuditBudgetState(
 }
 
 /**
+ * Reserve one audit entry for OBSERVABILITY (WL-0MWAMSK9H005BOHD).
+ *
+ * The audit tier's admission answer comes from the proxy; the local entry only
+ * feeds the header, the interactive dialog, the closed-pane sweep and the
+ * release paths. A failure to record it is therefore swallowed and NEVER
+ * turns a proxy admission into a refusal.
+ */
+function reserveAuditForObservability(
+  input: HostBudgetAdmissionInput,
+  ledgerOptions: HostBudgetOptions,
+): void {
+  reserve(
+    {
+      kind: 'audit',
+      itemId: input.itemId,
+      instanceId: input.instanceId,
+      root: input.root,
+      ...(input.paneId !== undefined ? { paneId: input.paneId } : {}),
+    },
+    ledgerOptions,
+  );
+}
+
+/**
+ * The ONE-RELEASE legacy audit decision (`HERDR_AUDIT_LOCAL_BUDGET=1`).
+ *
+ * Byte-for-byte the pre-proxy behaviour: {@link readAuditBudgetState} decides
+ * from `budget.json` `maxAudit` + the local ledger, the refusal tokens are the
+ * legacy ones, the ledger is repaired when unreadable, and the slot is
+ * reserved only when the state admits. The proxy is never consulted, and a
+ * reservation failure fails CLOSED exactly as before (the ledger could not
+ * prove the host is within budget).
+ */
+function admitAuditLegacy(
+  input: HostBudgetAdmissionInput,
+  opts: HostBudgetAdmissionOptions,
+): HostBudgetAdmission {
+  const state = readAuditBudgetState(opts);
+  if (state.atCap) {
+    return {
+      admitted: false,
+      live: state.live,
+      max: state.max,
+      reason: state.reason ?? HOST_BUDGET_AUDIT_REFUSAL,
+      ...(state.repaired === true ? { repaired: true } : {}),
+    };
+  }
+  const reserved = reserve(
+    {
+      kind: input.kind,
+      itemId: input.itemId,
+      instanceId: input.instanceId,
+      root: input.root,
+      ...(input.paneId !== undefined ? { paneId: input.paneId } : {}),
+    },
+    { dir: opts.dir, now: opts.now, staleWindowMs: opts.staleWindowMs, env: opts.env },
+  );
+  if (!reserved.ok) {
+    if (!reserved.unknown && reserved.reason === 'no-coordination-dir') {
+      // Parent AC11 (WL-0MVXY11IL0032S07): an unresolvable machine dir means
+      // there is no ledger and no new failure mode — exactly as before the
+      // budget existed. The audit tier must therefore admit without a
+      // reservation (mirroring the implement tier's early no-dir return).
+      return { admitted: true, live: state.live, max: state.max };
+    }
+    // The reservation could not be recorded — the host's in-flight audits can
+    // no longer be proven within budget, so fail closed (legacy semantics).
+    return {
+      admitted: false,
+      live: state.live,
+      max: state.max,
+      reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+    };
+  }
+  return { admitted: true, live: state.live, max: state.max };
+}
+
+/**
+ * The audit branch: proxy-derived by default, local behind the one-release
+ * flag (WL-0MWAMSK9H005BOHD).
+ *
+ * The proxy verdict decides. The local ledger is read only to detect a
+ * DIVERGENCE (and to reserve an observability entry after an admission); an
+ * entry can never cause a refusal and a reservation failure never changes the
+ * answer.
+ */
+function admitAuditDispatch(
+  input: HostBudgetAdmissionInput,
+  opts: HostBudgetAdmissionOptions,
+  ledgerOptions: HostBudgetOptions,
+): HostBudgetAdmission {
+  if (isLegacyAuditBudgetEnabled(ledgerOptions.env ?? process.env)) {
+    emitAuditBudgetEvent(opts, {
+      event: 'legacy',
+      reason: AUDIT_BUDGET_LEGACY_REASON,
+      message:
+        `${HERDR_AUDIT_LOCAL_BUDGET_ENV}=1 — audit admission uses the per-host ` +
+        'budget.json maxAudit cap and local ledger (one-release legacy path; ' +
+        'remove the flag to return to the proxy-managed budget)',
+    });
+    return admitAuditLegacy(input, opts);
+  }
+
+  const decision = decideAuditAvailability(opts.auditAvailability);
+
+  // AC2: log a divergence ONLY when both sides are observable and disagree.
+  // A failed-closed proxy read has no proxy evidence to compare, and an
+  // unreadable local ledger has no local evidence — neither is a divergence.
+  const divergence = detectAuditDivergence(
+    opts.auditAvailability,
+    readAuditLocalEvidence(ledgerOptions),
+    decision,
+  );
+  if (divergence !== null) {
+    emitAuditBudgetEvent(opts, {
+      event: 'divergence',
+      reason: AUDIT_BUDGET_DIVERGENCE_REASON,
+      divergence,
+    });
+  }
+
+  if (decision.active) {
+    return {
+      admitted: false,
+      live: decision.budget?.live ?? 0,
+      max: decision.budget?.max ?? 0,
+      reason: decision.reason ?? AUDIT_BUDGET_UNKNOWN_REASON,
+    };
+  }
+
+  reserveAuditForObservability(input, ledgerOptions);
+  return {
+    admitted: true,
+    live: decision.budget?.live ?? 0,
+    max: decision.budget?.max ?? 0,
+  };
+}
+
+/**
  * One admission decision for one dispatch attempt.
  *
  * Never throws; every outcome is expressed as `admitted` plus the `live`/`max`
@@ -348,14 +691,20 @@ export function readAuditBudgetState(
  *  1. resolve the effective cap (config + env, defaults absent a file);
  *  2. `max === 0` ⇒ refuse immediately with `live`/`max` `0/0` (AC4 — a
  *     disabled tier is refused regardless of what the ledger holds);
- *  3. count live dispatches (reaping stale, pane-less entries on read);
- *  4. unreadable ledger ⇒ repair from live panes and refuse (`unknown`);
+ *  3. count live dispatches (reaping stale, pane-less entries on read — but
+ *     with an UNKNOWN pane list (`livePanes: undefined`) the freshness rule
+ *     counts and nothing is reaped, WL-0MW9VQX5T001GCUP);
+ *  4. unreadable ledger ⇒ when the pane list is KNOWN, repair from live panes
+ *     and refuse (`unknown`); when it is unknown, refuse WITHOUT rewriting
+ *     (the next pane-carrying tick self-heals);
  *  5. at/over cap ⇒ refuse with the observed `live`/`max` (AC2);
  *  6. otherwise reserve the slot and admit.
  *
- * The audit tier delegates its count/cap decision to
- * {@link readAuditBudgetState} (so the pre-check and admission can never
- * disagree) and reserves only when that state admits.
+ * The audit tier is proxy-derived (WL-0MWAMSK9H005BOHD): it maps the
+ * availability read through {@link decideAuditAvailability}, the same helper
+ * the dispatcher's pre-check uses, and reserves locally ONLY for observability
+ * — never to refuse. The one-release `HERDR_AUDIT_LOCAL_BUDGET=1` path keeps
+ * the pre-change local decision.
  */
 export function admitHostDispatch(
   input: HostBudgetAdmissionInput,
@@ -368,44 +717,7 @@ export function admitHostDispatch(
     env: opts.env,
   };
   if (input.kind === 'audit') {
-    const state = readAuditBudgetState(opts);
-    if (state.atCap) {
-      return {
-        admitted: false,
-        live: state.live,
-        max: state.max,
-        reason: state.reason ?? HOST_BUDGET_AUDIT_REFUSAL,
-        ...(state.repaired === true ? { repaired: true } : {}),
-      };
-    }
-    const reserved = reserve(
-      {
-        kind: input.kind,
-        itemId: input.itemId,
-        instanceId: input.instanceId,
-        root: input.root,
-        ...(input.paneId !== undefined ? { paneId: input.paneId } : {}),
-      },
-      ledgerOptions,
-    );
-    if (!reserved.ok) {
-      if (!reserved.unknown && reserved.reason === 'no-coordination-dir') {
-        // Parent AC11 (WL-0MVXY11IL0032S07): an unresolvable machine dir means
-        // there is no ledger and no new failure mode — exactly as before the
-        // budget existed. The audit tier must therefore admit without a
-        // reservation (mirroring the implement tier's early no-dir return).
-        return { admitted: true, live: state.live, max: state.max };
-      }
-      // The reservation could not be recorded — the host's in-flight audits can
-      // no longer be proven within budget, so fail closed.
-      return {
-        admitted: false,
-        live: state.live,
-        max: state.max,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-      };
-    }
-    return { admitted: true, live: state.live, max: state.max };
+    return admitAuditDispatch(input, opts, ledgerOptions);
   }
 
   const { config } = readBudgetConfig(ledgerOptions);
@@ -421,7 +733,13 @@ export function admitHostDispatch(
       // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
       return { admitted: true, live: 0, max };
     }
-    const repaired = repairLedgerFromLivePanes(opts.livePanes, input, ledgerOptions);
+    // Repair from observed live state ONLY when the pane read succeeded and
+    // the list is authoritative; an unknown pane state (failed read) must
+    // never rewrite a corrupt ledger from nothing (WL-0MW9VQX5T001GCUP AC1).
+    const repaired =
+      opts.livePanes === undefined
+        ? false
+        : repairLedgerFromLivePanes(opts.livePanes, input, ledgerOptions);
     return {
       admitted: false,
       live: 0,
@@ -466,12 +784,14 @@ export function admitHostDispatch(
 /**
  * Confirm a reserved entry with the spawned pane's id.
  *
- * For the implement tier, counted = fresh heartbeat AND a pane id in the live
- * pane list, so the entry is invisible to admission until the pane id is known.
- * The audit tier counts a fresh entry regardless (the marker semantics), so the
- * confirmation only records the pane id for observability. Best-effort: a
- * failing seam never affects the dispatch, and the release-by-item-id on pane
- * close (or the stale reap) remains the backstop.
+ * For the implement tier, counted = a pane id in the live pane list
+ * (pane-derived freshness since WL-0MW9VQ08W000SN63 — a live pane counts
+ * regardless of heartbeat age; a reserved-but-unspawned entry is invisible to
+ * admission until the pane id is known). The audit tier counts a fresh entry
+ * regardless (the marker semantics), so the confirmation only records the
+ * pane id for observability. Best-effort: a failing seam never affects the
+ * dispatch, and the release-by-item-id on pane close (or the stale reap)
+ * remains the backstop.
  */
 export function confirmHostDispatch(
   input: HostBudgetAdmissionInput,

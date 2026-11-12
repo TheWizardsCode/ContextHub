@@ -16,12 +16,26 @@
  * consumable per-tier caps come from `readBudgetConfig`, and the interactive
  * over-quota dialog / observability surfaces are F4/F5.
  *
+ * ## Audit admission authority (WL-0MW95GBEG005ERHS)
+ *
+ * For the **audit tier** this ledger's audit entries and `budget.json`
+ * `maxAudit` are **observability only**: the authoritative audit budget and
+ * live audit-lease registry are the PROXY's, read by herdr over HTTP
+ * (`GET {proxyUrl}/llama/local/audit/status`). The ledger still records audit
+ * entries so the header, the interactive dialog, the dead-pane sweep and the
+ * release paths work, but an audit entry can never refuse an audit. `maxAudit`
+ * is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local
+ * figure the divergence log compares against. The **implement tier** keeps the
+ * per-host ledger + `maxImplement` cap unchanged.
+ *
  * ## Files (machine coordination dir — `~/.herdr/downtime` or
  * ## `HERDR_COORDINATION_DIR`, see `machine-coordination.ts`)
  *
  *  - `dispatch-budget.json` — the ledger (this module's only write target).
  *  - `budget.json` — the per-tier caps (read-only here; the operator writes it):
- *    `{ "maxImplement": 2, "maxAudit": 1 }`.
+ *    `{ "maxImplement": 2, "maxAudit": 1 }`. `maxImplement` governs the
+ *    implement tier; `maxAudit` is the legacy/observability figure only (see
+ *    the audit-admission-authority note above).
  *
  * ## Ledger shape (version 1)
  *
@@ -61,22 +75,35 @@
  *  - `release(itemId)` — under the lock, remove that entry (idempotent:
  *    `removed: false` when absent). Called on pane close, dispatch failure and
  *    a failed claim.
- *  - `reap(livePanes)` — under the lock, drop entries whose heartbeat is stale
- *    **and** whose pane is not in the caller's live pane list.
- *  - `liveCount(kind, livePanes)` — the admission read: counts entries of that
- *    kind whose heartbeat is fresh **and** whose `paneId` is in the live pane
- *    list, and reaps stale, pane-less entries on read so a crashed leader
- *    cannot wedge the host. A reap write is best-effort: the count already
- *    excludes those entries, so lock contention only defers the cleanup.
- *  - `freshCount(kind)` — the AUDIT tier's admission read: counts every entry
- *    of that kind whose heartbeat is fresh, with no live-pane requirement, and
- *    reaps every stale entry. This is the semantics of the retired host-wide
- *    `active-audit` marker (WL-0MVXY0XPF006YUHA F2): an audit slot is held from
- *    the dispatch until a release point fires (pane close, dispatch failure,
- *    claim rollback) and is released by staleness after the 2 h window — the
- *    pane list is not a release point for the audit tier. It also counts a
- *    non-stale legacy `active-audit` marker file as ONE synthetic audit entry
- *    (retirement read-compatibility) and never writes or removes that file.
+ *  - `reap(livePanes?)` — under the lock, drop entries whose heartbeat is stale
+ *    **and** whose pane is not in the caller's live pane list. `livePanes` of
+ *    `undefined` means pane liveness UNKNOWN (a failed/unparseable pane read,
+ *    WL-0MW9VQX5T001GCUP): nothing is reaped and nothing is written, so a
+ *    reap on unknown state is a pure read.
+ *  - `liveCount(kind, livePanes?)` — the admission read: counts entries of that
+ *    kind whose `paneId` is in the live pane list, and reaps stale, pane-less
+ *    entries on read so a crashed leader cannot wedge the host. With `livePanes`
+ *    `undefined` (unknown) it counts fresh entries by the freshness rule and
+ *    reaps NOTHING — an admission read on an unknown pane state is a pure read
+ *    that never mutates the ledger (AC1/AC3 of WL-0MW9VQX5T001GCUP). A reap
+ *    write is best-effort: the count already excludes those entries, so lock
+ *    contention only defers the cleanup. Since WL-0MW9VQ08W000SN63 the
+ *    IMPLEMENT tier counts a confirmed entry with a live pane REGARDLESS of
+ *    heartbeat age (pane-derived freshness — see the liveness table).
+ *  - `freshCount(kind)` — the AUDIT tier's **legacy/observability** read:
+ *    counts every entry of that kind whose heartbeat is fresh, with no
+ *    live-pane requirement, and reaps every stale entry. This is the semantics
+ *    of the retired host-wide `active-audit` marker (WL-0MVXY0XPF006YUHA F2):
+ *    an audit slot is held from the dispatch until a release point fires (pane
+ *    close, dispatch failure, claim rollback) and is released by staleness
+ *    after the 2 h window — the pane list is not a release point for the audit
+ *    tier. It also counts a non-stale legacy `active-audit` marker file as ONE
+ *    synthetic audit entry (retirement read-compatibility) and never writes or
+ *    removes that file. Since WL-0MW95GBEG005ERHS the audit tier's ADMISSION
+ *    authority is the proxy's audit-availability read; this count is used for
+ *    the observability surfaces, the divergence evidence and the one-release
+ *    `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path — never to refuse an audit on the
+ *    default proxy path.
  *
  * The composite liveness rules are deliberately explicit, because the
  * in-between states matter and are pinned by tests:
@@ -85,12 +112,34 @@
  * |-----------|-------------------|---------|--------|
  * | fresh     | yes               | yes     | no     |
  * | fresh     | no                | no      | no (spawn/reconcile window) |
- * | stale     | yes               | no      | no (pane still alive) |
+ * | stale     | yes               | yes¹    | no (pane still alive) |
  * | stale     | no                | no      | yes    |
+ *
+ * A pane list that is **UNKNOWN** (a failed/unparseable read — the tri-state
+ * `{ok:false}` from `hostBudgetLivePanes`, WL-0MW9VQX5T001GCUP) is NOT the
+ * same fact as "no panes": the pane-derived requirement is dropped, the
+ * freshness rule applies (fresh entries count) and NOTHING is reaped. Reap
+ * must never act on an unknown state — an empty list derived from a broken
+ * read would permanently delete entries for work that is still running
+ * (heartbeats are only written at reserve/confirm, so a reaped live entry
+ * never comes back). The same value therefore cannot serve admission and
+ * reap: admission fails open on unknown (never wedges dispatch), reap must
+ * fail safe (never delete on unknown).
+ *
+ * ¹ Pane-derived freshness (WL-0MW9VQ08W000SN63): for the IMPLEMENT tier a
+ * confirmed entry (non-empty `paneId`) whose pane is in the trusted live list
+ * counts regardless of heartbeat age — the pane is conclusive evidence the
+ * dispatch is still in flight, and `heartbeatAt` is only written at
+ * `reserve`/`confirmHostDispatch` (no refresh path), so a >2 h implement must
+ * not silently drop out of the counter or the cap. The AUDIT tier keeps the
+ * freshness rule (staleness is its release; see {@link reduceMarkerCounts}).
  *
  * A CONFIRMED entry (non-empty `paneId`) whose pane is absent from a trusted
  * live list is additionally swept by {@link sweepClosedPanes} regardless of
  * freshness (WL-0MW5KC8J300942EA), so a closed pane cannot pin a budget slot.
+ * Since WL-0MW9VQ08W000SN63 the sweep applies pane-derived freshness to the
+ * implement tier too: a stale-but-live implement entry is retained (never
+ * swept), matching the counting rule.
  *
  * The window where a freshly reserved entry has no pane yet is why the
  * admission path must pass the `paneId` at reserve time whenever one exists;
@@ -100,12 +149,15 @@
  * ## Configuration
  *
  * Resolution order: `budget.json` → defaults (`maxImplement: 2`,
- * `maxAudit: 1`, preserving today's single-flight audit behaviour) →
+ * `maxAudit: 1`, the pre-proxy single-flight figure kept for the one-release
+ * legacy path and for local observability) →
  * `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` env override → clamp to
  * `0..HOST_BUDGET_MAX`. `0` disables that tier host-wide (a per-tier kill
- * switch). A malformed `budget.json` falls back to the defaults and records a
- * warning instead of throwing; an unresolvable coordination dir yields
- * defaults + env and never throws.
+ * switch) on the paths that read these caps (the implement tier always; the
+ * audit tier only under the one-release legacy flag — the proxy owns the
+ * default audit cap). A malformed `budget.json` falls back to the defaults and
+ * records a warning instead of throwing; an unresolvable coordination dir
+ * yields defaults + env and never throws.
  *
  * ## Layering
  *
@@ -146,6 +198,23 @@ export const HOST_BUDGET_ENV_KEYS = {
 
 /** Ceiling for a configured cap — guards typos/overflow, never a policy. */
 export const HOST_BUDGET_MAX = 32;
+
+/**
+ * One-release escape hatch restoring the pre-proxy audit-budget behaviour
+ * (WL-0MWAMSK9H005BOHD AC3, parent WL-0MW95GBEG005ERHS AC3).
+ *
+ * The audit tier's capacity is normally the proxy's shared audit-availability
+ * verdict. Setting this environment variable to `1` restores the pre-change
+ * per-host decision (`budget.json` `maxAudit` + the local
+ * `dispatch-budget.json` ledger) WITHOUT consulting the proxy, so an operator
+ * can revert during the rollout of the proxy-owned budget.
+ *
+ * ONE RELEASE ONLY. This flag and the legacy branch it selects are removed
+ * after the proxy side (LP-0MW95FYMH006XYNK) is deployed everywhere; it is an
+ * environment variable (not a persisted setting) so it can be reverted without
+ * editing a file, matching the `HERDR_HOST_MAX_*` precedent.
+ */
+export const HERDR_AUDIT_LOCAL_BUDGET_ENV = 'HERDR_AUDIT_LOCAL_BUDGET';
 
 /** Today's behaviour preserved: two implements, one audit. */
 export const DEFAULT_HOST_BUDGET_CONFIG: Readonly<HostBudgetConfig> = Object.freeze({
@@ -208,6 +277,24 @@ export interface HostBudgetLivePane {
   paneId: string;
   title?: string;
 }
+
+/**
+ * The machine-wide live pane read for the dispatch budget — tri-state
+ * (mirroring the `InFlightPanes` precedent in `downtime-worker.types.ts`,
+ * WL-0MW9VQX5T001GCUP).
+ *
+ *  - `{ ok: true; panes: [...] }` — the read succeeded; the list is
+ *    AUTHORITATIVE. An empty list means "genuinely no downtime panes".
+ *  - `{ ok: false }` — the read failed, was unparseable (a malformed-but-`ok`
+ *    payload with neither `records` nor `paneIds`), or was not wired: pane
+ *    liveness is UNKNOWN. Unknown must never be conflated with "no panes":
+ *    the reap-bearing paths retain every entry and admission falls back to
+ *    the documented freshness rule, so a herdr hiccup can never delete ledger
+ *    state nor silently under-count in-flight work.
+ */
+export type HostBudgetLivePanesResult =
+  | { ok: true; panes: HostBudgetLivePane[] }
+  | { ok: false };
 
 /** Injected seams; every field falls back to production behaviour. */
 export interface HostBudgetOptions {
@@ -401,6 +488,22 @@ export function isOverQuota(current: number, maximum: number): boolean {
 }
 
 /**
+ * True when the ONE-RELEASE legacy audit budget is explicitly enabled
+ * ({@link HERDR_AUDIT_LOCAL_BUDGET_ENV} `=1`).
+ *
+ * Read per tick so an operator can revert without restarting: an unset value,
+ * `0`, an empty string or any other value keeps the proxy-derived path. The
+ * comparison is deliberately narrow (`1`) so a typo can never silently
+ * resurrect the per-host cap.
+ */
+export function isLegacyAuditBudgetEnabled(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const raw = env[HERDR_AUDIT_LOCAL_BUDGET_ENV];
+  return typeof raw === 'string' && raw.trim() === '1';
+}
+
+/**
  * True when an entry's heartbeat is at or beyond `staleWindowMs` old.
  *
  * The comparison matches `isHostAuditActive` (an age of exactly the window is
@@ -429,15 +532,43 @@ export function livePaneIdSet(
 }
 
 /**
+ * True when a confirmed entry with a live pane counts for the implement tier
+ * (WL-0MW9VQ08W000SN63 pane-derived freshness — the ONE counting rule).
+ *
+ * The implement tier treats a confirmed entry (non-empty `paneId`) whose pane
+ * is in the trusted live list as fresh REGARDLESS of heartbeat age: the pane
+ * is conclusive evidence the dispatch is still in flight, and `heartbeatAt`
+ * is only written at `reserve`/`confirmHostDispatch` (there is no refresh
+ * path), so a >2 h implement would otherwise silently drop out of the counter
+ * and the cap while its pane is demonstrably alive. The audit tier keeps the
+ * freshness rule (staleness is its release; see {@link reduceMarkerCounts}).
+ */
+export function isImplementPaneFresh(
+  entry: { kind: HostBudgetKind },
+  hasLivePane: boolean,
+  stale: boolean,
+): boolean {
+  return hasLivePane && (entry.kind === 'implement' || !stale);
+}
+
+/**
  * Reduce a ledger against a live pane list: per-tier live counts, surviving
  * entries and entries to reap (see the liveness table in the header).
+ *
+ * `livePaneIds` of `undefined` means pane liveness is UNKNOWN (a failed or
+ * unparseable pane read, WL-0MW9VQX5T001GCUP): the pane-derived requirement
+ * is dropped and the documented FRESHNESS rule applies — fresh entries count
+ * with no pane requirement, every entry is retained and NOTHING is reaped.
+ * Unknown is never treated as "no panes", and reap must not act on it (a
+ * stale-but-live entry reaped on an unknown read is gone forever, because
+ * heartbeats are only written at reserve/confirm).
  *
  * Pure — the single place the counting and reaping rules live, so
  * `liveCount`, `reap` and the future observability surfaces cannot drift.
  */
 export function reduceLedgerCounts(
   entries: readonly HostBudgetEntry[],
-  livePaneIds: ReadonlySet<string>,
+  livePaneIds: ReadonlySet<string> | undefined,
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
@@ -445,6 +576,13 @@ export function reduceLedgerCounts(
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
+    if (livePaneIds === undefined) {
+      // Pane liveness UNKNOWN: freshness rule only — count fresh entries
+      // (no pane requirement), retain everything, never reap.
+      retained.push(entry);
+      if (!isEntryStale(entry, now, staleWindowMs)) counts[entry.kind] += 1;
+      continue;
+    }
     const hasLivePane =
       typeof entry.paneId === 'string' &&
       entry.paneId.length > 0 &&
@@ -455,7 +593,14 @@ export function reduceLedgerCounts(
       continue;
     }
     retained.push(entry);
-    if (!stale && hasLivePane) counts[entry.kind] += 1;
+    // Pane-derived freshness (WL-0MW9VQ08W000SN63): for the IMPLEMENT tier a
+    // confirmed entry whose pane is in the trusted live list is counted
+    // REGARDLESS of heartbeat age — a live pane is conclusive evidence the
+    // dispatch is still in flight, and `heartbeatAt` is only written at
+    // reserve/confirm (no refresh path), so a >2 h implement must not silently
+    // drop out of the cap. The AUDIT tier keeps the freshness rule here (its
+    // authoritative counts live in reduceMarkerCounts / reduceAuditDisplayCounts).
+    if (isImplementPaneFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }
@@ -497,12 +642,15 @@ export function reduceMarkerCounts(
  * Reduce a ledger for the AUDIT tier's DISPLAY count — pane-aware
  * (WL-0MW8D4UQH002TWJV).
  *
- * The audit tier's ADMISSION rule is deliberately marker-compatible: it
- * counts every fresh entry and ignores pane liveness ({@link reduceMarkerCounts}),
- * so a slot is held from dispatch until an explicit release point or the 2 h
- * staleness window. That is correct for admission, but wrong for the header: a
- * CONFIRMED entry whose pane has closed is a dead audit, and the display must
- * not claim it is still in flight for the rest of the staleness window.
+ * The audit tier's LEGACY (pre-proxy) admission rule was deliberately
+ * marker-compatible: it counted every fresh entry and ignored pane liveness
+ * ({@link reduceMarkerCounts}), so a slot was held from dispatch until an
+ * explicit release point or the 2 h staleness window. That remains the rule
+ * only under the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` path; the DEFAULT
+ * (proxy-derived) audit admission does not read this count at all. For the
+ * header the marker-compatible rule is wrong regardless: a CONFIRMED entry
+ * whose pane has closed is a dead audit, and the display must not claim it is
+ * still in flight for the rest of the staleness window.
  *
  * Display rule for a fresh entry:
  *  - no `paneId` (reserve→spawn window, no pane evidence yet) → counted;
@@ -555,7 +703,11 @@ export function reduceAuditDisplayCounts(
  * Entries with NO `paneId` are the reserve→spawn window: there is no pane
  * evidence to judge, so they are retained (and stay counted while fresh) —
  * exactly the behaviour the staleness rule already provides. Stale entries are
- * reaped as before.
+ * reaped as before, with one exception pinned by WL-0MW9VQ08W000SN63: an
+ * IMPLEMENT entry whose pane IS in the trusted live list is pane-derived
+ * fresh and is never reaped by staleness alone (mirroring the counting rule in
+ * {@link reduceLedgerCounts}), so the dead-pane sweep cannot drop a
+ * long-running implement off the ledger.
  *
  * Pure — the sibling of {@link reduceLedgerCounts} / {@link reduceMarkerCounts}.
  * `livePaneIds` MUST come from a trusted pane read; a failed read must not be
@@ -575,12 +727,16 @@ export function reduceClosedPaneSweep(
       typeof entry.paneId === 'string' && entry.paneId.length > 0;
     const hasLivePane = confirmed && livePaneIds.has(entry.paneId as string);
     const stale = isEntryStale(entry, now, staleWindowMs);
-    if (stale || (confirmed && !hasLivePane)) {
+    // Pane-derived freshness for the implement tier (WL-0MW9VQ08W000SN63):
+    // a stale-but-live implement entry is retained, never reaped on staleness.
+    const staleForImplement =
+      stale && (entry.kind !== 'implement' || !hasLivePane);
+    if (staleForImplement || (confirmed && !hasLivePane)) {
       reaped.push(entry);
       continue;
     }
     retained.push(entry);
-    if (!stale && hasLivePane) counts[entry.kind] += 1;
+    if (isImplementPaneFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }
@@ -877,16 +1033,21 @@ export function replaceBudget(
  * Fresh entries and entries whose pane is still live are retained. Writes
  * only when something is reaped, so an idle reap is a pure read. A corrupt
  * ledger is `unknown` and is never rewritten.
+ *
+ * `livePanes` of `undefined` means pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
+ * the freshness rule applies and NOTHING is reaped — no write at all, so a
+ * reap on an unknown pane state is a pure read. Reap must never act on an
+ * unknown state: an empty list from a broken read would delete live entries.
  */
 export function reap(
-  livePanes: readonly HostBudgetLivePane[],
+  livePanes: readonly HostBudgetLivePane[] | undefined,
   opts: HostBudgetOptions = {},
 ): ReapResult {
   const dir = resolveBudgetDir(opts);
   if (dir === null) return noDir();
   const now = opts.now ?? Date.now();
   const windowMs = staleWindowOf(opts);
-  const livePaneIds = livePaneIdSet(livePanes);
+  const livePaneIds = livePanes === undefined ? undefined : livePaneIdSet(livePanes);
   return withLedgerLock(dir, (ledger) => {
     const reduction = reduceLedgerCounts(ledger.entries, livePaneIds, now, windowMs);
     if (
@@ -939,14 +1100,21 @@ export function sweepClosedPanes(
 /**
  * Count one tier's live dispatches and reap stale, pane-less entries on read.
  *
- * Counted = heartbeat fresh AND `paneId` in `livePanes` (see the header
- * table). The reap write is best-effort: the returned count already excludes
- * reaped entries, so lock contention only defers cleanup — a crashed leader
- * can never wedge the host.
+ * Counted = `paneId` in the trusted live pane list (see the header table):
+ * an IMPLEMENT entry with a live pane counts regardless of heartbeat age
+ * (pane-derived freshness, WL-0MW9VQ08W000SN63), while the audit tier keeps
+ * the fresh-plus-live rule here. The reap write is best-effort: the returned
+ * count already excludes reaped entries, so lock contention only defers
+ * cleanup — a crashed leader can never wedge the host.
+ *
+ * `livePanes` of `undefined` means pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
+ * the admission read becomes a PURE READ — fresh entries count by the
+ * freshness rule and nothing is reaped, so an unknown pane state can never
+ * delete ledger state (a failed herdr read must not be treated as "no panes").
  */
 export function liveCount(
   kind: HostBudgetKind,
-  livePanes: readonly HostBudgetLivePane[],
+  livePanes: readonly HostBudgetLivePane[] | undefined,
   opts: HostBudgetOptions = {},
 ): LiveCountResult {
   const dir = resolveBudgetDir(opts);
@@ -955,9 +1123,10 @@ export function liveCount(
   const windowMs = staleWindowOf(opts);
   const read = readBudgetAt(dir);
   if (!read.ok) return read;
+  const livePaneIds = livePanes === undefined ? undefined : livePaneIdSet(livePanes);
   const reduction = reduceLedgerCounts(
     read.ledger.entries,
-    livePaneIdSet(livePanes),
+    livePaneIds,
     now,
     windowMs,
   );
@@ -992,16 +1161,52 @@ export function legacyActiveAuditCount(
 }
 
 /**
+ * The audit tier's pane-aware DISPLAY count, shared by the worklist header and
+ * the interactive over-quota dialog (WL-0MW8IQNY7003JIOL).
+ *
+ * Both operator-facing surfaces must quote the same number: a confirmed audit
+ * entry whose pane has closed is a dead audit and must not render as in flight,
+ * even though the admission rule keeps counting it until an explicit release or
+ * the staleness window ({@link reduceMarkerCounts}). This helper is the ONE
+ * place that rule is spelled out, so the header and the dialog cannot drift.
+ *
+ * `livePaneIds` MUST come from a trusted machine-wide pane read. When it is
+ * `undefined` (no trusted list available) the marker-compatible freshness rule
+ * is used instead of excluding every confirmed entry — the same fallback
+ * `readHostBudgetStatus` applies, rather than inventing a zero.
+ *
+ * Includes the non-stale legacy `active-audit` marker as one synthetic audit
+ * entry ({@link legacyActiveAuditCount}), exactly like the header. Read-only:
+ * unlike `freshCount`, it never reaps or rewrites the ledger (a TUI render and
+ * the interactive gate must never mutate machine state).
+ */
+export function auditDisplayCount(
+  entries: readonly HostBudgetEntry[],
+  livePaneIds: ReadonlySet<string> | undefined,
+  now: number,
+  staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
+  dir: string | null = null,
+): number {
+  const reduction =
+    livePaneIds === undefined
+      ? reduceMarkerCounts(entries, now, staleWindowMs)
+      : reduceAuditDisplayCounts(entries, livePaneIds, now, staleWindowMs);
+  return reduction.counts.audit + legacyActiveAuditCount(dir, now, staleWindowMs);
+}
+
+/**
  * Count a tier's FRESH entries without requiring a live pane, and reap every
  * stale entry (see {@link reduceMarkerCounts} for the semantics and why the
  * audit tier uses them).
  *
  * For the audit tier the result additionally includes a non-stale legacy
  * `active-audit` marker as one synthetic entry ({@link legacyActiveAuditCount}),
- * so `count` and `counts.audit` are exactly what admission must compare with
- * `maxAudit`. The reap write is best-effort, like `liveCount`: the returned
- * count already excludes reaped entries, so lock contention only defers the
- * cleanup.
+ * so `count` and `counts.audit` are exactly what the one-release LEGACY path
+ * compares with `maxAudit` (and what the divergence log uses as local
+ * evidence). The DEFAULT proxy-derived audit admission does not compare this
+ * count with `maxAudit` at all. The reap write is best-effort, like
+ * `liveCount`: the returned count already excludes reaped entries, so lock
+ * contention only defers the cleanup.
  */
 export function freshCount(
   kind: HostBudgetKind,

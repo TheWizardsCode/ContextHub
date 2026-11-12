@@ -30,6 +30,21 @@ export const DOWNTIME_STATUS_PATH = '/llama/local/status';
  */
 export const LOCAL_RESERVE_PATH = '/llama/local/reserve';
 /**
+ * Proxy audit-availability endpoint path (parent WL-0MW95GBEG005ERHS):
+ * `GET {proxyUrl}/llama/local/audit/status`, the read the audit `tier` will
+ * use instead of asserting a per-host `budget.json` cap.
+ *
+ * PROVISIONAL. The proxy side is sibling llm item LP-0MW95FYMH006XYNK and has
+ * not shipped: probed 2026-11-10 against the live proxy
+ * (`http://192.168.0.199:8000`), `/openapi.json` lists only
+ * `/llama/local/status` and `/llama/local/reserve`, and
+ * `/llama/local/audit`, `/llama/local/budget` and `/llama/local/audit/status`
+ * all answer `404`. The contract (types + tolerant parser) is pinned BEFORE
+ * the server exists, exactly as the reserve-handshake slice C1 pinned its
+ * wire shape; the proxy's final path is a one-line change here.
+ */
+export const AUDIT_AVAILABILITY_PATH = '/llama/local/audit/status';
+/**
  * Request/response header carrying the granted reservation ticket id
  * (`X-Local-Reservation: <ticketId>`), sent on the pane's FIRST request
  * (parent AC1).
@@ -110,6 +125,15 @@ export const DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1;
  * that an interactive request grabs the slot before the audit's first call.
  */
 export const DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE = false;
+/**
+ * Default for the offer-only mode (`downtimeOfferOnly`, WL-0MWDDHOK6009GJCC):
+ * **off**. A dispatch-disabled instance performs NO coordination check-in and
+ * offers nothing by default — behaviour is unchanged. When explicitly enabled
+ * a disabled instance still performs the coordination check-in and offer
+ * computation without ever polling the proxy, taking the leader lease,
+ * claiming an item, reserving capacity or spawning a pane.
+ */
+export const DEFAULT_DOWNTIME_OFFER_ONLY = false;
 /**
  * Minimum free slots required for a single-pane dispatch (implement /
  * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3, F5
@@ -557,23 +581,33 @@ export const DISPATCH_PIPELINE_SINGLE_FLIGHT = 1;
  */
 export { DEFAULT_BROWSE_ITEM_COUNT } from './browse-window.js';
 /**
- * Maximum number of additional items to fetch when extending the dispatch
- * window (WL-0MU6UL3GQ0015AA5; restricted to critical-only by
- * WL-0MUNS8X97007C9H9 AC2/AC4).
+ * Growth step (in items) for the dispatcher's whole-backlog window walk
+ * (WL-0MU6UL3GQ0015AA5; widened to the whole backlog by WL-0MW9XS0XR007K1TH,
+ * superseding the critical-only restriction of WL-0MUNS8X97007C9H9 AC2/AC4).
  *
- * The dispatcher head is the sprint view, so a defensive out-of-window read
- * re-checks the SAME ranking path with a window of
- * `head length + DOWNTIME_DISPATCH_EXTEND_MAX` items. The extension returns
- * ONLY `critical` items: every non-critical candidate must be visible in the
- * sprint view, so a non-critical item beyond `browseItemCount` is never
- * dispatched. Because all `critical` items are mandatory in the view, this
- * escape hatch is normally a no-op.
+ * The dispatcher's initial head is the rendered sprint view, so a window
+ * EXTENSION re-reads the SAME ranking path with a larger window and scans only
+ * the newly visible items. The window grows geometrically —
+ * `max(current.length + DOWNTIME_DISPATCH_EXTEND_MAX, current.length * 2)` — so
+ * a deep item is reached in O(log n) reads rather than one read per 30 items.
  *
- * The extension is bounded: at most `head length + 30` items are ever scanned
- * per dispatch cycle. The TUI worklist continues to show exactly
- * `browseItemCount` items (clamped 1–50).
+ * EVERY ranked item beyond the head is eligible (critical and non-critical), so
+ * any work item is dispatchable; the extension is a window, never a second
+ * ranking. The TUI worklist still shows exactly `browseItemCount` items
+ * (clamped 1–50) — the window bounds rendering only.
  */
 export const DOWNTIME_DISPATCH_EXTEND_MAX = 30;
+/**
+ * Hard cap on the number of window-extension reads in one walk
+ * (WL-0MW9XS0XR007K1TH AC8).
+ *
+ * Geometric growth means a realistic backlog is exhausted in a handful of
+ * reads; this bound is a defensive stop so a pathological backing read (e.g. a
+ * mocking/looping provider that keeps returning "new" items) can never wedge
+ * the idle tick in an unbounded loop. At the cap the walk stops and the caller
+ * proceeds with what it has collected.
+ */
+export const DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS = 20;
 /**
  * Audit-tier recency window: a completed/in_review candidate is only
  * dispatched for audit when it was modified within the last 7 days.
@@ -593,6 +627,11 @@ export const DOWNTIME_AUDIT_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
  * stage is released once its age exceeds this window — a pane that spawned
  * but whose agent never advanced the item (crash, manual close, silent
  * failure) must not strand the item permanently. Default 24 hours.
+ *
+ * Reused as the peer-entry liveness window by `hasPeerOffer`
+ * (WL-0MVR8GDJ3008WY3Y AC7): a coordination entry older than this window is
+ * treated as an absent peer. One number for both keeps a dispatched-but-dead
+ * instance from lingering in either the marker ledger or the offer list.
  */
 export const DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
 /**

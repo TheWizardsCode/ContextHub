@@ -17,6 +17,9 @@ import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rule
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 import { downgradeCriticalIfTerminal, isTerminalState } from '../terminal-priority.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
+// Shared soft-delete predicate (WL-0MW7S20IC001F3AP): the write-side guard must
+// use the same "soft-deleted" definition as the read paths.
+import { isSoftDeleted } from '@worklog/shared/predicates';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -271,18 +274,21 @@ export default function register(ctx: PluginContext): void {
         if (needsProducerReviewCandidate !== undefined) updates.needsProducerReview = needsProducerReviewCandidate;
 
         // Soft-delete guard (SA-0MUJBLZC60085DI9 AC1): a soft-deleted work
-        // item (non-empty `deletedBy`) must never be resurrected by an
-        // update. `wl delete` sets `deletedBy` and may leave the status
-        // untouched, so without this guard `wl update <id> --status open`
-        // rewrites the status and the downtime dispatcher re-selects the
-        // deleted item. Reject any mutation other than an explicit change to
-        // the delete-attribution fields themselves (`--deleted-by` /
-        // `--delete-reason`) — the administrative override. The guard runs
-        // before any write so a rejected id is never partially mutated.
+        // item must never be resurrected by an update. Soft-deleted is one
+        // shared definition `isSoftDeleted(item)` — `status === 'deleted'` OR
+        // a non-empty `deletedBy` (WL-0MW7S20IC001F3AP) — matching the read
+        // paths (`wl list`, `wl next`, `wl worklist`). `wl delete` sets
+        // `deletedBy` and may leave the status untouched, so without this
+        // guard `wl update <id> --status open` rewrites the status and the
+        // downtime dispatcher re-selects the deleted item. Reject any mutation
+        // other than an explicit change to the delete-attribution fields
+        // themselves (`--deleted-by` / `--delete-reason`) — the administrative
+        // override. The guard runs before any write so a rejected id is never
+        // partially mutated.
         const existingForSoftDeleteGuard = db.get(normalizedId);
         if (
           existingForSoftDeleteGuard &&
-          String(existingForSoftDeleteGuard.deletedBy ?? '').trim() !== ''
+          isSoftDeleted(existingForSoftDeleteGuard)
         ) {
           // Note: `updates.status`/`updates.stage` are only populated later,
           // per-id, by the status/stage validation block — so the candidate

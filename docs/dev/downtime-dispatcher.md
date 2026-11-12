@@ -42,16 +42,19 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.dispatch-contract.ts` | The dispatch pipeline's dependency boundary + event/outcome types | `DowntimeDispatchEvent`, `DowntimeErrorEvent`, … |
 | `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
 | `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
+| `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (provisional path, sibling proxy item `LP-0MW95FYMH006XYNK`) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON`, `AUDIT_BUDGET_UNKNOWN_REASON` |
+| `downtime-worker.audit-availability.ts` | The fail-closed audit-availability `GET` client — one bounded call, one typed outcome; consumed by the audit pre-check and admission (WL-0MWAMSDNW000SL0E) | `createAuditAvailabilityClient` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (one item per instance per check-in) | `computeMostImportantItem`, `coordinationTierRank` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
+| `downtime-worker.head-scan.ts` | Bounded head/extension candidate scan over ONE root, plus the registered-root sweep that applies it per root in round-robin order | `dispatchFromOwnHead`, `dispatchFromRegisteredRoots` |
 | `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
 | `downtime-worker.launch-fence.ts` | One-per-idle-window launch fence (closes the stale-status launch window) | `createIdleWindowLaunchFence` |
 | `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
 | `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota`, `reduceAuditDisplayCounts` |
-| `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `readAuditBudgetState`, `confirmHostDispatch`, `releaseHostDispatch` |
+| `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (proxy-derived audit admission, fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `decideAuditAvailability`, `detectAuditDivergence`, `readAuditBudgetState` (legacy only), `confirmHostDispatch`, `releaseHostDispatch` |
 | `host-dispatch-budget.interactive.ts` | User-fired over-quota gate half: tier detection and prompt-then-claim (F4) | `budgetKindForAgentCommand`, `prepareInteractiveAgentDispatch` |
 | `host-budget-dialog.ts` | Pure bottom-anchored over-quota dialog + the renderer↔awaiter prompt host (F4) | `formatHostBudgetDialog`, `overlayHostBudgetDialog`, `createHostBudgetPromptHost` |
 | `host-budget-status.ts` | Read-only host-budget status for the worklist `n/max` counter and the stderr skip line (F5) | `readHostBudgetStatus`, `hostBudgetStatusText`, `hostBudgetSkipLine` |
@@ -129,78 +132,80 @@ critical work is never starved by lower-priority items occupying the window (see
 "no candidate" rather than falling back to a second ranking.
 No `wl next`/database scoring change is required; the observable contract is
 "dispatcher == Herdr list head". The head is fetched with the **live per-root
-`browseItemCount`** limit (clamped 1–50), so the dispatcher head equals the
-rendered sprint view — see *Sprint-view-only dispatch window* below.
+`browseItemCount`** limit (clamped 1–50) as its *initial* window — see
+*Whole-backlog dispatch window* below.
 
-### Sprint-view-only dispatch window (WL-0MUNS8X97007C9H9)
+### Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH)
 
-The dispatcher head **is** the sprint view. Both selection paths pass the live
-per-root `browseItemCount` setting — clamped to the supported `1`–`50` range by
-`resolveSprintViewWindow` (`packages/herdr/src/browse-window.ts`), the same
-clamp the TUI worklist applies — as the `getHerdrListHead` limit:
+> **Supersedes the sprint-view-only restriction of WL-0MUNS8X97007C9H9.** That
+> item bounded the whole dispatch candidate universe to the rendered view. This
+> contract restores WL-0MU6UL3GQ0015AA5's whole-backlog reach **without**
+> reintroducing its unbounded-read cost: every ranked work item is a dispatch
+> candidate, in the canonical prioritisation order, still bounded by every
+> budget and safety gate.
+
+**Any work item is dispatchable.** Both selection paths pass the live per-root
+`browseItemCount` setting — clamped to `1`–`50` by `resolveSprintViewWindow`
+(`packages/herdr/src/browse-window.ts`), the same clamp the TUI applies — as
+the **initial** `getHerdrListHead` window, then walk the rest of the ranked
+backlog:
 
 - `dispatchDowntimeWork` (direct dispatch), and
 - `computeMostImportantItem` (the coordination check-in offer).
 
-`getHerdrListHead` forwards the limit to `fetchNextItems(limit)`, so the head
-contains exactly the items the sprint view renders (`f-s-s` → `/wl`): the
-mandatory set (all `critical` plus all completed/`in_review`) and enough
-"other" items to fill the remaining `browseItemCount` slots. The setting is
-re-read live on every dispatch cycle, so a change applies without a restart. A
-caller that passes no limit falls back to the sprint-view default (20), so an
-unwindowed head is never produced.
+When the initial window yields no candidate, `fetchExtendedHerdrItems` re-reads
+the **same ranking path** with a larger window — a window extension, never a
+second ranking — and returns the newly visible items. The window grows
+**geometrically** (`max(current.length + DOWNTIME_DISPATCH_EXTEND_MAX,
+current.length * 2)`), so a deep item costs O(log n) reads rather than one read
+per 30 items. The walk stops as soon as a candidate dispatches, so the extra
+reads are paid only when the visible window yields nothing, and it is bounded
+by `DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS` (20) as a defensive stop against a
+pathological provider.
 
-**Non-critical work outside the view is never dispatched by the normal
-paths.** When the head yields no candidate the dispatcher reports the terminal
-reason derived from the in-view flags (`no-candidate`, `review-queue-hold`,
-`code-freeze`, `fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`,
-`host-budget-implement`, `host-budget-audit`, `host-budget-unknown`,
-`in-flight-hold`, `wl-error`) and does **not** fall back to a second ranking or
-an out-of-view non-critical scan. Audit-batch observability adds the decision
-*observation* tokens `audit-batch-continue` / `audit-batch-end` (never terminal
-reasons) — see *Decision-log entries: audit-batch tokens & metadata* under
-*Log schema*. When every visible item is filtered by a
-safety gate (or the view is empty) the outcome is a NOP — **except** on the
-coordination leader path, which has one bounded, own-root escape valve that
-then hands off leadership (see *Own-backlog fallback & leadership hand-off*
-below).
+**Both critical and non-critical items are eligible** — there is no
+critical-only filter on the extension. The leader-side paths (own-backlog
+fallback, audit-batch continuation, registered-root sweep) use
+`fetchWholeBacklogTail`, which loops the same primitive until the backlog is
+exhausted.
 
-**Critical escape hatch (defensive).** A bounded out-of-window read
-(`fetchExtendedHerdrItems`, `DOWNTIME_DISPATCH_EXTEND_MAX = 30`) re-reads the
-**same ranking path** with a larger window — a window extension, never a second
-ranking — and returns **only** `critical` items. Because every `critical` item
-is already mandatory in the view, this escape hatch is normally a no-op; it
-exists purely as a safety net so a release blocker can never be windowed out.
-Non-critical items beyond the sprint view are filtered out, so the operator can
-never be surprised by hidden-backlog dispatch. (The critical-only filter is
-lifted **only** for the coordination-mode own-backlog fallback below; the
-defensive escape hatch itself stays critical-only.) The extension runs on both
-dispatch paths; the **TUI worklist is unchanged** (it keeps rendering exactly
-`browseItemCount` items, plus the mandatory set).
+**The TUI worklist is unchanged**: it keeps rendering exactly
+`browseItemCount` items (plus the mandatory set). The window bounds only
+*rendering*; it no longer bounds *dispatch*.
 
-**Supersedes WL-0MU6UL3GQ0015AA5 AC1/AC4.** That item widened the non-critical
-window to prevent a 31-hour starvation incident. This item deliberately reverses
-the non-critical part of that behaviour: the dispatch window now tracks the
-operator-curated sprint view. The accepted trade-off (recorded on
-WL-0MUNS8X97007C9H9) is that if every visible item is blocked and the only
-dispatchable item lies beyond `browseItemCount`, the dispatcher no-ops —
-mitigated operationally by raising `browseItemCount` (up to 50) or clearing a
-blocker. The WL-0MU6UL3GQ0015AA5 starvation regression now asserts this NOP
-behaviour rather than a dispatch.
+**Prioritisation is unchanged.** Ordering remains
+`fetchNextItems` → `selectWorkItems` → `regroupWorkItems`: priority
+(high → medium → low), then the established stage sub-order, then id. The
+annexed extension is the same ranking with more items included.
+
+**Every budget and safety gate still applies** to out-of-window candidates,
+unchanged and as sequential filters: the host dispatch budget (the
+proxy-owned audit budget / `GET {proxyUrl}/llama/local/audit/status` for the
+audit tier; `maxImplement` / the legacy `maxAudit` for the implement/legacy
+paths), the per-item/per-kind attempt budget, free-slot minimums, the
+code-freeze split-by-skill, the host-CPU gate, the review-queue depth hold,
+active-audit single-flight and host saturation, freshness/recency, the
+producer-review flag, the `assignee` hold, soft-delete, dispatched-marker
+exclusion, the non-terminal pane-close cooldown and the CAS claim.
 
 **Fail-open preserved.** A failed head lookup still resolves `{ok:false}` (the
-caller keeps its entry / reports `wl-error`); a failed or empty extended
-critical read degrades to the original terminal reason, so the escape hatch can
+caller keeps its entry / reports `wl-error`); a failed or empty extended read
+stops the walk and degrades to the original terminal reason, so the walk can
 never convert a defined outcome into a new failure.
+
+**Relationship to the own-backlog fallback.** Because an instance now offers its
+whole ranked backlog at check-in, out-of-view work arrives as a normal
+fleet-visible *offer*; the own-backlog fallback below is reached only when no
+offer is dispatchable. It remains wired, and its leadership step-down still
+fires when it is the path that dispatches.
 
 ### Own-backlog fallback & leadership hand-off (WL-0MUU4XFU90008E24)
 
-The sprint-view-only window above is the **normal** dispatch contract: the
-dispatcher head equals the rendered view and a view with nothing dispatchable
-is a NOP. In **coordination/leader mode** the leader additionally has a
-bounded, self-scoped escape valve so a fleet does not idle when one root's view
-is momentarily empty or fully blocked — with a fairness guard so no instance
-can monopolise leadership by repeatedly reaching into its own hidden backlog.
+With the whole-backlog window above, an instance offers its **entire ranked
+backlog** at check-in, so out-of-view work normally arrives as a fleet-visible
+offer and dispatch needs no special case. The own-backlog fallback below
+remains wired for the case where the offer scan yields nothing dispatchable —
+with a fairness guard so no instance can monopolise leadership.
 
 **Trigger (AC1).** The fallback is evaluated in `dispatchFromCoordination`
 **only after** the coordination offer scan yields no dispatchable candidate —
@@ -283,17 +288,19 @@ work can then win the next election and dispatch it. Contract details:
 **Scope: coordination/leader mode only.** The fallback lives on the
 coordination leader path (`dispatchFromCoordination`) and both step-downs are
 guarded by a non-null `leaderManager`. **Legacy mode** (no `coordinationDir`;
-`leaderManager === null`, `leaderState` hard-coded `true`) is unchanged — there
-is no manager and no peer to hand off to, so the direct/legacy path keeps the
-strict sprint-view-only behaviour (non-critical out-of-view work is never
-dispatched). The TUI worklist is unchanged.
+`leaderManager === null`, `leaderState` hard-coded `true`) has no manager and
+no peer to hand off to; its direct path dispatches the whole ranked backlog
+(see *Whole-backlog dispatch window*). The TUI worklist is unchanged.
 
-**No contradiction with WL-0MUNS8X97007C9H9.** The sprint-view-only contract
-still governs the dispatcher head and the direct/legacy path; the fallback is a
-bounded, own-root, leadership-handing-off exception on the coordination leader
-path only. It is *not* a reinstatement of the unconditional non-critical
-extension that WL-0MUNS8X97007C9H9 superseded: the window stays bounded, the
-ranking is the same, and the fairness guard removes the monopolisation risk.
+**Relationship to WL-0MUNS8X97007C9H9 (superseded).** That item's
+sprint-view-only contract is gone: the dispatcher now considers the whole
+ranked backlog on every path, so non-critical out-of-view work is dispatched
+directly rather than only through this fallback. Because that work is offered
+fleet-wide (not read from a privileged view of a *hidden* backlog), the
+step-down guard's original monopolisation premise no longer applies to it —
+cross-root fairness is owned by the `selectLeastRecentlyServed` round-robin
+cursor. The fallback and both of its step-downs stay wired and tested for the
+no-dispatchable-offer case.
 
 **Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
 entry per instance — an **offer** of that instance's own Herdr list head (computed at the
@@ -314,6 +321,131 @@ exported for the module tests only — nothing on the dispatch path calls them.
 computes the downtime pick from the production `fetchNextItems` sequence + dispatcher
 filters and asserts the pick is the Herdr head whenever the head is dispatchable (and
 reports explicitly when a filter moves the pick deeper in the SAME sequence).
+
+### Registered-root discovery — sweeping roots with no running instance (parent WL-0MVR8GDJ3008WY3Y, option O1)
+
+**Problem (parent AC1).** The candidate universe above is
+`offers ∪ ownBacklog(opts.cwd)`. A worklog root that holds dispatchable work
+but has **no running herdr instance** never writes a coordination entry, so the
+leader has no path to it: its work is never dispatched even when the leader has
+idle capacity and every safety gate would admit the item. The empty-leader
+hand-off does not help — there is no peer in that root to hand off to.
+
+**Candidate universe (AC1/AC3).**
+
+```
+candidates = offers ∪ sweep(downtimeWorklogRoots) ∪ ownBacklog(opts.cwd)
+```
+
+The sweep is **strictly additive and ordered**: it runs only when the offer
+list yielded nothing dispatchable, and it runs **before** the leader's own
+out-of-view backlog, so a busy leader root can never starve a registered root
+(AC4). It lives on the **coordination leader path** (`dispatchFromCoordination`)
+only — legacy mode (no coordination directory) is unchanged. When no registry
+is configured nothing changes (AC6, below).
+
+**The registry (`downtimeWorklogRoots`, AC6).** An explicit, operator-managed
+list of worklog **roots** — the parent of `.worklog/`, matching the
+`worklogRoot`/`opts.cwd` semantics, *not* the `.worklog` directory itself.
+`loadSettings` clamps then validates it every tick
+(`clampDowntimeWorklogRoots` → `resolveDowntimeWorklogRoots`,
+`packages/herdr/src/settings.ts`, bound `MAX_DOWNTIME_WORKLOG_ROOTS = 32`):
+
+- a non-array value (including a single-string shorthand) → `[]`;
+- non-string entries are dropped, entries are trimmed, blank entries dropped;
+- duplicates collapse (first-seen order preserved) and the list is bounded
+  **after** filtering, so junk never consumes a slot;
+- an entry survives only when it is an **absolute** path that realpath-resolves
+  to a directory containing `.worklog/worklog.db`; the stored value is that
+  **realpath**, so a symlinked root can never dispatch into an unexpected
+  workspace;
+- validation is **per entry**: an invalid/unreadable root is dropped on its
+  own and never invalidates a good neighbour, and never crashes settings load.
+
+**Fail-safe (AC6).** An absent, empty, or wholly unresolvable registry is a
+no-op: `dispatchFromRegisteredRoots` returns immediately on a normalised-empty
+list, with no cursor read/write and no extra `wl` spawn. The candidate
+universe stays `offers ∪ ownBacklog(opts.cwd)` **byte-for-byte** — today's
+behaviour is unchanged for every deployment that does not opt in.
+
+**Canonical ranking, not a second ranking (AC3).** Each registered root is
+read through `readOwnHeadWindow` — the same
+`getHerdrListHead(root, browseItemCount)` path and the same bounded extension
+(`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 items) the own-backlog fallback uses — and
+the first eligible item in that canonical order wins. A registered root has no
+owner offering its head, so the sweep scans the **whole** window (head plus
+extension); the own-backlog fallback still scans only the extension, because
+in-view items belong to the offer path.
+
+**Round-robin fairness (AC4).** The sweep starts at the least-recently-served
+registry root, selected with the existing `selectLeastRecentlyServed` cursor
+from `downtime-round-robin-by-root.ts` (WL-0MTJDX4M4007YH5U) — the same cursor
+the offer path uses for cross-root ordering; it advances atomically for the
+selected root. The remaining roots follow in **registry order** (the cursor is
+a tie break, never a re-ranking). A root with nothing dispatchable does not
+end the sweep: the next root is tried, and a dispatch anywhere in the sweep
+ends the tick.
+
+**No gate bypass (AC2).** Every swept candidate passes the **full sequential
+filter chain** in `dispatchFromOwnHead`, evaluated against **its own root's**
+state: classify → dispatched-marker exclusion (id/stage guard) → attempt
+budget → non-terminal cooldown → per-root code freeze → host-CPU gate →
+leaf-aware audit slot minimum/pin → critical in-flight guard → review-queue
+hold → CAS claim. No gate was added, removed or reordered for the sweep, and
+the claim/comment/dispatch target resolves to the swept root's own
+`--worklog-dir`, so a swept item is claimed and dispatched in its own database.
+A gate that holds the only swept candidate surfaces its **neutral** terminal
+reason (`code-freeze`, `review-queue-hold`, `in-flight-pane`,
+`attempt-budget-exhausted`, `non-terminal-cooldown`, `cpu-saturated`, …) —
+never `no-candidate` — so the no-candidate cooldown does not arm on a held
+sweep.
+
+**Freeze is per root.** The leader's own tick-level freeze read is reused for
+`opts.cwd`; every other registered root gets a fresh
+`readCodeFreezeStatus(root)` so its freeze cannot be bypassed (and the
+leader's freeze cannot wrongly block it).
+
+**Fail-open (AC5).** A root whose head read throws or resolves `{ok:false}`
+(missing/unreadable/not-a-worklog) is skipped without a strike and never
+crashes the tick; when every registered root fails, the caller's original
+terminal reason is unchanged.
+
+**No leadership hand-off on a sweep.** A swept dispatch is recorded with
+`selectionPath: 'registered-root-sweep'` and
+`selectionReason: 'registered-root-sweep'`, and deliberately leaves
+`ownBacklogDispatch` unset — the leader is serving a *registered* root, not
+its own backlog, so it must not step down (stepping down on every sweep would
+flap the machine-wide election). The own-backlog hand-off and the empty-leader
+step-down are unchanged.
+
+**Composition summary.**
+
+| Order | Source | Scope |
+|---|---|---|
+| 1 | Scheduled prompts | a due prompt dispatches immediately |
+| 2 | Offer list (`downtime-coordination.json`) | live peer offers, file order |
+| 3 | **Registered roots (`downtimeWorklogRoots`)** | **round-robin sweep, per-root gates** |
+| 4 | Own backlog (`opts.cwd`) | bounded extension, own root only, then hand off |
+
+**Liveness-aware peer predicate (AC7).** Independent of the registry, the
+`no-candidate` pause-arm/cancel predicate `hasPeerOffer`
+(`packages/herdr/src/coordination.ts`) ignores entries whose `lastUpdated` is
+older than `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h) — a crashed
+instance can no longer masquerade as a live peer. Treating a stale entry as an
+**absent** peer makes the leader *more* willing to sweep/arm the probe, never
+less, so the worst case is one extra idle tick polling the offer list. Entry
+expiry remains a deliberate no-op (`pruneStaleEntries` returns `0` and never
+mutates the file, WL-0MTMPIQBE001J41P); liveness lives only in the read
+predicate. See *No-candidate cooldown & the empty offer file* for the full
+pause contract.
+
+**Constraints preserved.** The sweep remains a **bounded window over an
+explicit registry** (the `downtimeWorklogRoots` setting), not an unbounded scan
+of the filesystem, and it never requires a running pane or instance per root —
+that is precisely the bug it fixes. Note that the whole-backlog window
+(WL-0MW9XS0XR007K1TH) now lets any path reach deep work; the sweep's distinctive
+job is *cross-root reach* into roots that have no running instance to offer
+work.
 
 ## Architecture
 
@@ -424,7 +556,9 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
 1. **Check-in** — every instance reads the file on startup; leaders re-offer every ~4 minutes
    (`DEFAULT_LEADER_CHECK_IN_MS = 4 min`) and followers every 5 minutes
    (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H — was 30 min, clamped ≥ 60 s),
-   recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
+   recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
+   also checks in on the follower cadence (WL-0MWDDHOK6009GJCC — see *Offer-only mode*
+   below), so a passive root still contributes an offer to the leader. When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
 2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**. A non-dispatchable entry (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via `removeEntry` **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the tier loop **continues to the next entry**. Entries do **not** expire by wall-clock age.
 3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
@@ -444,8 +578,11 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    Each entry is eligibility re-checked at dispatch time; stale entries are
    dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
    opens the first passing offer dispatches in the entry's `worklogRoot`. If
-   **no** offer passes, the leader performs one bounded own-backlog fallback
-   against its **own** root (`opts.cwd`) and, on a successful fallback
+   **no** offer passes, the leader first sweeps the registered worklog roots
+   (`downtimeWorklogRoots`) in round-robin order through the same ranking and
+   the same sequential gates (see *Registered-root discovery* above). If that
+   sweep finds nothing dispatchable, it then performs one bounded own-backlog
+   fallback against its **own** root (`opts.cwd`) and, on a successful fallback
    dispatch, voluntarily steps down via `releaseLeadership()` so another
    instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog fallback &
    leadership hand-off* above).
@@ -454,7 +591,9 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    preserved unchanged.
 5. **Non-leaders** skip proxy polling and dispatch entirely — they only
    refresh their lease check (a cheap local file read) and their
-   coordination entry.
+   coordination entry. Dispatch-disabled instances with `downtimeOfferOnly`
+   contribute an entry exactly like a follower (never pooling, never
+   leading) — see *Offer-only mode* above.
 
 ### Truthful local-slot capacity (schema v2, LP-0MVGDUVGE0024YAI)
 
@@ -740,6 +879,191 @@ unchanged) and the pane-arg/env forwarding;
 `tests/herdr/send-to-pi.test.ts` pins `--reservation-ticket` →
 `PI_LOCAL_RESERVATION_TICKET` in the pane process.
 
+### Proxy audit availability (provisional wire contract, parent WL-0MW95GBEG005ERHS, child WL-0MWAMS1PW000O3OS)
+
+**Why.** The audit tier used to assert a **per-host** `budget.json` cap
+(`maxAudit`, default `1`). The resource an audit actually contends for is the
+single local `llama-server` GPU, which every ContextHub host shares — so two
+hosts each enforcing "one audit" produced two concurrent audits on one GPU (the
+2026-11-03 incident). The fix is to let the **proxy** own the audit budget and
+have herdr **query** it (parent AC1), which makes the audit tier
+**cross-machine** rather than per-host. This section pins the client-side wire
+contract, exactly as the reserve-handshake slice C1 pinned its shape
+(`downtime-worker.local-reservation.ts`); the admission mapping built on it is
+in *Proxy-derived audit admission* below.
+
+**The proxy side is sibling llm item `LP-0MW95FYMH006XYNK` and has not
+shipped.** Probed **2026-11-10** against the live proxy
+(`http://192.168.0.199:8000`): `/openapi.json` lists only
+`/llama/local/status` and `/llama/local/reserve`, and `/llama/local/audit`,
+`/llama/local/budget` and `/llama/local/audit/status` all answer **`404`**.
+The contract is therefore **provisional**; the final path is one constant
+(`AUDIT_AVAILABILITY_PATH`) and a field rename on either side is a one-line
+change because the parser reads documented aliases.
+
+**Provisional wire contract** (`packages/herdr/src/downtime-worker.audit-availability.contract.ts`):
+
+```
+GET {proxyUrl}/llama/local/audit/status
+
+200 -> { "cap": <n>, "live": <n>, "available": <bool>,
+         "leases": [ { "id": "<id>", "expires_at": <epoch ms> } ],
+         "reclaimed": <n>, "reason": "<open vocabulary>" }
+```
+
+| Field | Aliases read | Rule |
+|---|---|---|
+| audit cap | `cap`, `max`, `max_audit` | finite, `>= 0` |
+| live leases | `live`, `in_flight`, `live_leases` | finite, `>= 0` |
+| availability verdict | `available`, `can_admit` | must be a real boolean — **never derived** from cap/live |
+| lease expiry | `expires_at`, `expires_at_ms`, `expiry`, `expiresAt` | positive epoch-ms number or a `Date.parse`-able ISO-8601 string |
+| lease identity | `id`, `lease_id`, `ticket_id`, `owner` | optional non-empty string |
+| reclaimed leases | `reclaimed` | finite, `>= 0` |
+| refusal reason | `reason`, `refusal_reason` | open vocabulary; the canonical saturated token is `AUDIT_BUDGET_SATURATED_REASON` (`audit-budget-saturated`, parent AC2) |
+
+**Fail-closed parse.** `parseAuditAvailabilityResponse(raw, httpStatus)` returns
+`null` for **every** unusable payload — a non-2xx status, a non-object body, a
+missing/non-finite/negative `cap` or `live`, a missing/non-boolean availability
+verdict, a `leases` value that is not an array, a malformed lease entry, or a
+malformed `reclaimed` count. A garbage payload can therefore never be read as
+"available". `available` is copied from the proxy's own field and never derived
+locally: two sides reading the same verdict is what keeps a dispatcher
+admission and a proxy refusal from disagreeing (parent AC2). Additive proxy
+fields are ignored, so the contract can evolve without breaking this reader.
+
+**Behaviour now consumed.** The contract was pinned before the proxy existed;
+the client (`WL-0MWAMSCOP003R837`) was its first consumer and the audit gate
+(`WL-0MWAMSDNW000SL0E`) is the client's — see *Proxy-derived audit admission*.
+The contract test still pins the allowed reader set, so widening the
+dispatch-path consumers is a deliberate, reviewed change.
+`AUDIT_AVAILABILITY_PATH` lives in `downtime-worker.constants.ts`; the contract
+module, the client and their key symbols are re-exported from the
+`downtime-worker.ts` barrel.
+
+**The client** (`packages/herdr/src/downtime-worker.audit-availability.ts`,
+child `WL-0MWAMSCOP003R837`) is the counterpart of `createLocalReserver` and
+`createDowntimePoller`:
+
+```
+createAuditAvailabilityClient(proxyUrl, fetcher = globalThis.fetch, timeoutMs = DEFAULT_DOWNTIME_POLL_TIMEOUT_MS)
+  -> () => Promise<AuditAvailabilityOutcome>
+```
+
+One call = one `GET {proxyUrl}{AUDIT_AVAILABILITY_PATH}` (URL normalised with
+the reserve client's trailing-slash convention, `accept: application/json`),
+bounded by the poller's timeout. It **never throws** and resolves exactly one
+typed outcome:
+
+| Outcome | Cause |
+|---|---|
+| `{ status: 'ok', availability }` | 2xx **and** the pinned parser accepts the body |
+| `{ status: 'endpoint-absent', reason: 'http-404' }` | the proxy predates the endpoint (the sibling proxy item has not shipped) |
+| `{ status: 'unreachable', reason: 'timeout' }` | the timeout expired — the request is **aborted**, not merely ignored |
+| `{ status: 'unreachable', reason: 'network' }` | connection refused / DNS failure / the fetcher threw |
+| `{ status: 'unreachable', reason: 'http-<status>' }` | any other non-2xx status (a contract-break `400` is distinct from `404`) |
+| `{ status: 'unparsable', reason: 'bad-body' }` | 2xx with a non-JSON body or a body the parser rejects (never `ok` with partial data) |
+
+The `404` check precedes the general non-2xx case, so a rollout gap can never
+be mistaken for an outage or a contract break. The abort timer is cleared on
+every path (no open handle after a call). The audit gate maps `endpoint-absent`,
+`unreachable` and `unparsable` to the fail-closed `audit-budget-unknown` reason
+(parent AC3).
+
+### Proxy-derived audit admission — gate, vocabulary and the one-release flag
+### (WL-0MWAMSDNW000SL0E, WL-0MWAMSK9H005BOHD, parent WL-0MW95GBEG005ERHS)
+
+**The contract.** For the **audit tier only**, the capacity decision is the
+**proxy's** audit-availability verdict — not the per-host `budget.json`
+`maxAudit` cap. The proxy owns the audit budget and the live audit-lease
+registry (sibling llm item `LP-0MW95FYMH006XYNK`), and every ContextHub host
+already talks to the proxy for model traffic, so
+`GET {proxyUrl}/llama/local/audit/status` is the single **cross-machine**
+serialisation of the resource an audit actually contends for (the one local
+`llama-server` GPU). Two hosts can no longer independently believe they are
+under their own cap while contending for the same GPU — the 2026-11-03
+incident. The **implement tier is untouched** and keeps its per-host
+`budget.json` cap + local ledger.
+
+**The decision mapping.** Both the dispatcher's pre-check (`getActiveAudit`)
+and `admitHostDispatch` map one availability read through the SAME helper
+(`decideAuditAvailability`), so a refusal before selection and a refusal at
+admission agree and quote the SAME token. The proxy always wins:
+
+| Availability read | Audit decision | Decision-log reason | Header token |
+|---|---|---|---|
+| proxy `available: true` | admit (reserve locally for observability only) | — | — |
+| proxy `available: false` | skip that audit candidate and keep scanning (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) | `budget-audit` |
+| `endpoint-absent` (`404`, the proxy predates the endpoint) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'http-404'` | `budget-unknown` |
+| `unreachable` (`timeout` / `network` / `http-<status>`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + the failing exchange as `detail` | `budget-unknown` |
+| `unparsable` (`bad-body`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'bad-body'` | `budget-unknown` |
+| seam absent (no availability client wired) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'seam-absent'` | `budget-unknown` |
+
+The two fail-closed tokens are the proxy's own vocabulary, so a dispatcher
+admission and a proxy refusal cannot disagree about *why* an audit was
+refused (AC2). Every non-`ok` outcome stops audit dispatch with a named
+reason (AC3) rather than silently reverting to the per-host cap; a missing
+seam fails closed too, never open, because the audit tier cannot prove
+availability without it.
+
+**Divergence log (AC2).** The local `dispatch-budget.json` ledger keeps
+recording the audit entry, but it is **observability only** for admission. When
+the proxy and the local ledger disagree about audit capacity (the proxy admits
+while the local fresh audit count is at/over `maxAudit`, or the proxy refuses
+while the local count is below it) ONE decision entry with reason
+`audit-budget-divergence` is written, carrying both sides' evidence
+(`{ proxy: { live, cap, available }, local: { live, maxAudit } }`). An agreeing
+state emits nothing (no log noise), and the entry never changes the admission
+answer — the proxy always wins. The pre-check logs the "proxy refuses / local
+not at cap" half (admission never runs, because the tier is skipped before
+selection), and admission logs the "proxy admits / local at cap" half.
+
+**Local ledger is observability-only for the audit tier.** Audit entries are
+still reserved (and confirmed/released on the existing paths — pane close,
+dispatch/spawn failure, claim rollback, the 2 h stale window) so the worklist
+header, the interactive over-quota dialog, the dead-pane sweep and every
+release path keep working unchanged. But a local entry can never cause an
+audit refusal, and a reservation failure never turns a proxy admission into a
+refusal. The header/dialog still read the pane-aware display count
+(`auditDisplayCount`), which is unaffected.
+
+**One-release legacy flag (AC3).** `HERDR_AUDIT_LOCAL_BUDGET=1` restores the
+pre-change **pre-proxy** decision for the audit tier — `budget.json`
+`maxAudit` + the local `dispatch-budget.json` ledger, with the legacy tokens
+`audit-host-saturated` (cap `1`) / `host-budget-audit` (any other cap) /
+`host-budget-unknown` (unreadable ledger) — and never consults the proxy. It is
+read per tick, and the legacy path writes an `audit-budget-legacy` decision
+entry so a host still running the escape hatch is visible in the log. It is an
+environment variable (not a persisted setting) so it can be reverted without
+editing a file, matching the `HERDR_HOST_MAX_*` precedent.
+
+> **Removal release.** `HERDR_AUDIT_LOCAL_BUDGET`, the legacy audit branch it
+> selects and the `audit-budget-legacy` token are removed in the release
+> **after** the proxy side (`LP-0MW95FYMH006XYNK`) is deployed everywhere.
+> Until then a host whose proxy predates the endpoint must either run with the
+> flag or accept `audit-budget-unknown` (the fail-closed default).
+
+**Tests.** `downtime-worker.audit-tier.test.ts` pins the pre-check mapping;
+`host-dispatch-budget.machine.test.ts` and
+`host-dispatch-budget.acceptance.test.ts` pin the admission mapping, the
+divergence entry, the legacy flag and the observability-only reservation;
+`audit-availability.cross-host.test.ts` proves two hosts against one stub
+proxy admit exactly one audit.
+
+**Tests.** `downtime-worker.audit-availability.contract.test.ts` is table-driven
+and pins grant / saturated / alias spellings / absent and empty lease arrays /
+additive extra fields / non-derived `available` / every malformed shape
+(non-object, missing or non-finite or negative numbers, non-boolean verdict,
+non-array `leases`, malformed lease entries) / non-2xx statuses, plus the
+barrel re-export and the allowed-reader-set guard.
+`downtime-worker.audit-availability.test.ts` drives the client through an
+injected fetcher: the GET URL/method/header, the trailing-slash normalisation,
+the typed success (including `leases`/`reclaimed`/`reason`), `404` →
+`endpoint-absent`, `400`/`5xx` → `unreachable`/`http-<status>`, a network
+rejection and a synchronous throw → `unreachable`/`network`, an expired timeout
+→ `unreachable`/`timeout` with the signal **asserted aborted**, non-JSON and
+parser-rejected bodies → `unparsable`/`bad-body`, and the abort timer cleared
+(`vi.getTimerCount() === 0`) on both the success and failure paths.
+
 ### One launch per idle window (parent WL-0MVIKRFP0005JDL8 AC3, slice C3)
 
 **Problem (the residual half of the race).** The reservation handshake above is
@@ -789,7 +1113,8 @@ deliberately distinct from herdr's OWN paced stops (`prefill-gate` /
 `prefill-cap` / `prefill-eta`) and from the fence hold (`window-spent`), so an
 operator can tell a lost reservation race from a paced stop from the herdr
 header alone. The coordination-leader path returns that refusal directly
-instead of falling through to the own-backlog fallback (which would retry other
+instead of falling through to the registered-root sweep or the own-backlog
+fallback (which would retry other
 items and replace the evidence with a generic terminal reason).
 
 **Composition with the coordination leader.** The fence holds no distributed
@@ -1592,10 +1917,13 @@ Two mechanisms, in this order of preference:
 1. **Never provision before admission.** `resolveDispatchPlacement` (in
    `downtime-worker.dispatch-placement.ts`) runs after the CAS claim, the
    reservation gate and the host-budget admission, and immediately before the
-   marker write. A claim loss, a reservation refusal, a TTL-below-bound
-   reservation or a host-budget refusal therefore returns **before any tab is
-   created** — there is no pane to leak. This covers the automated dispatcher's
-   `implement` and `audit` tiers alike.
+   marker write. A claim loss, a reservation refusal or a host-budget refusal
+   therefore returns **before any tab is created** — there is no pane to leak.
+   A TTL-below-bound reservation is the one gate that does *not* abort: it
+   fails open (no ticket forwarded, recorded `reservationUnavailable:
+   'ttl-below-bound'`) and the pipeline continues to provision, so the tab
+   that is created is the one the dispatch pane lands in — never an orphan.
+   This covers the automated dispatcher's `implement` and `audit` tiers alike.
 2. **Defence in depth on the aborts that DID provision.** Once the item tab
    exists, every remaining pre-spawn abort closes the placeholder root pane via
    `closePlaceholderRootPaneBestEffort`: marker-write failure
@@ -1981,8 +2309,9 @@ contract that an absent value omits the env var.
 **Priority rule and precedence (WL-0MVNUIW77000VYAX).** The preference is
 resolved **once** at the dispatch boundary (`dispatchClaimedTier`, from the
 already-resolved candidate priority), so every dispatch path — coordination
-offer, own-backlog fallback, audit-batch continuation, critical-first/normal
-scan and the legacy tier chain — inherits the same decision. Precedence,
+offer, registered-root sweep, own-backlog fallback, audit-batch continuation,
+critical-first/normal scan and the legacy tier chain — inherits the same
+decision. Precedence,
 highest first:
 
 1. **Explicit operator setting wins.** When `downtimeLocalPreference` is
@@ -2145,13 +2474,12 @@ The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
 (no poll, no idle tracking, no dispatch) for `downtimeNoCandidateCooldownMs`
 (default 60 min) after a genuinely empty backlog, resetting the idle
 tracker so a fresh full idle period is required after the pause. A
-`no-candidate` outcome means the *sprint view* — the live `browseItemCount`
-window (plus mandatory items) — held nothing dispatchable: the dispatcher does
-not scan hidden backlog (WL-0MUNS8X97007C9H9; see *Sprint-view-only dispatch
-window* above) **except** via the coordination leader's bounded own-backlog
-fallback, which dispatches before this reason is returned and then hands off
-leadership (WL-0MUU4XFU90008E24; see *Own-backlog fallback & leadership
-hand-off* above). In
+`no-candidate` outcome means the **whole ranked backlog** held nothing
+dispatchable: the dispatcher walks every ranked work item beyond the initial
+`browseItemCount` window (see *Whole-backlog dispatch window* above), so this
+reason now implies a genuinely empty-or-fully-gated backlog rather than a
+narrow view (WL-0MW9XS0XR007K1TH supersedes WL-0MUNS8X97007C9H9's
+sprint-view-only reading). In
 coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
 (`.worklog/downtime-coordination.json`) is an **offer list, not the
 backlog**: the leader removes each entry after dispatching (see step 4
@@ -2179,7 +2507,20 @@ reads the block as work. Therefore:
   scan of the coordination entries **already read for that dispatch** — never
   a second worklog CLI probe. It is deliberately conservative/fail-open (a
   stale peer entry only costs an idle tick); an instance's own entry never
-  counts, and neither does an entry with an empty `workItemId`. The cooldown
+  counts, and neither does an entry with an empty `workItemId`.
+- **Liveness-aware peer predicate (WL-0MVR8GDJ3008WY3Y AC7).** `hasPeerOffer`
+  rejects entries whose `lastUpdated` is older than
+  `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h) — a crashed instance whose
+  entry lingers can no longer masquerade as a live peer. The rationale is
+  deliberately conservative: treating a stale entry as an **absent** peer
+  makes the leader *more* willing to sweep/arm the cooldown probe, never less,
+  so the worst case is one extra idle tick polling the offer list — never a
+  starved offer. Both orchestrator call sites (the tick-time pause-cancel and
+  the dispatch-time pause-arm) pass an explicit `nowMs`, and the default
+  window applies to callers that omit the options object. Entry expiry remains
+  a deliberate no-op (`pruneStaleEntries` still returns 0 and never mutates
+  the file, WL-0MTMPIQBE001J41P); liveness lives only in the read predicate.
+  The cooldown
   duration (`downtimeNoCandidateCooldownMs`, 60 min) is unchanged and still
   arms when there is genuinely nothing anywhere. The empty-leader step-down
   still fires on that cycle (see *Own-backlog fallback & leadership hand-off*
@@ -2238,21 +2579,57 @@ per dispatch, in the claim→marker→spawn choke point, so both dispatcher path
 (`dispatchDowntimeWork` and `dispatchFromCoordination`) and every tier share
 the same decision. All budget refusals are **neutral skips** — never a CLI
 error strike, never `no-candidate`, so the no-candidate cooldown is not
-entered and the next idle tick re-checks (as with `audit-host-saturated`).
+entered and the next idle tick re-checks (as with `audit-budget-saturated`).
 
 | Tier | Condition (evaluated at admission) | Decision | Decision-log reason | Header token |
 |---|---|---|---|---|
-| implement | fresh entries whose pane is in the live pane list **<** `maxImplement` | admit + reserve | — | — |
-| implement | at/over `maxImplement` (including `maxImplement: 0`) | skip the tick — no claim, no pane | `host-budget-implement` | `budget-implement` |
-| audit | fresh entries (no live-pane requirement) **<** `maxAudit` | admit + reserve | — | — |
-| audit | at cap with `maxAudit: 1` (default) | skip the tick | `audit-host-saturated` (byte-identical to the retired marker) | `budget-audit` |
-| audit | at cap with any other `maxAudit` (including `0`) | skip the tick | `host-budget-audit` | `budget-audit` |
-| either | ledger exists but cannot be trusted (corrupt/unreadable bytes, or the reservation lock/I/O failed) | **fail closed** — skip the tick, then rewrite the ledger from the live pane list so the next tick can decide again | `host-budget-unknown` | `budget-unknown` |
-| either | coordination dir unresolvable | admit — no ledger, no new failure mode (degrades exactly as before the budget existed) | — | — |
+| implement | entries whose pane is in the live pane list **<** `maxImplement` (a confirmed implement with a live pane counts regardless of heartbeat age — pane-derived freshness, WL-0MW9VQ08W000SN63) | admit + reserve | — | — |
+| implement | pane list UNKNOWN (failed/unparseable `hostBudgetLivePanes` read, WL-0MW9VQX5T001GCUP) | count fresh entries by the **freshness rule** (no pane requirement) — never reaps, never deletes, still decides (fail-open: a broken herdr read does not refuse a tick on its own) | — | — |
+| implement | at/over `maxImplement` (including `maxImplement: 0`) | skip that candidate and keep scanning — no claim, no pane | `host-budget-implement` | `budget-implement` |
+| audit | proxy availability read `available: true` | admit + reserve (the local entry is observability only) | — | — |
+| audit | proxy availability read `available: false` | skip that audit candidate and keep scanning (neutral) | `audit-budget-saturated` | `budget-audit` |
+| audit | proxy read not `ok` — `endpoint-absent` / `unreachable` / `unparsable`, or the seam is absent | **fail closed** — skip that audit candidate and keep scanning, recording the failing exchange as `detail` | `audit-budget-unknown` | `budget-unknown` |
+| audit (one-release legacy path, `HERDR_AUDIT_LOCAL_BUDGET=1`) | fresh entries (no live-pane requirement) **<** `maxAudit` | admit + reserve (pre-proxy behaviour) | `audit-budget-legacy` (warning entry, once per tick) | — |
+| audit (legacy path) | at cap with `maxAudit: 1` (default) | skip that candidate and keep scanning | `audit-host-saturated` (byte-identical to the retired marker) | `budget-audit` |
+| audit (legacy path) | at cap with any other `maxAudit` (including `0`) | skip that candidate and keep scanning | `host-budget-audit` | `budget-audit` |
+| audit (either path) | the proxy verdict and the local (observability-only) ledger disagree about capacity | decision unchanged — the proxy wins; ONE evidence entry with both sides' figures | `audit-budget-divergence` | — |
+| implement | ledger exists but cannot be trusted (corrupt/unreadable bytes, or the reservation lock/I/O failed) | **fail closed** — skip that candidate and keep scanning, then rewrite the ledger from the live pane list **when the pane read succeeded**; an unknown pane read (failed `hostBudgetLivePanes`) skips the rewrite so the corrupt ledger is never replaced by an empty one (WL-0MW9VQX5T001GCUP) | `host-budget-unknown` | `budget-unknown` |
+| audit (legacy path) | ledger exists but cannot be trusted | **fail closed** — skip that candidate and keep scanning (pre-proxy semantics) | `host-budget-unknown` | `budget-unknown` |
+| audit (proxy path) | local ledger unreadable | **no effect on admission** — the proxy is authoritative, the local entry is observability only; the local ledger is never read to refuse an audit | — | — |
+| either | coordination dir unresolvable | admit — no ledger, no new failure mode; the audit tier still consults the proxy (degrades exactly as before the budget existed) | — | — |
 
 Beneath the table, existing capacity gates remain the inner limiter: free-slot
 minimums, the local reservation/prefill pacing, contention and the host-CPU
 gate all still apply, in their existing order.
+
+#### Continuable vs terminal outcomes (WL-0MWBT76WY00298AY)
+
+A head scan (`dispatchFromOwnHead`, and both loops of `dispatchFromHerdrList`)
+never treats "not dispatched" as sufficient reason to keep scanning. It steps
+to the next candidate ONLY for an allow-listed **continuable hold**:
+
+- **lost claim** — `claim-failed`, `claim-rolled-back`: the CAS race was lost
+  or a marker write was rolled back; the candidate is neutral, so the scan
+  steps on (the audit-batch continuation ends instead — see below).
+- **neutral budget refusal** — `host-budget-implement`, `host-budget-audit`,
+  `host-budget-unknown`, `audit-budget-saturated`, `audit-budget-unknown`,
+  `audit-host-saturated`: the candidate is budgeted, but a prep candidate
+  ranked behind it (`plan` / `intake` / `risk-effort`) is not, so the scan
+  records the hold (reason + `{live, max}`) and keeps scanning.
+
+Everything else is **terminal/strike-worthy** and returns immediately, ending
+the tick exactly as before: `wl-error`, `spawn-failed`, `marker-write-failed`,
+`anchor-unavailable`, … The rule lives in ONE allow-list predicate
+(`isContinuableHoldOutcome`, `downtime-worker.dispatch-contract.ts`) used
+identically by `dispatchFromOwnHead` and both `dispatchFromHerdrList` loops. It
+is deliberately an allow-list, not a deny-list, so a new refusal class must be
+added explicitly and can never be swallowed into a silent retry loop.
+
+The audit-batch continuation is the one exception to "keep scanning": while a
+batch is armed, a budget refusal records the hold and **ends the batch** — it
+does not hop to another audit target — so the "a batch never hops to another
+target" contract holds while the batch's terminal reason stays the neutral
+refusal.
 
 **Fail directions are deliberately different per path.** This is a design
 decision, not an inconsistency:
@@ -2264,16 +2641,48 @@ decision, not an inconsistency:
 
 The fail-closed arm is deliberately self-healing rather than sticky: the
 rewrite rebuilds the ledger from the leader's live pane list, so one corrupt
-read costs at most one tick — a crashed leader cannot wedge the host.
+read costs at most one tick — a crashed leader cannot wedge the host. The
+rewrite is gated on a **known** pane list: a failed/unparseable pane read is
+UNKNOWN and must never rewrite a corrupt ledger as empty (WL-0MW9VQX5T001GCUP),
+so the next pane-carrying tick self-heals instead.
+
+**Empty vs unknown pane list (WL-0MW9VQX5T001GCUP).** The machine-wide pane
+read (`hostBudgetLivePanes`) is **tri-state**, mirroring the `InFlightPanes`
+precedent: `{ok:true, panes}` carries an **authoritative** list (an empty
+list genuinely means "no downtime panes"), while `{ok:false}` means pane
+liveness is **UNKNOWN** (a failed, unparseable or unwired read). The two must
+never be conflated — they fail in opposite directions:
+
+| State | Counting rule | Reap | Repair |
+|---|---|---|---|
+| pane list **known** (successful read) | fresh AND pane in list (implement) / pane-aware display (audit) | stale, pane-less entries reaped | unreadable ledger repaired from the list |
+| pane list **empty but known** (successful read, no panes) | zero in-flight | stale entries reaped (existing behaviour, pinned by AC2) | — |
+| pane list **UNKNOWN** (failed read) | fresh entries, no pane requirement (the freshness rule) | **never** — reaping on unknown would delete live entries (heartbeats are only written at reserve/confirm, so a reaped live entry never comes back) | skipped — a corrupt ledger stays corrupt until a pane-carrying tick |
+
+This is why the same value cannot serve both directions: admission is
+**fail-open** on unknown (a herdr hiccup never silently wedges dispatch — the
+existing rationale is preserved), while reap is **fail-safe** (never delete
+on unknown). When unknown, the implement tier's admission read is a **pure
+read** — no write at all — and the count is deliberately conservative
+(fresh entries count without the pane requirement, so a broken herdr
+over-counts rather than under-counts and cannot over-admit).
+
+**Audit tier fail direction (proxy-derived).** For the audit tier the
+fail-closed decision is the **proxy read**, not the ledger: any non-`ok`
+availability outcome (`endpoint-absent` / `unreachable` / `unparsable`, or a
+missing seam) stops audit dispatch as `audit-budget-unknown`. An unreadable
+local ledger has **no effect** on audit admission — it is observability only.
+The one-release `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the ledger
+fail-direction table above for the audit tier.
 
 **Why `maxImplement` defaults to 2.** The default is **conservative** and it
 bounds **host work-in-flight**, not LLM capacity: it is a statement of
 operator intent ("at most this much agent work on this box at once"), which
 is a different question from "how many proxy slots are free". Two concurrent
 implements leave a slot for the operator's own interactive session and for
-one audit. `maxAudit: 1` is the other half of the default and preserves
-today's single-flight audit behaviour exactly (same `audit-host-saturated`
-token, same release points).
+one audit. `maxAudit: 1` is retained as the **one-release legacy default** and
+as the local observability figure; the authoritative audit cap is the
+**proxy's** (see *Proxy-derived audit admission* above).
 
 **Boundary statement (WL-0MU2EP6JL006A1U3).** That item removed the
 client-side *running-pane* cap in favour of LLM-idle gating, and this budget
@@ -2297,7 +2706,12 @@ ends:
   that pane (`ReaperDeps.releasePaneBudget`), for both `implement` and
   `audit`;
 - **staleness** — the ledger's own 2 h heartbeat-staleness reap remains the
-  final backstop.
+  final backstop. Since WL-0MW9VQ08W000SN63 this reap is **pane-derived** for
+  the implement tier: a stale heartbeat alone never releases a confirmed
+  implement entry whose pane is still in the trusted live list (the pane is
+  conclusive evidence of in-flight work, and `heartbeatAt` is only written at
+  reserve/confirm — there is no refresh path). The entry is released by
+  staleness only once its pane is also gone.
 
 A pane can still be closed *outside* those paths (the operator closes it in
 herdr, a session crashes, the window is torn down). Because the audit tier
@@ -2306,9 +2720,12 @@ would otherwise hold `maxAudit` until the 2 h window expired — the 2026-11-06
 incident. The reaper therefore runs one **dead-pane sweep** per pass
 (`sweepClosedPanes`) with the pane list it already read: any **confirmed**
 entry (non-empty `paneId`) whose pane is absent from that trusted list is
-reaped regardless of heartbeat freshness. Entries with no `paneId` (the
-reserve→spawn window) are retained, and a failed/unparseable pane read never
-sweeps (a synthetic empty list would over-reap and over-admit).
+reaped regardless of heartbeat freshness (and, since WL-0MW9VQ08W000SN63, an
+IMPLEMENT entry whose pane IS in the trusted list is never swept by staleness
+alone — the sweep applies the same pane-derived freshness as the count).
+Entries with no `paneId` (the reserve→spawn window) are retained, and a
+failed/unparseable pane read never sweeps (a synthetic empty list would
+over-reap and over-admit).
 
 **The header's audit count is pane-aware (WL-0MW8D4UQH002TWJV).** Admission
 keeps the marker's liveness-free rule on purpose (a slot is held from dispatch
@@ -2324,12 +2741,38 @@ phantom slot for the remainder of the 2 h window.
   fresh, so a just-reserved audit is not hidden.
 - An absent live-pane list falls back to the marker-compatible freshness rule
   (the display cannot distinguish "gone" from "unknown", and it never invents
-  a zero).
+  a zero). Since WL-0MW9VQX5T001GCUP **both** figures — the implement count
+  and the audit count — fall back to the freshness rule on an unknown pane
+  read, so a broken herdr read no longer reports zero implements either.
+  An **authoritative empty** list still reads as zero in-flight for both
+  tiers (empty ≠ unknown).
 - The display path remains strictly read-only: it never reaps or rewrites the
   ledger (the sweep/staleness release owns cleanup).
 - This deliberately diverges from **admission**, which continues to count a
   dead entry until it is released or reaped; the divergence is display-only and
   cannot admit work.
+
+**The interactive over-quota dialog follows the same display rule
+(WL-0MW8IQNY7003JIOL).** When an operator fires `/skill:audit` by hand and the
+audit tier is at its cap, the confirmation dialog quotes the **pane-aware
+display count** the header shows — not the admission count — so the two
+operator-facing surfaces never disagree. Both go through the same shared
+helper (`auditDisplayCount`, used by `readHostBudgetStatus` and
+`prepareInteractiveAgentDispatch`):
+
+- A dead (confirmed, pane-gone) audit entry neither triggers the dialog nor
+  appears in its `live` figure.
+- An unconfirmed audit entry (no `paneId`) and a confirmed entry whose pane is
+  live still count, and stale entries stay excluded.
+- With no trusted live-pane list the dialog falls back to the freshness rule —
+  the same fallback the header uses — rather than inventing a zero.
+- Admission is untouched: the dispatcher still counts marker-compatibly
+  (`freshCount` / `readAuditBudgetState`, fail-closed). The consequence is
+  deliberate and documented: after the fix the dialog may not prompt when only
+  dead-pane entries exist, so the operator can hand-fire an audit that
+  admission would refuse — they are choosing from the count they just saw in
+  the header.
+- The dialog read stays read-only: it never reaps or rewrites the ledger.
 
 **Audit-cap unification (the choice, recorded).** The hard-coded host-wide
 audit cap of 1 — the `active-audit` marker in `machine-coordination.ts` — is
@@ -2358,6 +2801,18 @@ serves `maxAudit: 1` (identical behaviour) and `maxAudit: 2…N`.
   authoritative wording lives in the `machine-coordination.ts` module comment;
   this schedule is the operator-facing record.
 
+**Superseded for the audit tier: the proxy owns the audit budget
+(WL-0MW95GBEG005ERHS).** The ledger unification above superseded the marker,
+but the ledger's `maxAudit` is **not** the current audit-admission authority
+either. Once admission became proxy-derived, the per-host `budget.json`
+`maxAudit` cap and the local ledger's audit entries were demoted to
+**observability only** for admission (the header, dialog and dead-pane sweep
+still read them), and the proxy's verdict decides. `maxAudit` is now the
+one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local evidence
+the divergence log compares against. `budget.json` `maxAudit` must therefore
+never be documented — or defaulted — as the audit-admission authority; see
+*Proxy-derived audit admission — gate, vocabulary and the one-release flag*.
+
 **Out of scope for v1 — the future `window` field.** A total cap over a
 rolling window ("≤ 20 dispatches per 24 h") is explicitly **not** implemented.
 The ledger shape was chosen to make it additive: every entry already carries
@@ -2366,9 +2821,29 @@ The ledger shape was chosen to make it additive: every entry already carries
 `maxImplement`/`maxAudit`, plus a time-filtered reduction beside
 `reduceLedgerCounts`) without a new file, a new lock or a second counting
 path. Capping the `plan` / `intake` / `risk-effort` tiers is likewise out of
-scope (`kind` is recorded, so extending is trivial), as is multi-machine or
-networked coordination — the single-machine v1 contract of
-`machine-coordination.ts` is unchanged.
+scope (`kind` is recorded, so extending is trivial). **Multi-machine
+coordination is no longer out of scope for the audit budget:** the local
+ledger remains single-machine, and the **proxy-owned audit budget queried over
+HTTP** (`GET {proxyUrl}/llama/local/audit/status`) is the cross-machine
+serialisation that supersedes the old `machine-coordination.ts` note. See
+*Proxy-derived audit admission* above.
+
+**Release window interaction — code-freeze, not a budget slot
+(WL-0MW7YIBG70021YI3).** The budget ledger counts **dispatched agent panes**;
+neither the release process's subprocesses (`audit_runner.py`, `run_tests.py`,
+`git`/`gh`) nor the `/skill:ship` command itself pass through
+`admitHostDispatch`, so a release **bypasses the ledger entirely** — it neither
+consumes nor is limited by `maxImplement`/`maxAudit`. While a release runs, the
+**per-root code-freeze gate** (evaluated *before* budget admission) skips all
+new implement and audit dispatch for the releasing root, still allows
+plan/intake prep (including critical prep), and lets in-progress panes finish.
+A dedicated "release budget" slot is **not recommended**: it would reserve
+ledger capacity as a declaration rather than measure the release's actual
+subprocess load. The real residual gap is scope — the freeze is per root while
+the ledger is host-wide, so a release in one project does not pause another
+project's implement/audit dispatch; that is tracked separately
+(WL-0MWAM5N75004ROSW). Full rationale, the tier table and the subprocess
+inventory: [release-dispatch-budget-evaluation.md](release-dispatch-budget-evaluation.md).
 
 ### Unified budget observability (F5 WL-0MVXY0ZYW009NEJD)
 
@@ -2378,13 +2853,13 @@ disagree:
 
 | Surface | What it shows | Source |
 |---|---|---|
-| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement`, `host-budget-audit`, `host-budget-unknown`, or `audit-host-saturated` at `maxAudit: 1`) plus a `budget` evidence figure (`live`/`max` for the tier) | `downtime-log.ts` vocabulary, written by the tick |
+| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement` for implement; `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier; the legacy `host-budget-audit` / `host-budget-unknown` / `audit-host-saturated` under `HERDR_AUDIT_LOCAL_BUDGET=1`) plus a `budget` evidence figure (`live`/`max` for the tier), and the `audit-budget-divergence` / `audit-budget-legacy` evidence entries | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
 | Herdr header token | `budget-implement` / `budget-audit` / `budget-unknown`, from the shared `decisionHeaderToken` mapping, so the header says *why* the tick stopped — consistent with `contention` / `slot-owner` / `saturated` | `downtime-worker.constants.ts` |
-| stderr skip line | `[worklog-plugin] Downtime <tier> tier skipped: <reason> (live=n, max=m)` (`tier` is `budget` for `host-budget-unknown`, which can come from either tier) | `hostBudgetSkipLine` (`host-budget-status.ts`) |
+| stderr skip line | `[worklog-plugin] Downtime <tier> tier skipped: <reason> (live=n, max=m)` (`tier` is `budget` for `audit-budget-unknown` / `host-budget-unknown`) | `hostBudgetSkipLine` (`host-budget-status.ts`) |
 | Worklist header counter | read-only `[budget: implement n/max · audit n/max]`, rendered from already-available state; it never spawns `wl`, never mutates and never changes a dispatch decision, and renders nothing when the budget is unavailable (no chrome in the common case) | `readHostBudgetStatus` (`host-budget-status.ts`) |
 
 `readHostBudgetStatus` counts with the **same pure reductions admission
-uses** (`reduceLedgerCounts` for the implement live-pane rule,
+uses** (`reduceLedgerCounts` for the implement pane-derived live-pane rule,
 `reduceMarkerCounts` + `legacyActiveAuditCount` for the audit rule), so the
 counter, the header token, the stderr line and the decision entry quote the
 same ledger and the same caps. The display read is deliberately non-mutating
@@ -2393,8 +2868,25 @@ write machine state). A budget refusal is an **operator-imposed** stop, so it
 never starts or extends a capacity-starvation episode
 (`capacity-starvation.ts` is untouched).
 
+A refusal token is a **hold on one candidate**, not a whole-tick stop: the
+tick records it (with `{live, max}` evidence) and keeps scanning, so prep work
+ranked behind the refused candidate still dispatches. The neutral reason is
+reported only when nothing else dispatches, and no cooldown/strike is
+recorded.
+
 ### Host-wide audit admission — budget ledger, `active-audit` marker retired
 ### (WL-0MUIVE0YG000UVIA → WL-0MVXY0XPF006YUHA F2)
+
+> **Current state (WL-0MW95GBEG005ERHS).** The per-host ledger cap described
+> below is **no longer the audit-admission authority**. Audit admission is
+> proxy-derived: `getActiveAudit` and `admitHostDispatch` read the proxy's
+> `GET {proxyUrl}/llama/local/audit/status` verdict and fail closed as
+> `audit-budget-unknown` when it cannot answer. The ledger's audit entries and
+> `budget.json` `maxAudit` are **observability only** for admission
+> (header/dialog/sweep) and the **one-release legacy path**
+> (`HERDR_AUDIT_LOCAL_BUDGET=1`). Everything in this section remains true only
+> under that flag; see *Proxy-derived audit admission — gate, vocabulary and
+> the one-release flag* for the current contract.
 
 **Problem.** On 2026-09-26 four downtime audits ran concurrently on a single host —
 dispatched by *different projects' dispatchers*. The existing per-instance
@@ -2405,8 +2897,9 @@ audit runner's host-wide slot (`AUDIT_MAX_CONCURRENCY=1` in cheap-proxy mode)
 were saturated; the audit for `SA-0MUG0WFP8008WN63` failed on every Pi call
 after 90 s and was aborted with no usable verdict.
 
-**Contract.** At most **`maxAudit` audit-tier `/skill:audit` runs
-(default 1) are actively executing per host**, across herdr instances and
+**Contract (pre-proxy; now the one-release legacy path).** Under
+`HERDR_AUDIT_LOCAL_BUDGET=1`, at most **`maxAudit` audit-tier `/skill:audit`
+runs (default 1) are actively executing per host**, across herdr instances and
 projects, tracked in the machine-scoped dispatch-budget ledger
 (`~/.herdr/downtime/dispatch-budget.json`, entries with `kind: "audit"`) with
 the cap in `~/.herdr/downtime/budget.json` (`{"maxAudit": 2}`; `0` is the
@@ -2431,8 +2924,10 @@ reason token is:
     (live/max `0/0`);
   - **`host-budget-unknown`** when an unreadable ledger had to be rewritten
     from the live pane list (fail-closed; the next tick can decide again).
-  All three are neutral skips — never `no-candidate`, so the no-candidate
-  cooldown is not entered and the next idle tick re-checks.
+  All three are neutral **holds on one candidate** — never `no-candidate`, so
+  the no-candidate cooldown is not entered and the next idle tick re-checks.
+  The head scan records the hold and keeps scanning, so a `plan`/`intake`
+  candidate behind the refused audit can still dispatch this tick.
 - **Legacy read-compatibility (exactly one release).** A non-stale
 `active-audit` file written by an OLDER herdr instance is counted as ONE
 synthetic audit entry, so a mixed-version host can never double-dispatch.
@@ -2451,27 +2946,34 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 
 | Guard | Scope | Sees | Action |
 |---|---|---|---|
-| **Host-wide ledger** (this mechanism) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip audit tier; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
+| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/status`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
+| **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip that audit candidate and keep scanning; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
 | **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |
 | **`AUDIT_PHASE2_PARALLELISM=1`** (always) | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots (fully serial Phase 2) |
 
 **Observability.** The skip is logged to stderr as
-`Downtime audit tier skipped: audit-host-saturated (concurrentAudits=<live>,
-[maxAudit=<cap>,] freeSlots=…, contentionQueueDepth=…)` — the concurrent-audit
-count is the ledger's observed live audit count (with its cap when the ledger
-supplied the evidence) — and recorded (rate-limited) in
+`Downtime audit tier skipped: <reason> (concurrentAudits=<live>,
+[maxAudit=<cap>,] freeSlots=…, contentionQueueDepth=…)`. For the default
+proxy path the reason is `audit-budget-saturated` (or `audit-budget-unknown`)
+and `concurrentAudits` is the **proxy's** live-lease count against its cap; for
+the one-release legacy path it is `audit-host-saturated` / `host-budget-audit`
+/ `host-budget-unknown` and the count is the ledger's observed live audit
+count. The skip is recorded (rate-limited) in
 `.worklog/downtime-coordination.log` via the shared no-dispatch decision log
-under the reported reason token (`audit-host-saturated` / `host-budget-audit` /
-`host-budget-unknown`, with the poll's `freeSlots`/`totalSlots`/
-`contentionDepth`). The free-slot and contention figures distinguish
-infrastructure saturation from a content problem.
+under the reported reason token, with the poll's `freeSlots`/`totalSlots`/
+`contentionDepth`; a proxy/local disagreement adds the
+`audit-budget-divergence` evidence entry (above). The free-slot and contention
+figures distinguish infrastructure saturation from a content problem.
 
-**Scope.** Single-machine v1 only — matches the machine-coordination contract
-(`machine-coordination.ts`): multi-machine (flock/NFS) is out of scope and the
-dir resolves per-user. Ledger writes run under the existing coordination lock
-with an atomic tmp+rename, so the audit tier adds no read-modify-write
-contention on the shared `downtime-coordination.json`.
+**Scope.** The **local ledger** is single-machine v1 (the dir resolves
+per-user; ledger writes run under the existing coordination lock with an
+atomic tmp+rename, so the audit tier adds no read-modify-write contention on
+the shared `downtime-coordination.json`). **Cross-machine serialisation** of
+the audit resource is the **proxy-owned audit budget queried over HTTP** —
+`GET {proxyUrl}/llama/local/audit/status` — not flock/NFS. This supersedes the
+old single-machine note in `machine-coordination.ts`; see *Proxy-derived audit
+admission* above.
 
 **Tests.** `host-dispatch-budget.machine.test.ts` pins the audit matrix
 (`maxAudit` 0/1/2), the legacy-marker synthetic entry, the release points and
@@ -2498,7 +3000,7 @@ observable happens. The gate lives in `index.ts`'s `route === 'agent'` block,
 BEFORE the claim and before any spawn, so it covers **both** branches of that
 route with one enforcement point: the interactive pane and the headless
 `open_pane: false` background dispatch. Dispatcher-fired work never prompts —
-it refuses the tick and logs the reason (above).
+it refuses that candidate, logs the reason and keeps scanning (above).
 
 | State | Behaviour |
 |---|---|
@@ -2520,7 +3022,7 @@ dispatcher's log can never disagree.
 
 | Path | Unreadable ledger | Rationale |
 |---|---|---|
-| Dispatcher (admission) | **fail closed** — skip the tick, reason `host-budget-unknown`, self-healing rewrite from the live pane list | nobody is watching; over-admitting is unbounded |
+| Dispatcher (admission) | **fail closed** — skip that candidate and keep scanning, reason `host-budget-unknown`, self-healing rewrite from the live pane list | nobody is watching; over-admitting is unbounded |
 | Interactive (this gate) | **fail open + visible notice** | a human is present and owns the decision; a corrupt ledger must never block their shortcut |
 
 **Modules.** `host-budget-dialog.ts` is the pure dialog half — the copy helper,
@@ -2533,22 +3035,31 @@ registered — or a TUI torn down while a prompt is pending — an `ask()` resol
 hang. `host-dispatch-budget.interactive.ts` is the decision half:
 `budgetKindForAgentCommand()` (implement family / audit; everything else is
 outside the budget) and `prepareInteractiveAgentDispatch()`, which reads the
-cap, counts with the ledger's own per-tier semantics (`liveCount` for implement,
-`freshCount` for audit), prompts only at/over cap, then claims.
+cap, counts with the ledger's own per-tier semantics (`liveCount` for implement;
+the pane-aware `auditDisplayCount`/`reduceAuditDisplayCounts` for the audit
+dialog, matching the header — WL-0MW8IQNY7003JIOL), prompts only at/over cap,
+then claims.
 
-**Known limitation.** The implement tier counts an entry only while its
-`paneId` is in the machine-wide live pane list (the F1 liveness table). The
-pane branch confirms the reservation with the captured pane id once
-`send-to-pi.sh` reports the split; a headless `open_pane: false` dispatch never
-gains a pane, so its entry is recorded (and carries the override) but never
-counts toward the implement cap. The audit tier is unaffected (marker
-semantics — no pane required).
+**Known limitation.** The implement tier counts an entry whenever its
+`paneId` is in the machine-wide live pane list (the F1 liveness table) —
+including stale-but-live entries: since WL-0MW9VQ08W000SN63 a confirmed
+implement whose pane is in the trusted live list counts regardless of
+heartbeat age (pane-derived freshness), so a >2 h run is never silently
+dropped from the counter or the cap. The pane branch confirms the
+reservation with the captured pane id once `send-to-pi.sh` reports the
+split; a headless `open_pane: false` dispatch never gains a pane, so its
+entry is recorded (and carries the override) but never counts toward the
+implement cap. The audit dialog's count is pane-aware (the header's display
+rule, WL-0MW8IQNY7003JIOL) while its **admission** stays marker-compatible —
+the two rules differ only by dead (pane-gone) confirmed entries.
 
 **Tests.** `host-budget-dialog.test.ts` pins the copy/overshoot arithmetic and
 every key path; `host-dispatch-budget.interactive.test.ts` pins the gate
 against the isolated machine-dir fixture (under-quota no-op, cancel with no
-claim/ledger entry, proceed with `override: { by: 'user' }`, the audit counting
-asymmetry, the fail-open notice, and both agent branches);
+claim/ledger entry, proceed with `override: { by: 'user' }`, the fail-open
+notice, both agent branches, and — for WL-0MW8IQNY7003JIOL — dialog-vs-header
+agreement for dead / live / unconfirmed / stale audit entries plus the
+unchanged implement-tier counting);
 `host-budget-dialog-tui.test.ts` drives the REAL worklist with the REAL
 shortcut registry and prompt host, proving the dialog renders over the list and
 that `y`/`Enter`/`Esc` resolve the dispatch path.
@@ -2639,11 +3150,12 @@ extension** (the bounded `fetchExtendedHerdrItems` tail of its own head — the
 head itself is the already-considered ranking prefix) and
 dispatches at most one continuation audit per invocation. The scan is factored
 into `dispatchFromOwnHead`, so a continuation applies the **identical**
-sequential filter chain as the own-backlog fallback (classify → dispatched
+sequential filter chain as the registered-root sweep and the own-backlog
+fallback (classify → dispatched
 marker id-guard → attempt budget → non-terminal cooldown → code-freeze → audit
 ≥ 2 free slots → critical in-flight guard → review-queue hold) and only
-`audit` items are eligible. If no audit candidate survives, the unchanged
-all-kinds own-backlog fallback runs.
+`audit` items are eligible. If no audit candidate survives, the registered-root
+sweep runs and then the unchanged all-kinds own-backlog fallback.
 
 An own-backlog dispatch normally steps down leadership immediately
 (WL-0MUU4XFU90008E24). During a batch the step-down is **deferred to batch
@@ -2895,8 +3407,9 @@ Every refusal still applies on both settings: unusable per-slot detail
 `capacity_hint: "saturated"` (→ `capacity-saturated`), live contention
 (`contention_queue_depth > 0` / `prefill_gate_waiters > 0`), the prefill
 serialisation gate (`evaluatePrefillPacing`), owned slots
-(`countFreeUnownedSlots` excludes them), the host-wide audit budget
-(`maxAudit`, default `1`) and a
+(`countFreeUnownedSlots` excludes them), the proxy-owned audit budget
+(`GET {proxyUrl}/llama/local/audit/status`; the legacy `maxAudit` cap only
+under `HERDR_AUDIT_LOCAL_BUDGET=1`) and a
 `parent`/unclassifiable candidate. The relaxed slot stays **pinned** to that
 one leaf audit (`ctx.leafAuditAdmission`, the C4 single-tier pin), so no
 implement/plan/intake pane can consume it.
@@ -3003,6 +3516,51 @@ header's "sprint complete" banner is display-only (a review-queue-depth indicato
 longer writes/clears the marker. If a genuinely distinct sprint-complete signal is ever
 desired it must be a separate, explicit mechanism (follow-up, out of scope here).
 
+#### Offer-only mode (downtimeOfferOnly) - WL-0MWDDHOK6009GJCC
+
+A herdr instance whose downtime dispatch is deliberately switched off
+(`downtimeEnabled: false` or a live manual `d` disable marker) normally produces **no
+coordination offer at all**: the enabled/disable gate returns before the leader
+election/check-in, so the fleet leader cannot see that root's backlog. The only
+workaround used to be hand-registering the root in `downtimeWorklogRoots`, which
+duplicates a source of truth the instance already knows. Typical deployments: a
+desktop instance that must not run agents locally (no local model capacity, contested
+GPU, machine in use) and a laptop kept only as a viewer.
+
+`downtimeOfferOnly` (default `false`) closes the gap. When dispatch is disabled AND
+`downtimeOfferOnly: true`, the tick performs the **coordination check-in only**: it
+computes and writes/refreshes this instance's `entries` offer via the same
+`computeMostImportantItem` computation, filters and staleness semantics as an active
+instance (`runCoordinationCheckIn`, unchanged cadence — the non-leader 5-min default,
+WL-0MTMPSCL8000O45H; AC6), then stops. A passive instance **never** polls the llama
+proxy, takes the leader lease, runs a CAS claim, writes a dispatch marker, reserves
+capacity or spawns a pane — the gate routes these ticks through
+`runOfferOnlyCheckIn` *before* the election/poll/dispatch phases are reachable (fail
+closed in code, not by convention; AC3). The knob is re-read every tick, so a settings
+change applies without a plugin restart (AC1).
+
+Composition notes:
+
+- **Fail-open (AC5).** A failed offer computation (`{ok:false}`) or coordination write
+  keeps the previous entry intact, never throws out of the tick and never removes
+  another instance's entry.
+- **Leader-side compatibility (AC6).** The elected leader's dispatch-time re-validation
+  (`fetchItem` → `classifyItemForDispatch` → gates) and its 24 h `hasPeerOffer`
+  liveness predicate are unchanged — an offer from a passive instance is
+  indistinguishable from an active one at dispatch time, so no leader change is
+  required and no second selection path exists.
+- **Transient quiescence.** Offer-only never renews or takes the lease. An instance
+  that already HELD the lease when the mode was switched on keeps it until the 5-min
+  TTL expires (nothing renews it), so dispatch may pause for up to one TTL before a
+  new election — automatic, safe, and inherent to "the passive instance must not
+  dispatch or lead".
+- **Prefer over `downtimeWorklogRoots` when the root's instance is running but
+  passive.** `downtimeOfferOnly` removes the operational need to maintain the registry
+  for such roots: the instance advertises the work it can see itself. The two
+  mechanisms are independent and compose — see the registered-root discovery section
+  above for when the registry is still the right tool (roots with **no** running herdr
+  instance at all).
+
 ### Critical-first tier & freeze split-by-skill
 
 > **Scope note (WL-0MTK1ILM2009QYB2):** "critical first" now lives INSIDE the
@@ -3045,8 +3603,8 @@ What the contract now guarantees:
    ambiguous split-by-skill rule pauses audit/implement-kind candidates
    while plan/intake/risk-effort prep still dispatches (Q1); per-tier
    free-slot minimums gate the dispatch path; the CAS claim and
-   per-process single-flight guards are unchanged. The host-wide audit
-   budget gate (`maxAudit`, default `1`) remains audit-tier scoped (an open
+   per-process single-flight guards are unchanged. The proxy-owned audit
+   budget gate remains audit-tier scoped (an open
    critical item is never audit-kind, so matching the legacy tier ordering
    it escalates even while an audit is in flight).
 3. **No second ranking is introduced (AC3).** Scanning never re-ranks
@@ -3235,8 +3793,10 @@ ONE `freeSlots` snapshot **derived from the per-slot array** — the only
 trusted availability source (fail-closed contract, WL-0MUXVPXAZ005RESW) —
 forwarded to the sole
 dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
-WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a
-multi-machine (real flock/NFS) extension is future work.
+WL-0MT50LKAK001EF5Q single cap source). The **local coordination/ledger**
+paths are single-machine, and the **audit budget** is cross-machine via the
+proxy-owned audit-availability read (WL-0MW95GBEG005ERHS) rather than a
+flock/NFS extension (see *Proxy-derived audit admission*).
 
 #### Cross-root `assignee` merge rule (WL-0MV85WBZ2004VDUQ)
 
@@ -3441,7 +4001,7 @@ status refresh unchanged at 30s.**
 | Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.constants.ts`, `leader-election.ts` |
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.constants.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.constants.ts` |
-| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
+| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT; the **same** window bounds the `hasPeerOffer` peer-entry liveness check, WL-0MVR8GDJ3008WY3Y AC7) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS` (`downtime-worker.constants.ts`), `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.clamps.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (`downtime-worker.constants.ts`), `clampDowntimeMaxAttempts` (`downtime-worker.clamps.ts`), `countAttempts` (`downtime-log.ts`) |
 | Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (`downtime-worker.constants.ts`), `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.clamps.ts`) |
@@ -3483,7 +4043,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
-| `packages/herdr/src/downtime-worker*.ts` | The downtime-worker module family: the barrel (`downtime-worker.ts`, re-exports only) over the sibling modules — worker tick orchestration (`downtime-worker.orchestrator*.ts`, `worker-contract.ts`, `launch-fence.ts`), dispatch (`dispatch.ts`, `dispatch-filter.ts`, `dispatch-claims.ts`, `dispatch-cpu-gate.ts`, `dispatch-contract.ts`), coordination (`coordination.ts`, `coordination-leader.ts`), gates/prompts/stalled-resume, pane, idle/poller, parsers/selection, constants/types/clamps (full layout: [Module layout](#module-layout)) |
+| `packages/herdr/src/downtime-worker*.ts` | The downtime-worker module family: the barrel (`downtime-worker.ts`, re-exports only) over the sibling modules — worker tick orchestration (`downtime-worker.orchestrator*.ts`, `worker-contract.ts`, `launch-fence.ts`), dispatch (`dispatch.ts`, `dispatch-filter.ts`, `dispatch-claims.ts`, `dispatch-cpu-gate.ts`, `dispatch-contract.ts`), coordination (`coordination.ts`, `coordination-leader.ts`), the bounded head scan + registered-root sweep (`head-scan.ts`), gates/prompts/stalled-resume, pane, idle/poller, parsers/selection, constants/types/clamps (full layout: [Module layout](#module-layout)) |
 | `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
 | `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
@@ -3501,8 +4061,9 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
-| `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `implement`/`audit` dispatch (WL-0MVXY0WQF0069YDJ); audit entries stale-release after 2 h |
-| `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override) |
+| `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — the least-recently-served root starts the offer ordering and the registered-root sweep (WL-0MTJDX4M4007YH5U; fail-open) |
+| `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `implement`/`audit` dispatch (WL-0MVXY0WQF0069YDJ); audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
+| `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
 | `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired** (WL-0MVXY0XPF006YUHA F2): a non-stale file written by an older instance is still read as ONE synthetic audit entry; this version never creates or removes it |
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
 | `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning + no-dispatch decisions (per worklog; rotating, 500 entries/file × 4 files ≈ ≥ 24 h — see [Retention & rotation](#rolling-log-trimming-retention--rotation)) |
@@ -3520,21 +4081,54 @@ likewise re-read live every tick and clamped on load
   continuously, and the coordination list has offers. Check
   `downtime-coordination.log` for check-ins and the dispatches log for the
   last dispatch.
+- **A worklog root with dispatchable work is never served:** if no herdr
+  instance runs in that root it writes no coordination offer, so the offer
+  path can never see it. Register the root in `downtimeWorklogRoots` (the
+  absolute path of the worklog ROOT — the parent of `.worklog/`), then
+  confirm `loadSettings` kept it: a relative path, a missing/unreadable
+  directory, or one without `.worklog/worklog.db` is dropped **per entry**
+  (fail-open), so a typo silently yields `[]` and no sweep. The sweep only
+  runs when the offer list yields nothing dispatchable, so check the
+  decision log for `selectionPath: registered-root-sweep` and remember each
+  root's own code freeze, review-queue depth and in-flight panes still gate
+  it.
+- **Audits skipped with `audit-budget-saturated` (WL-0MW95GBEG005ERHS):**
+  the **proxy** reports its audit budget saturated — its audit cap is at its
+  live-audit-lease count, possibly held by ANOTHER ContextHub host sharing the
+  same local `llama-server` GPU. This is expected cross-machine serialisation,
+  not a failure: audits resume when a live lease expires or is released on the
+  proxy. Inspect the proxy read (`curl <proxyUrl>/llama/local/audit/status`) and
+  the decision log (`grep 'audit-budget-saturated'
+  <root>/.worklog/downtime-coordination.log`). **To raise the audit cap now,
+  change the proxy's audit-budget configuration** (sibling llm item
+  `LP-0MW95FYMH006XYNK`) — raising `budget.json` `maxAudit` has **no effect**
+  on default audit admission. The proxy URL is `downtimeProxyUrl` in
+  `~/.config/herdr/worklog-plugin.json` (default
+  `http://192.168.0.199:8000`), the same URL the status poller and reserve
+  client use.
+- **Audits skipped with `audit-budget-unknown` (WL-0MW95GBEG005ERHS):** the
+  audit tier **failed closed** because the proxy cannot answer — `404`
+  (`endpoint-absent`, the proxy predates `/llama/local/audit/status`),
+  `unreachable` (timeout/network/`http-<status>`), `unparsable` (`bad-body`),
+  or no availability seam wired. Audit dispatch stops with a named reason
+  rather than silently trusting a per-host cap. Check the proxy URL reachability
+  and version; the `detail` on the decision entry names the failing exchange.
+  **Fallback for one release:** set `HERDR_AUDIT_LOCAL_BUDGET=1` to restore
+  the pre-proxy `budget.json` `maxAudit` + local-ledger decision (the legacy
+  `audit-host-saturated` / `host-budget-audit` / `host-budget-unknown`
+  tokens, and an `audit-budget-legacy` warning entry), or upgrade the proxy.
 - **Audits skipped with `audit-host-saturated` / `host-budget-audit`
-  (WL-0MUIVE0YG000UVIA → WL-0MVXY0XPF006YUHA F2):** the machine-scoped ledger
-  reports `maxAudit` fresh audit reservations, so an audit is already running —
-  possibly dispatched by another project's dispatcher. This is expected
-  host-wide budget behaviour, not a failure: audits resume when the running
-  pane closes (`recordPaneClose` releases the entry), when a failed dispatch
-  releases it, or after the 2-hour stale window. Inspect the ledger (`cat
-  ~/.herdr/downtime/dispatch-budget.json`), the cap (`cat
-  ~/.herdr/downtime/budget.json`; raise `maxAudit` to permit concurrent
-  audits) and the decision log
+  (the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path only):** the local
+  ledger reports `maxAudit` fresh audit reservations, so an audit is already
+  running — possibly dispatched by another project's dispatcher. Inspect the
+  ledger (`cat ~/.herdr/downtime/dispatch-budget.json`), the legacy cap (`cat
+  ~/.herdr/downtime/budget.json`) and the decision log
   (`grep -E 'audit-host-saturated|host-budget-audit' <root>/.worklog/downtime-coordination.log`).
   `host-budget-unknown` means the ledger was unreadable and had to be rewritten
   from the live pane list — check for a hand-edited/corrupt
   `dispatch-budget.json`. A leftover `active-audit` file only counts while it is
   fresh (one synthetic entry; it is never written or removed by this version).
+  Remove `HERDR_AUDIT_LOCAL_BUDGET` to return to the proxy-owned budget.
   Set `HERDR_COORDINATION_DIR` when testing to avoid the live machine dir.
 - **Diagnosing wl errors with per-strike logs (WL-0MTJPYM53003ORCV):**
   when the downtime worker encounters CLI errors, it now logs a **structured
@@ -3751,8 +4345,8 @@ duplicate-dispatch RCA is answerable from the log alone:
 
 | Field | Type | Description |
 |---|---|---|
-| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `own-backlog` (coordination own-backlog fallback, WL-0MUU4XFU90008E24), `scheduled-prompt`, or `legacy-tier` |
-| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `own-backlog-fallback` (WL-0MUU4XFU90008E24), `scheduled-due`, `critical-tier` |
+| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `registered-root-sweep` (registered-root discovery, WL-0MVR8GDJ3008WY3Y), `own-backlog` (coordination own-backlog fallback, WL-0MUU4XFU90008E24), `scheduled-prompt`, or `legacy-tier` |
+| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `registered-root-sweep` (WL-0MVR8GDJ3008WY3Y), `own-backlog-fallback` (WL-0MUU4XFU90008E24), `scheduled-due`, `critical-tier` |
 | `paneId` | string \| null | (Enrichment entry only) the resolved dispatch pane/session id, or `null` when it could not be resolved — never a guess |
 | `enrichment` | `true` | (Enrichment entry only) discriminator marking a post-spawn enrichment rather than a fresh dispatch |
 
@@ -3968,4 +4562,18 @@ trace.
   relinquish leadership* (bounded own-root fallback + voluntary
   `releaseLeadership()` hand-off; documented in *Own-backlog fallback &
   leadership hand-off* above)
+- Work item: **WL-0MVR8GDJ3008WY3Y** *Downtime leader cannot see a worklog
+  root with no running herdr instance* (registered-root discovery — option
+  O1; documented in *Registered-root discovery* above) with its children for
+  the `downtimeWorklogRoots` setting + validation, the registered-root
+  sweep, and the liveness-aware `hasPeerOffer`
+- Work item: **WL-0MTJDX4M4007YH5U** *global round-robin cursor module
+  (`downtime-round-robin-by-root`)* — the least-recently-served cursor the
+  sweep reuses for root-level fairness
+- Work item: **WL-0MTMPIQBE001J41P** *stale coordination entry pruning
+  (deliberate no-op)* — entry expiry stays a no-op; liveness lives only in
+  the `hasPeerOffer` read predicate
+- Work item: **WL-0MST3OJ8S0001ROL** *Refactor Downtime Dispatcher: leader
+  election with shared coordination file* — the coordination/offer
+  architecture the registered-root sweep composes with
 - Docs work item: **WL-0MT76H3Z900908TV** (this page)

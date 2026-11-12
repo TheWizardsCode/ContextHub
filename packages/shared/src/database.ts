@@ -1252,6 +1252,21 @@ export class WorklogDatabase {
   }
 
   /**
+   * Soft-delete predicate — the single definition of "soft-deleted" shared by
+   * read and write paths (WL-0MW7S20IC001F3AP, AC1).
+   *
+   * A work item is soft-deleted when its `status` is `'deleted'` **or** it
+   * carries a non-empty `deletedBy`. Callers use this to keep visibility
+   * (`wl list`, `wl next`, `wl worklist`) and mutability (`wl update`) in
+   * agreement, so no row is ever both visible and immutable.
+   *
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
+   */
+  isSoftDeleted(item: Pick<WorkItem, 'status' | 'deletedBy'>): boolean {
+    return workItemsModule.isSoftDeleted(item);
+  }
+
+  /**
    * List all work items
    *
    * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).

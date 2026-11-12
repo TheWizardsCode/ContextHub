@@ -80,6 +80,7 @@ import {
   parseIndexModuleFacts,
   readIndexBaseline,
 } from '../test/split-guard/index-family.js';
+import { isTestOrFixture } from '../test/split-guard/scan.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -480,5 +481,42 @@ describe('index split guard — gates fail on broken input', () => {
     expect(findCycleBaselineViolations([INDEX_CYCLE_BASELINE[0]], INDEX_CYCLE_BASELINE)).toEqual([]);
     const grown = [...INDEX_CYCLE_BASELINE[0], 'packages/herdr/src/newcomer.ts'];
     expect(findCycleBaselineViolations([grown], INDEX_CYCLE_BASELINE)).toEqual([grown.sort()]);
+  });
+});
+
+// ── Test/fixture exclusion from the size ceiling (AC5) ────────────────
+
+describe('index split guard — test/fixture files are outside the production ceiling (AC5)', () => {
+  it('recognises *.test.ts and *.fixtures.ts as test support, not production', () => {
+    expect(isTestOrFixture('packages/herdr/src/index.test.ts')).toBe(true);
+    expect(isTestOrFixture('packages/herdr/src/index.args.test.ts')).toBe(true);
+    expect(isTestOrFixture('packages/herdr/src/index.fixtures.ts')).toBe(true);
+    // Production index-family modules are NOT test support.
+    expect(isTestOrFixture('packages/herdr/src/index.ts')).toBe(false);
+    expect(isTestOrFixture('packages/herdr/src/index.commands.ts')).toBe(false);
+  });
+
+  it('excludes oversized test/fixture modules from the production line ceiling', () => {
+    const index = indexFromSources({
+      'packages/herdr/src/index.ts': `export const a = 1;\n`,
+      'packages/herdr/src/index.args.test.ts': lines(MAX_MODULE_LINES * 3),
+      'packages/herdr/src/index.fixtures.ts': lines(MAX_MODULE_LINES * 3),
+      'packages/herdr/src/index.commands.ts': `export const b = 2;\n`,
+    });
+    // Test and fixture modules are filtered out before the ceiling is applied.
+    expect(indexFamilyModules(index).map((m) => m.file)).toEqual([
+      'packages/herdr/src/index.ts',
+      'packages/herdr/src/index.commands.ts',
+    ]);
+    expect(findOversizedModules(indexFamilyModules(index), [], MAX_MODULE_LINES)).toEqual([]);
+  });
+
+  it('still flags an oversized production index-family module (control)', () => {
+    const index = indexFromSources({
+      'packages/herdr/src/index.commands.ts': lines(MAX_MODULE_LINES + 1),
+    });
+    expect(findOversizedModules(indexFamilyModules(index), [], MAX_MODULE_LINES)).toEqual([
+      { file: 'packages/herdr/src/index.commands.ts', lineCount: MAX_MODULE_LINES + 1 },
+    ]);
   });
 });
