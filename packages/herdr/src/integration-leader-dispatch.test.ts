@@ -154,6 +154,10 @@ function makeWorker(opts: {
   cooldownMs?: number;
   /** checkInIntervalMs (default 5 min, WL-0MTMPSCL8000O45H). */
   checkInIntervalMs?: number;
+  /** `downtimeEnabled` (offer-only mode, WL-0MWDDHOK6009GJCC). Default true. */
+  enabled?: boolean;
+  /** `downtimeOfferOnly` (WL-0MWDDHOK6009GJCC). Default false. */
+  offerOnly?: boolean;
 }): DowntimeWorker {
   const fetcher = vi.fn(async () => {
     const payload = idlePayload();
@@ -178,7 +182,8 @@ function makeWorker(opts: {
     poller: createDowntimePoller('http://localhost:8000', fetcher as never, 5000),
     deps: opts.deps,
     config: () => ({
-      enabled: true,
+      enabled: opts.enabled ?? true,
+      offerOnly: opts.offerOnly,
       thresholdMs: 60_000,
       requiredFreeSlots: 1,
       model: 'plan',
@@ -244,6 +249,63 @@ describe('integration: leader election → coordination → dispatch', () => {
       vi.setSystemTime(20_000_000 + 31 * 60_000);
       await workerB.tick();
       expect(getEntry(sharedCoord, 'inst-b')?.workItemId).toBe('WL-B2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('dispatches an offer written by a disabled + offer-only instance with no local capacity (WL-0MWDDHOK6009GJCC AC7)', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(40_000_000);
+    try {
+      // B is dispatch-disabled and offer-only: it never polls the proxy
+      // (its poller is never called), never takes the leader lease, never
+      // spawns — it ONLY checks in and offers its root's work.
+      const depsB = baseDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [{ id: 'WL-P1', title: 'Passive one', status: 'open', stage: 'intake_complete' }],
+        }),
+      });
+      const depsA = baseDeps({
+        // The leader re-validates the offer at dispatch time exactly as for
+        // an active instance (AC6 — the dispatch-time contract is unchanged).
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-P1', 'intake_complete') }),
+      });
+      const workerB = makeWorker({
+        coordinationDir: sharedCoord,
+        instanceId: 'inst-b',
+        cwd: dirB,
+        deps: depsB,
+        enabled: false,
+        offerOnly: true,
+      });
+      const workerA = makeWorker({
+        coordinationDir: sharedCoord,
+        instanceId: 'inst-a',
+        cwd: dirA,
+        deps: depsA,
+      });
+
+      // B's tick: offer-only check-in only — the entry appears, and none of
+      // the dispatch side effects ran (no capacity anywhere on B).
+      await workerB.tick();
+      expect(getEntry(sharedCoord, 'inst-b')?.workItemId).toBe('WL-P1');
+      expect(depsB.spawnAgentPane).not.toHaveBeenCalled();
+
+      // A (enabled) elects itself leader and, once idle across the threshold,
+      // dispatches B's offer with a stubbed spawn — the passive offer is
+      // indistinguishable from an active one at dispatch time (AC6/AC7).
+      await workerA.tick();
+      expect(workerA.isLeader).toBe(true);
+      vi.setSystemTime(40_000_000 + 60_001);
+      const at = await workerA.tick();
+      expect(at.dispatched).toBe(true);
+      const spawnArgs = (depsA.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(String(spawnArgs[0])).toContain('WL-P1');
+      expect(spawnArgs[1].cwd).toBe(dirB);
+      // The dispatched entry was removed — re-offered by B on its cadence.
+      expect(getEntry(sharedCoord, 'inst-b')).toBe(null);
     } finally {
       vi.useRealTimers();
     }

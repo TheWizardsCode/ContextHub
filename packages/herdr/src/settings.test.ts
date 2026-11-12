@@ -31,6 +31,7 @@ import {
 import * as settingsModule from './settings.js';
 import {
   DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
+  DEFAULT_DOWNTIME_OFFER_ONLY,
   DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   MIN_DOWNTIME_STALL_THRESHOLD_MS,
@@ -659,6 +660,52 @@ describe('downtimeLeafAuditImmediate (WL-0MVV1F1P1005PO5M)', () => {
       'utf-8',
     );
     expect(loadSettings(path).downtimeLeafAuditImmediate).toBe(false);
+  });
+});
+
+// ── downtimeOfferOnly — offer-only mode when dispatch is disabled
+//    (WL-0MWDDHOK6009GJCC AC1) ───────────────────────────────────────────
+//
+// The setting lets a dispatch-disabled instance keep checking in and offering
+// its root to the fleet leader without ever polling/claiming/spawning. It
+// must default OFF (dispatch-disabled ⇒ no check-in, no offer — unchanged)
+// and behave like every other boolean downtime knob on load: absent/
+// malformed → false, re-read live each tick.
+
+describe('downtimeOfferOnly (WL-0MWDDHOK6009GJCC)', () => {
+  it('defaults OFF — a disabled instance stays silent by default', () => {
+    expect(DEFAULT_DOWNTIME_OFFER_ONLY).toBe(false);
+    expect(defaultSettings.downtimeOfferOnly).toBe(false);
+  });
+
+  it('loads an existing settings file without the key as OFF', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ autoRefresh: false }), 'utf-8');
+    expect(loadSettings(path).downtimeOfferOnly).toBe(false);
+  });
+
+  it('round-trips an explicit ON through save/load', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeOfferOnly: true });
+    expect(loadSettings(path).downtimeOfferOnly).toBe(true);
+
+    saveSettings(path, { ...defaultSettings, downtimeOfferOnly: false });
+    expect(loadSettings(path).downtimeOfferOnly).toBe(false);
+  });
+
+  it.each<[string, unknown]>([
+    ['a string "true"', 'true'],
+    ['a number', 1],
+    ['null', null],
+    ['an object', { on: true }],
+  ])('falls back to OFF when the persisted value is %s', (_name, value) => {
+    const path = tempSettingsPath();
+    writeFileSync(
+      path,
+      JSON.stringify({ ...defaultSettings, downtimeOfferOnly: value }),
+      'utf-8',
+    );
+    expect(loadSettings(path).downtimeOfferOnly).toBe(false);
   });
 });
 

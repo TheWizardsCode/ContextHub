@@ -46,6 +46,7 @@ import {
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+  DEFAULT_DOWNTIME_OFFER_ONLY,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_PROXY_URL,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -227,6 +228,18 @@ export interface PluginSettings {
    */
   downtimeLeafAuditImmediate: boolean;
   /**
+   * Offer-only mode (WL-0MWDDHOK6009GJCC): when dispatch is disabled
+   * (`downtimeEnabled: false` or a live manual disable marker) AND this is
+   * `true`, the tick still performs the leader-election check-in and writes/
+   * refreshes this instance's coordination entry with its computed offer —
+   * the fleet leader can see (and dispatch) this root's work even though the
+   * local instance never polls the proxy for capacity, takes the leader
+   * lease, claims an item, reserves capacity or spawns a pane. Default
+   * `false`; absent/malformed → `false`. Re-read each tick like the other
+   * downtime knobs. See docs/dev/downtime-dispatcher.md.
+   */
+  downtimeOfferOnly: boolean;
+  /**
    * Enable periodic auto-close of settled/abandoned agent panes
    * (WL-0MUJL1NAH0042GOS). Default `true`; disable to turn off the reaper
    * without editing code.
@@ -302,6 +315,9 @@ export const defaultSettings: PluginSettings = {
   downtimeCapacityStarvationAlertMs: DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
   downtimeLongRunningThresholdMs: DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
   downtimeLeafAuditImmediate: DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
+  // Offer-only mode (WL-0MWDDHOK6009GJCC AC1): OFF by default — a
+  // dispatch-disabled instance stays silent (no check-in, no offer).
+  downtimeOfferOnly: DEFAULT_DOWNTIME_OFFER_ONLY,
   downtimeCpuGatePercent: DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
   paneCloseEnabled: DEFAULT_PANE_CLOSE_ENABLED,
   paneCloseIdleThresholdMinutes: DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
@@ -498,6 +514,11 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         typeof parsed.downtimeLeafAuditImmediate === 'boolean'
           ? parsed.downtimeLeafAuditImmediate
           : defaultSettings.downtimeLeafAuditImmediate,
+      // Offer-only mode (WL-0MWDDHOK6009GJCC AC1): a boolean knob read live
+      // per tick. Anything that is not literally `true`/`false` (absent,
+      // string, number, null) resolves to the fail-closed default `false`.
+      downtimeOfferOnly: typeof parsed.downtimeOfferOnly === 'boolean'
+        ? parsed.downtimeOfferOnly : defaultSettings.downtimeOfferOnly,
       paneCloseEnabled: typeof parsed.paneCloseEnabled === 'boolean'
         ? parsed.paneCloseEnabled : defaultSettings.paneCloseEnabled,
       paneCloseIdleThresholdMinutes: typeof parsed.paneCloseIdleThresholdMinutes === 'number'

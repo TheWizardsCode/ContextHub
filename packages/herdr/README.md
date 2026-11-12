@@ -789,6 +789,24 @@ pacing* below).
   Boolean; absent/malformed → `false`; re-read live on every tick, and the
   decision log records `leafAuditImmediate` on the `leaf-audit-admission`
   token
+- `downtimeOfferOnly` — **Opt-in, default `false`** (WL-0MWDDHOK6009GJCC).
+  When dispatch is **disabled** (`downtimeEnabled: false` or a live manual
+  `d` disable marker) AND this is `true`, the instance still performs the
+  coordination **check-in**: it writes/refreshes its `entries` offer with
+  its computed most-important item (same computation, filters and staleness
+  semantics as an active instance), so the fleet leader can see — and
+  dispatch — this root's work even though the local instance never polls the
+  llama proxy, takes the leader lease, claims an item, reserves capacity or
+  spawns a pane. It is strictly a check-in concern: a passive instance can
+  never dispatch, claim, reserve or lead (fail closed in code, not by
+  convention). Use it for instances that must never run agents locally
+  (no local model capacity, contested GPU, machine in use) but whose worklog
+  root should still be served by the fleet leader — **prefer it over
+  `downtimeWorklogRoots` when the root's instance is running but passive**;
+  keep the registry for roots with no running instance at all (the two
+  mechanisms are independent and compose). Boolean; absent/malformed →
+  `false`; re-read live on every tick. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#offer-only-mode-downtimeofferonly---wl-0mwddhok6009gjcc)
 - `downtimeWorklogRoots` — Registered worklog roots the leader may sweep for
   dispatchable work even when **no herdr instance is running** in them
   (default: `[]`). Each entry is a worklog ROOT — the parent of `.worklog/`,

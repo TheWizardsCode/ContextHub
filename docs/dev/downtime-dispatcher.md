@@ -556,7 +556,9 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
 1. **Check-in** — every instance reads the file on startup; leaders re-offer every ~4 minutes
    (`DEFAULT_LEADER_CHECK_IN_MS = 4 min`) and followers every 5 minutes
    (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H — was 30 min, clamped ≥ 60 s),
-   recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
+   recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
+   also checks in on the follower cadence (WL-0MWDDHOK6009GJCC — see *Offer-only mode*
+   below), so a passive root still contributes an offer to the leader. When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
 2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**. A non-dispatchable entry (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via `removeEntry` **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the tier loop **continues to the next entry**. Entries do **not** expire by wall-clock age.
 3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
@@ -589,7 +591,9 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    preserved unchanged.
 5. **Non-leaders** skip proxy polling and dispatch entirely — they only
    refresh their lease check (a cheap local file read) and their
-   coordination entry.
+   coordination entry. Dispatch-disabled instances with `downtimeOfferOnly`
+   contribute an entry exactly like a follower (never pooling, never
+   leading) — see *Offer-only mode* above.
 
 ### Truthful local-slot capacity (schema v2, LP-0MVGDUVGE0024YAI)
 
@@ -3508,6 +3512,51 @@ honoured live and across restarts — it is never derived from queue depth. The 
 header's "sprint complete" banner is display-only (a review-queue-depth indicator); it no
 longer writes/clears the marker. If a genuinely distinct sprint-complete signal is ever
 desired it must be a separate, explicit mechanism (follow-up, out of scope here).
+
+#### Offer-only mode (downtimeOfferOnly) - WL-0MWDDHOK6009GJCC
+
+A herdr instance whose downtime dispatch is deliberately switched off
+(`downtimeEnabled: false` or a live manual `d` disable marker) normally produces **no
+coordination offer at all**: the enabled/disable gate returns before the leader
+election/check-in, so the fleet leader cannot see that root's backlog. The only
+workaround used to be hand-registering the root in `downtimeWorklogRoots`, which
+duplicates a source of truth the instance already knows. Typical deployments: a
+desktop instance that must not run agents locally (no local model capacity, contested
+GPU, machine in use) and a laptop kept only as a viewer.
+
+`downtimeOfferOnly` (default `false`) closes the gap. When dispatch is disabled AND
+`downtimeOfferOnly: true`, the tick performs the **coordination check-in only**: it
+computes and writes/refreshes this instance's `entries` offer via the same
+`computeMostImportantItem` computation, filters and staleness semantics as an active
+instance (`runCoordinationCheckIn`, unchanged cadence — the non-leader 5-min default,
+WL-0MTMPSCL8000O45H; AC6), then stops. A passive instance **never** polls the llama
+proxy, takes the leader lease, runs a CAS claim, writes a dispatch marker, reserves
+capacity or spawns a pane — the gate routes these ticks through
+`runOfferOnlyCheckIn` *before* the election/poll/dispatch phases are reachable (fail
+closed in code, not by convention; AC3). The knob is re-read every tick, so a settings
+change applies without a plugin restart (AC1).
+
+Composition notes:
+
+- **Fail-open (AC5).** A failed offer computation (`{ok:false}`) or coordination write
+  keeps the previous entry intact, never throws out of the tick and never removes
+  another instance's entry.
+- **Leader-side compatibility (AC6).** The elected leader's dispatch-time re-validation
+  (`fetchItem` → `classifyItemForDispatch` → gates) and its 24 h `hasPeerOffer`
+  liveness predicate are unchanged — an offer from a passive instance is
+  indistinguishable from an active one at dispatch time, so no leader change is
+  required and no second selection path exists.
+- **Transient quiescence.** Offer-only never renews or takes the lease. An instance
+  that already HELD the lease when the mode was switched on keeps it until the 5-min
+  TTL expires (nothing renews it), so dispatch may pause for up to one TTL before a
+  new election — automatic, safe, and inherent to "the passive instance must not
+  dispatch or lead".
+- **Prefer over `downtimeWorklogRoots` when the root's instance is running but
+  passive.** `downtimeOfferOnly` removes the operational need to maintain the registry
+  for such roots: the instance advertises the work it can see itself. The two
+  mechanisms are independent and compose — see the registered-root discovery section
+  above for when the registry is still the right tool (roots with **no** running herdr
+  instance at all).
 
 ### Critical-first tier & freeze split-by-skill
 

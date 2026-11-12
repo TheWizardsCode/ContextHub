@@ -1820,6 +1820,12 @@ export async function main(): Promise<void> {
         // escape hatch on/off applies without a plugin restart. Default OFF —
         // the fail-closed C4 admission (full idle threshold) is unchanged.
         leafAuditImmediate: s.downtimeLeafAuditImmediate,
+        // Offer-only mode (WL-0MWDDHOK6009GJCC): re-read each tick like the
+        // other downtime settings, so a settings change applies without a
+        // plugin restart. When dispatch is disabled and this is ON the
+        // instance still checks in and offers its root to the fleet leader
+        // (never polling/claiming/spawning).
+        offerOnly: s.downtimeOfferOnly,
         browseItemCount: s.browseItemCount,
         // Registered-root discovery (parent WL-0MVR8GDJ3008WY3Y O1): the
         // already-clamped/validated `downtimeWorklogRoots` registry, re-read

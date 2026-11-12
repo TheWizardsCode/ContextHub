@@ -303,6 +303,14 @@ export function writeCoordinationFile(worklogDir: string, data: CoordinationData
 export function tryAcquireCoordLock(worklogDir: string): (() => void) | null {
   try {
     const fp = lockFilePath(worklogDir);
+    // Ensure the coordination dir exists FIRST (same provisioning as
+    // writeLockFile / writeLeaseFile / writeCoordinationFile): an
+    // offer-only instance (WL-0MWDDHOK6009GJCC) checks in on a fresh dir
+    // before ANY election could provision it, and without the mkdir the
+    // O_EXCL open below fails with ENOENT + the lock is never taken, so
+    // the instance's first check-in write silently no-ops.
+    const effDir = resolveEffectiveDir(worklogDir) ?? worklogDir;
+    fs.mkdirSync(effDir, { recursive: true });
     // Atomic exclusive create — fails (EEXIST) while another holder owns it.
     const fd = fs.openSync(fp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o644);
     fs.closeSync(fd);

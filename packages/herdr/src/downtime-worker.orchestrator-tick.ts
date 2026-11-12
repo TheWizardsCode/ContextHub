@@ -69,19 +69,33 @@ import type { LlamaSlot, LlamaStatus } from './downtime-worker.types.js';
 // ── Tick phases ────────────────────────────────────────────────────────
 
 /**
+ * The enabled/disable gate result: `null` = dispatch enabled (continue);
+ * `{ offerOnly: true }` = dispatch disabled but offer-only mode is on
+ * (WL-0MWDDHOK6009GJCC — the tick proceeds to the offer-only check-in, then
+ * stops); `OrchestratorTickResult` = a fully stopped tick (disabled, no
+ * offer). The decision is made HERE and nowhere else, so a passive instance
+ * can never reach the election/dispatch phases by a refactor reordering.
+ */
+export type EnabledGateResult = OrchestratorTickResult | ({ offerOnly: true }) | null;
+
+/**
  * The enabled / durable-disable-marker gates (WL-0MTTSWC1X005P4VD): return a
  * stopped tick when the worker is toggled off or a manual `d` marker is live,
- * else null.
+ * else null. Offer-only mode (WL-0MWDDHOK6009GJCC): when dispatch is disabled
+ * but `downtimeOfferOnly` is on, return `{ offerOnly: true }` so the tick
+ * still checks in and offers this root to the fleet leader — it never polls,
+ * claims or spawns (the offer-only path returns before those phases).
  */
 export function applyEnabledGates(
   ctx: OrchestratorContext,
   cfg: OrchestratorConfig,
-): OrchestratorTickResult | null {
+): EnabledGateResult {
   // Short-circuit on the EFFECTIVE enabled state (override ?? settings):
   // while toggled off the worker performs no proxy polling, no idle
   // tracking, and no dispatch — exactly the settings-disabled path.
   if (!(ctx.override ?? cfg.enabled)) {
     ctx.activeAuditBatch = null; // disabled → no carried batch window
+    if (cfg.offerOnly === true) return { offerOnly: true };
     return { polled: false, dispatched: false, idle: false };
   }
   // ── Live marker gate (MANUAL `d`-toggle semantics only) ──────────
@@ -101,9 +115,97 @@ export function applyEnabledGates(
   // honoured cross-process.
   if (disableMarkerExists(cfg.cwd) && ctx.override === null) {
     ctx.activeAuditBatch = null; // disabled → no carried batch window
+    if (cfg.offerOnly === true) return { offerOnly: true };
     return { polled: false, dispatched: false, idle: false };
   }
   return null;
+}
+
+/**
+ * One coordination CHECK-IN cycle (WL-0MTMPSCL8000O45H, WL-0MTEZ4XZJ006Y9U7,
+ * WL-0MW1VINII003IL7R): when the periodic cadence is due (or an immediate
+ * re-offer is pending), recompute this instance's most-important item via
+ * `runCoordinationCheckIn` and apply the cooldown-cancel semantics.
+ *
+ * Shared verbatim by the leader/peer path and the offer-only path
+ * (WL-0MWDDHOK6009GJCC AC6) — a passive instance's entry is produced by
+ * exactly the same computation, filters and staleness semantics as an active
+ * one's, so the leader's dispatch-time re-validation sees a passive offer
+ * indistinguishably from an active one (no leader change required).
+ *
+ * Immediate re-offer when the owner's entry was removed by the leader's
+ * dispatch (WL-0MTMPSCL8000O45H AC2); fail-open on an unreadable file; never
+ * while paused or while the last check-in offered nothing (churn guard).
+ * Fail-safe: a throwing check-in never crashes the tick; a `{ok:false}`
+ * computation keeps the existing entry and never touches a peer's (AC5).
+ *
+ * Returns whether the cadence was due (a check-in ran) so the leader path
+ * can decide whether to write its leader-block heartbeat on the same cadence.
+ */
+async function runCheckInCycle(
+  ctx: OrchestratorContext,
+  cfg: OrchestratorConfig,
+  tickNow: number,
+  checkInIntervalMs: number,
+): Promise<boolean> {
+  let reOfferDue = false;
+  try {
+    const notPaused = ctx.cooldownUntil === null || Date.now() >= ctx.cooldownUntil;
+    reOfferDue =
+      notPaused
+      && !disableMarkerExists(cfg.cwd)
+      && !ctx.lastOfferEmpty
+      && getEntry(ctx.opts.coordinationDir!, ctx.instanceId) === null;
+  } catch {
+    reOfferDue = false;
+  }
+  if (!(reOfferDue || ctx.lastCheckInAt === null || tickNow - ctx.lastCheckInAt >= checkInIntervalMs)) {
+    return false;
+  }
+  ctx.lastCheckInAt = tickNow;
+  try {
+    const checkIn = await runCoordinationCheckIn(ctx.opts.deps, {
+      cwd: cfg.cwd,
+      coordinationDir: ctx.opts.coordinationDir!,
+      instanceId: ctx.instanceId,
+      browseItemCount: cfg.browseItemCount,
+      markerStaleWindowMs: cfg.markerStaleWindowMs,
+      nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
+      maxAttempts: cfg.maxAttempts,
+      coordinationLogPolicy: coordinationLogPolicyFromConfig(cfg),
+    }, tickNow);
+    ctx.lastOfferEmpty = checkIn.offered === null;
+    // WL-0MTEZ4XZJ006Y9U7 (AC2): any successful write (re-offer, emptied
+    // entry or a CLI-healthy no-write) proves CLI health, and a peer entry
+    // observed during the pause proves the backlog is not empty — either
+    // cancels the no-candidate pause so polling/dispatch resumes this tick
+    // (WL-0MVP7QHUB003ZA2A AC3; fail-safe: an unreadable file resolves no
+    // peer and leaves the pause exactly as it is). A re-offer proves the
+    // backlog is dispatchable again — the pause must never suppress the only
+    // mechanism that re-offers work once the coordination file empties.
+    if (checkIn.updated || checkIn.offered !== null) {
+      ctx.cooldownUntil = null;
+      ctx.errorStrikes = 0;
+    } else if (ctx.cooldownUntil !== null && checkIn.offered !== null) {
+      // File already holds the same entry (no write needed) but CLI healthy
+      // — also cancel so stale-file probes don't keep the pause alive.
+      ctx.cooldownUntil = null;
+      ctx.errorStrikes = 0;
+    } else if (ctx.cooldownUntil !== null && hasPeerOffer(
+      readCoordinationFile(ctx.opts.coordinationDir!)?.entries ?? [],
+      ctx.instanceId,
+      { nowMs: Date.now() },
+    )) {
+      // Coordination check-in cancels, peer presence cancels (parent
+      // WL-0MVP7QHUB003ZA2A AC3).
+      ctx.cooldownUntil = null;
+      ctx.errorStrikes = 0;
+    }
+  } catch {
+    // Fail-safe: a throwing check-in (stub or regression) must never
+    // crash the worker — retried at the next cadence.
+  }
+  return true;
 }
 
 /**
@@ -210,98 +312,31 @@ export async function runLeaderElectionAndCheckIn(
     // 2026-11-04 outage showed five healthy offers and no dispatcher for eight
     // hours. The block is evidence only; `entries` semantics are untouched.
     //
-    // WL-0MTMPSCL8000O45H AC2 — immediate re-offer when the owner's own
-    // entry was removed by the leader's dispatch (push-based re-offer
-    // via coordination-file observation on the next tick). Fail-open:
-    // unreadable coordination file → no re-offer → the periodic cadence
-    // retries. Not while paused (no-candidate cooldown is a full stop;
-    // the periodic boundary below still cancels the pause on a fresh
-    // offer) and not while the last check-in offered nothing (churn
-    // guard — the periodic cadence re-probes for new work).
-    let reOfferDue = false;
-    try {
-      const notPaused = ctx.cooldownUntil === null || Date.now() >= ctx.cooldownUntil;
-      reOfferDue =
-        notPaused
-        && !disableMarkerExists(cfg.cwd)
-        && !ctx.lastOfferEmpty
-        && getEntry(ctx.opts.coordinationDir!, ctx.instanceId) === null;
-    } catch {
-      reOfferDue = false;
-    }
+    // The check-in cycle itself (reOfferDue probe, cadence gate, the
+    // `runCoordinationCheckIn` call and the cooldown-cancel semantics) now
+    // lives in `runCheckInCycle` — shared verbatim with the offer-only path
+    // (WL-0MWDDHOK6009GJCC AC6), so a passive instance's entry is produced by
+    // exactly the same computation and staleness semantics as an active one's.
     const effectiveCheckInMs = ctx.leaderState ? ctx.leaderCheckInMs : ctx.checkInIntervalMs;
-    if (reOfferDue || ctx.lastCheckInAt === null || tickNow - ctx.lastCheckInAt >= effectiveCheckInMs) {
-      ctx.lastCheckInAt = tickNow;
-      try {
-        const checkIn = await runCoordinationCheckIn(ctx.opts.deps, {
-          cwd: cfg.cwd,
-          coordinationDir: ctx.opts.coordinationDir!,
-          instanceId: ctx.instanceId,
-          browseItemCount: cfg.browseItemCount,
-          markerStaleWindowMs: cfg.markerStaleWindowMs,
-          nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
-          maxAttempts: cfg.maxAttempts,
-          coordinationLogPolicy: coordinationLogPolicyFromConfig(cfg),
-        }, tickNow);
-        ctx.lastOfferEmpty = checkIn.offered === null;
-        // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
-        // backlog is dispatchable again — cancel any no-candidate pause
-        // so the leader resumes polling/dispatch this very tick. The
-        // check-in block runs BEFORE the cooldown gate below, so the
-        // pause can never suppress the only mechanism that re-offers
-        // work once the coordination file empties.
-        // WL-0MTEZ4XZJ006Y9U7 (AC2): any successful write (re-offer
-        // or emptied entry) proves CLI health — cancel any pause so
-        // polling resumes this tick. A non-update on a paused worker
-        // also cancels (the write proved CLI health; dispatch will
-        // resume next tick via the poll).
-        if (checkIn.updated || checkIn.offered !== null) {
-          ctx.cooldownUntil = null;
-          ctx.errorStrikes = 0;
-        } else if (ctx.cooldownUntil !== null && checkIn.offered !== null) {
-          // File already holds the same entry (no write needed) but
-          // CLI healthy — also cancel so stale-file probes don't keep
-          // the pause alive while work still exists.
-          ctx.cooldownUntil = null;
-          ctx.errorStrikes = 0;
-        } else if (ctx.cooldownUntil !== null && hasPeerOffer(
-          readCoordinationFile(ctx.opts.coordinationDir!)?.entries ?? [],
-          ctx.instanceId,
-          { nowMs: Date.now() },
-        )) {
-          // Coordination check-in cancels, peer presence cancels (parent
-          // WL-0MVP7QHUB003ZA2A AC3): an offer that APPEARS during a pause
-          // (another instance's check-in) must not wait out the 60-minute
-          // full stop — the offer list is not polled while paused, so this
-          // check-in is the only tick that can observe it. A peer entry with
-          // a dispatchable item means the backlog is not empty, so the pause
-          // is cancelled and polling resumes on this very tick (the cooldown
-          // gate below then sees `cooldownUntil === null`). Fail-safe: an
-          // unreadable coordination file resolves `[]` → no peer → the pause
-          // is left exactly as it is today.
-          ctx.cooldownUntil = null;
-          ctx.errorStrikes = 0;
-        }
-      } catch {
-        // Fail-safe: a throwing check-in (stub or regression) must never
-        // crash the worker — retried at the next cadence.
-      }
-      // Leader-block heartbeat (WL-0MW1VINII003IL7R): record the dispatcher
-      // and its latest decision token regardless of the check-in's offer
-      // outcome — the empty-window case is precisely the one that used to be
-      // invisible. Written after the check-in so the block never races the
-      // offer upsert for the lock, and OUTSIDE the try above so a throwing
-      // check-in cannot suppress it. `upsertLeader` is itself fail-safe.
-      if (ctx.leaderState) {
-        upsertLeader(ctx.opts.coordinationDir!, {
-          instanceId: ctx.instanceId,
-          worklogRoot: cfg.cwd,
-          lastDecisionReason: ctx.lastDecisionReason,
-          lastDecisionAt:
-            ctx.lastDecisionAt > 0 ? new Date(ctx.lastDecisionAt).toISOString() : null,
-          lastUpdated: new Date(tickNow).toISOString(),
-        });
-      }
+    const checkInRan = await runCheckInCycle(ctx, cfg, tickNow, effectiveCheckInMs);
+    // Leader-block heartbeat (WL-0MW1VINII003IL7R): record the dispatcher
+    // and its latest decision token regardless of the check-in's offer
+    // outcome — the empty-window case is precisely the one that used to be
+    // invisible. Written after the check-in so the block never races the
+    // offer upsert for the lock, and OUTSIDE the check-in's try so a
+    // throwing check-in cannot suppress it. `upsertLeader` is itself
+    // fail-safe. Only on a due cycle (the heartbeat cadence is the check-in
+    // cadence) and only while holding the lease — a passive offer-only
+    // instance never presents as the dispatcher.
+    if (checkInRan && ctx.leaderState) {
+      upsertLeader(ctx.opts.coordinationDir!, {
+        instanceId: ctx.instanceId,
+        worklogRoot: cfg.cwd,
+        lastDecisionReason: ctx.lastDecisionReason,
+        lastDecisionAt:
+          ctx.lastDecisionAt > 0 ? new Date(ctx.lastDecisionAt).toISOString() : null,
+        lastUpdated: new Date(tickNow).toISOString(),
+      });
     }
 
     // Non-leader short-circuit (AC4): no proxy polling, no idle
@@ -313,6 +348,36 @@ export async function runLeaderElectionAndCheckIn(
     }
   }
   return { tickNow, stop: null };
+}
+
+/**
+ * Offer-only tick (WL-0MWDDHOK6009GJCC): the ENTIRE pre-dispatch portion of a
+ * dispatch-DISABLED + `downtimeOfferOnly` tick. Runs only the coordination
+ * check-in (the same computation/cadence/staleness semantics as the active
+ * path — AC6) and then stops: leader election/lease, proxy poll, CAS claim,
+ * dispatch-marker write, host-budget reservation and pane spawn are all
+ * structurally unreachable because this function returns a stopped result
+ * before `runLeaderElectionAndCheckIn`, `pollAndEvaluate` and
+ * `performDispatch` are ever called on this path.
+ *
+ * The passive instance NEVER takes the leader lease and never writes the
+ * leader-block heartbeat — it uses the non-leader check-in cadence
+ * (`checkInIntervalMs`) regardless of any stale `leaderState` cache, so it
+ * can never present as the dispatcher. Legacy mode (no coordinationDir) has
+ * no shared file to check in to — a pure no-op stop. Fail-open (AC5): a
+ * failed offer computation or write keeps the previous entry and never
+ * throws out of the tick.
+ */
+async function runOfferOnlyCheckIn(
+  ctx: OrchestratorContext,
+  cfg: OrchestratorConfig,
+): Promise<OrchestratorTickResult> {
+  const tickNow = Date.now();
+  if (ctx.leaderManager !== null) {
+    await runCheckInCycle(ctx, cfg, tickNow, ctx.checkInIntervalMs);
+  }
+  ctx.activeAuditBatch = null; // no carried batch window in a stopped tick
+  return { polled: false, dispatched: false, idle: false };
 }
 
 /**
@@ -882,7 +947,15 @@ export async function runOrchestratorTick(
   // admission never outlives the tick that computed it.
   ctx.leafAuditAdmission = null;
   const enabledGate = applyEnabledGates(ctx, cfg);
-  if (enabledGate !== null) return enabledGate;
+  if (enabledGate !== null) {
+    // Offer-only mode (WL-0MWDDHOK6009GJCC): dispatch is disabled but the
+    // instance still checks in and offers. The offer-only decision was made
+    // INSIDE `applyEnabledGates` (never re-derived here) — election (no
+    // lease), proxy poll, CAS claim, reservation and spawn are all
+    // structurally unreachable on this path.
+    if ('offerOnly' in enabledGate) return runOfferOnlyCheckIn(ctx, cfg);
+    return enabledGate;
+  }
   const leader = await runLeaderElectionAndCheckIn(ctx, cfg);
   if (leader.stop !== null) return leader.stop;
   runPaneMaintenance(ctx, cfg, leader.tickNow);

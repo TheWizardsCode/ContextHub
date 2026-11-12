@@ -766,6 +766,19 @@ export interface DowntimeWorkerConfig {
      */
     leafAuditImmediate?: boolean;
     /**
+     * Offer-only mode (WL-0MWDDHOK6009GJCC): when the effective enabled state
+     * is off (`override ?? cfg.enabled` falsy — a `downtimeEnabled: false`
+     * setting, an in-memory `d` toggle, or a live manual disable marker) AND
+     * this is `true`, the tick still performs the coordination check-in
+     * (offer computation + entry write/refresh on the normal non-leader
+     * cadence) but does NOT poll the proxy, take the leader lease, claim an
+     * item, reserve capacity or spawn a pane — the instance advertises its
+     * root to the fleet leader while remaining passive locally. Fail-closed
+     * default `false`: absent keeps today's no-check-in-when-disabled
+     * behaviour exactly. Read live on every tick.
+     */
+    offerOnly?: boolean;
+    /**
      * Continuous capacity-refusal window before a `capacity-starved`
      * observation is written (WL-0MVKNC2N50025HXE AC3). Read live on every
      * tick. Optional — defaults to

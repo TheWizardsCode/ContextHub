@@ -126,6 +126,15 @@ export const DOWNTIME_LEAF_AUDIT_MIN_FREE_SLOTS = 1;
  */
 export const DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE = false;
 /**
+ * Default for the offer-only mode (`downtimeOfferOnly`, WL-0MWDDHOK6009GJCC):
+ * **off**. A dispatch-disabled instance performs NO coordination check-in and
+ * offers nothing by default — behaviour is unchanged. When explicitly enabled
+ * a disabled instance still performs the coordination check-in and offer
+ * computation without ever polling the proxy, taking the leader lease,
+ * claiming an item, reserving capacity or spawning a pane.
+ */
+export const DEFAULT_DOWNTIME_OFFER_ONLY = false;
+/**
  * Minimum free slots required for a single-pane dispatch (implement /
  * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3, F5
  * WL-0MTII48OV008P2QU single budget): each pane consumes exactly one local
