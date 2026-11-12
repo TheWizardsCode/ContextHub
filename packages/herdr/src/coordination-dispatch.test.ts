@@ -3871,3 +3871,174 @@ describe('host-wide dispatch budget (F3)', () => {
     expect(outcome.reason).not.toBe('no-candidate');
   });
 });
+
+// ── Per-bucket nominees from one head read (parent WL-0MWDDHQON0015T3P AC2/AC3) ──
+//
+// Tier-aware offers (WL-0MWDDHQON0015T3P): each instance advertises the head
+// of EVERY dispatch bucket (`implement` / `audit` / `prep` — the union of
+// plan/intake/risk-effort) so a budget-refused head cannot hide the root's
+// other backlog. This slice (WL-0MWDVMYAC0064JNW) defines the OFFER-COMPUTATION
+// contract: all three nominees are drawn from the SAME sprint-view window the
+// single-offer path uses today, partitioned per bucket — one
+// `getHerdrListHead` call per computation, no new ranking/scoring logic, and
+// the single-offer path's fail-open, stall-scan short-circuit and sequential
+// filters preserved per bucket.
+//
+// RED WITNESS. The per-bucket surface does not exist yet: today
+// `computeMostImportantItem` still returns a SINGLE offer (`{ok:true, kind,
+// candidate}`) with no `nominees` array. Each body below asserts the
+// post-implementation contract and is committed with `it.fails` — the suite
+// stays green because the bodies currently throw (the `nominees` surface is
+// absent). Implementation child WL-0MWDVMZNV0011FDT flips each `it.fails` to
+// `it` and makes the bodies pass; the two plain `it` bodies pin contracts
+// that are preserved unchanged (they pass today and must keep passing).
+describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
+  /**
+   * Post-F2 per-bucket nominee — the v2 `offers` entry shape F1's check-in
+   * write path consumes (`{kind, workItemId}`, at most one per bucket).
+   */
+  interface NomineeWitness {
+    kind: 'implement' | 'audit' | 'prep';
+    workItemId: string;
+  }
+
+  /** Read the per-bucket surface through a narrow structural cast (absent today). */
+  const nomineesOf = (result: unknown): NomineeWitness[] | undefined =>
+    (result as { nominees?: NomineeWitness[] }).nominees;
+
+  // Mixed-kind window fixtures in CANONICAL Herdr list order (the window IS
+  // the ranking — no new priority/age/scoring logic may re-order it).
+  const implementItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Implement ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', sortIndex });
+  const auditItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Audit ${id}`, status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString(), sortIndex });
+  /** Prep-bucket item (plan tier in the classification). */
+  const prepItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Prep ${id}`, status: 'open', stage: 'intake_complete', sortIndex });
+
+  it.fails('AC1: each nominee is the canonical FIRST item of its bucket in window order — a lower sortIndex later in the window never displaces it', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        // Window order = the canonical ranking. The SECOND item of each bucket
+        // carries a lower sortIndex (which other logic would rank higher):
+        // per-bucket selection must keep the window-first item, otherwise a
+        // new scoring rule crept in.
+        items: [
+          implementItem('WL-IMP-1', 500),
+          auditItem('WL-AUD-1', 500),
+          prepItem('WL-PREP-1', 500),
+          implementItem('WL-IMP-2', 1),
+          auditItem('WL-AUD-2', 1),
+          prepItem('WL-PREP-2', 1),
+        ],
+      }),
+    });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-1' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+      { kind: 'prep', workItemId: 'WL-PREP-1' },
+    ]);
+  });
+
+  it.fails('AC2: exactly ONE getHerdrListHead call computes all three nominees (no per-bucket wl spawn)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1')],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toHaveLength(3);
+    // The single sprint-view read served every bucket — no additional wl list
+    // spawn per bucket, and exactly the sprint view was requested.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    expect(getHerdrListHead).toHaveBeenCalledWith('/repo', expect.any(Number));
+  });
+
+  it.fails('AC3: a bucket empty in the window nominates NOTHING and the window is not widened', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      // No idea / intake_complete / risk-effort item anywhere → the prep
+      // bucket is empty; the computation must not re-read to find one.
+      items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1')],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-1' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+    ]);
+    // No widening read for the missing prep bucket.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+  });
+
+  it.fails('AC3: per-bucket filters preserved — a fresh dispatch marker on the implement head skips to the NEXT offerable implement, other buckets unaffected', async () => {
+    // WL-IMP-1 was just dispatched at its current stage → the implement-bucket
+    // exclusion skips it and nominates the next offerable implement, while
+    // the audit and prep buckets still nominate their own canonical heads
+    // (the same sequential filters the single-offer path applies today).
+    writeDowntimeLog('/repo', [
+      { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
+    ] as never);
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1'), implementItem('WL-IMP-2')],
+      }),
+    });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-2' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+      { kind: 'prep', workItemId: 'WL-PREP-1' },
+    ]);
+  });
+
+  it('AC3: preserve the {ok:false} fail-open contract — a head lookup failure yields no nominees and never throws (the caller keeps its entry)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({ ok: false, error: 'wl exploded' });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error).toBe('wl exploded');
+    // The single aborted read, exactly as today — never a per-bucket retry.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    expect((result as { nominees?: unknown }).nominees).toBeUndefined();
+  });
+
+  it('AC3: preserve the stall-scan short-circuit — a resumed stalled pane yields stalledResume BEFORE any head read (no per-bucket read either)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1')],
+    });
+    const deps = makeCoordinationDeps({
+      getHerdrListHead,
+      scanStalledPanes: vi.fn().mockResolvedValue([
+        {
+          pane: { paneId: 'pane-1', label: 'Downtime triggered implement Some item - WL-STALLED', agent: 'pi', agentStatus: 'idle' },
+          item: { id: 'WL-STALLED', status: 'open', stage: 'plan_complete', title: 'Some item', updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() },
+          cwd: '/repo',
+          kind: 'implement',
+        },
+      ]),
+      resumeStalledPane: vi.fn().mockResolvedValue({ resumed: true, reason: 'prompt', paneId: 'pane-1', itemId: 'WL-STALLED', kind: 'implement' }),
+    });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('stalledResume' in result)) throw new Error('expected stalledResume');
+    expect(result.stalledResume).toBe(true);
+    // Short-circuit before the (single shared) head read — preserved per bucket.
+    expect(getHerdrListHead).not.toHaveBeenCalled();
+  });
+});
