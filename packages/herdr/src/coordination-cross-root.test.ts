@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatchFromCoordination, type DowntimeWorkerDeps, type DowntimeItemInfo, type HerdrPaneRecord } from './downtime-worker.js';
 import type { CoordinationEntry } from './coordination.js';
+import { saveRoundRobinCursor } from './downtime-round-robin-by-root.js';
 import {
   scanStalledPanes,
   resumeStalledPane,
@@ -356,5 +357,110 @@ describe('registered-root registry fail-safe (parent AC6)', () => {
     // leader's own backlog (never reached here — the offer dispatched).
     expect(headCalls).not.toContain(offerRoot);
     expect(headCalls.filter((cwd) => cwd !== leaderRoot)).toEqual([]);
+  }));
+});
+
+// ── Cross-root round-robin governs ROOT order (parent WL-0MWDDHQON0015T3P AC8) ──
+//
+// Tier choice (audit-drain → prep → implement) happens ONLY inside an entry.
+// Across entries, `selectLeastRecentlyServed` alone decides root order, so a
+// root offering more buckets (or a "higher" tier) gains no root-level share.
+// These plain specs are GREEN today (v1 single-offer entries) and must stay
+// green after F3 (WL-0MWDVN2HN004CQ1O, per-offer iteration) — they are the
+// regression guard for the "no second ranking on the dispatch path" contract.
+// The RED v2 spec below (a multi-bucket root gaining no root-level share)
+// flips green along with F1 (WL-0MWDVMVX50012RSU) + F3.
+describe('round-robin still governs root order (parent AC8)', () => {
+  it('a PREP offer in the cursor-oldest root dispatches before an IMPLEMENT offer in a newer root (tier choice never crosses roots)', withShared(async () => {
+    const rootA = '/repo/a'; const rootB = '/repo/b';
+    // rootA was served most recently; rootB is the least-recently-served.
+    saveRoundRobinCursor(shared, {
+      [rootA]: '2026-12-31T23:59:59.999Z',
+      [rootB]: '2026-01-01T00:00:00.000Z',
+    });
+    const d = deps({
+      fetchItem: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'WL-IMPL') return { ok: true, info: info({ id, status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }) };
+        return { ok: true, info: info({ id, status: 'open', stage: 'intake_complete' }) };
+      }),
+    });
+    const out = await dispatchFromCoordination(
+      d,
+      [entry('inst-a', 'WL-IMPL', rootA), entry('inst-b', 'WL-PREP', rootB)],
+      { model: 'plan', cwd: '/repo', coordinationDir: shared },
+    );
+    expect(out.dispatched).toBe(true);
+    expect(out.kind).toBe('plan'); // rootB's prep, NOT rootA's implement
+    const spawn = (d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(spawn[1].cwd).toBe(rootB);
+    expect(String(spawn[0])).toContain('WL-PREP');
+  }));
+
+  it('rotates across successive ticks: after rootB dispatches, the SELECTION ITSELF advances the cursor so the next tick favours rootA', withShared(async () => {
+    const rootA = '/repo/a'; const rootB = '/repo/b';
+    // Seed BOTH roots as known, rootB strictly older → tick 1 selects rootB;
+    // the selection advances rootB to now, so tick 2 selects rootA.
+    saveRoundRobinCursor(shared, {
+      [rootA]: '2026-06-01T00:00:00.000Z',
+      [rootB]: '2026-01-01T00:00:00.000Z',
+    });
+    const d = deps({
+      fetchItem: vi.fn().mockImplementation(async (id: string) =>
+        ({ ok: true, info: info({ id, status: 'open', stage: 'intake_complete' }) }),
+      ),
+    });
+    // Tick 1: rootB is cursor-oldest → rootB's offer dispatches.
+    const first = await dispatchFromCoordination(
+      d,
+      [entry('inst-a', 'WL-A', rootA), entry('inst-b', 'WL-B', rootB)],
+      { model: 'plan', cwd: '/repo', coordinationDir: shared },
+    );
+    expect(first.dispatched).toBe(true);
+    expect((d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1].cwd).toBe(rootB);
+    // Tick 2 (same two roots, fresh file not needed — the cursor is the
+    // shared state): rootB was just served, so rootA is now least-recently-served.
+    const second = await dispatchFromCoordination(
+      d,
+      [entry('inst-a', 'WL-A', rootA), entry('inst-b', 'WL-B', rootB)],
+      { model: 'plan', cwd: '/repo', coordinationDir: shared },
+    );
+    expect(second.dispatched).toBe(true);
+    expect((d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[1][1].cwd).toBe(rootA);
+  }));
+
+  it.fails('a root offering the FULL v2 bucket set gains no root-level priority: a cursor-older peer single-offer root still dispatches first', withShared(async () => {
+    const rootA = '/repo/a'; const rootB = '/repo/b';
+    // rootA advertises all three buckets (v2 offers payload, no top-level
+    // workItemId); rootB — cursor-oldest — one v1-style offer.
+    const v2 = {
+      instanceId: 'inst-a',
+      worklogRoot: rootA,
+      directory: rootA,
+      assignedAt: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+      offers: [
+        { kind: 'implement', workItemId: 'WL-IMP' },
+        { kind: 'audit', workItemId: 'WL-AUD' },
+        { kind: 'prep', workItemId: 'WL-PREP' },
+      ],
+    } as unknown as CoordinationEntry;
+    saveRoundRobinCursor(shared, {
+      [rootA]: '2026-12-31T23:59:59.999Z',
+      [rootB]: '2026-01-01T00:00:00.000Z',
+    });
+    const d = deps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: info({ id: 'WL-B', status: 'open', stage: 'intake_complete' }) }),
+    });
+    const out = await dispatchFromCoordination(
+      d,
+      [v2, entry('inst-b', 'WL-B', rootB)],
+      { model: 'plan', cwd: '/repo', coordinationDir: shared },
+    );
+    // Round-robin still selects rootB (cursor-oldest): the multi-bucket root
+    // gains no root-level share — tier choice stays inside the entry.
+    expect(out.dispatched).toBe(true);
+    const spawn = (d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(spawn[1].cwd).toBe(rootB);
+    expect(String(spawn[0])).toContain('WL-B');
   }));
 });

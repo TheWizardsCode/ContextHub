@@ -4042,3 +4042,515 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     expect(getHerdrListHead).not.toHaveBeenCalled();
   });
 });
+
+// ── v2 leader offer iteration: filter chain, drain-aware tie-break, partial removal, regression (parent WL-0MWDDHQON0015T3P AC4–AC8) ──
+//
+// Tier-aware offers (WL-0MWDDHQON0015T3P): one entry per instance carries up
+// to three BUCKET nominees (`implement` / `audit` / `prep` — parent AC1), and
+// the elected leader iterates the offers INSIDE an entry, applying the
+// existing, UNMODIFIED sequential filter chain to each (parent AC4: classify
+// → attempt budget → non-terminal cooldown → per-root code freeze → CPU gate
+// → audit slot minimum/pin → review-queue hold → host-budget admission →
+// CAS claim — no gate duplicated, relaxed or reordered). When several offers
+// are simultaneously admissible, selection follows the DRAIN-AWARE tie-break
+// (parent AC5): audit while the root's review queue is at/over
+// `browseItemCount`, else prep, else implement — the fixed implement-first
+// ladder is deliberately NOT implemented (precedent WL-0MW9X7EJ6009EL6E).
+// On a successful dispatch ONLY the dispatched offer is removed — the entry
+// keeps its remaining offers and an unchanged `lastUpdated` (parent AC6), so
+// the motivating 2/2-cap regression (parent AC7: an implement head refused by
+// the machine-wide cap no longer hides the entry's prep work; the tick never
+// ends `no-candidate`) is fixed. Cross-root round-robin still governs ROOT
+// order — tier choice happens only inside an entry, so no root gains an
+// unfair share (parent AC8; pinned in coordination-cross-root.test.ts).
+//
+// RED WITNESS. The v2 `offers` payload does not exist yet: `CoordinationEntry`
+// still carries one `workItemId` and the leader loop reads it directly
+// (`entry.workItemId.length`, and `readCoordinationFile` rebuilds entries
+// without `offers`), so a v2-shaped entry (offers payload, NO top-level
+// `workItemId`) makes today's leader throw — an EXPECTED failure that keeps
+// this suite green. Implementation child WL-0MWDVN2HN004CQ1O flips each
+// `it.fails` to `it` and makes the body pass; the partial-removal assertions
+// additionally require F1 (WL-0MWDVMVX50012RSU) to parse `offers` back from
+// the file.
+
+/** The v2 per-bucket offer payload F1 introduces (at most one per bucket). */
+interface CoordOfferWitness {
+  kind: 'implement' | 'audit' | 'prep';
+  workItemId: string;
+}
+
+/** A v2 entry: the outer fields unchanged, the bucket payload in `offers`. */
+type V2EntryWitness = Omit<CoordinationEntry, 'workItemId'> & {
+  offers: CoordOfferWitness[];
+};
+
+/** Build a v2-shaped entry (offers payload, NO top-level `workItemId`). */
+function v2Entry(instanceId: string, worklogRoot: string, offers: CoordOfferWitness[]): CoordinationEntry {
+  const now = new Date().toISOString();
+  return {
+    instanceId,
+    worklogRoot,
+    directory: worklogRoot,
+    assignedAt: now,
+    lastUpdated: now,
+    offers,
+  } as unknown as CoordinationEntry;
+}
+
+const offerImplement = (workItemId: string): CoordOfferWitness => ({ kind: 'implement', workItemId });
+const offerAudit = (workItemId: string): CoordOfferWitness => ({ kind: 'audit', workItemId });
+const offerPrep = (workItemId: string): CoordOfferWitness => ({ kind: 'prep', workItemId });
+
+/** fetchItem mock keyed by item id, with a fallback for unknown ids. */
+function fetchById(specs: Record<string, Partial<DowntimeItemInfo> & { id: string }>) {
+  return vi.fn(async (id: string) => {
+    const spec = specs[id];
+    if (spec === undefined) return { ok: true, info: itemInfo({ id, stage: 'idea' }) };
+    return { ok: true, info: itemInfo(spec) };
+  });
+}
+
+/** Read the surviving entry from the coordination file after a dispatch. */
+function fileEntryAfterDispatch(): V2EntryWitness | null {
+  const data = readCoordinationFile(testDir);
+  if (data === null || data.entries.length === 0) return null;
+  return data.entries[0] as unknown as V2EntryWitness;
+}
+
+describe('sequential filter chain on the v2 offer path (parent AC4)', () => {
+  it.fails('a multi-offer dispatch consults EVERY seam-based chain limb for the admissible offers — classify, per-root code freeze, CPU gate, review-queue hold, host-budget admission and the CAS claim', async () => {
+    const fetched: string[] = [];
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn(async (id: string) => {
+        fetched.push(id);
+        if (id === 'WL-AUD') {
+          return {
+            ok: true,
+            info: itemInfo({ id, status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+          } as const;
+        }
+        return { ok: true, info: itemInfo({ id, status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }) } as const;
+      }),
+      // Per-root code freeze + CPU gate are read once per tick, BEFORE the
+      // offer loop — the enumeration must still prove they ran for the cycle.
+      readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+      readHostCpu: vi.fn().mockReturnValue({ ok: true, percent: 10, source: 'proc-stat' }),
+      // Review-queue hold: shallow queue so the implement offer is ADMISSIBLE
+      // (the deep-queue hold is pinned by the audit-drain arm test below).
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      // Host-budget admission: consulted at the claim boundary for the
+      // budgeted implement kind.
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 2 }),
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerAudit('WL-AUD')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+      cpuGatePercent: 50,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    // 1. classify — EVERY offered item is re-fetched and re-classified at
+    //    dispatch time (a stale offer is dropped at dispatch, never by age).
+    expect(fetched).toEqual(expect.arrayContaining(['WL-IMP', 'WL-AUD']));
+    // 4. per-root code freeze — consulted.
+    expect(deps.readCodeFreezeStatus).toHaveBeenCalled();
+    // 5. CPU gate — consulted (fail-open reading, below the threshold).
+    expect(deps.readHostCpu).toHaveBeenCalled();
+    // 7. review-queue hold — consulted for the implement offer.
+    expect(deps.getReviewQueueCount).toHaveBeenCalled();
+    // 8. host-budget admission — the surviving offer is budgeted (implement
+    //    kind) and consults the machine-wide ledger exactly once.
+    expect(deps.admitHostDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'WL-IMP', kind: 'implement', cwd: '/roots/a' }),
+    );
+    // 9. CAS claim — the surviving offer is claimed against ITS OWN root
+    //    (the cross-root claim invariant, WL-0MTQ14W7L003II5A).
+    expect(deps.claimItem).toHaveBeenCalledWith(expect.anything(), expect.anything(), '/roots/a');
+  });
+
+  it.fails('attempt-budget limb: a budget-exhausted offer is rejected with the neutral token (per-offer attribution) and the entry\u2019s other offer dispatches', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-budget-'));
+    try {
+      // One prior dispatch at the current stage with maxAttempts=1 → the
+      // implement offer has exhausted its budget; the prep offer is untouched.
+      writeDowntimeLog(root, [
+        {
+          kind: 'implement',
+          operation: 'dispatch',
+          itemId: 'WL-IMP',
+          stage: 'plan_complete',
+          dispatchedAt: new Date(Date.now() - 60_000).toISOString(),
+        },
+      ] as never);
+      const entry = v2Entry('inst-1', root, [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+      writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+      const deps = makeCoordinationDeps({
+        getReviewQueueCount: vi.fn().mockResolvedValue(0),
+        fetchItem: fetchById({
+          'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+          'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+        }),
+      });
+
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        freeSlots: 2,
+        browseItemCount: 5,
+        maxAttempts: 1,
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      // The rejection is attributed to the OFFER (workItemId), not the
+      // instance — per-offer, not per-instance (parent AC4 / offer-attribution).
+      expect(outcome.offerRejections).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ workItemId: 'WL-IMP', gate: 'attempt-budget-exhausted' }),
+        ]),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.fails('non-terminal-cooldown limb: a same-kind offer in the pane-close cooldown is skipped neutrally and the entry\u2019s other offer dispatches', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-cooldown-root-'));
+    try {
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      writeFileSync(
+        join(root, '.worklog', 'downtime-dispatches.log'),
+        JSON.stringify({
+          entryType: 'pane-close',
+          itemId: 'WL-IMP',
+          kind: 'implement',
+          stage: 'plan_complete',
+          reasonCode: 'agent-ended-no-terminal',
+          outcome: 'requires-attention',
+          timestamp: new Date().toISOString(),
+          closed: true,
+        }) + '\n',
+        'utf-8',
+      );
+      const entry = v2Entry('inst-1', root, [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+      writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+      const deps = makeCoordinationDeps({
+        getReviewQueueCount: vi.fn().mockResolvedValue(0),
+        fetchItem: fetchById({
+          'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+          'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+        }),
+      });
+
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        freeSlots: 2,
+        browseItemCount: 5,
+        nonTerminalCooldownMs: 3_600_000,
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      expect(outcome.offerRejections).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ workItemId: 'WL-IMP', gate: 'non-terminal-cooldown' }),
+        ]),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.fails('CPU-gate limb: an audit/implement offer under CPU saturation is skipped (KEPT, not removed) and a prep offer dispatches', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      readHostCpu: vi.fn().mockReturnValue({ ok: true, percent: 90, source: 'proc-stat' }),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+      cpuGatePercent: 50,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-IMP', gate: 'cpu-saturated' }),
+      ]),
+    );
+  });
+
+  it.fails('audit-slot-minimum/pin limb: in the single-free-slot band a parent-scoped audit offer is skipped with the audit-slot-min token and a prep offer dispatches', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerAudit('WL-AUD'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      // Leaf band (freeSlots=1): only a TRUSTED LEAF may consume the single
+      // free slot — the neutral `parent` scope (the default) is rejected.
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+      fetchItem: fetchById({
+        'WL-AUD': { id: 'WL-AUD', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 1,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-AUD', gate: 'audit-slot-min' }),
+      ]),
+    );
+  });
+});
+
+describe('drain-aware tie-break over admissible offers (parent AC5)', () => {
+  it.fails('audit-drain arm: while the root review queue is at/over browseItemCount, an ADMISSIBLE audit offer dispatches even when prep and implement are also offered', async () => {
+    // The audit offer is the LAST entry in the array — the tie-break is not
+    // array order. The implement head is review-HELD (deep queue, non-critical)
+    // and the prep offer is admissible, but arm 1 (audit-drain) wins.
+    const entry = v2Entry('inst-1', '/roots/a', [
+      offerImplement('WL-IMP'),
+      offerPrep('WL-PREP'),
+      offerAudit('WL-AUD'),
+    ]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      // Queue at the drain threshold (>= browseItemCount) → the implement
+      // offer is held by the review-queue gate and the audit arm arms.
+      getReviewQueueCount: vi.fn().mockResolvedValue(5),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+        'WL-AUD': { id: 'WL-AUD', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-AUD');
+    expect(spawn[1].cwd).toBe('/roots/a');
+    // The deep queue review-hold is attributed to the IMPLEMENT offer —
+    // the hold is per offer, never a whole-instance skip.
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-IMP', gate: 'review-queue-hold' }),
+      ]),
+    );
+  });
+
+  it.fails('prep arm: with a shallow review queue and a prep offer admissible, the PREP offer dispatches ahead of implement (no fixed implement-first ladder)', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-PREP');
+  });
+
+  it.fails('implement arm: with a shallow queue and NO prep offer, an ADMISSIBLE implement offer dispatches even when an audit offer is also present', async () => {
+    // The audit offer does NOT win in a shallow queue — the audit-drain arm
+    // is gated on the review queue depth (a fixed audit-first ladder is not
+    // implemented either).
+    const entry = v2Entry('inst-1', '/roots/a', [offerAudit('WL-AUD'), offerImplement('WL-IMP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-AUD': { id: 'WL-AUD', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() },
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-IMP');
+  });
+});
+
+describe('only the dispatched offer is removed (partial removal, parent AC6)', () => {
+  it.fails('dispatch-on-FIRST-offer removes only that offer — the entry survives with the remaining offer and an unchanged lastUpdated', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerPrep('WL-PREP'), offerImplement('WL-IMP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan'); // the FIRST offer (prep) is chosen
+    // Only the dispatched offer is removed: the entry REMAINS with the
+    // implement offer — no whole-entry removal, no owner re-check-in.
+    expect(getEntry(testDir, 'inst-1')).not.toBeNull();
+    const after = fileEntryAfterDispatch();
+    expect(after?.offers).toEqual([offerImplement('WL-IMP')]);
+    expect(after?.lastUpdated).toBe(entry.lastUpdated);
+  });
+
+  it.fails('dispatch-on-SECOND-offer without a new check-in retains the FIRST offer with an unchanged lastUpdated', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan'); // the SECOND offer (prep) is chosen
+    // The FIRST offer (implement) is retained — dispatch never touches the
+    // owner's entry metadata: no new check-in ran, lastUpdated is unchanged.
+    expect(getEntry(testDir, 'inst-1')).not.toBeNull();
+    const after = fileEntryAfterDispatch();
+    expect(after?.offers).toEqual([offerImplement('WL-IMP')]);
+    expect(after?.lastUpdated).toBe(entry.lastUpdated);
+  });
+
+  it.fails('an entry whose LAST offer dispatches is removed entirely (as today)', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(getEntry(testDir, 'inst-1')).toBeNull();
+  });
+});
+
+describe('2/2 implement-cap regression (parent AC7)', () => {
+  it.fails('with an implement cap of 2/2 and an offered implement head, the entry\u2019s PREP nominee dispatches and the tick never reports no-candidate', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      // Machine-wide implement ledger at the cap (2/2): any implement
+      // dispatch is refused with the neutral hold.
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: false, live: 2, max: 2, reason: 'host-budget-implement' }),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    // The prep nominee dispatches — the budget-refused implement head can
+    // no longer hide the root's prep work (the 2026-11-12 stall).
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-PREP');
+    // NEUTRAL, never the empty-backlog pause: the cap refusal and the prep
+    // dispatch are both non-`no-candidate`.
+    expect(outcome.reason).not.toBe('no-candidate');
+    // The implement head is still valid work — retained (only the dispatched
+    // offer was removed), so the next tick re-checks the ledger.
+    const after = fileEntryAfterDispatch();
+    expect(after?.offers).toEqual([offerImplement('WL-IMP')]);
+    expect(after?.lastUpdated).toBe(entry.lastUpdated);
+  });
+});
