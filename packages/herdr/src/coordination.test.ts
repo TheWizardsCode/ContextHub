@@ -22,6 +22,7 @@ import {
   writeCoordinationFile,
   upsertEntry,
   removeEntry,
+  removeOffer,
   getEntry,
   pruneStaleEntries,
   mergeEntries,
@@ -624,5 +625,97 @@ describe('removeEntry v1 semantics preserved (parent AC9, GREEN today)', () => {
     expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
     expect(existsSync(COORD_PATH())).toBe(true);
     expect(removeEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+  });
+});
+// ── Partial removal: only the dispatched offer goes (parent WL-0MWDDHQON0015T3P AC6) ──
+//
+// The leader dispatches one nominated bucket at a time, so the coordination
+// file must lose exactly that offer: the entry survives with its remaining
+// nominees and its owner metadata (`lastUpdated` / `assignedAt`) untouched, so
+// the next tick can dispatch the next tier WITHOUT waiting for the owner's
+// check-in cadence. `removeOffer` is the primitive that owns that rule; the
+// entry is dropped only when it has no offers left (v1 semantics).
+
+describe('removeOffer — partial removal (parent AC6)', () => {
+  it('removes only the dispatched offer and leaves the rest of the entry, including lastUpdated, untouched', () => {
+    const entry = v2EntryWitness('inst-1', CANONICAL_V2_OFFERS);
+    expect(upsertEntry(testDir, entry)).toBe(true);
+
+    const result = removeOffer(testDir, 'inst-1', 'WL-AUD');
+
+    expect(result).toEqual({ offerRemoved: true, entryRemoved: false });
+    const after = getEntry(testDir, 'inst-1');
+    expect(after).not.toBe(null);
+    // Exactly the dispatched offer is gone; the others keep their order.
+    expect((after as unknown as V2EntryWitness).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'prep', workItemId: 'WL-PREP' },
+    ]);
+    // A v1-era leader keeps reading a coherent first offer.
+    expect(after!.workItemId).toBe('WL-IMP');
+    // Owner metadata is never rewritten by a dispatch.
+    expect(after!.lastUpdated).toBe(entry.lastUpdated);
+    expect(after!.assignedAt).toBe(entry.assignedAt);
+  });
+
+  it('re-points workItemId at the surviving first offer when the FIRST offer dispatched', () => {
+    expect(upsertEntry(testDir, v2EntryWitness('inst-1', CANONICAL_V2_OFFERS))).toBe(true);
+
+    expect(removeOffer(testDir, 'inst-1', 'WL-IMP')).toEqual({
+      offerRemoved: true,
+      entryRemoved: false,
+    });
+
+    const after = getEntry(testDir, 'inst-1')!;
+    expect(after.workItemId).toBe('WL-AUD');
+    expect((after as unknown as V2EntryWitness).offers).toEqual([
+      { kind: 'audit', workItemId: 'WL-AUD' },
+      { kind: 'prep', workItemId: 'WL-PREP' },
+    ]);
+  });
+
+  it('removes the whole entry once its LAST offer is removed', () => {
+    expect(upsertEntry(testDir, v2EntryWitness('inst-1', CANONICAL_V2_OFFERS))).toBe(true);
+    removeOffer(testDir, 'inst-1', 'WL-IMP');
+    removeOffer(testDir, 'inst-1', 'WL-AUD');
+
+    expect(removeOffer(testDir, 'inst-1', 'WL-PREP')).toEqual({
+      offerRemoved: true,
+      entryRemoved: true,
+    });
+    expect(getEntry(testDir, 'inst-1')).toBe(null);
+    // The file remains (empty) so the owner re-offers at its next check-in.
+    expect(existsSync(COORD_PATH())).toBe(true);
+  });
+
+  it('drops a legacy v1-shaped entry whole (its single offer IS the entry)', () => {
+    writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
+
+    expect(removeOffer(testDir, LEGACY_V1_INSTANCE_ID, LEGACY_V1_WORK_ITEM_ID)).toEqual({
+      offerRemoved: true,
+      entryRemoved: true,
+    });
+    expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+  });
+
+  it('is a no-op for an unknown offer or an unknown instance', () => {
+    expect(upsertEntry(testDir, v2EntryWitness('inst-1', CANONICAL_V2_OFFERS))).toBe(true);
+
+    // An offer this entry never advertised: nothing is removed, nothing is
+    // rewritten.
+    const before = getEntry(testDir, 'inst-1')!;
+    expect(removeOffer(testDir, 'inst-1', 'WL-OTHER')).toEqual({
+      offerRemoved: false,
+      entryRemoved: false,
+    });
+    expect(getEntry(testDir, 'inst-1')!.lastUpdated).toBe(before.lastUpdated);
+    expect((getEntry(testDir, 'inst-1') as unknown as V2EntryWitness).offers).toEqual(
+      CANONICAL_V2_OFFERS,
+    );
+
+    expect(removeOffer(testDir, 'nobody', 'WL-IMP')).toEqual({
+      offerRemoved: false,
+      entryRemoved: false,
+    });
   });
 });

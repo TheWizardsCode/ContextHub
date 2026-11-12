@@ -365,11 +365,11 @@ describe('registered-root registry fail-safe (parent AC6)', () => {
 // Tier choice (audit-drain → prep → implement) happens ONLY inside an entry.
 // Across entries, `selectLeastRecentlyServed` alone decides root order, so a
 // root offering more buckets (or a "higher" tier) gains no root-level share.
-// These plain specs are GREEN today (v1 single-offer entries) and must stay
-// green after F3 (WL-0MWDVN2HN004CQ1O, per-offer iteration) — they are the
-// regression guard for the "no second ranking on the dispatch path" contract.
-// The RED v2 spec below (a multi-bucket root gaining no root-level share)
-// flips green along with F1 (WL-0MWDVMVX50012RSU) + F3.
+// GREEN (v1 single-offer entries, and unchanged by F3 WL-0MWDVN2HN004CQ1O's
+// per-offer iteration) — they are the regression guard for the "no second
+// ranking on the dispatch path" contract. The v2 spec below (a multi-bucket
+// root gaining no root-level share) landed with F1
+// (WL-0MWDVMVX50012RSU) + F3.
 describe('round-robin still governs root order (parent AC8)', () => {
   it('a PREP offer in the cursor-oldest root dispatches before an IMPLEMENT offer in a newer root (tier choice never crosses roots)', withShared(async () => {
     const rootA = '/repo/a'; const rootB = '/repo/b';
@@ -428,7 +428,7 @@ describe('round-robin still governs root order (parent AC8)', () => {
     expect((d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[1][1].cwd).toBe(rootA);
   }));
 
-  it.fails('a root offering the FULL v2 bucket set gains no root-level priority: a cursor-older peer single-offer root still dispatches first', withShared(async () => {
+  it('a root offering the FULL v2 bucket set gains no root-level priority: a cursor-older peer single-offer root still dispatches first', withShared(async () => {
     const rootA = '/repo/a'; const rootB = '/repo/b';
     // rootA advertises all three buckets (v2 offers payload, no top-level
     // workItemId); rootB — cursor-oldest — one v1-style offer.

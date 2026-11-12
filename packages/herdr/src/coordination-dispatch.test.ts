@@ -4375,17 +4375,14 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
 // order — tier choice happens only inside an entry, so no root gains an
 // unfair share (parent AC8; pinned in coordination-cross-root.test.ts).
 //
-// RED WITNESS. The v2 `offers` payload does not exist yet: `CoordinationEntry`
-// still carries one `workItemId` and the leader loop reads it directly
-// (`entry.workItemId.length`, and `readCoordinationFile` rebuilds entries
-// without `offers`), so a v2-shaped entry (offers payload, NO top-level
-// `workItemId`) makes today's leader throw — an EXPECTED failure that keeps
-// this suite green. Implementation child WL-0MWDVN2HN004CQ1O flips each
-// `it.fails` to `it` and makes the body pass; the partial-removal assertions
-// additionally require F1 (WL-0MWDVMVX50012RSU) to parse `offers` back from
-// the file.
+// LANDED WITH F3 (WL-0MWDVN2HN004CQ1O). These bodies were committed RED under
+// `it.fails` by the test-first sibling WL-0MWDVN11K008HYVU and now run as
+// plain `it`: the leader iterates an entry's v2 `offers` payload (a v2-shaped
+// entry has no top-level `workItemId` at all), so `entryOffers` derives its
+// offer list from `offers` alone, and the partial-removal assertions rely on
+// F1 (WL-0MWDVMVX50012RSU) parsing `offers` back from the file.
 
-/** The v2 per-bucket offer payload F1 introduces (at most one per bucket). */
+/** The v2 per-bucket offer payload (F1, WL-0MWDVMVX50012RSU) — at most one per bucket. */
 interface CoordOfferWitness {
   kind: 'implement' | 'audit' | 'prep';
   workItemId: string;
@@ -4430,7 +4427,7 @@ function fileEntryAfterDispatch(): V2EntryWitness | null {
 }
 
 describe('sequential filter chain on the v2 offer path (parent AC4)', () => {
-  it.fails('a multi-offer dispatch consults EVERY seam-based chain limb for the admissible offers — classify, per-root code freeze, CPU gate, review-queue hold, host-budget admission and the CAS claim', async () => {
+  it('a multi-offer dispatch consults EVERY seam-based chain limb for the admissible offers — classify, per-root code freeze, CPU gate, review-queue hold, host-budget admission and the CAS claim', async () => {
     const fetched: string[] = [];
     const deps = makeCoordinationDeps({
       fetchItem: vi.fn(async (id: string) => {
@@ -4487,7 +4484,7 @@ describe('sequential filter chain on the v2 offer path (parent AC4)', () => {
     expect(deps.claimItem).toHaveBeenCalledWith(expect.anything(), expect.anything(), '/roots/a');
   });
 
-  it.fails('attempt-budget limb: a budget-exhausted offer is rejected with the neutral token (per-offer attribution) and the entry\u2019s other offer dispatches', async () => {
+  it('attempt-budget limb: a budget-exhausted offer is rejected with the neutral token (per-offer attribution) and the entry\u2019s other offer dispatches', async () => {
     const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-budget-'));
     try {
       // One prior dispatch at the current stage with maxAttempts=1 → the
@@ -4534,7 +4531,7 @@ describe('sequential filter chain on the v2 offer path (parent AC4)', () => {
     }
   });
 
-  it.fails('non-terminal-cooldown limb: a same-kind offer in the pane-close cooldown is skipped neutrally and the entry\u2019s other offer dispatches', async () => {
+  it('non-terminal-cooldown limb: a same-kind offer in the pane-close cooldown is skipped neutrally and the entry\u2019s other offer dispatches', async () => {
     const root = mkdtempSync(join(tmpdir(), 'herdr-cooldown-root-'));
     try {
       mkdirSync(join(root, '.worklog'), { recursive: true });
@@ -4583,7 +4580,7 @@ describe('sequential filter chain on the v2 offer path (parent AC4)', () => {
     }
   });
 
-  it.fails('CPU-gate limb: an audit/implement offer under CPU saturation is skipped (KEPT, not removed) and a prep offer dispatches', async () => {
+  it('CPU-gate limb: an audit/implement offer under CPU saturation is skipped (KEPT, not removed) and a prep offer dispatches', async () => {
     const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
     writeCoordinationFile(testDir, { version: 2, entries: [entry] });
     const deps = makeCoordinationDeps({
@@ -4613,7 +4610,7 @@ describe('sequential filter chain on the v2 offer path (parent AC4)', () => {
     );
   });
 
-  it.fails('audit-slot-minimum/pin limb: in the single-free-slot band a parent-scoped audit offer is skipped with the audit-slot-min token and a prep offer dispatches', async () => {
+  it('audit-slot-minimum/pin limb: in the single-free-slot band a parent-scoped audit offer is skipped with the audit-slot-min token and a prep offer dispatches', async () => {
     const entry = v2Entry('inst-1', '/roots/a', [offerAudit('WL-AUD'), offerPrep('WL-PREP')]);
     writeCoordinationFile(testDir, { version: 2, entries: [entry] });
     const deps = makeCoordinationDeps({
@@ -4646,7 +4643,7 @@ describe('sequential filter chain on the v2 offer path (parent AC4)', () => {
 });
 
 describe('drain-aware tie-break over admissible offers (parent AC5)', () => {
-  it.fails('audit-drain arm: while the root review queue is at/over browseItemCount, an ADMISSIBLE audit offer dispatches even when prep and implement are also offered', async () => {
+  it('audit-drain arm: while the root review queue is at/over browseItemCount, an ADMISSIBLE audit offer dispatches even when prep and implement are also offered', async () => {
     // The audit offer is the LAST entry in the array — the tie-break is not
     // array order. The implement head is review-HELD (deep queue, non-critical)
     // and the prep offer is admissible, but arm 1 (audit-drain) wins.
@@ -4689,7 +4686,7 @@ describe('drain-aware tie-break over admissible offers (parent AC5)', () => {
     );
   });
 
-  it.fails('prep arm: with a shallow review queue and a prep offer admissible, the PREP offer dispatches ahead of implement (no fixed implement-first ladder)', async () => {
+  it('prep arm: with a shallow review queue and a prep offer admissible, the PREP offer dispatches ahead of implement (no fixed implement-first ladder)', async () => {
     const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
     writeCoordinationFile(testDir, { version: 2, entries: [entry] });
     const deps = makeCoordinationDeps({
@@ -4714,7 +4711,7 @@ describe('drain-aware tie-break over admissible offers (parent AC5)', () => {
     expect(String(spawn[0])).toContain('WL-PREP');
   });
 
-  it.fails('implement arm: with a shallow queue and NO prep offer, an ADMISSIBLE implement offer dispatches even when an audit offer is also present', async () => {
+  it('implement arm: with a shallow queue and NO prep offer, an ADMISSIBLE implement offer dispatches even when an audit offer is also present', async () => {
     // The audit offer does NOT win in a shallow queue — the audit-drain arm
     // is gated on the review queue depth (a fixed audit-first ladder is not
     // implemented either).
@@ -4744,7 +4741,7 @@ describe('drain-aware tie-break over admissible offers (parent AC5)', () => {
 });
 
 describe('only the dispatched offer is removed (partial removal, parent AC6)', () => {
-  it.fails('dispatch-on-FIRST-offer removes only that offer — the entry survives with the remaining offer and an unchanged lastUpdated', async () => {
+  it('dispatch-on-FIRST-offer removes only that offer — the entry survives with the remaining offer and an unchanged lastUpdated', async () => {
     const entry = v2Entry('inst-1', '/roots/a', [offerPrep('WL-PREP'), offerImplement('WL-IMP')]);
     writeCoordinationFile(testDir, { version: 2, entries: [entry] });
     const deps = makeCoordinationDeps({
@@ -4773,7 +4770,7 @@ describe('only the dispatched offer is removed (partial removal, parent AC6)', (
     expect(after?.lastUpdated).toBe(entry.lastUpdated);
   });
 
-  it.fails('dispatch-on-SECOND-offer without a new check-in retains the FIRST offer with an unchanged lastUpdated', async () => {
+  it('dispatch-on-SECOND-offer without a new check-in retains the FIRST offer with an unchanged lastUpdated', async () => {
     const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
     writeCoordinationFile(testDir, { version: 2, entries: [entry] });
     const deps = makeCoordinationDeps({
@@ -4802,7 +4799,7 @@ describe('only the dispatched offer is removed (partial removal, parent AC6)', (
     expect(after?.lastUpdated).toBe(entry.lastUpdated);
   });
 
-  it.fails('an entry whose LAST offer dispatches is removed entirely (as today)', async () => {
+  it('an entry whose LAST offer dispatches is removed entirely (as today)', async () => {
     const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP')]);
     writeCoordinationFile(testDir, { version: 2, entries: [entry] });
     const deps = makeCoordinationDeps({
@@ -4827,7 +4824,7 @@ describe('only the dispatched offer is removed (partial removal, parent AC6)', (
 });
 
 describe('2/2 implement-cap regression (parent AC7)', () => {
-  it.fails('with an implement cap of 2/2 and an offered implement head, the entry\u2019s PREP nominee dispatches and the tick never reports no-candidate', async () => {
+  it('with an implement cap of 2/2 and an offered implement head, the entry\u2019s PREP nominee dispatches and the tick never reports no-candidate', async () => {
     const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
     writeCoordinationFile(testDir, { version: 2, entries: [entry] });
     const deps = makeCoordinationDeps({

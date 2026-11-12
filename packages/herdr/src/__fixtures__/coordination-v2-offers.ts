@@ -7,12 +7,12 @@
 // offer payload is a bounded `offers` array — at most one nominee per bucket
 // (`implement` / `audit` / `prep`, the classifier outputs with
 // plan/intake/risk-effort unioning to `prep`), at most three offers total,
-// and duplicate `(kind, workItemId)` pairs collapse. `CoordinationOffer`
-// does not exist until the schema implementation (sibling
-// WL-0MWDVMVX50012RSU), so the witness shape is declared here and shared by
-// the schema tests in `coordination.test.ts`.
+// and duplicate `(kind, workItemId)` pairs collapse. The witness shape stays
+// declared here — it is the file-level contract the schema must honour — and
+// is shared by the schema tests in `coordination.test.ts`; the production
+// shape is `CoordinationOffer` (schema sibling WL-0MWDVMVX50012RSU).
 
-/** The v2 per-bucket offer payload F1 introduces (at most one per bucket). */
+/** The v2 per-bucket offer payload (F1, WL-0MWDVMVX50012RSU) — at most one per bucket. */
 export type CoordOfferWitness = {
   kind: 'implement' | 'audit' | 'prep';
   workItemId: string;

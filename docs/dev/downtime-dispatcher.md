@@ -46,7 +46,9 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.audit-availability.ts` | The fail-closed audit-availability `GET` client — one bounded call, one typed outcome; consumed by the audit pre-check and admission (WL-0MWAMSDNW000SL0E) | `createAuditAvailabilityClient` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
-| `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
+| `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch (per-offer iteration), own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
+| `downtime-worker.offer-selection.ts` | The leader's drain-aware tie-break over one entry's ADMISSIBLE offers (pure ordering arithmetic — never a gate, never a cross-root ranking) | `entryOffers`, `drainAwareRank`, `orderAdmissibleOffers` |
+| `downtime-worker.terminal-reason.ts` | The neutral terminal-reason precedence chain for a tick that dispatched nothing | `resolveTerminalOutcome` |
 | `downtime-worker.head-scan.ts` | Bounded head/extension candidate scan over ONE root, plus the registered-root sweep that applies it per root in round-robin order | `dispatchFromOwnHead`, `dispatchFromRegisteredRoots` |
 | `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
 | `downtime-worker.launch-fence.ts` | One-per-idle-window launch fence (closes the stale-status launch window) | `createIdleWindowLaunchFence` |
@@ -178,6 +180,43 @@ Contract:
 The check-in writes the nominees as the v2 `offers` array (canonical bucket
 order `implement` → `audit` → `prep`) with `workItemId` mirroring the first
 offer, so a v1-era leader keeps reading exactly one offer.
+
+### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
+
+The leader keeps ONE entry per instance and iterates the offers **inside** it:
+
+- **The filter chain is unchanged, applied per offer.** `fetchItem` re-fetch →
+  `classifyItemForDispatch` → attempt budget → non-terminal cooldown →
+  per-root code freeze → host-CPU gate → audit slot minimum/pin →
+  review-queue hold → in-flight (critical) → host-budget admission → CAS
+  claim. No gate is duplicated, relaxed or reordered; a gate that refuses one
+  offer never refuses its siblings (`classifyItemForDispatch` remains the
+  single classifier — the offer's declared bucket is never a gate verdict).
+  Rejection attribution (`offerRejections`) is per **offer**, not per
+  instance.
+- **Drain-aware tie-break among the admissible offers of one entry.**
+  `audit` while that root's completed/in_review queue is at/over
+  `browseItemCount` (drain it) → `prep` (plan/intake/risk-effort — keep
+  implement fed) → `implement`. A fixed implement-first ladder is explicitly
+  **not** implemented: it is the same starvation pattern
+  (`WL-0MW9X7EJ6009EL6E`) the review-queue gate exists to prevent. The
+  tie-break is a dispatch ORDER, never a gate, and it never crosses roots —
+  `selectLeastRecentlyServed` still owns root order, so offering more buckets
+  gains no root-level share.
+- **Remove only what dispatched.** A successful dispatch removes just that
+  offer (`removeOffer`): the entry keeps its remaining nominees and its
+  `lastUpdated`, so the next tick can dispatch the next tier without waiting
+  for the owner's check-in. An entry whose last offer dispatched is removed
+  exactly as before. A v1 entry (no `offers` payload) is its single
+  `workItemId` offer — dispatched unchanged, and dropped whole when it is
+  stale or dispatched.
+- **Rejections ride with the decision they explain.** A dispatched outcome
+  carries the rejections of offers from THAT entry only; a peer entry's
+  refusal never pollutes it (`WL-0MWDDHVF2004PTYX` AC7).
+
+The motivating regression: with the machine-wide implement budget at 2/2 and
+an implement head offered, the entry's `prep` nominee now dispatches on the
+same tick, and the tick never ends `no-candidate`.
 
 ### Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH)
 
@@ -346,12 +385,15 @@ cross-root fairness is owned by the `selectLeastRecentlyServed` round-robin
 cursor. The fallback and both of its step-downs stay wired and tested for the
 no-dispatchable-offer case.
 
-**Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
-entry per instance — an **offer** of that instance's own Herdr list head (computed at the
-owner's check-in by `computeMostImportantItem`, which walks the same Herdr sequence with the
-same filters). The leader dispatches offers in **file order** and re-validates each offer at
-dispatch time (`fetchItem` + `classifyItemForDispatch` as sequential filters, no wall-clock
-prune). The cross-root **tier priority** (audit → critical → implement → plan → intake), the
+**Coordination leader (F3, WL-0MTK1ILM2009QYB2; per-offer iteration by F3+,
+WL-0MWDVN2HN004CQ1O):** the shared coordination file holds ONE entry per
+instance — each entry advertises that instance's own Herdr list head at its
+check-in (`computeMostImportantItem`, which walks the same Herdr sequence with
+the same filters) as up to one nominee per dispatch bucket. The leader
+dispatches ENTRIES in **file order**, iterating the offers inside each entry
+(see *Leader: iterating an entry's offers* above), and re-validates each offer
+at dispatch time (`fetchItem` + `classifyItemForDispatch` as sequential
+filters, no wall-clock prune). The cross-root **tier priority** (audit → critical → implement → plan → intake), the
 **global critical override** and the per-`worklogRoot` **round-robin cursor ordering** are
 **retired** from the leader dispatch path — they were a second ranking and are removed by
 WL-0MTK1ILM2009QYB2 AC1–2. Per-root "critical first" is preserved *by construction*: the

@@ -18,7 +18,7 @@
  */
 
 import { resolveSprintViewWindow } from './browse-window.js';
-import { removeEntry, type CoordinationEntry } from './coordination.js';
+import { removeOffer, type CoordinationEntry } from './coordination.js';
 import type { DowntimeLogEntry } from './downtime-log.js';
 import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
 import { clampDowntimeAuditBatchMax } from './downtime-worker.clamps.js';
@@ -40,13 +40,18 @@ import {
   type DispatchGateToken,
 } from './downtime-worker.offer-attribution.js';
 import {
+  entryOffers,
+  orderAdmissibleOffers,
+  type AdmissibleOffer,
+} from './downtime-worker.offer-selection.js';
+import { resolveTerminalOutcome } from './downtime-worker.terminal-reason.js';
+import {
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   DOWNTIME_PANE_MIN_FREE_SLOTS,
-  LEAF_AUDIT_PIN_HOLD_REASON,
 } from './downtime-worker.constants.js';
 import {
   dispatchClaimedTier,
@@ -58,12 +63,10 @@ import {
   type DowntimeDispatchOutcome,
 } from './downtime-worker.dispatch-contract.js';
 import {
-  CPU_SATURATED_REASON,
   hostCpuGateEvidence,
   resolveCpuGate,
 } from './downtime-worker.dispatch-cpu-gate.js';
 import {
-  REVIEW_QUEUE_HOLD_REASON,
   auditItemEligible,
   auditPinAdmits,
   classifyItemForDispatchDetail,
@@ -105,18 +108,21 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
 /**
  * Leader-only dispatch from the shared coordination OFFER list
  * (WL-0MTK1ILM2009QYB2 "dispatcher == Herdr list head"): the
- * coordination file holds ONE entry per instance — each entry offers that
- * instance's own worklog Herdr list HEAD, computed at the owner's
- * check-in (`computeMostImportantItem`, canonical ranking via
- * fetcher → smart-selection → grouping). The leader does NOT re-rank the
+ * coordination file holds ONE entry per instance. Since v2
+ * (parent WL-0MWDDHQON0015T3P AC1) each entry advertises up to three
+ * BUCKET nominees (`implement` / `audit` / `prep`) drawn from that
+ * instance's own worklog Herdr list head at the owner's check-in
+ * (`computeMostImportantItem`, canonical ranking via
+ * fetcher → smart-selection → grouping); a legacy v1 entry advertises its
+ * single `workItemId` as one offer (AC9). The leader does NOT re-rank the
  * offers (no tier priority, no round-robin cursor — those second
- * orderings are retired by WL-0MTK1ILM2009QYB2 AC1–2): entries dispatch
+ * orderings are retired by WL-0MTK1ILM2009QYB2 AC1–2): ENTRIES dispatch
  * in file order, and every safety gate is a sequential FILTER at
- * dispatch time on each offer (WL-0MTMPIQBE001J41P — no wall-clock
+ * dispatch time on each OFFER (WL-0MTMPIQBE001J41P — no wall-clock
  * prune):
  *  - `fetchItem` re-fetch: the offer is validated against the item's
  *    CURRENT state (a stale offer — item closed/in_progress/review-gated
- *    or otherwise non-dispatchable — is dropped via `removeEntry`, no
+ *    or otherwise non-dispatchable — is dropped via `removeOffer`, no
  *    pane, no marker, no cursor, and dispatch continues to the next
  *    offer);
  *  - `classifyItemForDispatch` maps the fetched item to its dispatch
@@ -139,11 +145,32 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
  *    surviving offer is cooldown-held the outcome is the neutral
  *    'non-terminal-cooldown' (never 'no-candidate').
  *
- * The first offer that passes every filter dispatches via the existing
- * `dispatchClaimedTier` pipeline (CAS claim → marker write → spawn); its
- * entry is removed so the owner re-offers its next Herdr head at the next
- * check-in (AC3). A claimed-but-failed spawn also consumes the entry
- * (the marker + in_progress claim prevent a double dispatch).
+ * The filter chain is applied to EVERY offer of an entry, unchanged and in
+ * this order (parent AC4 — no gate duplicated, relaxed or reordered):
+ * classify → attempt budget → non-terminal cooldown → per-root code freeze →
+ * CPU gate → audit slot minimum/pin → review-queue hold → host-budget
+ * admission → CAS claim. `classifyItemForDispatch` remains the single
+ * classifier; the offer's declared bucket is never a gate verdict.
+ *
+ * ## Drain-aware tie-break (parent AC5)
+ *
+ * Among the offers of ONE entry that are simultaneously ADMISSIBLE, dispatch
+ * order is audit-drain (the entry root's review queue is at/over
+ * `browseItemCount`, so audits — the queue drain — go first) → prep (keeps
+ * implement fed) → implement. A fixed implement-first ladder is deliberately
+ * NOT implemented (precedent WL-0MW9X7EJ6009EL6E). The tie-break is a
+ * selection ORDER, never a gate: a filter that refuses an offer still refuses
+ * it. Cross-root round-robin still owns ROOT order, so tier choice happens
+ * only inside an entry and no root gains an unfair share (AC8).
+ *
+ * The first admissible offer — in tie-break order — dispatches via the
+ * existing `dispatchClaimedTier` pipeline (CAS claim → marker write → host
+ * admission → spawn), and ONLY that offer is removed (parent AC6): the
+ * entry's remaining nominees and its `lastUpdated` are untouched, so the next
+ * tick can dispatch the next tier without waiting for the owner's check-in.
+ * An entry whose last offer dispatches is dropped exactly as before (AC9). A
+ * claimed-but-failed spawn also consumes just that offer (the marker +
+ * in_progress claim prevent a double dispatch).
  *
  * Fail-closed at every boundary: a wl failure fetching an entry resolves
  * `wl-error` only when EVERY entry failed (a fully broken lookup — a
@@ -278,29 +305,31 @@ async function dispatchFromCoordinationGated(
   // `no-candidate`. Derived from the entries snapshot already read.
   const offerRejections: CoordinationOfferRejection[] = [];
   const rejectOffer = (
-    entry: CoordinationEntry,
+    offer: { workItemId: string },
     worklogRoot: string,
     gate: DispatchGateToken,
     assignee?: string,
   ): void => {
     offerRejections.push({
-      workItemId: entry.workItemId,
+      workItemId: offer.workItemId,
       worklogRoot,
       gate,
       ...(assignee !== undefined && assignee.trim().length > 0 ? { assignee: assignee.trim() } : {}),
     });
   };
+  // Attribution is PER OFFER, not per instance (parent AC4): a v2 entry advertises
+  // up to three nominees, so flatten every entry's offer list.
   const rejectedOffers = (
     list: CoordinationEntry[],
     gate: DispatchGateToken,
   ): CoordinationOfferRejection[] =>
-    list
-      .filter((entry) => entry.workItemId.length > 0)
-      .map((entry) => ({
-        workItemId: entry.workItemId,
+    list.flatMap((entry) =>
+      entryOffers(entry).map((offer) => ({
+        workItemId: offer.workItemId,
         worklogRoot: entry.worklogRoot ?? entry.directory,
         gate,
-      }));
+      })),
+    );
 
   // No wall-clock prune (WL-0MTMPIQBE001J41P) — entries persist until
   // dispatch-time eligibility check (fetchItem+classify) finds them
@@ -462,7 +491,7 @@ async function dispatchFromCoordinationGated(
   // project root before dispatch iteration (wire in the cursor infrastructure
   // that was implemented but never connected — WL-0MTQ2FGSK004CBRK).
   const entryRoots = entries
-    .filter(e => e.instanceId.length > 0 && e.workItemId.length > 0)
+    .filter(e => e.instanceId.length > 0 && entryOffers(e).length > 0)
     .map(e => e.worklogRoot ?? e.directory);
   const selectedRoot = selectLeastRecentlyServed(opts.coordinationDir, entryRoots, now);
   if (selectedRoot !== null) {
@@ -502,220 +531,274 @@ async function dispatchFromCoordinationGated(
       : Math.max(0, Math.trunc(opts.auditBatchRemaining));
 
   for (const entry of entries) {
-    if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
-    fetchAttempts += 1;
+    if (entry.instanceId.length === 0) continue;
+    const offers = entryOffers(entry);
+    if (offers.length === 0) continue;
     const worklogRoot = entry.worklogRoot ?? entry.directory;
-    const result = await deps.fetchItem(entry.workItemId, worklogRoot);
-    if (!result.ok) {
-      // Per-entry wl/parse failure — tolerated (fail-open per instance:
-      // one broken worklog must not starve the rest).
-      fetchFailures += 1;
-      lastFetchError = (result as { error?: string }).error ?? 'fetchItem failed';
-      lastEntryWorkItemId = entry.workItemId; // WL-0MTJPYM53003ORCV
-      rejectOffer(entry, worklogRoot, 'wl-error');
-      continue;
-    }
-    // Sequential FILTERS on the offer (never a ranking).
-    // Producer-review gate (parent WL-0MTIAL65N004T22F AC3) + dispatch-
-    // time eligibility (WL-0MTMPIQBE001J41P): a now-gated or otherwise
-    // non-dispatchable offer is stale — remove it, no pane, no marker.
-    const classification = classifyItemForDispatchDetail(result.info, now);
-    const kind = classification.kind;
-    if (kind === null) {
-      rejectOffer(entry, worklogRoot, classification.gate, result.info.assignee ?? undefined);
-      removeEntry(opts.coordinationDir, entry.instanceId);
-      continue;
-    }
-    // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3):
-    // flag the item for producer review and keep the entry (it is still a
-    // valid offer once a human clears the flag) but skip it this cycle.
-    // Neutral — never a strike, never 'no-candidate' (AC5).
-    if (isAttemptBudgetExhausted(await cooldownEntriesForRoot(worklogRoot), result.info.id, kind, result.info.stage, maxAttempts)) {
-      if (!flaggedForBudget.has(result.info.id)) {
-        flaggedForBudget.add(result.info.id);
-        await flagBudgetExhausted(deps, result.info.id, worklogRoot);
-      }
-      budgetHold = true;
-      rejectOffer(entry, worklogRoot, 'attempt-budget-exhausted');
-      continue;
-    }
-    // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
-    // sequential filter — keep the entry (it is still a valid offer) but
-    // skip it this cycle while the cooldown holds. Never a strike, never
-    // 'no-candidate'.
-    if (
-      _isNonTerminalCooldownActive(
-        await cooldownEntriesForRoot(worklogRoot),
-        result.info.id,
-        kind,
-        result.info.stage,
-        cooldownMs,
-        now,
-      )
-    ) {
-      cooldownHold = true;
-      rejectOffer(entry, worklogRoot, 'non-terminal-cooldown');
-      continue;
-    }
-    // Code-freeze split-by-skill: audit/implement/risk-effort offers pause
-    // during a freeze/ambiguous marker (plan/intake still dispatch). A frozen
-    // offer is stale for the dispatch window — drop it so the owner re-offers
-    // its next head at the next check-in.
-    if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) {
-      rejectOffer(entry, worklogRoot, 'code-freeze');
-      removeEntry(opts.coordinationDir, entry.instanceId);
-      continue;
-    }
-    // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2/AC4): at or above the threshold
-    // audit/implement offers are refused. The entry is KEPT — it is still a
-    // valid offer and the next idle tick re-checks the live CPU (removing it
-    // would also force an owner re-offer cycle for work that is only
-    // temporarily held). Evaluated AFTER the freeze so a dual-gated tick
-    // reports `code-freeze` (AC4 precedence).
-    if (cpuSaturated && (kind === 'audit' || kind === 'implement')) {
-      cpuHold = true;
-      rejectOffer(entry, worklogRoot, 'cpu-saturated');
-      continue;
-    }
-    // Relaxed leaf-audit tick (C4, WL-0MVV1F0HK009JQAP; leader-path wiring
-    // C5 WL-0MVV1F130009VZ1P): the tick admitted this dispatch for ONE pinned
-    // leaf audit, so no other tier may consume the relaxed slot — a non-audit
-    // offer is reported `slots-unavailable` (the token the direct path uses
-    // when its pane budget is unavailable).
-    if (pinnedAuditItemId !== undefined && kind !== 'audit') {
-      pinHeld = true;
-      rejectOffer(entry, worklogRoot, 'slots-unavailable');
-      continue;
-    }
-    // Audit-tier slot minimum: an audit pane needs a second slot for its
-    // Phase 2 child (WL-0MSORQ1RG005DGUS / WL-0MT32F90V008UAD2 AC3) — skip
-    // the offer this cycle when too few slots are free, but KEEP it (it is
-    // still a valid offer; the next cycle may have the slot). The minimum is
-    // PER CANDIDATE (leaf-aware, parent WL-0MSORQ8Y4004YT63 AC2/AC3): in the
-    // single-free-slot band only a classified LEAF is eligible, so the leader
-    // reaches the same decision as the direct path for the same candidate.
-    if (kind === 'audit' && !auditPinAdmits(pinnedAuditItemId, result.info.id)) {
-      pinHeld = true;
-      rejectOffer(entry, worklogRoot, 'audit-slot-min');
-      continue;
-    }
-    if (
-      kind === 'audit' &&
-      !(await auditItemEligible(deps, result.info, auditSlotBudget, worklogRoot))
-    ) {
-      // Budget precondition (AC3): the tick records the
-      // `audit-tier-budget-skipped` observation for this same raw slot
-      // budget; here we only attribute the rejected offer.
-      rejectOffer(entry, worklogRoot, 'audit-slot-min');
-      continue;
-    }
-    // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
-    // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while ITS
-    // OWN root's review queue is deep. Audits (the queue drain), plan,
-    // intake and critical implements flow unconditionally. The entry is
-    // KEPT (not removed) — the queue may drain below the threshold at any
-    // moment (an audit completes / producer reviews) and the next cycle
-    // then dispatches it; the owner's check-in re-offers its next head
-    // once the gate allows.
-    if (kind === 'implement') {
-      const gate = await reviewGateForRoot(worklogRoot);
-      if (isImplementHeldByReviewGate(kind, result.info, gate)) {
-        reviewHold = true;
-        rejectOffer(entry, worklogRoot, 'review-queue-hold');
+    // Rejections are per OFFER but the SUCCESS outcome describes one entry's
+    // decision, so only THIS entry's slice rides along with a dispatch: a peer
+    // entry's refusal belongs to that entry's own attribution and must never
+    // pollute this outcome (WL-0MWDDHVF2004PTYX AC7).
+    const rejectionsBeforeEntry = offerRejections.length;
+    // ── Phase 1 — the UNCHANGED sequential filter chain, per offer ─────
+    // (parent WL-0MWDDHQON0015T3P AC4.) Iterating the entry's offers is what
+    // stops one refused bucket from hiding the entry's other nominees; every
+    // filter below is the pre-tier-aware block verbatim — no gate duplicated,
+    // relaxed or reordered. A survivor is only ADMISSIBLE here: the
+    // drain-aware tie-break in phase 2 still owns the dispatch decision, and
+    // `classifyItemForDispatchDetail` stays the single classifier (the offer's
+    // declared bucket is never used as a gate verdict).
+    const admissible: AdmissibleOffer[] = [];
+    for (const offer of offers) {
+      fetchAttempts += 1;
+      const result = await deps.fetchItem(offer.workItemId, worklogRoot);
+      if (!result.ok) {
+        // Per-offer wl/parse failure — tolerated (fail-open per instance:
+        // one broken worklog must not starve the rest).
+        fetchFailures += 1;
+        lastFetchError = (result as { error?: string }).error ?? 'fetchItem failed';
+        lastEntryWorkItemId = offer.workItemId; // WL-0MTJPYM53003ORCV
+        rejectOffer(offer, worklogRoot, 'wl-error');
         continue;
       }
-    }
-    // Leader-side in-flight re-check (AC2.10): an offer computed BEFORE the
-    // pane appeared must not dispatch now. Only a PROVEN live working pane
-    // blocks (an unavailable query must not stall all coordination dispatch);
-    // the owner's offer computation already applied the marker-TTL fallback.
-    // The entry is KEPT — the offer is still valid once the pane finishes.
-    if (result.info.priority === 'critical') {
-      const inFlight = await inFlightForRoot(worklogRoot);
-      if (inFlight.available && inFlight.itemIds.has(result.info.id)) {
-        inFlightHold = true;
-        rejectOffer(entry, worklogRoot, 'in-flight-pane');
+      // Sequential FILTERS on the offer (never a ranking).
+      // Producer-review gate (parent WL-0MTIAL65N004T22F AC3) + dispatch-
+      // time eligibility (WL-0MTMPIQBE001J41P): a now-gated or otherwise
+      // non-dispatchable offer is stale — remove it, no pane, no marker.
+      const classification = classifyItemForDispatchDetail(result.info, now);
+      const kind = classification.kind;
+      if (kind === null) {
+        rejectOffer(offer, worklogRoot, classification.gate, result.info.assignee ?? undefined);
+        removeOffer(opts.coordinationDir, entry.instanceId, offer.workItemId);
         continue;
       }
+      // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3):
+      // flag the item for producer review and keep the offer (it is still a
+      // valid offer once a human clears the flag) but skip it this cycle.
+      // Neutral — never a strike, never 'no-candidate' (AC5).
+      if (isAttemptBudgetExhausted(await cooldownEntriesForRoot(worklogRoot), result.info.id, kind, result.info.stage, maxAttempts)) {
+        if (!flaggedForBudget.has(result.info.id)) {
+          flaggedForBudget.add(result.info.id);
+          await flagBudgetExhausted(deps, result.info.id, worklogRoot);
+        }
+        budgetHold = true;
+        rejectOffer(offer, worklogRoot, 'attempt-budget-exhausted');
+        continue;
+      }
+      // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
+      // sequential filter — keep the offer (it is still a valid offer) but
+      // skip it this cycle while the cooldown holds. Never a strike, never
+      // 'no-candidate'.
+      if (
+        _isNonTerminalCooldownActive(
+          await cooldownEntriesForRoot(worklogRoot),
+          result.info.id,
+          kind,
+          result.info.stage,
+          cooldownMs,
+          now,
+        )
+      ) {
+        cooldownHold = true;
+        rejectOffer(offer, worklogRoot, 'non-terminal-cooldown');
+        continue;
+      }
+      // Code-freeze split-by-skill: audit/implement/risk-effort offers pause
+      // during a freeze/ambiguous marker (plan/intake still dispatch). A frozen
+      // offer is stale for the dispatch window — drop it so the owner re-offers
+      // its next head at the next check-in.
+      if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) {
+        rejectOffer(offer, worklogRoot, 'code-freeze');
+        removeOffer(opts.coordinationDir, entry.instanceId, offer.workItemId);
+        continue;
+      }
+      // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2/AC4): at or above the threshold
+      // audit/implement offers are refused. The offer is KEPT — it is still a
+      // valid offer and the next idle tick re-checks the live CPU (removing it
+      // would also force an owner re-offer cycle for work that is only
+      // temporarily held). Evaluated AFTER the freeze so a dual-gated tick
+      // reports `code-freeze` (AC4 precedence).
+      if (cpuSaturated && (kind === 'audit' || kind === 'implement')) {
+        cpuHold = true;
+        rejectOffer(offer, worklogRoot, 'cpu-saturated');
+        continue;
+      }
+      // Relaxed leaf-audit tick (C4, WL-0MVV1F0HK009JQAP; leader-path wiring
+      // C5 WL-0MVV1F130009VZ1P): the tick admitted this dispatch for ONE pinned
+      // leaf audit, so no other tier may consume the relaxed slot — a non-audit
+      // offer is reported `slots-unavailable` (the token the direct path uses
+      // when its pane budget is unavailable).
+      if (pinnedAuditItemId !== undefined && kind !== 'audit') {
+        pinHeld = true;
+        rejectOffer(offer, worklogRoot, 'slots-unavailable');
+        continue;
+      }
+      // Audit-tier slot minimum: an audit pane needs a second slot for its
+      // Phase 2 child (WL-0MSORQ1RG005DGUS / WL-0MT32F90V008UAD2 AC3) — skip
+      // the offer this cycle when too few slots are free, but KEEP it (it is
+      // still a valid offer; the next cycle may have the slot). The minimum is
+      // PER CANDIDATE (leaf-aware, parent WL-0MSORQ8Y4004YT63 AC2/AC3): in the
+      // single-free-slot band only a classified LEAF is eligible, so the leader
+      // reaches the same decision as the direct path for the same candidate.
+      if (kind === 'audit' && !auditPinAdmits(pinnedAuditItemId, result.info.id)) {
+        pinHeld = true;
+        rejectOffer(offer, worklogRoot, 'audit-slot-min');
+        continue;
+      }
+      if (
+        kind === 'audit' &&
+        !(await auditItemEligible(deps, result.info, auditSlotBudget, worklogRoot))
+      ) {
+        // Budget precondition (AC3): the tick records the
+        // `audit-tier-budget-skipped` observation for this same raw slot
+        // budget; here we only attribute the rejected offer.
+        rejectOffer(offer, worklogRoot, 'audit-slot-min');
+        continue;
+      }
+      // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+      // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while ITS
+      // OWN root's review queue is deep. Audits (the queue drain), plan,
+      // intake and critical implements flow unconditionally. The offer is
+      // KEPT (not removed) — the queue may drain below the threshold at any
+      // moment (an audit completes / producer reviews) and the next cycle
+      // then dispatches it; the owner's check-in re-offers its next head
+      // once the gate allows.
+      if (kind === 'implement') {
+        const gate = await reviewGateForRoot(worklogRoot);
+        if (isImplementHeldByReviewGate(kind, result.info, gate)) {
+          reviewHold = true;
+          rejectOffer(offer, worklogRoot, 'review-queue-hold');
+          continue;
+        }
+      }
+      // Leader-side in-flight re-check (AC2.10): an offer computed BEFORE the
+      // pane appeared must not dispatch now. Only a PROVEN live working pane
+      // blocks (an unavailable query must not stall all coordination dispatch);
+      // the owner's offer computation already applied the marker-TTL fallback.
+      // The offer is KEPT — it is still valid once the pane finishes.
+      if (result.info.priority === 'critical') {
+        const inFlight = await inFlightForRoot(worklogRoot);
+        if (inFlight.available && inFlight.itemIds.has(result.info.id)) {
+          inFlightHold = true;
+          rejectOffer(offer, worklogRoot, 'in-flight-pane');
+          continue;
+        }
+      }
+      admissible.push({ kind, info: result.info, offer });
     }
-    // Dispatch attempt (CAS claim → marker → spawn).
-    const outcome = await dispatchClaimedTier(
-      deps,
-      kind,
-      toCoordinationCandidate(result.info),
-      {
-        model: opts.model,
-        cwd: worklogRoot,
-        localPreference: opts.localPreference,
-        localPreferenceMode: opts.localPreferenceMode,
-        selectionPath: 'coordination-offer',
-        selectionReason: 'leader-offer',
-      },
+
+    // ── Phase 2 — drain-aware tie-break, then dispatch ────────────────
+    // Parent AC5: when several offers of ONE entry are simultaneously
+    // admissible, the order is audit-drain (the root's review queue is at/over
+    // `browseItemCount`, so audits — the drain — go first) → prep (keeps
+    // implement fed) → implement. A fixed implement-first ladder is explicitly
+    // NOT implemented (precedent WL-0MW9X7EJ6009EL6E: implement-first inflates
+    // the queue and starves both the audits that drain it and the prep that
+    // feeds it). `sort` is stable, so file order still breaks a tie inside a
+    // bucket. Tier choice never crosses roots: the round-robin above owns root
+    // order (AC8), and a single-offer entry dispatches without an extra gate
+    // read — its behaviour is byte-identical to pre-v2.
+    const ordered = orderAdmissibleOffers(
+      admissible,
+      // The drain flag is the SAME per-root review-queue reading the chain
+      // consults, cached for this tick — no second gate definition (AC4).
+      admissible.length > 1 ? await reviewGateForRoot(worklogRoot) : null,
     );
-    if (outcome.dispatched) {
-      // Dispatched — remove the entry so the owner re-queues its next
-      // Herdr head at the next check-in (AC3 re-queue).
-      removeEntry(opts.coordinationDir, entry.instanceId);
-      return outcome;
-    }
-    if (outcome.reservation?.admit === false) {
-      // The proxy REFUSED the local-capacity ticket (parent AC3/AC4, slice
-      // C3): a capacity deferral, not an offer problem. Keep the entry (the
-      // offer is still valid) and return the refusal evidence WITHOUT falling
-      // through to the own-backlog fallback — that fallback would retry other
-      // items and eventually report a generic terminal reason, losing the
-      // `admit: false` / `retryAfterS` / proxy-reason evidence the decision
-      // log needs to distinguish a lost reservation race from a paced stop
-      // (coordination-path parity, C3-AC4).
-      return outcome;
-    }
-    if (outcome.reason === 'claim-failed') {
-      // Another pane won the CAS race — neutral; try the next offer.
-      continue;
-    }
-    if (outcome.reason === 'claim-rolled-back') {
-      // Marker write failed and claim was rolled back (WL-0MT32F908002YFFA);
-      // the item is back in the backlog — try the next offer.
-      continue;
-    }
-    if (isHostBudgetHoldReason(outcome.reason)) {
-      // Machine-wide budget refusal (F3 AC5 / WL-0MWDDHVF2004PTYX): NEUTRAL
-      // hold — keep the offer, no strike, no attempt budget, no cooldown
-      // (AC4). Other offers are still tried; if none dispatches the tick ends
-      // on this refusal. The rung is tier-decided: an IMPLEMENT refusal
-      // (`host-budget-implement`, or `host-budget-unknown` from an implement
-      // admission) records `hostBudgetHold`; an AUDIT refusal
-      // (`audit-budget-saturated` / `audit-budget-unknown` + `detail`, or the
-      // legacy `host-budget-audit` / `audit-host-saturated`) records
-      // `auditBudgetHold` on its own rung so it is NEVER masked by
-      // `host-budget-implement` (AC1/AC2) — and is attributed in the
-      // per-offer rejection payload with the `audit-budget` gate token (AC5).
-      if (isAuditBudgetHoldOutcome(outcome)) {
-        auditBudgetHold ??= outcome;
-        rejectOffer(entry, worklogRoot, 'audit-budget');
-      } else {
-        hostBudgetHold ??= outcome;
+    for (const chosen of ordered) {
+      // Dispatch attempt (CAS claim → marker → host-budget admission → spawn).
+      const outcome = await dispatchClaimedTier(
+        deps,
+        chosen.kind,
+        toCoordinationCandidate(chosen.info),
+        {
+          model: opts.model,
+          cwd: worklogRoot,
+          localPreference: opts.localPreference,
+          localPreferenceMode: opts.localPreferenceMode,
+          selectionPath: 'coordination-offer',
+          selectionReason: 'leader-offer',
+        },
+      );
+      if (outcome.dispatched) {
+        // Dispatched — remove ONLY this offer (parent AC6): the entry's
+        // remaining nominees and its `lastUpdated` stay untouched, so the
+        // next tick can dispatch the next tier without a fresh check-in; an
+        // entry whose last offer dispatched is dropped exactly as before
+        // (AC9). `removeOffer` owns both halves of that rule. The rejections
+        // of the entry's OTHER offers ride along, so a multi-offer tick never
+        // loses its per-offer attribution.
+        removeOffer(opts.coordinationDir, entry.instanceId, chosen.offer.workItemId);
+        return withOfferRejections(
+          outcome,
+          offerRejections.slice(rejectionsBeforeEntry),
+        );
       }
-      continue;
-    }
-    if (outcome.reason === 'wl-error') {
-      // A wl failure is a strike — stop the cycle (three-strike rule
-      // decides when to pause). Carry the entry's workItemId for logging.
-      return { ...outcome, workItemId: entry.workItemId };
-    }
-    if (outcome.reason === 'anchor-unavailable') {
-      // Dispatcher anchor provisioning failed (C0 WL-0MTR01EU7005SYZG): the
-      // anchor is MACHINE-WIDE, so no other offer can spawn either — stop the
-      // cycle now (neutral, no strike, no cooldown; the next idle tick
-      // retries the provisioning). Keep the entry: the offer is still valid.
-      return outcome;
-    }
-    if (outcome.reason === 'spawn-failed' || outcome.reason === 'marker-write-failed') {
-      // The item is claimed (+ marked) but the pane never appeared:
-      // remove the entry so the owner re-queues; the standing marker and
-      // the in_progress claim prevent double-dispatch.
-      removeEntry(opts.coordinationDir, entry.instanceId);
-      return outcome;
+      if (outcome.reservation?.admit === false) {
+        // The proxy REFUSED the local-capacity ticket (parent AC3/AC4, slice
+        // C3): a capacity deferral, not an offer problem. Keep the offer (it
+        // is still valid) and return the refusal evidence WITHOUT falling
+        // through to the own-backlog fallback — that fallback would retry other
+        // items and eventually report a generic terminal reason, losing the
+        // `admit: false` / `retryAfterS` / proxy-reason evidence the decision
+        // log needs to distinguish a lost reservation race from a paced stop
+        // (coordination-path parity, C3-AC4).
+        return outcome;
+      }
+      if (outcome.reason === 'claim-failed') {
+        // Another pane won the CAS race — neutral; try the next admissible
+        // offer (its own tier), then the next entry.
+        continue;
+      }
+      if (outcome.reason === 'claim-rolled-back') {
+        // Marker write failed and claim was rolled back (WL-0MT32F908002YFFA);
+        // the item is back in the backlog — try the next admissible offer.
+        continue;
+      }
+      if (isHostBudgetHoldReason(outcome.reason)) {
+        // Machine-wide budget refusal (F3 AC5 / WL-0MWDDHVF2004PTYX): NEUTRAL
+        // hold — keep the offer, no strike, no attempt budget, no cooldown
+        // (AC4). The entry's OTHER nominees are still dispatched below (their
+        // own admission), which is the motivating regression fix (parent AC7);
+        // if none dispatches the tick ends on this refusal. The rung is
+        // tier-decided: an IMPLEMENT refusal (`host-budget-implement`, or
+        // `host-budget-unknown` from an implement admission) records
+        // `hostBudgetHold`; an AUDIT refusal (`audit-budget-saturated` /
+        // `audit-budget-unknown` + `detail`, or the legacy `host-budget-audit`
+        // / `audit-host-saturated`) records `auditBudgetHold` on its own rung
+        // so it is NEVER masked by `host-budget-implement` (AC1/AC2) — and is
+        // attributed in the per-offer rejection payload with the `audit-budget`
+        // gate token (AC5).
+        if (isAuditBudgetHoldOutcome(outcome)) {
+          auditBudgetHold ??= outcome;
+          rejectOffer(chosen.offer, worklogRoot, 'audit-budget');
+        } else {
+          hostBudgetHold ??= outcome;
+        }
+        continue;
+      }
+      if (outcome.reason === 'wl-error') {
+        // A wl failure is a strike — stop the cycle (three-strike rule
+        // decides when to pause). Carry the offer's workItemId for logging.
+        return { ...outcome, workItemId: chosen.offer.workItemId };
+      }
+      if (outcome.reason === 'anchor-unavailable') {
+        // Dispatcher anchor provisioning failed (C0 WL-0MTR01EU7005SYZG): the
+        // anchor is MACHINE-WIDE, so no other offer can spawn either — stop the
+        // cycle now (neutral, no strike, no cooldown; the next idle tick
+        // retries the provisioning). Keep the offer: it is still valid.
+        return outcome;
+      }
+      if (outcome.reason === 'spawn-failed' || outcome.reason === 'marker-write-failed') {
+        // The item is claimed (+ marked) but the pane never appeared: remove
+        // only THAT offer (its item can never be re-offered safely); the
+        // standing marker and the in_progress claim prevent double-dispatch,
+        // and the entry's other nominees stay dispatchable.
+        removeOffer(opts.coordinationDir, entry.instanceId, chosen.offer.workItemId);
+        return withOfferRejections(
+          outcome,
+          offerRejections.slice(rejectionsBeforeEntry),
+        );
+      }
     }
   }
 
@@ -880,69 +963,25 @@ async function dispatchFromCoordinationGated(
   // TERMINAL-REASON PRECEDENCE (module contract; WL-0MWBT76WY00298AY AC5,
   // extended by WL-0MWDDHVF2004PTYX AC2): `code-freeze` → CPU →
   // review-queue → non-terminal cooldown → attempt budget → in-flight →
-  // leaf-audit pin → AUDIT budget → host budget → `no-candidate`. The audit
-  // budget rung sits ABOVE the host budget rung because an audit refusal with
-  // `detail: 'http-404'` is a BROKEN PROXY CONTRACT, not the weakest ambient
-  // statement — it must never be masked by `host-budget-implement`. The host
-  // budget rung stays last: it is the weakest, most ambient statement
-  // ("some budgeted candidate was refused this tick"). Any stronger hold that
-  // also fired keeps its own reason; with no other hold, the neutral refusal
-  // (its `{live, max}` evidence, and the failing exchange on `detail` for an
-  // audit-budget refusal) is reported instead of `no-candidate`, so no
-  // cooldown/strike is recorded. The offer path's `hostBudgetHold` /
-  // `auditBudgetHold` (same seam, same neutral contract) keep their positions
-  // and are reported first when both a path hold and an own-head hold
-  // recorded one for the same rung.
-  const terminal: DowntimeDispatchOutcome = frozen
-    ? { dispatched: false, reason: 'code-freeze' }
-    : cpuHold || ownHeadHolds.cpu
-      ? { ...cpuEvidence, dispatched: false, reason: CPU_SATURATED_REASON }
-      : reviewHold || ownHeadHolds.review
-        ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
-        : cooldownHold || ownHeadHolds.cooldown
-          ? { dispatched: false, reason: 'non-terminal-cooldown' }
-          : budgetHold || ownHeadHolds.budget
-            ? { dispatched: false, reason: 'attempt-budget-exhausted' }
-            : inFlightHold || ownHeadHolds.inFlight
-            ? { dispatched: false, reason: 'in-flight-pane' }
-            : pinHeld || pinnedAuditItemId !== undefined
-            // A relaxed leaf-audit tick reserved its single free slot for the
-            // pinned audit item: that reservation — not an empty backlog — is
-            // the reason (parity with the direct path, C4/C5). Neutral, so no
-            // no-candidate cooldown and no strike.
-            ? { dispatched: false, reason: LEAF_AUDIT_PIN_HOLD_REASON }
-            // AUDIT-budget refusal (WL-0MWDDHVF2004PTYX AC1/AC2): the
-            // proxy-owned audit budget stopped the audit tier. Neutral — no
-            // cooldown, no strike; the next idle tick re-checks. Reported
-            // BEFORE any implement/host-budget hold so a broken proxy
-            // contract (`audit-budget-unknown` + `detail: 'http-404'`) is
-            // never masked by `host-budget-implement`.
-            : auditBudgetHold !== undefined
-              ? auditBudgetHold
-              : ownHeadHolds.auditBudget !== undefined
-                ? {
-                    dispatched: false,
-                    reason: ownHeadHolds.auditBudget.reason,
-                    ...(ownHeadHolds.auditBudget.budget !== undefined
-                      ? { budget: ownHeadHolds.auditBudget.budget }
-                      : {}),
-                    ...(ownHeadHolds.auditBudget.detail !== undefined
-                      ? { detail: ownHeadHolds.auditBudget.detail }
-                      : {}),
-                  }
-                // Host-budget refusal (F3 AC5): a machine-wide cap, not an
-                // empty backlog, stopped the budgeted tier. Neutral — no
-                // cooldown, no strike; the next idle tick re-checks the ledger.
-                : hostBudgetHold !== undefined
-                  ? hostBudgetHold
-                  : ownHeadHolds.hostBudget !== undefined
-                    ? {
-                        dispatched: false,
-                        reason: ownHeadHolds.hostBudget.reason,
-                        ...(ownHeadHolds.hostBudget.budget !== undefined
-                          ? { budget: ownHeadHolds.hostBudget.budget }
-                          : {}),
-                      }
-                    : { dispatched: false, reason: 'no-candidate' };
+  // leaf-audit pin → AUDIT budget → host budget → `no-candidate`. The full
+  // ordering — and why the audit rung sits above the host rung — lives in
+  // `resolveTerminalOutcome` (`downtime-worker.terminal-reason.ts`), a pure
+  // sibling; this call site only hands it the holds the tick recorded. The
+  // offer path's `hostBudgetHold` / `auditBudgetHold` are reported first when
+  // both a path hold and an own-head hold recorded one for the same rung.
+  const terminal = resolveTerminalOutcome({
+    frozen,
+    cpuHold,
+    cpuEvidence,
+    ownHeadHolds,
+    reviewHold,
+    cooldownHold,
+    budgetHold,
+    inFlightHold,
+    pinHeld,
+    pinnedAuditItemId,
+    auditBudgetHold,
+    hostBudgetHold,
+  });
   return withOfferRejections(terminal, offerRejections);
 }

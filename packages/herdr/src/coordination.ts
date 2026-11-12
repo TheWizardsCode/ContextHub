@@ -553,6 +553,56 @@ export function removeEntry(
 }
 
 /**
+ * Remove ONE offer from an instance's v2 entry (parent WL-0MWDDHQON0015T3P
+ * AC6, "remove only what dispatched"): the entry keeps its remaining offers
+ * and its `lastUpdated`/`assignedAt` metadata untouched, so a second tier can
+ * be dispatched on the next tick without waiting for the owner's check-in
+ * cadence. When the removed offer was the entry's LAST one — and for every
+ * legacy v1-shaped entry, where the single `workItemId` IS the entry — the
+ * whole entry is dropped, exactly as `removeEntry` did before v2 (AC9).
+ *
+ * Returns what actually happened; `{false, false}` means the instance/offer
+ * was not present or the write failed (lock contention, I/O error —
+ * fail-safe, never throws).
+ */
+export function removeOffer(
+  worklogDir: string,
+  instanceId: string,
+  workItemId: string,
+): { offerRemoved: boolean; entryRemoved: boolean } {
+  const missed = { offerRemoved: false, entryRemoved: false };
+  const result = withCoordLock(worklogDir, () => {
+    const data = readCoordinationFile(worklogDir);
+    if (data === null) return missed;
+    const entry = data.entries.find((e) => e.instanceId === instanceId);
+    if (entry === undefined) return missed;
+    const offers = Array.isArray(entry.offers) ? entry.offers : [];
+    // Legacy v1-shaped entry: no payload, so the single `workItemId` is the
+    // offer AND the entry — drop the entry (v1 semantics preserved).
+    if (offers.length === 0) {
+      if (entry.workItemId !== workItemId) return missed;
+      const next = data.entries.filter((e) => e.instanceId !== instanceId);
+      return writeCoordinationFile(worklogDir, { ...data, entries: next })
+        ? { offerRemoved: true, entryRemoved: true }
+        : missed;
+    }
+    const remaining = offers.filter((o) => o.workItemId !== workItemId);
+    if (remaining.length === offers.length) return missed;
+    const entries =
+      remaining.length === 0
+        ? data.entries.filter((e) => e.instanceId !== instanceId)
+        : data.entries.map((e) =>
+            e.instanceId === instanceId
+              ? { ...e, offers: remaining, workItemId: remaining[0].workItemId }
+              : e,
+          );
+    if (!writeCoordinationFile(worklogDir, { ...data, entries })) return missed;
+    return { offerRemoved: true, entryRemoved: remaining.length === 0 };
+  });
+  return result ?? missed;
+}
+
+/**
  * Read one instance's entry. Returns null when absent.
  * Fail-safe: missing/corrupt file → null.
  */
