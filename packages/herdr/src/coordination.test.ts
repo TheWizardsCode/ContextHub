@@ -461,3 +461,172 @@ describe('worklogRoot / directory compat', () => {
     expect(raw.entries[0].worklogRoot).toBe('/tmp/merge-root');
   });
 });
+
+// ── v2 schema contract: bounded offers, duplicate collapse, v1 migration-read (parent WL-0MWDDHQON0015T3P AC1/AC9, test-first slice WL-0MWDVMK48002NIHO) ──
+//
+// Tier-aware offers (parent AC1): `CoordinationEntry` carries a bounded
+// `offers` array — one nominee per bucket (`implement` / `audit` / `prep`,
+// the classifier outputs with plan/intake/risk-effort unioning to `prep`),
+// at most three offers total, and duplicate `(kind, workItemId)` pairs
+// collapse. `COORDINATION_FILE_VERSION` becomes `2`; a v1 file (single
+// top-level `workItemId`, no `offers`) is read as a one-offer entry whose
+// kind is derived by the classifier, and is rewritten as v2 on the next
+// check-in — no v1 file is ever dropped by the upgrade. Legacy
+// `removeEntry` semantics are preserved (parent AC9).
+//
+// RED WITNESS. No v2 surface exists yet: `CoordinationEntry` still carries
+// one `workItemId`, `readCoordinationFile` rebuilds entries without `offers`,
+// and `COORDINATION_FILE_VERSION` is 1 — every spec below that pins the v2
+// shape is expected to fail. Schema implementation child
+// WL-0MWDVMVX50012RSU flips each `it.fails` to `it` and makes the body pass.
+// The GREEN spec below (legacy `removeEntry` semantics) already passes on v1
+// and must STAY green after the upgrade.
+
+import { classifyItemForDispatch } from './downtime-worker.gates.js';
+import {
+  LEGACY_V1_ENTRY,
+  LEGACY_V1_INSTANCE_ID,
+  LEGACY_V1_ITEM,
+  LEGACY_V1_WORK_ITEM_ID,
+} from './__fixtures__/coordination-v1-entry.js';
+import {
+  CANONICAL_V2_OFFERS,
+  DUPLICATE_V2_OFFERS,
+  OVER_BUCKET_V2_OFFERS,
+  OVER_CAP_V2_OFFERS,
+  type CoordOfferWitness,
+} from './__fixtures__/coordination-v2-offers.js';
+
+/** The v2 per-bucket offer payload F1 introduces (at most one per bucket). */
+type V2EntryWitness = Omit<CoordinationEntry, 'workItemId'> & {
+  offers: CoordOfferWitness[];
+};
+
+/** Build a v2-shaped entry (offers payload, NO top-level `workItemId`). */
+function v2EntryWitness(instanceId: string, offers: CoordOfferWitness[]): CoordinationEntry {
+  const now = new Date().toISOString();
+  return {
+    instanceId,
+    directory: testDir,
+    worklogRoot: testDir,
+    assignedAt: now,
+    lastUpdated: now,
+    offers,
+  } as unknown as CoordinationEntry;
+}
+
+/** Map a classifier output to its v2 bucket (parent AC1: plan/intake/risk-effort → prep). */
+function toBucket(kind: string | null): 'implement' | 'audit' | 'prep' | null {
+  if (kind === 'implement' || kind === 'audit') return kind;
+  if (kind === 'plan' || kind === 'intake' || kind === 'risk-effort') return 'prep';
+  return null;
+}
+
+/** Read the persisted raw JSON (the on-disk contract, not the parsed view). */
+function rawFile(): { version: number; entries: Array<Record<string, unknown>> } {
+  return JSON.parse(readFileSync(COORD_PATH(), 'utf-8')) as {
+    version: number;
+    entries: Array<Record<string, unknown>>;
+  };
+}
+
+describe('v2 schema: bounded offers array (parent AC1, RED until F1)', () => {
+  it.fails('COORDINATION_FILE_VERSION is bumped to 2 for the tier-aware offer contract', () => {
+    expect(COORDINATION_FILE_VERSION).toBe(2);
+  });
+
+  it.fails('duplicate (kind, workItemId) pairs collapse to one offer on every write seam', () => {
+    // upsertEntry (per-check-in upsert) ...
+    expect(upsertEntry(testDir, v2EntryWitness('inst-1', DUPLICATE_V2_OFFERS))).toBe(true);
+    // ... and mergeEntries (the batch check-in write seam) collapse the same way.
+    expect(mergeEntries(testDir, [v2EntryWitness('inst-2', DUPLICATE_V2_OFFERS)])).toBe(1);
+
+    const data = readCoordinationFile(testDir)!;
+    expect(data.entries).toHaveLength(2);
+    const offersOf = (entry: CoordinationEntry): CoordOfferWitness[] =>
+      (entry as unknown as V2EntryWitness).offers;
+    // The exact duplicate pair is written ONCE — the array never inflates.
+    for (const entry of data.entries) {
+      expect(offersOf(entry)).toEqual(CANONICAL_V2_OFFERS);
+    }
+    // On disk too: the persisted JSON carries the collapsed arrays.
+    const raw = rawFile();
+    for (const entry of raw.entries) {
+      expect(entry.offers as CoordOfferWitness[]).toEqual(CANONICAL_V2_OFFERS);
+    }
+  });
+
+  it.fails('an offers array exceeding one-per-bucket or three-offer bounds is not persisted', () => {
+    // Two implements in one bucket — the write must keep at most the FIRST
+    // (the canonical first item of the bucket; no second ranking).
+    expect(upsertEntry(testDir, v2EntryWitness('inst-bucket', OVER_BUCKET_V2_OFFERS))).toBe(true);
+    // Four offers (implement twice + audit + prep) — the write must stop at
+    // three total, one per bucket.
+    expect(upsertEntry(testDir, v2EntryWitness('inst-cap', OVER_CAP_V2_OFFERS))).toBe(true);
+
+    const data = readCoordinationFile(testDir)!;
+    const offersOf = (entry: CoordinationEntry): CoordOfferWitness[] =>
+      (entry as unknown as V2EntryWitness).offers;
+    expect(offersOf(data.entries[0])).toEqual([{ kind: 'implement', workItemId: 'WL-IMP-A' }]);
+    expect(offersOf(data.entries[1])).toEqual(CANONICAL_V2_OFFERS);
+    // On disk the bounded invariant holds too — an over-bounds array is never
+    // persisted.
+    const raw = rawFile();
+    expect(raw.entries[0].offers as CoordOfferWitness[]).toHaveLength(1);
+    expect(raw.entries[1].offers as CoordOfferWitness[]).toHaveLength(3);
+  });
+});
+
+describe('v1 migration-read and rewrite (parent AC1, RED until F1)', () => {
+  it.fails('a v1 file (single workItemId, no offers) is read as a one-offer entry whose kind is derived by the classifier', () => {
+    writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
+    const data = readCoordinationFile(testDir);
+    expect(data).not.toBe(null);
+    // No v1 file is dropped by the upgrade — the entry survives the read.
+    expect(data!.entries).toHaveLength(1);
+    const entry = data!.entries[0] as unknown as V2EntryWitness;
+    expect(entry.instanceId).toBe(LEGACY_V1_INSTANCE_ID);
+    // The single v1 offer becomes exactly one `offers` entry...
+    expect(entry.offers).toHaveLength(1);
+    // ...carrying the v1 workItemId...
+    expect(entry.offers[0].workItemId).toBe(LEGACY_V1_WORK_ITEM_ID);
+    // ...and the classifier-derived kind (plan_complete / Low / S → implement).
+    expect(toBucket(classifyItemForDispatch(LEGACY_V1_ITEM))).toBe('implement');
+    expect(entry.offers[0].kind).toBe('implement');
+  });
+
+  it.fails('a v1 file is rewritten as v2 on the next check-in and never dropped', () => {
+    writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
+    // The owner's next check-in recomputes its tier-aware offers and upserts
+    // the same instance's entry (the migrated one-offer shape).
+    const migrated = v2EntryWitness(LEGACY_V1_INSTANCE_ID, [
+      { kind: 'implement', workItemId: LEGACY_V1_WORK_ITEM_ID },
+    ]);
+    expect(upsertEntry(testDir, migrated)).toBe(true);
+
+    const data = readCoordinationFile(testDir)!;
+    // The write path persists the CURRENT format version (2) — never the
+    // legacy one read back from disk.
+    expect(data.version).toBe(2);
+    // The v1 entry survived the upgrade as a one-offer v2 entry.
+    expect(data.entries).toHaveLength(1);
+    const offers = (data.entries[0] as unknown as V2EntryWitness).offers;
+    expect(offers).toEqual([{ kind: 'implement', workItemId: LEGACY_V1_WORK_ITEM_ID }]);
+  });
+});
+
+describe('removeEntry v1 semantics preserved (parent AC9, GREEN today)', () => {
+  it('removes a legacy v1 entry by instanceId and returns it; an absent instance yields null', () => {
+    writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
+    expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).not.toBe(null);
+
+    const removed = removeEntry(testDir, LEGACY_V1_INSTANCE_ID);
+    expect(removed).not.toBe(null);
+    expect(removed!.instanceId).toBe(LEGACY_V1_INSTANCE_ID);
+    expect(removed!.workItemId).toBe(LEGACY_V1_WORK_ITEM_ID);
+    // The entry is gone; the file remains (empty) for the owner's next check-in.
+    expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+    expect(existsSync(COORD_PATH())).toBe(true);
+    expect(removeEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+  });
+});
