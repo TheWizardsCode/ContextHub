@@ -174,6 +174,91 @@ describe('createDowntimeDeps', () => {
     rmSync(rootDir, { recursive: true, force: true });
   });
 
+  // Dispatch-head effect of blocker pinning (WL-0MW7YJYS5009H7WC AC10):
+  // getHerdrListHead feeds the downtime dispatcher the SAME pinned selection
+  // the worklist renders, so a pinned blocker becomes a dispatch candidate
+  // from the same selection the dispatcher ranks. RED WITNESS — today the
+  // head contains only the 24 mandatory rows (the blocker is hidden); the
+  // selection child WL-0MWDOL9J4008K3YR flips `it.fails` to `it` as it lands.
+  it.fails('getHerdrListHead surfaces the pinned blockers of a visible blocked item (AC10)', async () => {
+    const rootDir = makeTempDir();
+    try {
+      const worklogDir = join(rootDir, '.worklog');
+      mkdirSync(worklogDir, { recursive: true });
+      const db = new WorklogDatabase(
+        'WL',
+        join(worklogDir, 'worklog.db'),
+        join(worklogDir, 'worklog-data.jsonl'),
+        true,
+        false,
+      );
+      // One review root filling the window + one blocked root with an open
+      // root blocker hidden behind it (the reported defect shape, reduced).
+      const review = db.create({ title: 'Review root', status: 'completed', stage: 'in_review', priority: 'high' });
+      const blocked = db.create({ title: 'Blocked root', status: 'blocked', stage: 'plan_complete', priority: 'high' });
+      const blocker = db.create({ title: 'Open blocker', status: 'open', stage: 'idea', priority: 'medium' });
+      db.addDependencyEdge(blocked.id, blocker.id);
+      db.close();
+
+      setWorklogDir(worklogDir);
+      const now = new Date().toISOString();
+      const reviewRow = {
+        id: review.id,
+        title: `Item ${review.id}`,
+        status: 'completed',
+        stage: 'in_review',
+        parentId: null,
+        priority: 'high',
+        createdAt: now,
+        updatedAt: now,
+      };
+      const blockedRow = {
+        id: blocked.id,
+        title: `Item ${blocked.id}`,
+        status: 'blocked',
+        stage: 'plan_complete',
+        parentId: null,
+        priority: 'high',
+        createdAt: now,
+        updatedAt: now,
+      };
+      const mockExec = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+        if (args.includes('worklist')) {
+          return {
+            stdout: JSON.stringify({
+              success: true,
+              subsets: {
+                critical: [],
+                reviewQueue: [reviewRow],
+                inProgressRoots: [],
+                blockedRoots: [blockedRow],
+                browse: [{ workItem: reviewRow, reason: 'in review' }],
+              },
+            }),
+            stderr: '',
+          };
+        }
+        return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
+      });
+      setExecFileAsync(mockExec as never);
+
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+      const head = await deps.getHerdrListHead(rootDir, 20);
+
+      expect(head.ok).toBe(true);
+      const items = (head as { ok: true; items: WorkItem[] }).items;
+      const ids = items.map((i) => i.id);
+      // The head is the same selection the dispatcher ranks — the pinned
+      // blocker becomes a candidate, deliberately changing its ordering.
+      expect(ids).toContain(blocker.id);
+      expect(ids).toContain(blocked.id);
+      expect(ids).toContain(review.id);
+    } finally {
+      // Clean up the seeded store even though the RED witness fails today.
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it('getNextItem runs wl next --stage -n 10 and parses the first workItem', async () => {
     const mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ success: true, workItem: { id: 'WL-ABC', title: 'Some task', status: 'open' } }),

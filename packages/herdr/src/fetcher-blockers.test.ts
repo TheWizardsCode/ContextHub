@@ -24,6 +24,7 @@ import {
   resetExecFileAsync,
   resetWorklogDir,
 } from './fetcher.js';
+import { isActiveBlocker } from './fetcher.blockers.js';
 
 /** Spawn-recorded `wl` invocations, reset per test. */
 let spawns: string[];
@@ -163,6 +164,42 @@ describe('fetchBlockersForItem — active blockers (WL-0MV8EZRDJ001TDA8)', () =>
     installExecMock([]);
 
     await expect(fetchBlockersForItem('WL-X')).resolves.toEqual([]);
+  });
+});
+
+describe('isActiveBlocker — the ONE pin predicate (WL-0MW7YJYS5009H7WC AC7)', () => {
+  // The blocker-pin pass (selection child WL-0MWDOL9J4008K3YR) filters
+  // through the SAME shared predicate as the metadata panel's `Blocked By`
+  // rows, so the pinned set can never disagree with what the panel renders.
+  // This pins every terminal case:
+  //   - status `completed` / `deleted` → not an active blocker;
+  //   - stage `in_review` / `done` → not an active blocker (whatever the
+  //     status);
+  //   - anything else (open / in-progress / blocked at an actionable stage)
+  //     → still an active blocker and therefore a pin candidate.
+
+  it('never pins a target whose status is completed or deleted', () => {
+    expect(isActiveBlocker({ id: 'WL-X', status: 'completed', stage: 'done' })).toBe(false);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'deleted', stage: 'intake_complete' })).toBe(false);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'completed' })).toBe(false);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'deleted' })).toBe(false);
+  });
+
+  it('never pins a target at a terminal stage (in_review or done)', () => {
+    expect(isActiveBlocker({ id: 'WL-X', status: 'open', stage: 'in_review' })).toBe(false);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'in-progress', stage: 'in_review' })).toBe(false);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'blocked', stage: 'in_review' })).toBe(false);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'open', stage: 'done' })).toBe(false);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'in-progress', stage: 'done' })).toBe(false);
+  });
+
+  it('keeps an open / in-progress / blocked target at an actionable stage pinable', () => {
+    expect(isActiveBlocker({ id: 'WL-X', status: 'open', stage: 'idea' })).toBe(true);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'open', stage: 'intake_complete' })).toBe(true);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'in-progress', stage: 'plan_complete' })).toBe(true);
+    expect(isActiveBlocker({ id: 'WL-X', status: 'blocked', stage: 'idea' })).toBe(true);
+    // A status-only edge (no stage known from `wl dep list`) stays pinable.
+    expect(isActiveBlocker({ id: 'WL-X', status: 'open' })).toBe(true);
   });
 });
 

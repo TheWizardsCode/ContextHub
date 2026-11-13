@@ -864,3 +864,331 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(ids(items)).not.toContain('N-KID-VIA-SHOW');
   });
 });
+
+// ── Blockers of visible blocked items are pinned (WL-0MW7YJYS5009H7WC) ────
+//
+// RED WITNESS (test-first child WL-0MWDOL08L000L3ZG). The selection child
+// (WL-0MWDOL9J4008K3YR) adds a blocker-pin pass to the default-worklist
+// selection tail: every ACTIVE blocker of a visible blocked item joins the
+// selected set (the blocker itself when it is a root, its ROOT ancestor when
+// it is a child — the same parent substitution the critical-child path uses).
+// The specs that assert post-implementation behaviour are committed with
+// `it.fails` so the suite stays GREEN while they are RED; the selection child
+// flips each `it.fails` to `it` as it lands. Guards that must hold BEFORE and
+// AFTER (no-op, read cost, no-duplicates) are plain `it`.
+
+/**
+ * Seed a REAL worklog DB reproducing the measured defect shape: 20 root
+ * completed/in_review items, 4 blocked roots, open root blockers and one
+ * child-of-self blocker (the `LP-0MVMHNUAR006SRZT` shape) — with
+ * `browseItemCount = 20` the review queue saturates the window and every
+ * open blocker is cut (othersLimit 0).
+ */
+function seedReproductionDb(withEdges = true): {
+  worklogDir: string;
+  reviews: string[];
+  blocked: string[];
+  rootBlockers: string[];
+  childBlocker: string;
+} {
+  const rootDir = mkdtempSync(join(tmpdir(), 'herdr-blocker-pin-'));
+  seededDirs.push(rootDir);
+  const worklogDir = join(rootDir, '.worklog');
+  mkdirSync(worklogDir, { recursive: true });
+  const db = new WorklogDatabase(
+    'WL',
+    join(worklogDir, 'worklog.db'),
+    join(worklogDir, 'worklog-data.jsonl'),
+    true,
+    false,
+  );
+  // 20 root completed/in_review items (the mandatory review queue).
+  const reviews = Array.from({ length: 20 }, (_, index) =>
+    db.create({ title: `Review ${index + 1}`, status: 'completed', stage: 'in_review', priority: 'medium' }).id,
+  );
+  // 4 blocked roots (status=blocked, always shown).
+  const blockedA = db.create({ title: 'Blocked A', status: 'blocked', stage: 'intake_complete', priority: 'high' });
+  const blockedB = db.create({ title: 'Blocked B', status: 'blocked', stage: 'intake_complete', priority: 'high' });
+  const blockedC = db.create({ title: 'Blocked C', status: 'blocked', stage: 'plan_complete', priority: 'high' });
+  const blockedD = db.create({ title: 'Blocked D', status: 'blocked', stage: 'idea', priority: 'high' });
+  // Open root blockers (hidden by the window today — the reported defect).
+  const blockerA1 = db.create({ title: 'Blocker A1', status: 'open', stage: 'idea', priority: 'medium' });
+  const blockerA2 = db.create({ title: 'Blocker A2', status: 'open', stage: 'idea', priority: 'medium' });
+  const blockerB1 = db.create({ title: 'Blocker B1', status: 'open', stage: 'idea', priority: 'medium' });
+  const blockerB2 = db.create({ title: 'Blocker B2', status: 'open', stage: 'idea', priority: 'medium' });
+  // A CHILD blocker whose root IS the blocked item it blocks (the
+  // `LP-0MVMHNUAR006SRZT` shape): substitution collapses to the already
+  // visible blocked item — nothing is added, the child stays reachable via
+  // expand.
+  const childBlocker = db.create({
+    title: 'Child blocker of C',
+    status: 'open',
+    stage: 'intake_complete',
+    priority: 'medium',
+    parentId: blockedC.id,
+  });
+  if (withEdges) {
+    db.addDependencyEdge(blockedA.id, blockerA1.id);
+    db.addDependencyEdge(blockedA.id, blockerA2.id);
+    db.addDependencyEdge(blockedB.id, blockerB1.id);
+    db.addDependencyEdge(blockedB.id, blockerB2.id);
+    db.addDependencyEdge(blockedC.id, childBlocker.id);
+    // Blocked D is blocked by Blocked B, which is already visible — no pin.
+    db.addDependencyEdge(blockedD.id, blockedB.id);
+  }
+  db.close();
+  return {
+    worklogDir,
+    reviews,
+    blocked: [blockedA.id, blockedB.id, blockedC.id, blockedD.id],
+    rootBlockers: [blockerA1.id, blockerA2.id, blockerB1.id, blockerB2.id],
+    childBlocker: childBlocker.id,
+  };
+}
+
+/** The `wl worklist` payload for the reproduction shape (blockers excluded). */
+function reproductionPayload(
+  seeded: ReturnType<typeof seedReproductionDb>,
+  browseLimit?: number,
+): Record<string, unknown> {
+  const reviewEntries = seeded.reviews.map((id) =>
+    entry(item(id, { status: 'completed', stage: 'in_review', priority: 'medium' }), 'in review'),
+  );
+  const blockedRoots = [
+    item(seeded.blocked[0], { status: 'blocked', stage: 'intake_complete', priority: 'high' }),
+    item(seeded.blocked[1], { status: 'blocked', stage: 'intake_complete', priority: 'high' }),
+    item(seeded.blocked[2], { status: 'blocked', stage: 'plan_complete', priority: 'high' }),
+    item(seeded.blocked[3], { status: 'blocked', stage: 'idea', priority: 'high' }),
+  ];
+  return {
+    success: true,
+    worklogDir: seeded.worklogDir,
+    requestedCount: 20,
+    subsets: {
+      critical: [],
+      reviewQueue: reviewEntries.map((e) => e.workItem),
+      inProgressRoots: [],
+      blockedRoots,
+      browse: browseLimit === undefined ? reviewEntries : reviewEntries.slice(0, browseLimit),
+    },
+  };
+}
+
+describe('fetchNextItems: blockers of visible blocked items are pinned (WL-0MW7YJYS5009H7WC)', () => {
+  it.fails('AC1: reproduces the defect shape and pins EVERY root blocker into the selection', async () => {
+    const seeded = seedReproductionDb();
+    setWorklogDir(seeded.worklogDir);
+    const calls = mockWl((args) =>
+      commandOf(args) === 'worklist'
+        ? reproductionPayload(seeded, requestedBrowseCount(args))
+        : legacyRespond(args),
+    );
+
+    // browseItemCount = 20 with 20 review roots + 4 blocked roots: the whole
+    // window is consumed by the mandatory set (othersLimit 0), exactly the
+    // measured defect shape.
+    const items = await fetchNextItems(20);
+    const shown = ids(items);
+
+    // The 4 blocked roots and all 20 reviews are visible…
+    for (const id of [...seeded.blocked, ...seeded.reviews]) {
+      expect(shown).toContain(id);
+    }
+    // …and each ROOT blocker is now selected — not merely "not dropped by the
+    // count window", but present in the returned selection.
+    for (const blockerId of seeded.rootBlockers) {
+      expect(shown).toContain(blockerId);
+    }
+    // AC8: adding the pinned blockers costs NO extra wl spawn — the whole
+    // refresh stays ONE consolidated worklist read on the default path.
+    expect(calls).toHaveLength(1);
+    expect(calls.every((c) => c.args.includes('worklist'))).toBe(true);
+  });
+
+  it('AC4: pinning never duplicates ids and never hides an item visible today', async () => {
+    const seeded = seedReproductionDb();
+    setWorklogDir(seeded.worklogDir);
+    mockWl((args) =>
+      commandOf(args) === 'worklist'
+        ? reproductionPayload(seeded, requestedBrowseCount(args))
+        : legacyRespond(args),
+    );
+
+    const items = await fetchNextItems(20);
+    const shown = ids(items);
+
+    // No duplicate ids.
+    expect(new Set(shown).size).toBe(shown.length);
+    // Every item that is visible today (the 24 mandatory rows) stays visible.
+    for (const id of [...seeded.blocked, ...seeded.reviews]) {
+      expect(shown.filter((x) => x === id)).toHaveLength(1);
+    }
+  });
+
+  it('AC5: with no active blocker the selection is byte-identical to today (no-op regression)', async () => {
+    // Same reproduction shape, but NO dependency edges: no visible blocked
+    // item has an active blocker, so the pin pass must leave the output
+    // byte-identical to today's — the 24 mandatory rows, nothing more.
+    const seeded = seedReproductionDb(/* withEdges */ false);
+    setWorklogDir(seeded.worklogDir);
+    const calls = mockWl((args) =>
+      commandOf(args) === 'worklist'
+        ? reproductionPayload(seeded, requestedBrowseCount(args))
+        : legacyRespond(args),
+    );
+
+    const items = await fetchNextItems(20);
+    const shown = ids(items);
+
+    // Exactly today's selection: the mandatory set, no additions, no
+    // duplicates, in exactly today's order (deterministic content grouping).
+    expect(new Set(shown).size).toBe(shown.length);
+    expect(shown.length).toBe(24);
+    for (const id of [...seeded.blocked, ...seeded.reviews]) {
+      expect(shown).toContain(id);
+    }
+    // No pins → still exactly one consolidated read.
+    expect(calls).toHaveLength(1);
+  });
+
+  it('AC8: the pinned read reuses the in-process dependency read — zero dep/show spawns', async () => {
+    const seeded = seedReproductionDb();
+    setWorklogDir(seeded.worklogDir);
+    const calls = mockWl((args) =>
+      commandOf(args) === 'worklist'
+        ? reproductionPayload(seeded, requestedBrowseCount(args))
+        : legacyRespond(args),
+    );
+
+    await fetchNextItems(20);
+
+    // The pin read is in-process (batched fetchOutboundDepsForItems over the
+    // selected blocked ids): no `wl dep list`, no per-blocker `wl show`, no
+    // extra `wl next` — the ONLY spawned command is the consolidated worklist.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.some((a) => a === 'dep' || a === 'show' || a === 'next')).toBe(false);
+    expect(calls[0].args).toContain('worklist');
+  });
+});
+
+describe('fetchNextItems: ancestor substitution for CHILD blockers (WL-0MW7YJYS5009H7WC AC6)', () => {
+  /**
+   * Seed ONE blocked root whose active blocker is a CHILD, then serve a
+   * `wl worklist` payload containing ONLY the blocked root (the child and
+   * any ancestors are hidden). Returns the seeded ids so each AC6 case can
+   * assert what the pin pass must add/keep.
+   */
+  async function seedChildBlockerCase(kind: 'third-party' | 'self' | 'nested'): Promise<{
+    worklogDir: string;
+    blocked: string;
+    child: string;
+    root: string;
+  }> {
+    const rootDir = mkdtempSync(join(tmpdir(), 'herdr-child-blocker-'));
+    seededDirs.push(rootDir);
+    const worklogDir = join(rootDir, '.worklog');
+    mkdirSync(worklogDir, { recursive: true });
+    const db = new WorklogDatabase(
+      'WL',
+      join(worklogDir, 'worklog.db'),
+      join(worklogDir, 'worklog-data.jsonl'),
+      true,
+      false,
+    );
+    const blocked = db.create({ title: 'Blocked', status: 'blocked', stage: 'plan_complete', priority: 'high' });
+
+    let childParentId = blocked.id;
+    let root = blocked.id;
+    if (kind === 'third-party') {
+      // Child blocker hangs under a THIRD-PARTY root: the ROOT is pinned.
+      root = db.create({ title: 'Third-party parent', status: 'open', stage: 'idea', priority: 'medium' }).id;
+      childParentId = root;
+    } else if (kind === 'nested') {
+      // Nested chain: child → middle → top-most root.
+      const top = db.create({ title: 'Top-most root', status: 'open', stage: 'idea', priority: 'medium' });
+      const middle = db.create({ title: 'Middle parent', status: 'open', stage: 'idea', priority: 'medium', parentId: top.id });
+      root = top.id;
+      childParentId = middle.id;
+    }
+    const child = db.create({
+      title: 'Child blocker',
+      status: 'open',
+      stage: 'intake_complete',
+      priority: 'medium',
+      parentId: childParentId,
+    });
+    db.addDependencyEdge(blocked.id, child.id);
+    db.close();
+
+    setWorklogDir(worklogDir);
+    const blockedRow = item(blocked.id, { status: 'blocked', stage: 'plan_complete', priority: 'high' });
+    mockWl((args) => {
+      if (commandOf(args) === 'worklist') {
+        return {
+          success: true,
+          worklogDir,
+          requestedCount: 20,
+          subsets: {
+            critical: [],
+            reviewQueue: [],
+            inProgressRoots: [],
+            blockedRoots: [blockedRow],
+            browse: [entry(blockedRow, 'blocked')],
+          },
+        };
+      }
+      return legacyRespond(args);
+    });
+    return { worklogDir, blocked: blocked.id, child: child.id, root };
+  }
+
+  it.fails('pins the ROOT ancestor when a child blocker hangs under a third-party parent (AC6a)', async () => {
+    const seeded = await seedChildBlockerCase('third-party');
+
+    const items = await fetchNextItems(20);
+    const shown = ids(items);
+
+    // The child never renders at the top level…
+    expect(shown).not.toContain(seeded.child);
+    // …its ROOT ancestor is pinned instead.
+    expect(shown).toContain(seeded.root);
+    // No leftover parentId item appears in the selected list (generalisation
+    // of the root-only invariant).
+    expect(items.filter((i) => i.parentId)).toHaveLength(0);
+    // The blocked root itself stays visible.
+    expect(shown).toContain(seeded.blocked);
+  });
+
+  it('adds NO row when the child blocker\'s root IS the blocked item — child stays reachable via expand (AC6b)', async () => {
+    const seeded = await seedChildBlockerCase('self');
+
+    const items = await fetchNextItems(20);
+    const shown = ids(items);
+
+    // The blocked item appears exactly once (never duplicated by the pin)…
+    expect(shown).toContain(seeded.blocked);
+    expect(items.filter((i) => i.id === seeded.blocked)).toHaveLength(1);
+    // …the child is NOT a top-level row…
+    expect(shown).not.toContain(seeded.child);
+    expect(items.filter((i) => i.parentId)).toHaveLength(0);
+    // …and it stays reachable via expand of the parent it blocks.
+    const children = await fetchChildrenForItem(seeded.blocked);
+    expect(ids(children)).toContain(seeded.child);
+  });
+
+  it.fails('pins the TOP-MOST ancestor for a NESTED child blocker (AC6c)', async () => {
+    const seeded = await seedChildBlockerCase('nested');
+
+    const items = await fetchNextItems(20);
+    const shown = ids(items);
+
+    // Top-most ancestor is pinned; the intermediate parent and the child
+    // itself never render at top level (mirrors the nested critical-child
+    // rule).
+    expect(shown).toContain(seeded.root);
+    expect(shown).not.toContain(seeded.child);
+    expect(items.filter((i) => i.parentId)).toHaveLength(0);
+    expect(shown).toContain(seeded.blocked);
+  });
+});
+

@@ -662,3 +662,181 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
   });
 });
 
+
+// ── Pinned blockers share the blocked item's group (WL-0MW7YJYS5009H7WC) ───
+//
+// RED WITNESS (test-first child WL-0MWDOL08L000L3ZG). The blocker-pin contract
+// drives two implementation children:
+//
+//   - WL-0MWDOL9J4008K3YR (selection): pins each active blocker of a visible
+//     blocked item into the selected list and emits a pin map
+//     `blockerItemId → blockedItemId(s)`;
+//   - WL-0MWDOL7I1001SXXA (grouping): consumes that map. `regroupWorkItems`
+//     gains an optional third parameter — the pin map — and overrides each
+//     pinned blocker's `group`/`groupLabel` to the blocked item's group,
+//     sorts it immediately after the blocked item within the group, and
+//     collapses a blocker that blocks several blocked items in different
+//     groups into the FIRST (lowest-numbered) group, exactly once.
+//
+// Today the third parameter does not exist, so every spec below is committed
+// with `it.fails` (the repo's documented TDD pattern — the suite stays GREEN
+// while the assertions are RED); the grouping child flips each `it.fails` to
+// `it` as it lands.
+
+/** Pin map contract: blocker item id → the visible blocked item id(s) it blocks. */
+type BlockerPins = ReadonlyMap<string, string | string[]>;
+
+/** Call `regroupWorkItems` with the (future) pin map — no-op today, so the
+ *  pin-override assertions fail until the grouping child lands. */
+function regroupPinned(items: WorkItem[], pins: BlockerPins, maxFilePathGroups = 3): WorkItem[] {
+  return (regroupWorkItems as unknown as (
+    items: WorkItem[],
+    maxFilePathGroups: number,
+    pins: BlockerPins,
+  ) => WorkItem[])(items, maxFilePathGroups, pins);
+}
+
+/** A blocker with no shared key files (would group on its own today). */
+function blocker(id: string, overrides: Partial<WorkItem> = {}): WorkItem {
+  return makeItem(id, {
+    stage: 'idea',
+    status: 'open',
+    priority: 'medium',
+    description: undefined as unknown as string, // no Key Files section
+    ...overrides,
+  });
+}
+
+describe('regroupWorkItems — blocker pin overrides (WL-0MW7YJYS5009H7WC)', () => {
+  it.fails('pins a blocker into the blocked item\'s group and label despite no shared key files (AC2)', () => {
+    const blocked = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
+    const pinned = blocker('WL-P1');
+
+    const items = regroupPinned([blocked, pinned], pinMap([['WL-P1', 'WL-B1']]));
+    const blockedRow = items.find((i) => i.id === 'WL-B1')!;
+    const pinnedRow = items.find((i) => i.id === 'WL-P1')!;
+
+    // The blocker would land in "Idea" on its own (no shared key files), but
+    // the pin carries it into the blocked item's group with the SAME label.
+    expect(pinnedRow.group).toBe(blockedRow.group);
+    expect(pinnedRow.groupLabel).toBe(blockedRow.groupLabel);
+    expect(blockedRow.groupLabel).toBe('Group 1');
+  });
+
+  it.fails('appears exactly once in the first (lowest-numbered) group when it blocks two visible blocked items in different groups (AC2)', () => {
+    const blocked1 = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
+    const blocked2 = makeItem('WL-B2', { stage: 'idea', priority: 'medium' });
+    const pinned = blocker('WL-P1');
+
+    const items = regroupPinned(
+      [blocked1, blocked2, pinned],
+      pinMap([['WL-P1', ['WL-B1', 'WL-B2']]]),
+    );
+    const blocked1Row = items.find((i) => i.id === 'WL-B1')!;
+    const blocked2Row = items.find((i) => i.id === 'WL-B2')!;
+    const pinnedRows = items.filter((i) => i.id === 'WL-P1');
+
+    // The two blocked items genuinely land in different groups.
+    expect(blocked1Row.group).not.toBe(blocked2Row.group);
+    // The blocker appears exactly once, in the FIRST (lowest) group.
+    expect(pinnedRows).toHaveLength(1);
+    expect(pinnedRows[0].group).toBe(Math.min(blocked1Row.group!, blocked2Row.group!));
+    expect(pinnedRows[0].groupLabel).toBe(blocked1Row.groupLabel);
+  });
+
+  it.fails('places the pinned blocker immediately after the blocked item within the group (AC3)', () => {
+    const blocked = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
+    const other = makeItem('WL-X1', { stage: 'plan_complete', priority: 'high' });
+    const pinned = blocker('WL-P1');
+
+    const items = regroupPinned(
+      [blocked, other, pinned],
+      pinMap([['WL-P1', 'WL-B1']]),
+    );
+    const indexOf = (id: string): number => items.findIndex((i) => i.id === id);
+
+    // Same group first…
+    expect(items[indexOf('WL-P1')]!.group).toBe(items[indexOf('WL-B1')]!.group);
+    // …and immediately after the blocked item, before the other group member.
+    expect(indexOf('WL-P1')).toBe(indexOf('WL-B1') + 1);
+    expect(indexOf('WL-P1')).toBeLessThan(indexOf('WL-X1'));
+  });
+
+  it('never duplicates an id and never drops an item visible today (AC4)', () => {
+    // Both the blocked item and its (already-selected) blocker are in the
+    // input. The pin pass is additive: the grouped list keeps every input
+    // item exactly once, whatever the overrides.
+    const blocked = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
+    const blocked2 = makeItem('WL-B2', { stage: 'idea', priority: 'medium' });
+    const pinned = blocker('WL-P1');
+    const input = [blocked, blocked2, pinned];
+
+    const items = regroupPinned(input, pinMap([['WL-P1', ['WL-B1', 'WL-B2']]]));
+    const ids = items.map((i) => i.id);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.sort()).toEqual(input.map((i) => i.id).sort());
+  });
+
+  it('is byte-identical to today\'s output when no visible item has an active blocker (AC5)', () => {
+    const input = [
+      blocker('WL-P1'),
+      makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' }),
+      makeItem('WL-I1', { stage: 'idea', priority: 'low' }),
+      makeItem('WL-R1', { stage: 'in_review', priority: 'medium', status: 'completed' }),
+    ];
+
+    // An empty pin map (no active blockers) must leave the output — ids,
+    // groups, labels and order — byte-identical to today's grouping.
+    const today = regroupWorkItems(input, 3).map((i) => `${i.id}|${i.group}|${i.groupLabel}`);
+    const withEmptyPins = regroupPinned(input, new Map()).map(
+      (i) => `${i.id}|${i.group}|${i.groupLabel}`,
+    );
+
+    expect(withEmptyPins).toEqual(today);
+    expect(today).toEqual([
+      'WL-B1|1|Group 1',
+      'WL-P1|2|Idea',
+      'WL-I1|2|Idea',
+      'WL-R1|3|In Review',
+    ]);
+  });
+
+  it.fails('keeps pinned grouping a pure function of content + edges, never of arrival order (AC9)', () => {
+    const blocked1 = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
+    const blocked2 = makeItem('WL-B2', { stage: 'idea', priority: 'medium' });
+    const blocked3 = makeItem('WL-B3', { stage: 'plan_complete', priority: 'medium' });
+    const pinned = blocker('WL-P1');
+
+    // Same item set + same edges, two pin-map insertion orders.
+    const pinsA: BlockerPins = new Map([
+      ['WL-P1', ['WL-B1', 'WL-B2']],
+    ]);
+    const pinsB: BlockerPins = new Map([
+      ['WL-P1', ['WL-B2', 'WL-B1']],
+    ]);
+    const itemSet = [blocked1, blocked2, blocked3, pinned];
+
+    const groupedKey = (rows: WorkItem[]): string =>
+      rows.map((i) => `${i.id}|${i.group}|${i.groupLabel}`).join(';');
+
+    // Reference pinned grouping from one canonical order.
+    const reference = groupedKey(regroupPinned(itemSet, pinsA));
+    // The pin is actually applied: the blocker rides in the blocked item's
+    // group, not its own.
+    const referenceBlocker = regroupPinned(itemSet, pinsA).find((i) => i.id === 'WL-P1')!;
+    expect(referenceBlocker.group).toBe(
+      regroupPinned(itemSet, pinsA).find((i) => i.id === 'WL-B1')!.group,
+    );
+
+    for (const permuted of permutations(itemSet)) {
+      expect(groupedKey(regroupPinned(permuted, pinsA))).toBe(reference);
+      expect(groupedKey(regroupPinned(permuted, pinsB))).toBe(reference);
+    }
+  });
+});
+
+/** Convenience pin-map builder (blocker id → one or more blocked item ids). */
+function pinMap(entries: Array<[string, string | string[]]>): BlockerPins {
+  return new Map(entries);
+}

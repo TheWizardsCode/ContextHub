@@ -340,6 +340,55 @@ describe('selectWorkItems — smart selection algorithm', () => {
     });
   });
 
+  describe('blocker-pin selection contract (WL-0MW7YJYS5009H7WC AC4)', () => {
+    // The blocker-pin pass (selection child WL-0MWDOL9J4008K3YR) is a
+    // downstream tail of selectWorkItems, so the SELECTION contract that the
+    // pin must preserve is asserted here as a pure fixture: the pinned set is
+    // a superset of today's selection, never a removal and never a duplicate.
+    // `selectWorkItems` itself is unchanged (assertion fixture only — no
+    // behaviour change in this item).
+    it('never duplicates ids and never drops a currently-visible item when blockers are merged in (AC4)', () => {
+      const items = [
+        blocked('BLK-1', { stage: 'plan_complete' }),
+        // The blocker is merged into the candidate set (as the pin pass
+        // produces) — open, non-mandatory, root.
+        other('BLKR-1'),
+        other('O1'),
+        other('O2'),
+      ];
+
+      const result = selectWorkItems(items, 10);
+      const ids = result.map((i) => i.id);
+
+      // No duplicate ids.
+      expect(new Set(ids).size).toBe(ids.length);
+      // The mandatory blocked root is still visible.
+      expect(ids).toContain('BLK-1');
+      // A window with room keeps the (already-selected) blocker.
+      expect(ids).toContain('BLKR-1');
+      // Root-only top level unchanged.
+      expect(result.every((i) => !i.parentId)).toBe(true);
+    });
+
+    it('keeps a blocked root visible under window pressure even when its blocker is only an "other" (AC4)', () => {
+      const items = [
+        ...Array.from({ length: 25 }, (_, i) => other(`O${i + 1}`)),
+        blocked('BLK-1', { stage: 'idea' }),
+        // The open blocker is an "other": today it is cut by the window; the
+        // pin pass (downstream) is what re-adds it — never by removing the
+        // blocked root.
+        other('BLKR-1'),
+      ];
+
+      const result = selectWorkItems(items, 20);
+      const ids = result.map((i) => i.id);
+
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids).toContain('BLK-1');
+      expect(ids).not.toContain('BLKR-1');
+    });
+  });
+
   describe('edge cases', () => {
     it('empty mandatory set → behaves like plain top-N (others.slice(0, browseItemCount))', () => {
       const items = Array.from({ length: 25 }, (_, i) => other(`O${i + 1}`));
