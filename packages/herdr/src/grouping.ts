@@ -559,9 +559,8 @@ export function compareGroupableItems(a: GroupableItem, b: GroupableItem): numbe
  * visible blocked item id(s) it was pinned for. Produced by the selection
  * tail (`fetcher.root-substitution.ts`) and passed as the optional third
  * `regroupWorkItems` argument so a pinned blocker is grouped WITH the item it
- * blocks (first group wins — the grouping child WL-0MWDOL7I1001SXXA
- * implements the override). Absent/empty → byte-identical to today's output
- * (AC5 no-op regression).
+ * blocks (first group wins — implemented here, WL-0MWDOL7I1001SXXA).
+ * Absent/empty → byte-identical to today's output (AC5 no-op regression).
  */
 export type BlockerPins = ReadonlyMap<string, string | string[]>;
 
@@ -576,10 +575,14 @@ export type BlockerPins = ReadonlyMap<string, string | string[]>;
  * Does not filter or drop items — the always-show-mandatory guarantee of
  * selectWorkItems is preserved. Items are only reordered and stamped.
  *
- * The optional `pins` map (WL-0MW7YJYS5009H7WC) is the blocker-pin seam the
- * grouping child consumes; THIS implementation accepts and ignores it so the
- * selection child can thread it through while keeping output byte-identical
- * (AC5). The override itself lands with WL-0MWDOL7I1001SXXA.
+ * The optional `pins` map applies the blocker-pin override (WL-0MW7YJYS5009H7WC):
+ * a pinned blocker is grouped WITH the blocked item it blocks — same
+ * `group`/`groupLabel` — and sorts immediately after it (AC2/AC3). When a
+ * blocker blocks two visible blocked items in different groups the FIRST
+ * (lowest-numbered) group in display order wins and the blocker appears
+ * exactly once. An absent/empty pin map leaves the output byte-identical to
+ * today's (AC5). The override is a deliberate exception to the file-path
+ * conflict invariant for the blocker/blocked pair ONLY (AC12).
  */
 export function regroupWorkItems<T extends {
   id: string;
@@ -602,7 +605,7 @@ export function regroupWorkItems<T extends {
 }>(
   items: T[],
   maxFilePathGroups: number = 3,
-  _pins?: BlockerPins,
+  pins?: BlockerPins,
 ): T[] {
   const groupable = items.map(item => ({
     id: item.id,
@@ -618,6 +621,51 @@ export function regroupWorkItems<T extends {
     currentFingerprint: item.currentFingerprint,
   }));
   const groupMap = assignItemGroups(groupable, maxFilePathGroups);
+
+  // ── Blocker-pin override (WL-0MW7YJYS5009H7WC AC2/AC3) ────────────────
+  //
+  // AC12 — DELIBERATE INVARIANT OVERRIDE: the file-path conflict invariant
+  // (two conflicting items must never share a group) is broken for the
+  // blocker/blocked pair, on purpose. A pinned blocker renders NEXT TO the
+  // item it blocks (same group/label, immediately after it) because the
+  // dependency relationship is the operator's primary need: a "blocked" row
+  // must be followed by the work that unblocks it. This override applies ONLY
+  // to ids present in the pin map; every other item keeps the content-derived
+  // grouping, so the invariant is weakened for exactly the required pair and
+  // nothing else.
+  //
+  // Resolve each blocker → its blocked anchor: the FIRST (lowest-numbered)
+  // group in display order wins when a blocker blocks several visible blocked
+  // items that land in different groups (AC2). Tie-breaks are by id so the
+  // resolution is a pure function of content + edges, never of `updatedAt` or
+  // the pin map's insertion order (AC9).
+  const pinAnchor = new Map<string, { anchorId: string; group: number; groupLabel: string }>();
+  if (pins && pins.size > 0) {
+    for (const [blockerId, ref] of pins) {
+      const blockedIds = Array.isArray(ref) ? ref : [ref];
+      let chosen: { anchorId: string; group: number; groupLabel: string } | null = null;
+      for (const blockedId of blockedIds) {
+        const assignment = groupMap.get(blockedId);
+        if (!assignment) continue; // blocked item not visible → skip candidate
+        if (
+          !chosen ||
+          assignment.group < chosen.group ||
+          (assignment.group === chosen.group && blockedId < chosen.anchorId)
+        ) {
+          chosen = {
+            anchorId: blockedId,
+            group: assignment.group,
+            groupLabel: assignment.groupLabel,
+          };
+        }
+      }
+      if (chosen) {
+        // Override the blocker's group to the blocked item's (AC2).
+        groupMap.set(blockerId, { group: chosen.group, groupLabel: chosen.groupLabel });
+        pinAnchor.set(blockerId, chosen);
+      }
+    }
+  }
 
   const sorted = items.slice().sort((a, b) => {
     const ga = groupMap.get(a.id)?.group ?? Number.MAX_SAFE_INTEGER;
@@ -642,6 +690,61 @@ export function regroupWorkItems<T extends {
       },
     );
   });
+
+  // AC3 — adjacency: within a group, each pinned blocker sorts immediately
+  // AFTER the blocked item it was pinned for, instead of at its own
+  // content-derived position. Deterministic: process each group's members in
+  // content order (already established by `sorted`), emit non-pinned items as
+  // they come, and insert each pinned blocker right after its anchor
+  // (multi-block: the anchor resolves to the first/lowest group per AC2).
+  // Iteration order of `pins` never matters — everything derives from the
+  // content-ordered list + the resolved anchor map (AC9).
+  if (pinAnchor.size > 0) {
+    const result: T[] = [];
+    const byGroup = new Map<number, T[]>();
+    for (const item of sorted) {
+      const g = groupMap.get(item.id)?.group ?? Number.MAX_SAFE_INTEGER;
+      const list = byGroup.get(g);
+      if (list) list.push(item);
+      else byGroup.set(g, [item]);
+    }
+    for (const g of [...byGroup.keys()].sort((a, b) => a - b)) {
+      const members = byGroup.get(g)!;
+      const pinnedHere = members.filter(m => {
+        const anchor = pinAnchor.get(m.id);
+        return anchor !== undefined && anchor.group === g;
+      });
+      const pinnedIds = new Set(pinnedHere.map(m => m.id));
+      const out: T[] = [];
+      for (const member of members) {
+        if (pinnedIds.has(member.id)) continue; // emitted below, next to its anchor
+        out.push(member);
+        // Insert every pinned blocker anchored on this member immediately
+        // after it (deterministic by blocker id).
+        const afterThis = pinnedHere
+          .filter(p => pinAnchor.get(p.id)!.anchorId === member.id)
+          .sort((x, y) => x.id.localeCompare(y.id));
+        for (const pinned of afterThis) out.push(pinned);
+      }
+      // Fail-open: a pinned blocker whose anchor left the group (should not
+      // happen — the override forces them into the same group) appends at the
+      // group's end, deterministically.
+      const emitted = new Set(out.map(m => m.id));
+      for (const pinned of pinnedHere.sort((x, y) => x.id.localeCompare(y.id))) {
+        if (!emitted.has(pinned.id)) out.push(pinned);
+      }
+      result.push(...out);
+    }
+    return result.map(item => {
+      const assignment = groupMap.get(item.id);
+      if (!assignment) return item;
+      return {
+        ...item,
+        group: assignment.group,
+        groupLabel: assignment.groupLabel,
+      };
+    });
+  }
 
   return sorted.map(item => {
     const assignment = groupMap.get(item.id);

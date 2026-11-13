@@ -708,7 +708,7 @@ function blocker(id: string, overrides: Partial<WorkItem> = {}): WorkItem {
 }
 
 describe('regroupWorkItems — blocker pin overrides (WL-0MW7YJYS5009H7WC)', () => {
-  it.fails('pins a blocker into the blocked item\'s group and label despite no shared key files (AC2)', () => {
+  it('pins a blocker into the blocked item\'s group and label despite no shared key files (AC2)', () => {
     const blocked = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
     const pinned = blocker('WL-P1');
 
@@ -723,7 +723,7 @@ describe('regroupWorkItems — blocker pin overrides (WL-0MW7YJYS5009H7WC)', () 
     expect(blockedRow.groupLabel).toBe('Group 1');
   });
 
-  it.fails('appears exactly once in the first (lowest-numbered) group when it blocks two visible blocked items in different groups (AC2)', () => {
+  it('appears exactly once in the first (lowest-numbered) group when it blocks two visible blocked items in different groups (AC2)', () => {
     const blocked1 = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
     const blocked2 = makeItem('WL-B2', { stage: 'idea', priority: 'medium' });
     const pinned = blocker('WL-P1');
@@ -744,7 +744,7 @@ describe('regroupWorkItems — blocker pin overrides (WL-0MW7YJYS5009H7WC)', () 
     expect(pinnedRows[0].groupLabel).toBe(blocked1Row.groupLabel);
   });
 
-  it.fails('places the pinned blocker immediately after the blocked item within the group (AC3)', () => {
+  it('places the pinned blocker immediately after the blocked item within the group (AC3)', () => {
     const blocked = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
     const other = makeItem('WL-X1', { stage: 'plan_complete', priority: 'high' });
     const pinned = blocker('WL-P1');
@@ -802,7 +802,7 @@ describe('regroupWorkItems — blocker pin overrides (WL-0MW7YJYS5009H7WC)', () 
     ]);
   });
 
-  it.fails('keeps pinned grouping a pure function of content + edges, never of arrival order (AC9)', () => {
+  it('keeps pinned grouping a pure function of content + edges, never of arrival order (AC9)', () => {
     const blocked1 = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
     const blocked2 = makeItem('WL-B2', { stage: 'idea', priority: 'medium' });
     const blocked3 = makeItem('WL-B3', { stage: 'plan_complete', priority: 'medium' });
