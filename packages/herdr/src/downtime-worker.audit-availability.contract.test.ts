@@ -3,17 +3,24 @@
  * contract tests for the proxy audit-availability wire read (parent
  * WL-0MW95GBEG005ERHS, child WL-0MWAMS1PW000O3OS).
  *
- * The proxy endpoint does not exist yet (sibling llm item
- * LP-0MW95FYMH006XYNK; probed 2026-11-10 — every `/llama/local/audit*` path
- * answers `404`). These fixtures therefore PIN the client-side contract before
- * the server lands, exactly as the reserve-handshake slice C1 did:
+ * The proxy side (sibling llm item LP-0MW95FYMH006XYNK) has SHIPPED: validated
+ * 2026-11-13 against the live proxy (`http://192.168.0.199:8000`),
+ * `GET /llama/local/audit/availability` answers `200`
+ * `{"cap":1,"live":0,"available":1,"leases":[],"max_audits":1}` while
+ * `/llama/local/audit/status` answers `404`. These fixtures pin the SHIPPED
+ * wire contract:
  *
  *   - a usable payload maps to `{ cap, live, available, leases?, reclaimed? }`,
- *   - the alias spellings the proxy has not fixed yet parse to the same typed
+ *   - the shipped numeric `available` verdict (`0`/`1`) is coerced to a
+ *     boolean; a real boolean is still accepted, every other value fails
+ *     closed,
+ *   - the alias spellings the proxy may still evolve parse to the same typed
  *     result, and additive extra fields are ignored,
  *   - `available` is the proxy's OWN field — never derived from cap/live,
  *   - EVERY unusable payload is `null` (a garbage body can never be read as
  *     "available"),
+ *   - the path is the shipped endpoint, overridable via
+ *     `HERDR_AUDIT_AVAILABILITY_PATH`,
  *   - no production dispatch path imports the parser yet (no behaviour change).
  *
  * Traceability: each case cites the work-item AC it serves.
@@ -32,6 +39,10 @@ import {
 } from './downtime-worker.audit-availability.contract.js';
 import { AUDIT_AVAILABILITY_PATH } from './downtime-worker.constants.js';
 import {
+  AUDIT_AVAILABILITY_PATH_ENV,
+  resolveAuditAvailabilityPath,
+} from './downtime-worker.constants.js';
+import {
   AUDIT_BUDGET_SATURATED_REASON as BARREL_REASON,
   AUDIT_BUDGET_UNKNOWN_REASON as BARREL_UNKNOWN_REASON,
   parseAuditAvailabilityResponse as barrelParse,
@@ -39,16 +50,42 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// ── AC1: the provisional path is pinned in the constants module ────────
+// ── AC1: the shipped path (and its override) is pinned ──────────────
 
 describe('AUDIT_AVAILABILITY_PATH (AC1)', () => {
-  it('pins the documented provisional path', () => {
-    expect(AUDIT_AVAILABILITY_PATH).toBe('/llama/local/audit/status');
+  it('pins the proxy-\u2011shipped endpoint, not the provisional /audit/status', () => {
+    // Captured 2026-11-13: `/llama/local/audit/availability` -> 200,
+    // `/llama/local/audit/status` -> 404. The old literal pinned the wrong path.
+    expect(AUDIT_AVAILABILITY_PATH).toBe('/llama/local/audit/availability');
   });
 
   it('is re-exported from the downtime-worker barrel', () => {
     // The client child (WL-0MWAMSCOP003R837) imports the constant here.
     expect(AUDIT_AVAILABILITY_PATH).toMatch(/^\/llama\/local\/audit/);
+  });
+});
+
+describe('resolveAuditAvailabilityPath (AC1 override)', () => {
+  it('defaults to the shipped path when the override is unset', () => {
+    expect(resolveAuditAvailabilityPath({})).toBe(AUDIT_AVAILABILITY_PATH);
+  });
+
+  it('treats empty/whitespace overrides as unset (never a blank path)', () => {
+    expect(resolveAuditAvailabilityPath({ [AUDIT_AVAILABILITY_PATH_ENV]: '' })).toBe(
+      AUDIT_AVAILABILITY_PATH,
+    );
+    expect(resolveAuditAvailabilityPath({ [AUDIT_AVAILABILITY_PATH_ENV]: '   ' })).toBe(
+      AUDIT_AVAILABILITY_PATH,
+    );
+  });
+
+  it('honours a non-empty override (trimmed) so a path change is config, not code', () => {
+    expect(
+      resolveAuditAvailabilityPath({ [AUDIT_AVAILABILITY_PATH_ENV]: '/llama/local/audit/v2' }),
+    ).toBe('/llama/local/audit/v2');
+    expect(
+      resolveAuditAvailabilityPath({ [AUDIT_AVAILABILITY_PATH_ENV]: '  /llama/local/audit/v2  ' }),
+    ).toBe('/llama/local/audit/v2');
   });
 });
 
@@ -116,6 +153,15 @@ const CASES: readonly ParseCase[] = [
     expected: { cap: 1, live: 1, available: false, reason: 'queue-full' },
   },
 
+  {
+    name: 'shipped: captured proxy payload coerces the numeric verdict and ignores max_audits',
+    // Exact body captured 2026-11-13 from
+    // `GET /llama/local/audit/availability` at HTTP 200. `available` is the
+    // NUMBER 1, `max_audits` is additive and ignored.
+    raw: { cap: 1, live: 0, available: 1, leases: [], max_audits: 1 },
+    expected: { cap: 1, live: 0, available: true, leases: [] },
+  },
+
   // ── AC3: documented aliases map to the SAME typed result ────────────
   {
     name: 'alias: cap/max, live/in_flight, available/can_admit',
@@ -131,6 +177,21 @@ const CASES: readonly ParseCase[] = [
     name: 'alias: refusal_reason is read when reason is absent',
     raw: { cap: 1, live: 1, available: false, refusal_reason: AUDIT_BUDGET_SATURATED_REASON },
     expected: { cap: 1, live: 1, available: false, reason: AUDIT_BUDGET_SATURATED_REASON },
+  },
+  {
+    name: 'alias: numeric can_admit: 1 coerces to available: true',
+    raw: { max: 1, in_flight: 0, can_admit: 1 },
+    expected: { cap: 1, live: 0, available: true },
+  },
+  {
+    name: 'alias: an unparsable earlier verdict never shadows a usable later one',
+    raw: { cap: 1, live: 0, available: 'yes', can_admit: true },
+    expected: { cap: 1, live: 0, available: true },
+  },
+  {
+    name: 'alias: a numeric non-verdict in an earlier alias never shadows a usable later one',
+    raw: { cap: 1, live: 0, available: 2, can_admit: 1 },
+    expected: { cap: 1, live: 0, available: true },
   },
   {
     name: 'additive evolution: an unrecognised extra field is ignored',
@@ -175,6 +236,19 @@ const CASES: readonly ParseCase[] = [
     raw: { cap: 1, live: 0, available: 'yes' },
     expected: null,
   },
+  // Numeric coercion is deliberately bounded to 0/1: any other number still
+  // fails closed, as do strings, null, objects and arrays.
+  { name: 'unusable: numeric verdict 2', raw: { cap: 1, live: 0, available: 2 }, expected: null },
+  { name: 'unusable: numeric verdict -1', raw: { cap: 1, live: 0, available: -1 }, expected: null },
+  {
+    name: 'unusable: string verdict "true"',
+    raw: { cap: 1, live: 0, available: 'true' },
+    expected: null,
+  },
+  { name: 'unusable: string verdict "1"', raw: { cap: 1, live: 0, available: '1' }, expected: null },
+  { name: 'unusable: null verdict', raw: { cap: 1, live: 0, available: null }, expected: null },
+  { name: 'unusable: object verdict', raw: { cap: 1, live: 0, available: {} }, expected: null },
+  { name: 'unusable: array verdict', raw: { cap: 1, live: 0, available: [] }, expected: null },
   {
     name: 'unusable: leases is not an array',
     raw: { cap: 1, live: 0, available: true, leases: {} },

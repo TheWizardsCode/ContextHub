@@ -21,7 +21,7 @@
  * For the **audit tier** this ledger's audit entries and `budget.json`
  * `maxAudit` are **observability only**: the authoritative audit budget and
  * live audit-lease registry are the PROXY's, read by herdr over HTTP
- * (`GET {proxyUrl}/llama/local/audit/status`). The ledger still records audit
+ * (`GET {proxyUrl}/llama/local/audit/availability`). The ledger still records audit
  * entries so the header, the interactive dialog, the dead-pane sweep and the
  * release paths work, but an audit entry can never refuse an audit. `maxAudit`
  * is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local

@@ -31,19 +31,51 @@ export const DOWNTIME_STATUS_PATH = '/llama/local/status';
 export const LOCAL_RESERVE_PATH = '/llama/local/reserve';
 /**
  * Proxy audit-availability endpoint path (parent WL-0MW95GBEG005ERHS):
- * `GET {proxyUrl}/llama/local/audit/status`, the read the audit `tier` will
- * use instead of asserting a per-host `budget.json` cap.
+ * `GET {proxyUrl}/llama/local/audit/availability`, the read the audit `tier`
+ * uses instead of asserting a per-host `budget.json` cap.
  *
- * PROVISIONAL. The proxy side is sibling llm item LP-0MW95FYMH006XYNK and has
- * not shipped: probed 2026-11-10 against the live proxy
- * (`http://192.168.0.199:8000`), `/openapi.json` lists only
- * `/llama/local/status` and `/llama/local/reserve`, and
- * `/llama/local/audit`, `/llama/local/budget` and `/llama/local/audit/status`
- * all answer `404`. The contract (types + tolerant parser) is pinned BEFORE
- * the server exists, exactly as the reserve-handshake slice C1 pinned its
- * wire shape; the proxy's final path is a one-line change here.
+ * SHIPPED CONTRACT (LP-0MW95FYMH006XYNK landed; validated 2026-11-13 against
+ * the live proxy at `http://192.168.0.199:8000`):
+ *
+ * ```
+ * GET /llama/local/audit/availability -> 200
+ * {"cap":1,"live":0,"available":1,"leases":[],"max_audits":1}
+ * ```
+ *
+ * The proxy's `/openapi.json` lists exactly `/llama/local/audit/availability`,
+ * `/llama/local/audit/lease`, `/llama/local/audit/lease/renew` and
+ * `/llama/local/audit/lease/{session_id}` — there is no `/audit/status` (it
+ * answers `404`). Note the shipped `available` verdict is the NUMBER `0`/`1`,
+ * not a boolean; the fail-closed parser coerces exactly those two values.
+ * {@link resolveAuditAvailabilityPath} keeps the path a config change rather
+ * than a code edit. Lease acquisition is out of scope here and deferred to
+ * WL-0MWFJH3NW006F5GN, so this item reads availability only.
+ *
+ * Override with {@link AUDIT_AVAILABILITY_PATH_ENV}, so a future proxy path
+ * change is a config change rather than a code edit.
  */
-export const AUDIT_AVAILABILITY_PATH = '/llama/local/audit/status';
+export const AUDIT_AVAILABILITY_PATH = '/llama/local/audit/availability';
+/**
+ * Environment variable overriding {@link AUDIT_AVAILABILITY_PATH} (an env var,
+ * not a persisted setting, so it can be reverted without editing a file — the
+ * same one-release knob precedent as `HERDR_AUDIT_LOCAL_BUDGET`). A set,
+ * non-empty value replaces the shipped path; unset/empty keeps the default.
+ */
+export const AUDIT_AVAILABILITY_PATH_ENV = 'HERDR_AUDIT_AVAILABILITY_PATH';
+/**
+ * Resolve the audit-availability path: the {@link AUDIT_AVAILABILITY_PATH_ENV}
+ * override when set to a non-empty (trimmed) value, otherwise the shipped
+ * {@link AUDIT_AVAILABILITY_PATH}. Read per call beside the constant so an
+ * operator can point herdr at a renamed proxy endpoint without a rebuild.
+ */
+export function resolveAuditAvailabilityPath(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const raw = env[AUDIT_AVAILABILITY_PATH_ENV];
+  if (raw === undefined) return AUDIT_AVAILABILITY_PATH;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : AUDIT_AVAILABILITY_PATH;
+}
 /**
  * Request/response header carrying the granted reservation ticket id
  * (`X-Local-Reservation: <ticketId>`), sent on the pane's FIRST request

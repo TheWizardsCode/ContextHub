@@ -864,7 +864,7 @@ describe('createDowntimeDeps', () => {
     const result = await deps.getActiveAudit(makeTempDir());
 
     expect(fetcher).toHaveBeenCalledWith(
-      'http://proxy:8000/llama/local/audit/status',
+      'http://proxy:8000/llama/local/audit/availability',
       expect.objectContaining({ method: 'GET' }),
     );
     expect(result).toEqual({
