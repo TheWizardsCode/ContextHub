@@ -975,7 +975,7 @@ function reproductionPayload(
 }
 
 describe('fetchNextItems: blockers of visible blocked items are pinned (WL-0MW7YJYS5009H7WC)', () => {
-  it.fails('AC1: reproduces the defect shape and pins EVERY root blocker into the selection', async () => {
+  it('AC1: reproduces the defect shape and pins EVERY root blocker into the selection', async () => {
     const seeded = seedReproductionDb();
     setWorklogDir(seeded.worklogDir);
     const calls = mockWl((args) =>
@@ -1142,7 +1142,7 @@ describe('fetchNextItems: ancestor substitution for CHILD blockers (WL-0MW7YJYS5
     return { worklogDir, blocked: blocked.id, child: child.id, root };
   }
 
-  it.fails('pins the ROOT ancestor when a child blocker hangs under a third-party parent (AC6a)', async () => {
+  it('pins the ROOT ancestor when a child blocker hangs under a third-party parent (AC6a)', async () => {
     const seeded = await seedChildBlockerCase('third-party');
 
     const items = await fetchNextItems(20);
@@ -1176,7 +1176,7 @@ describe('fetchNextItems: ancestor substitution for CHILD blockers (WL-0MW7YJYS5
     expect(ids(children)).toContain(seeded.child);
   });
 
-  it.fails('pins the TOP-MOST ancestor for a NESTED child blocker (AC6c)', async () => {
+  it('pins the TOP-MOST ancestor for a NESTED child blocker (AC6c)', async () => {
     const seeded = await seedChildBlockerCase('nested');
 
     const items = await fetchNextItems(20);

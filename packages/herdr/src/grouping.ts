@@ -553,6 +553,18 @@ export function compareGroupableItems(a: GroupableItem, b: GroupableItem): numbe
   return a.id.localeCompare(b.id);
 }
 
+/**
+ * Blocker-pin relationship consumed by the grouping override
+ * (WL-0MW7YJYS5009H7WC AC2/AC3): blocker (or substituted-root) item id → the
+ * visible blocked item id(s) it was pinned for. Produced by the selection
+ * tail (`fetcher.root-substitution.ts`) and passed as the optional third
+ * `regroupWorkItems` argument so a pinned blocker is grouped WITH the item it
+ * blocks (first group wins — the grouping child WL-0MWDOL7I1001SXXA
+ * implements the override). Absent/empty → byte-identical to today's output
+ * (AC5 no-op regression).
+ */
+export type BlockerPins = ReadonlyMap<string, string | string[]>;
+
 // ── Regrouping the merged/selected list ───────────────────────────────
 
 /**
@@ -563,6 +575,11 @@ export function compareGroupableItems(a: GroupableItem, b: GroupableItem): numbe
  *
  * Does not filter or drop items — the always-show-mandatory guarantee of
  * selectWorkItems is preserved. Items are only reordered and stamped.
+ *
+ * The optional `pins` map (WL-0MW7YJYS5009H7WC) is the blocker-pin seam the
+ * grouping child consumes; THIS implementation accepts and ignores it so the
+ * selection child can thread it through while keeping output byte-identical
+ * (AC5). The override itself lands with WL-0MWDOL7I1001SXXA.
  */
 export function regroupWorkItems<T extends {
   id: string;
@@ -585,6 +602,7 @@ export function regroupWorkItems<T extends {
 }>(
   items: T[],
   maxFilePathGroups: number = 3,
+  _pins?: BlockerPins,
 ): T[] {
   const groupable = items.map(item => ({
     id: item.id,

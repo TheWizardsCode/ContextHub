@@ -180,7 +180,7 @@ describe('createDowntimeDeps', () => {
   // from the same selection the dispatcher ranks. RED WITNESS — today the
   // head contains only the 24 mandatory rows (the blocker is hidden); the
   // selection child WL-0MWDOL9J4008K3YR flips `it.fails` to `it` as it lands.
-  it.fails('getHerdrListHead surfaces the pinned blockers of a visible blocked item (AC10)', async () => {
+  it('getHerdrListHead surfaces the pinned blockers of a visible blocked item (AC10)', async () => {
     const rootDir = makeTempDir();
     try {
       const worklogDir = join(rootDir, '.worklog');

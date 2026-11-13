@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { getWorklogDir } from './fetcher.args.js';
 import { normalizeItem } from './fetcher.json.js';
 import type {
+  DependencyTargetRef,
   InProcessDb,
   InProcessDbCtor,
   InProcessOpenStats,
@@ -50,6 +51,45 @@ export function getInProcessOpenStats(): InProcessOpenStats {
 export function resetInProcessOpenStats(): void {
   _inProcessOpens = 0;
   _inProcessOpenMs = 0;
+}
+
+/**
+ * Batched in-process outbound dependency read for MULTIPLE items (F4 —
+ * WL-0MVJV2ORY002MNFF).
+ *
+ * The shared body behind {@link fetchOutboundDepsForItems} in
+ * `./fetcher.api.js` AND the blocker-pin pass in
+ * `./fetcher.root-substitution.js`: both must apply the identical CLI-field
+ * semantics (missing target → status `deleted`, title `(missing)`; the
+ * target's `stage` added directly, which the spawn path pays a `wl show`
+ * for), so it lives here in the leaf both modules already import — the
+ * root-substitution leaf cannot import `fetcher.api` (that would close the
+ * `api → root-substitution → api` cycle the split guard rejects) and a
+ * second implementation would let the two diverge.
+ */
+export function readOutboundDepsInProcess(
+  db: InProcessDb,
+  itemIds: string[],
+): Map<string, DependencyTargetRef[]> {
+  const unique = [...new Set(itemIds)];
+  const byItem = new Map<string, DependencyTargetRef[]>();
+  for (const id of unique) {
+    const targets: DependencyTargetRef[] = [];
+    for (const edge of db.listDependencyEdgesFrom(id)) {
+      const target = db.get(edge.toId);
+      const ref: DependencyTargetRef = {
+        id: edge.toId,
+        status: typeof target?.status === 'string' ? target.status : 'deleted',
+        title: typeof target?.title === 'string' ? target.title : '(missing)',
+      };
+      if (typeof target?.stage === 'string' && target.stage.length > 0) {
+        ref.stage = target.stage;
+      }
+      targets.push(ref);
+    }
+    byItem.set(id, targets);
+  }
+  return byItem;
 }
 
 /**

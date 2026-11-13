@@ -33,9 +33,10 @@
 
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
-import { withInProcessDb } from './fetcher.inprocess.js';
+import { readOutboundDepsInProcess, withInProcessDb } from './fetcher.inprocess.js';
 import { normalizeItem } from './fetcher.json.js';
-import type { RootSubstitution, WorkItem, WorklistBundle } from './fetcher.types.js';
+import { isActiveBlocker } from './fetcher.blockers.js';
+import type { RootSubstitution, WorkItem, WorklistBundle, DependencyTargetRef } from './fetcher.types.js';
 
 /**
  * Fail-open single-item read (`wl show`) used to resolve a critical child's
@@ -272,6 +273,213 @@ function ensureSubstitutedRoots(selected: WorkItem[], roots: WorkItem[]): WorkIt
   return missing.length === 0 ? selected : [...selected, ...missing];
 }
 
+// ── Blocker pinning (WL-0MW7YJYS5009H7WC) ─────────────────────────────
+//
+// A visible `status=blocked` item's ACTIVE blockers (the outbound `depends-on`
+// edges that still block it per the shared isActiveBlocker predicate) must be
+// REPRESENTED in the default worklist — as the blocker itself when it is a
+// root item, or via its ROOT ancestor when it is a child (the same
+// ``show parents, not children`` parent-substitution rule the critical-child
+// path applies, AC6). Root cause: the browse window is fully consumed by the
+// mandatory review queue, so ``othersLimit = 0`` and every open blocker is
+// cut by ``selectWorkItems`` while the blocked rows it waits on stay visible
+// (they are mandatory). The pin pass reads the blockers back INTO the
+// selection, pin-only (never remove/re-order an item visible today, never
+// duplicate an id) and emits the blocker→blocked relationship the grouping
+// child consumes (AC2/AC3/AC9).
+
+/**
+ * Blocker-pin map emitted by the selection tail for the grouping child
+ * (WL-0MWDOL7I1001SXXA): blocker item id (root-substituted for a child
+ * blocker) → the visible blocked item id(s) it blocks. First group wins when
+ * a blocker blocks two visible blocked items that land in different groups.
+ */
+export type BlockerPinMap = ReadonlyMap<string, string | string[]>;
+
+/**
+ * Build the memoised item lookup the blocker-pin pass reuses from the
+ * critical-child substitution machinery (knownById candidate set → in-process
+ * SQLite fast path → `wl show` fallback).
+ *
+ * The in-process pass pre-resolves every blocker id AND its ancestor chain
+ * (`parentId` walk) in ONE connection, attaching `childCount` to each resolved
+ * node exactly like the critical-child path — so a child blocker's ROOT is
+ * resolved without a `wl show` spawn on the default path (AC8), and the
+ * substituted root renders with an expand affordance when it has children
+ * (WL-0MWDDAQ0L009FLEF contract). `wl show` is only the fail-open fallback
+ * when the store is unavailable.
+ */
+async function buildBlockerLookup(
+  candidateItems: WorkItem[],
+  blockerIds: string[],
+  itemDetails: ItemDetailsLookup,
+  dirOverride?: string,
+): Promise<{
+  knownById: Map<string, WorkItem>;
+  lookup: (id: string) => Promise<WorkItem | null>;
+}> {
+  const knownById = new Map<string, WorkItem>();
+  for (const item of candidateItems) {
+    if (!knownById.has(item.id)) knownById.set(item.id, item);
+  }
+  const memo = new Map<string, WorkItem | null>();
+
+  // In-process fast path: ONE connection resolves every blocker chain
+  // (blocker → parent → … → root), mirroring substituteCriticalRoots. Skipped
+  // entirely when every blocker id is already in the candidate set.
+  if (blockerIds.some((id) => !knownById.has(id))) {
+    await withInProcessDb((db) => {
+      const childCounts = db.getChildCounts(db.list({}));
+      for (const blockerId of blockerIds) {
+        let currentId: string | null | undefined = blockerId;
+        while (currentId && !knownById.has(currentId) && !memo.has(currentId)) {
+          const raw = db.get(currentId);
+          if (!raw) break;
+          const item = normalizeItem(raw);
+          if (item.childCount === undefined) {
+            item.childCount = childCounts.get(currentId) ?? 0;
+          }
+          memo.set(currentId, item);
+          currentId = item.parentId;
+        }
+      }
+      return null;
+    }, dirOverride);
+  }
+
+  const lookup = async (id: string): Promise<WorkItem | null> => {
+    const known = knownById.get(id);
+    if (known) return known;
+    if (memo.has(id)) return memo.get(id) ?? null;
+    const item = await itemDetails(id);
+    memo.set(id, item);
+    return item;
+  };
+  return { knownById, lookup };
+}
+
+/**
+ * Pin the ACTIVE blockers of every visible blocked item into the selection.
+ *
+ * Reads the outbound dependency edges of ALL selected blocked ids in ONE
+ * batched in-process pass (AC8: no new `wl` process spawn per visible blocked
+ * item — the shared in-process dep reader, not a `wl dep list` fan-out),
+ * filters through the shared {@link isActiveBlocker} predicate (AC7: the
+ * pinned set can never disagree with the metadata panel's `Blocked By` rows),
+ * and for each active blocker:
+ *
+ *  - a ROOT blocker joins the selection as itself;
+ *  - a CHILD blocker never joins as a child — its ROOT ancestor (walked via
+ *    the same parent substitution as the critical-child path, AC6) joins
+ *    instead, and when that root is the blocked item itself (the
+ *    ``LP-0MVMHNUAR006SRZT`` shape) or is otherwise already visible, the pin
+ *    is a no-op (nothing is added, no duplicate, the child stays reachable
+ *    via expand of the parent);
+ *  - a blocker already selected (in an earlier group or via another blocked
+ *    item) is never added twice (AC4).
+ *
+ * Pin-only: never removes or re-orders an item that is visible today. The
+ * returned pin map (`blockerItemId → blockedItemId(s)`) travels with the
+ * selection for the grouping override; a blocker that blocks two visible
+ * blocked items carries BOTH blocked ids (the grouping child resolves
+ * first-group-wins, AC2).
+ *
+ * Fail-open and deterministic (AC9): an unavailable in-process read, an
+ * unresolvable blocker or an unresolvable root leaves the selection unchanged
+ * for that edge; the pin decision is a pure function of item content +
+ * dependency edges, never of `updatedAt`/arrival order.
+ */
+async function pinBlockersIntoSelection(
+  selected: WorkItem[],
+  candidateItems: WorkItem[],
+  itemDetails: ItemDetailsLookup,
+  dirOverride?: string,
+): Promise<{ items: WorkItem[]; pins: BlockerPinMap }> {
+  const blockedIds = selected
+    .filter((item) => (item.status ?? '') === 'blocked')
+    .map((item) => item.id);
+  if (blockedIds.length === 0) {
+    return { items: selected, pins: new Map() };
+  }
+
+  // AC8: ONE batched in-process outbound-dep read over all selected blocked
+  // ids — no new spawn. Fail-open: an undefined read leaves the selection
+  // unchanged (the metadata panel path is unaffected).
+  const deps = await withInProcessDb(
+    (db) => readOutboundDepsInProcess(db, blockedIds),
+    dirOverride,
+  );
+  if (deps === undefined) {
+    return { items: selected, pins: new Map() };
+  }
+
+  // Active blockers per blocked item, through the SHARED predicate (AC7).
+  const activeBlockers = new Map<string, DependencyTargetRef[]>();
+  for (const blockedId of blockedIds) {
+    const targets = (deps.get(blockedId) ?? []).filter((target) =>
+      isActiveBlocker({ id: target.id, status: target.status, stage: target.stage }),
+    );
+    if (targets.length > 0) activeBlockers.set(blockedId, targets);
+  }
+  if (activeBlockers.size === 0) {
+    return { items: selected, pins: new Map() };
+  }
+
+  const selectedIds = new Set(selected.map((item) => item.id));
+  const blockerIds = [
+    ...new Set([...activeBlockers.values()].flat().map((t) => t.id)),
+  ];
+  const { lookup } = await buildBlockerLookup(
+    candidateItems,
+    blockerIds,
+    itemDetails,
+    dirOverride,
+  );
+
+  const added: WorkItem[] = [];
+  const addedIds = new Set<string>();
+  const pins = new Map<string, string[]>();
+  for (const [blockedId, targets] of activeBlockers) {
+    for (const target of targets) {
+      // Resolve the blocker row: a child blocker is represented by its ROOT
+      // ancestor (AC6), reusing the critical-child walk; a root blocker is
+      // itself. The blocker may already be in the selection (a blocker that
+      // is also a blocked root, e.g. the reproduction's ``blocked D blocks
+      // blocked B`` edge) — already-visible rows are never added twice (AC4).
+      const blocker = await lookup(target.id);
+      if (!blocker) continue;
+      let row = blocker;
+      let rowId = blocker.id;
+      if (blocker.parentId) {
+        const root = await walkToRootAncestor(blocker.parentId, lookup);
+        if (!root) continue;
+        if (selectedIds.has(root.id)) continue; // AC6b: root already visible
+        row = root;
+        rowId = root.id;
+      } else if (selectedIds.has(rowId)) {
+        continue; // already visible (AC4)
+      }
+
+      // Record the pin edge ALWAYS (a blocker blocking two blocked items must
+      // carry both — AC2 multi-block); the row itself is added only once.
+      const existing = pins.get(rowId);
+      pins.set(rowId, existing ? [...existing, blockedId] : [blockedId]);
+      if (!addedIds.has(rowId)) {
+        addedIds.add(rowId);
+        added.push(row);
+      }
+    }
+  }
+  if (added.length === 0) {
+    return { items: selected, pins: new Map() };
+  }
+  const pinsOut: Map<string, string | string[]> = new Map();
+  for (const [id, list] of pins) {
+    pinsOut.set(id, list.length === 1 ? list[0] : list);
+  }
+  return { items: [...selected, ...added], pins: pinsOut };
+}
+
 /**
  * Shared tail of BOTH default-view fetch paths (the consolidated bundle and
  * the per-subset fallback): apply the critical-child root substitution to the
@@ -321,7 +529,21 @@ export async function mergeMandatoryAndSelect(
   });
   const merged = mergeUniqueById(enrichedItems, substituted.mandatory);
   const selected = selectWorkItems(merged, count);
-  return regroupWorkItems(ensureSubstitutedRoots(selected, substituted.roots));
+  const ensured = ensureSubstitutedRoots(selected, substituted.roots);
+  // Blocker pinning (WL-0MW7YJYS5009H7WC): every ACTIVE blocker of a visible
+  // blocked item is represented in the returned list — a root blocker as
+  // itself, a child blocker via its ROOT ancestor (AC6). Runs on the selected
+  // set (BEFORE regrouping) so the pinned rows join the same group pipeline;
+  // pin-only (never removes an item visible today), fail-open, and emits the
+  // blocker→blocked map for the grouping override (the optional third
+  // `regroupWorkItems` argument, consumed by WL-0MWDOL7I1001SXXA).
+  const { items: pinnedItems, pins } = await pinBlockersIntoSelection(
+    ensured,
+    merged,
+    itemDetails,
+    dirOverride,
+  );
+  return regroupWorkItems(pinnedItems, 3, pins);
 }
 
 /**
