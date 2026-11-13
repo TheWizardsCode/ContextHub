@@ -394,25 +394,45 @@ dispatches; the other herdr instances coordinate instead of polling:
   `HERDR_COORDINATION_DIR`): entries **do not expire by age**; every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 5 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — offering its most-important item as
   `{instanceId, workItemId, worklogRoot/directory, assignedAt, lastUpdated}`
   (`worklogRoot` lets the single leader dispatch across roots — F4). When the leader dispatches an entry and removes it, the owning instance **re-offers immediately on its next tick** (coordination-file observation — no extra poll). Re-offer also refreshes leadership every tick from the lease file.
+  **Schema v2 (tier-aware offers, parent WL-0MWDDHQON0015T3P):** the offer
+  payload is a bounded `offers` array — at most one nominee per dispatch
+  bucket (`implement` / `audit` / `prep`, where `prep` unions the classifier's
+  `plan`/`intake`/`risk-effort`), at most three total, duplicate
+  `(kind, workItemId)` pairs collapsed. `workItemId` mirrors the FIRST offer so
+  an old leader reads one offer and ignores the rest. **Migration:** a v1 file
+  (single `workItemId`, no `offers`) is read as a one-offer entry (kind derived
+  by the classifier) and rewritten as v2 on the next check-in — no v1 file is
+  dropped by the upgrade.
 - **Leader dispatch** — only the leader polls the proxy; once idle for the
   threshold, it first checks **scheduled-prompts** (a due prompt dispatches
   immediately — WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*); otherwise it
-  reads the machine-wide offer list and dispatches offers in **file order**
-  — each offer is that instance's own **Herdr list head** (computed at its
-  check-in via `computeMostImportantItem`, WL-0MTK1ILM2009QYB2 ranking
-  contract). The leader re-validates each offer **at dispatch time**
+  reads the machine-wide offer list and dispatches ENTRIES in **file order**,
+  iterating the **offers inside each entry** (each entry advertises up to one
+  nominee per bucket — see *Shared coordination file* above). Every offer is
+  re-validated **at dispatch time**
   (`fetchItem` → `classifyItemForDispatch`/stage+status as the sole gate;
-  no wall-clock prune — WL-0MTMPIQBE001J41P) and applies the sequential
+  no wall-clock prune — WL-0MTMPIQBE001J41P) and the same sequential
   safety filters (producer-review gate, code-freeze split-by-skill,
-  free-slot minimums). The cross-root **tier priority** and the **global
+  free-slot minimums) are applied **per offer**, unchanged. The cross-root **tier priority** and the **global
   cross-project round-robin cursor** ordering are **retired**
-  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); dispatch
+  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); the v2 bucket
+  offers are a scoped reversal of that item's single-offer *contract* (what is
+  offered, and how the leader walks it), never of that retirement —
+  `COORDINATION_TIER_ORDER` stays retired and the classifier remains the single
+  gate verdict. Dispatch
   is gated by a single machine-wide slot budget (F5 — one snapshot,
   per-tier minimums audit 2 / single-pane 1). A **stale** offer
   (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview ===
   true`, above-caps, or otherwise not currently dispatchable) is **removed
   eagerly without pane or dispatched marker**, and dispatch continues to
-  the next offer. If no offer is dispatchable, the leader first **sweeps the
+  the next offer. Among one entry's admissible offers the leader dispatches
+  in a **drain-aware tie-break** (`audit` while that root's review queue is
+  at/over `browseItemCount` → `prep` → `implement`); a fixed implement-first
+  ladder is deliberately **not** used. A successful dispatch removes **only
+  that offer** (`removeOffer`) — the entry keeps its remaining nominees and
+  `lastUpdated`, so the next tick can dispatch the next tier without a new
+  check-in — and an entry whose last offer is dispatched is removed exactly as
+  before. If no offer is dispatchable, the leader first **sweeps the
   registered worklog roots** (`downtimeWorklogRoots`) in round-robin order —
   extra roots with no running instance, read through the same canonical
   ranking and the same sequential safety gates (see *Registered-root
@@ -423,7 +443,13 @@ dispatches; the other herdr instances coordinate instead of polling:
   (WL-0MUU4XFU90008E24; see the *Own-backlog fallback & leadership hand-off*
   paragraph below). The dispatched entry is
   **removed**; its owner re-offers its next Herdr head at the next
-  check-in. There is **no TTL-based pruning**. **Every per-entry `wl`
+  check-in. There is **no TTL-based pruning**. **Cost (parent AC10):** the
+  per-offer re-validation adds **one `fetchItem` per offered item per tick** —
+  up to **3× the pre-v2 single-offer cost**. Measured at 7 instances
+  (`npm run benchmark:leader-tick-cost`): 21 fetches, ≈ 4.0–5.8 s tick with a
+  190–275 ms `wl show` median, ≈ 4–5 ms logic only — the 10 s poll-interval
+  floor is reached only at ≈ 476 ms per fetch, so there is ≈ 4–6 s headroom and
+  no bucket/order revision is needed at that fleet size. **Every per-entry `wl`
   invocation — the dispatch-time
   `fetchItem`/audit-enrichment lookups, the CAS claim (`wl update`) and the
   `wl comment add` trail — resolves against the OFFER's own `worklogRoot`
@@ -596,7 +622,8 @@ The filters walk the Herdr sequence in LIST ORDER — a filtered head simply mov
 to the first dispatchable item deeper in the same sequence (never a re-ranking). The same
 selection feeds the coordination check-in offer (`computeMostImportantItem`), so the
 leader's dispatch and each root's check-in agree on the ranking by construction
-(the leader dispatches offers in file order; the cross-root tier priority / round-robin
+(the leader dispatches ENTRIES in file order and the offers inside each in
+bucket order; the cross-root tier priority / round-robin
 cursor ordering are retired — see the *Leader dispatch* bullet above).
 Per-root "critical first" is preserved inside the ranking: smart-selection always places
 critical items at the Herdr head, so a critical item dispatches as soon as it is the

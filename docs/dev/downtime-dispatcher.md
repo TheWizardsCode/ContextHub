@@ -218,6 +218,47 @@ The motivating regression: with the machine-wide implement budget at 2/2 and
 an implement head offered, the entry's `prep` nominee now dispatches on the
 same tick, and the tick never ends `no-candidate`.
 
+#### Cost of validating every offer (parent AC10)
+
+The v2 protocol adds **one `fetchItem` per offered item per tick** — up to
+**3× the pre-v2 single-offer cost** per instance (one per bucket, at most three
+buckets). The fetch is the *only* added per-tick cost: refusals are cheap
+(classify only) and no bucket adds a list spawn. The fetch walk is bounded by
+the entry's offer count, so a tick validates at most `instances × 3` offers
+rather than `instances × 1`.
+
+**Measured at 7 instances** (`bench/leader-tick-cost.ts`, child
+WL-0MWDVN3N1004MBA9): 21 `fetchItem` calls per tick (baseline 7 → **3.0×**),
+with the per-fetch latency taken from a live `wl show` median (190–275 ms on
+the reference host, depending on load):
+
+| Scenario | `fetchItem` calls | Tick duration |
+|---|---|---|
+| Baseline (1 offer/instance) | 7 | ≈ 1.3–1.9 s |
+| Full v2 (3 offers/instance), simulated fetch latency | 21 | ≈ 4.0–5.8 s |
+| Full v2, logic only (0 ms fetch) | 21 | ≈ 4–5 ms |
+
+The tick scales linearly with the per-fetch latency, so the dispatcher
+poll-interval **floor of 10 s** (`DOWNTIME_POLL_INTERVAL_FLOOR_MS`) is reached at
+≈ **476 ms per `fetchItem`** (10 s / 21). The measured per-fetch median
+(190–275 ms) is **1.7–2.5× below that break-even**, leaving ≈ 4–6 s (40–60 %)
+of headroom. The tick therefore stays **within the poll interval** at 7
+instances, and no revision of the bucket count or validation order is needed
+**at this fleet size**. AC10's merge gate (a tick that exceeds the poll
+interval forces a bucket/order revision before merge) is not triggered; re-run
+the benchmark on a larger fleet or a slower host before raising the bucket
+bound. Re-run with:
+
+```bash
+npm run benchmark:leader-tick-cost -- --instances 7 --offers 3 --json
+```
+
+The benchmark drives the production `dispatchFromCoordination` entry point
+with a stub `fetchItem` (so it never touches a live coordination file or
+ledger), pins latency from a measured `wl show`, and reports `fetchCalls`,
+`fetchMultiplier`, `logicOnly.tickMs`, `full.tickMs`, `headroomMs`,
+`breakEvenFetchLatencyMs` and `withinPollInterval` as JSON for the AC10 record.
+
 ### Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH)
 
 > **Supersedes the sprint-view-only restriction of WL-0MUNS8X97007C9H9.** That
@@ -402,6 +443,18 @@ its check-in offers. The retired cursor helpers (`sortEntriesByRoundRobin`,
 `advanceRoundRobinCursor`, `COORDINATION_TIER_ORDER`, `coordinationTierRank`) remain
 exported for the module tests only — nothing on the dispatch path calls them.
 
+**This is a deliberate, scoped reversal of WL-0MTK1ILM2009QYB2's single-offer
+contract (parent WL-0MWDDHQON0015T3P).** The tier-aware offers change **what**
+an entry advertises (up to one nominee per bucket instead of one head) and
+**how** the leader walks it (per-offer instead of per-entry). They do **not**
+reintroduce the retired cross-root tier priority: the
+`COORDINATION_TIER_ORDER` retirement stands, the bucket of an offer is a
+*labelling* of the canonical first item of that bucket (never a new ranking),
+and every gate is still the unmodified sequential filter chain applied per
+offer. The drain-aware tie-break among one entry's *admissible* offers (see
+*Leader: iterating an entry's offers*) is a dispatch **order inside an entry**,
+not a re-ranking of roots — `selectLeastRecentlyServed` still owns root order.
+
 **Agreement sampling (F2):** `npm run sample:downtime-agreement [<worklog-root>]`
 (`scripts/downtime-agreement-sample.ts`) proves the contract on a live worklog root: it
 computes the downtime pick from the production `fetchNextItems` sequence + dispatcher
@@ -509,9 +562,15 @@ step-down are unchanged.
 | Order | Source | Scope |
 |---|---|---|
 | 1 | Scheduled prompts | a due prompt dispatches immediately |
-| 2 | Offer list (`downtime-coordination.json`) | live peer offers, file order |
+| 2 | Offer list (`downtime-coordination.json`) | live peer entries in file order, **offers iterated inside each entry** (v2: up to one nominee per bucket, drain-aware tie-break among admissible offers, remove only the dispatched offer) |
 | 3 | **Registered roots (`downtimeWorklogRoots`)** | **round-robin sweep, per-root gates** |
 | 4 | Own backlog (`opts.cwd`) | bounded extension, own root only, then hand off |
+
+The offer-list rung is the only changed rung under v2: it still runs after
+scheduled prompts and before the registered-root sweep, and it still walks
+entries in file order — the change is *within* an entry (per-offer validation
+and dispatch instead of one offer per entry), so the outer composition order,
+the root-level round-robin and every downstream gate are untouched.
 
 **Liveness-aware peer predicate (AC7).** Independent of the registry, the
 `no-candidate` pause-arm/cancel predicate `hasPeerOffer`
@@ -580,18 +639,42 @@ work.
 ### Shared coordination file (machine-wide)
 
 `~/.herdr/downtime/downtime-coordination.json` (or `HERDR_COORDINATION_DIR`,
-WL-0MTF0KLO10043YAN) stores one offer per herdr instance — `directory` + `worklogRoot`
-(the worklog root the item belongs to, so the single leader dispatches across roots),
-and no offer at all for an instance whose window is empty:
+WL-0MTF0KLO10043YAN) stores one entry per herdr instance — `directory` +
+`worklogRoot` (the worklog root the items belong to, so the single leader
+dispatches across roots) plus a bounded `offers` array — and no entry at all for
+an instance whose window is empty. Since **schema v2** (parent
+WL-0MWDDHQON0015T3P AC1) each entry advertises at most one nominee per dispatch
+bucket (`implement` / `audit` / `prep`), so at most three offers per entry;
+`workItemId` mirrors the FIRST offer for backward compatibility:
 
 ```json
-{"version":1,"entries":[
+{"version":2,"entries":[
   {"instanceId":"<uuid>","workItemId":"<wl-id>","directory":"<worklog-root>","worklogRoot":"<worklog-root>",
-   "assignedAt":"<iso>","lastUpdated":"<iso>"}
+   "assignedAt":"<iso>","lastUpdated":"<iso>",
+   "offers":[
+     {"kind":"implement","workItemId":"<wl-id>"},
+     {"kind":"audit",     "workItemId":"<wl-id>"},
+     {"kind":"prep",      "workItemId":"<wl-id>"}
+   ]}
 ],
  "leader":{"instanceId":"<uuid>","worklogRoot":"<worklog-root>",
            "lastDecisionReason":"slots-unavailable","lastDecisionAt":"<iso>","lastUpdated":"<iso>"}}
 ```
+
+- **Bounded by bucket, not by count.** At most one nominee per bucket and at
+  most three total; a duplicate `(kind, workItemId)` pair collapses. `prep`
+  is the union of the classifier's `plan`, `intake` and `risk-effort` kinds —
+  the bucket of a nominee never changes which gate applies (the classifier
+  remains the single gate verdict).
+- **Migration note (v1 → v2).** A v1 file (single top-level `workItemId`, no
+  `offers`) is **read** as a one-offer entry, with its kind derived by the
+  classifier at dispatch time, and is **rewritten as v2 on the next
+  check-in**. No v1 file is ever dropped by the upgrade; an old leader reading
+  a v2 entry sees the first `workItemId` offer and ignores the rest (parent
+  AC9, both directions compatible).
+- **No schema-level change elsewhere.** The file still holds ONE entry per
+  instance, one lock and one atomic tmp+rename write (the v2 payload is
+  nested, so `instanceId`-keyed lease/liveness logic is untouched).
 
 **The leader block (WL-0MW1VINII003IL7R).** The `entries` array is an OFFER list,
 and a check-in removes the instance's own entry whenever its window is empty
@@ -631,9 +714,12 @@ files are orphaned and ignored, so the leader never double-dispatches from legac
 data and a stale legacy file can never resurrect an offer.
 
 The machine file does **not** carry "exactly one entry per instance": `entries`
-is an OFFER list, so an `instanceId` holds **at most one** offer (upsert, never a
-duplicate) and **no** entry at all while its window is empty or its offer was just
-dispatched — the top-level `leader` block, not an entry, is what records the lease
+is an OFFER list, so an `instanceId` holds **at most one entry** (upsert, never a
+duplicate) — and that entry carries a bounded `offers` array (at most one
+nominee per bucket, at most three) — or **no** entry at all while its window is
+empty. Since v2 a dispatched offer no longer drops the whole entry: the entry
+keeps its remaining nominees until every offer is consumed, and only then is it
+removed, so the top-level `leader` block, not an entry, is what records the lease
 holder's liveness. Unreadable/missing machine files degrade to "no dispatch this
 cycle" (fail-safe).
 
@@ -644,10 +730,10 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H — was 30 min, clamped ≥ 60 s),
    recomputing their worklog's **most-important item** and its **per-bucket nominees**
    (see *Per-bucket nominees from one head read*) and upserting the v2 `offers` payload
-   (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
+   (or removing their own entry via `removeEntry` on a genuinely empty backlog / `wl` error fail-open — entry retained). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
    also checks in on the follower cadence (WL-0MWDDHOK6009GJCC — see *Offer-only mode*
-   below), so a passive root still contributes an offer to the leader. When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
-2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**. A non-dispatchable entry (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via `removeEntry` **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the tier loop **continues to the next entry**. Entries do **not** expire by wall-clock age.
+   below), so a passive root still contributes an offer to the leader. When the leader removes an entry's last offer on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
+2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**, for **each offer** of an entry. A non-dispatchable offer (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via **`removeOffer`** — only that offer, never its entry's siblings — **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the offer loop **continues to the next offer**. An entry whose last offer is removed is dropped whole, exactly as before. Entries do **not** expire by wall-clock age.
 3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
 ### Leader-only dispatch
@@ -674,7 +760,9 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    dispatch, voluntarily steps down via `releaseLeadership()` so another
    instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog fallback &
    leadership hand-off* above).
-4. The dispatched entry is **removed** from the coordination file. The
+4. The dispatched **offer** is **removed** from the coordination file
+   (`removeOffer`); its entry stays while it still has nominees, and is removed
+   once the last offer has dispatched. The
    existing dispatched-marker exclusion and CAS claim mechanisms are
    preserved unchanged.
 5. **Non-leaders** skip proxy polling and dispatch entirely — they only
@@ -3817,11 +3905,12 @@ through.
 
 > **Retired for the coordination leader (WL-0MTK1ILM2009QYB2).** The cross-root
 > round-robin cursor ordering below was a *second ranking* on the dispatch path
-> and is removed: the coordination leader now dispatches offers in file order
-> (each offer is its root's Herdr list head). Cross-project interleaving is
-> achieved by offer removal + re-offer: a dispatched root's entry is removed and
-> its owner re-offers its next Herdr head at the next check-in, so the next
-> cycle serves the next offer in the file. The cursor module
+> and is removed: the coordination leader now dispatches ENTRIES in file order,
+> iterating the offers inside each entry (v2: up to one nominee per bucket; see
+> *Leader: iterating an entry's offers*). Cross-project interleaving is
+> achieved by offer removal + re-offer: a dispatched offer is removed (only the
+> last offer drops its entry) and the owner re-offers its next head at the next
+> check-in, so the next cycle serves the next offer in the file. The cursor module
 > (`downtime-round-robin-by-root.ts`) and `sortEntriesByRoundRobin` /
 > `advanceRoundRobinCursor` remain exported only for module tests — nothing on
 > the dispatch path calls them. The historical description below is retained
