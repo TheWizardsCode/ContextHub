@@ -9,10 +9,11 @@
  * is a TYPED outcome, so the dispatcher's policy (fail closed with a named
  * reason) never has to guess from an empty value.
  *
- * The proxy endpoint does not exist yet (sibling llm item
- * LP-0MW95FYMH006XYNK; probed 2026-11-10 — every `/llama/local/audit*` path
- * answers `404`), so every exchange here is driven by an injected fetcher
- * double; nothing on this path talks to a network.
+ * The proxy side (sibling llm item LP-0MW95FYMH006XYNK) has SHIPPED —
+ * validated 2026-11-13, `GET /llama/local/audit/availability` answers `200`.
+ * Every exchange here is still driven by an injected fetcher double, so the
+ * unit suite never touches a network (the live check lives in
+ * `downtime-worker.audit-availability.live.test.ts`).
  *
  * Traceability: each test cites the work-item AC it serves.
  */
@@ -21,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createAuditAvailabilityClient } from './downtime-worker.audit-availability.js';
 import { AUDIT_AVAILABILITY_PATH } from './downtime-worker.constants.js';
+import { AUDIT_AVAILABILITY_PATH_ENV } from './downtime-worker.constants.js';
 import {
   createAuditAvailabilityClient as barrelCreate,
   type AuditAvailabilityFetcher,
@@ -106,6 +108,33 @@ describe('createAuditAvailabilityClient — the usable exchange (AC1)', () => {
         reason: 'audit-budget-saturated',
       },
     });
+  });
+});
+
+describe('createAuditAvailabilityClient — path override (parent AC1)', () => {
+  afterEach(() => {
+    delete process.env[AUDIT_AVAILABILITY_PATH_ENV];
+  });
+
+  it('uses HERDR_AUDIT_AVAILABILITY_PATH when set, without recreating the client', async () => {
+    delete process.env[AUDIT_AVAILABILITY_PATH_ENV];
+    const fetcher = fixtureFetcher(AVAILABLE_BODY);
+    const client = clientWith(fetcher);
+
+    process.env[AUDIT_AVAILABILITY_PATH_ENV] = '/llama/local/audit/v2';
+    await client();
+
+    // Resolved per call: the override takes effect on the next read.
+    expect(fetcher.mock.calls[0][0]).toBe('http://proxy:8000/llama/local/audit/v2');
+  });
+
+  it('falls back to the shipped path when the override is empty', async () => {
+    process.env[AUDIT_AVAILABILITY_PATH_ENV] = '   ';
+    const fetcher = fixtureFetcher(AVAILABLE_BODY);
+
+    await clientWith(fetcher)();
+
+    expect(fetcher.mock.calls[0][0]).toBe(`http://proxy:8000${AUDIT_AVAILABILITY_PATH}`);
   });
 });
 

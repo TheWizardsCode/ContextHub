@@ -11,25 +11,29 @@
  * dispatch path yet (no behaviour change), exactly as the reserve-handshake
  * slice C1 did (`downtime-worker.local-reservation.ts`).
  *
- * ## Why the contract is provisional
+ * ## Why the contract is pinned to the shipped wire shape
  *
- * The proxy side is sibling llm item LP-0MW95FYMH006XYNK, which has not
- * shipped: probed 2026-11-10 against the live proxy
- * (`http://192.168.0.199:8000`), `/openapi.json` lists only
- * `/llama/local/status` and `/llama/local/reserve`, and
- * `/llama/local/audit`, `/llama/local/budget` and `/llama/local/audit/status`
- * all answer `404`. The final path is therefore one constant
- * (`AUDIT_AVAILABILITY_PATH` in `downtime-worker.constants.ts`) and the field
- * names whose spelling is not yet fixed are read through a small alias set, so
- * a rename on either side stays a one-line change.
+ * The proxy side is sibling llm item LP-0MW95FYMH006XYNK, which has SHIPPED:
+ * validated 2026-11-13 against the live proxy (`http://192.168.0.199:8000`),
+ * `GET /llama/local/audit/availability` answers `200`
+ * `{"cap":1,"live":0,"available":1,"leases":[],"max_audits":1}` while
+ * `/llama/local/audit/status` answers `404`. The path is therefore the one
+ * constant `AUDIT_AVAILABILITY_PATH` (overridable through
+ * `HERDR_AUDIT_AVAILABILITY_PATH`) in `downtime-worker.constants.ts`, the
+ * shipped `available` verdict is the NUMBER `0`/`1` (coerced by the parser),
+ * and the field names whose spelling may still evolve are read through a
+ * small alias set so a rename on either side stays a one-line change.
  *
  * ## Trust rules
  *
  * The parser is fail-closed: a payload is usable only when `cap`, `live` and
  * the proxy's OWN `available` verdict are all trustworthy, and every other
  * outcome is `null`. In particular `available` is never derived from `cap` /
- * `live` — a missing verdict is unusable, never "available". Additive proxy
- * fields are ignored, so the contract can evolve without breaking this reader.
+ * `live` — a missing verdict is unusable, never "available". The only values
+ * accepted as a verdict are a real boolean and the proxy's shipped numeric
+ * `0`/`1`; `2`, `-1`, a string, `null` or an object fails closed. Additive
+ * proxy fields are ignored, so the contract can evolve without breaking this
+ * reader.
  */
 
 // ── Wire vocabulary ───────────────────────────────────────────────────
@@ -58,10 +62,11 @@ export const AUDIT_BUDGET_UNKNOWN_REASON = 'audit-budget-unknown';
  * field: a lease with no usable expiry cannot be reasoned about, so a
  * malformed entry makes the whole payload unusable (fail-closed).
  *
- * PROVISIONAL: the expiry is pinned as epoch MILLISECONDS; a proxy that
- * serves epoch seconds (or an ISO-8601 string) is handled by the string form
- * below, and a numeric-seconds proxy is a one-line normalisation once the
- * proxy side (LP-0MW95FYMH006XYNK) names its shape.
+ * The shipped proxy serves `leases: []` while the budget is idle. The expiry
+ * is pinned as epoch MILLISECONDS; a proxy that serves epoch seconds (or an
+ * ISO-8601 string) is handled by the string form below. Lease acquisition and
+ * expiry semantics are deferred to WL-0MWFJH3NW006F5GN, so this reader only
+ * reports what the availability observation serves.
  */
 export interface AuditAvailabilityLease {
   /** Proxy lease identity when served (open vocabulary; never branched on). */
@@ -137,7 +142,17 @@ function firstNumber(
   return undefined;
 }
 
-/** The value of the FIRST alias present as a `boolean`, else `undefined`. */
+/**
+ * The value of the FIRST alias present as a usable availability verdict, else
+ * `undefined`.
+ *
+ * A real `boolean` is taken verbatim. The SHIPPED proxy sends the verdict as
+ * the NUMBER `0`/`1` (`{"cap":1,"live":0,"available":1,...}`), so exactly
+ * those two numbers are coerced (`0` → `false`, `1` → `true`). Every other
+ * value — a string (`"true"`, `"1"`), `null`, an object, an array, `2`, `-1`,
+ * `NaN` — is NOT a verdict and is skipped, so the parser stays fail-closed and
+ * an unparsable earlier alias never shadows a usable later alias.
+ */
 function firstBoolean(
   source: Record<string, unknown>,
   keys: readonly string[],
@@ -145,6 +160,10 @@ function firstBoolean(
   for (const key of keys) {
     const value = source[key];
     if (typeof value === 'boolean') return value;
+    // Strict equality excludes every non-number (notably `false === 0` is
+    // false), so only the proxy's numeric 0/1 verdict is coerced.
+    if (value === 0) return false;
+    if (value === 1) return true;
   }
   return undefined;
 }
@@ -207,8 +226,9 @@ function parseLeases(raw: Record<string, unknown>): AuditAvailabilityLease[] | u
  * Fail-closed parse of a proxy audit-availability response. Returns a typed
  * {@link AuditAvailability} only when the payload is usable, and `null` for
  * EVERY other outcome — a non-2xx status, a non-object body, a missing or
- * non-finite/negative `cap` or `live`, a missing/non-boolean availability
- * verdict, a `leases` value that is not an array, or a malformed lease entry.
+ * non-finite/negative `cap` or `live`, a missing/invalid availability
+ * verdict (a real boolean or the shipped numeric `0`/`1`), a `leases` value
+ * that is not an array, or a malformed lease entry.
  *
  * `available` is copied from the proxy's own field (`available` / `can_admit`)
  * and NEVER derived from `cap` / `live`: a payload without a verdict is

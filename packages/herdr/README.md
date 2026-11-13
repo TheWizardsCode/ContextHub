@@ -571,7 +571,7 @@ dispatches; the other herdr instances coordinate instead of polling:
   - **Audit tier is proxy-derived (cross-machine)** — the audit budget and the
     live audit-lease registry are **owned by the proxy** (the one local
     `llama-server` GPU every ContextHub host shares), and herdr queries
-    `GET {proxyUrl}/llama/local/audit/status` (URL from `downtimeProxyUrl`),
+    `GET {proxyUrl}/llama/local/audit/availability` (URL from `downtimeProxyUrl`),
     mapping the verdict to a refusal with the proxy's own tokens
     (`audit-budget-saturated`; or `audit-budget-unknown` when the read fails
     closed). A proxy/local disagreement is logged with both sides' evidence
@@ -1178,7 +1178,7 @@ makes the item dispatchable again on the next idle poll.
 > **proxy-owned audit budget** is the outermost audit-concurrency gate
 > (see *Host-wide dispatch budget* above): the proxy owns the cap and the live
 > audit-lease registry, and herdr reads its verdict from
-> `GET {proxyUrl}/llama/local/audit/status`, refusing with
+> `GET {proxyUrl}/llama/local/audit/availability`, refusing with
 > `audit-budget-saturated` (or `audit-budget-unknown` when the read fails
 > closed). The local ledger's audit entries are **observability only** — they
 > can never refuse an audit; `budget.json` `maxAudit` is only the one-release

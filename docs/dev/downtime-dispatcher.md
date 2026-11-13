@@ -42,7 +42,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.dispatch-contract.ts` | The dispatch pipeline's dependency boundary + event/outcome types | `DowntimeDispatchEvent`, `DowntimeErrorEvent`, … |
 | `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
 | `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
-| `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (provisional path, sibling proxy item `LP-0MW95FYMH006XYNK`) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON`, `AUDIT_BUDGET_UNKNOWN_REASON` |
+| `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (shipped path + numeric `0`/`1` verdict, sibling proxy item `LP-0MW95FYMH006XYNK`) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON`, `AUDIT_BUDGET_UNKNOWN_REASON` |
 | `downtime-worker.audit-availability.ts` | The fail-closed audit-availability `GET` client — one bounded call, one typed outcome; consumed by the audit pre-check and admission (WL-0MWAMSDNW000SL0E) | `createAuditAvailabilityClient` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
@@ -304,7 +304,7 @@ annexed extension is the same ranking with more items included.
 
 **Every budget and safety gate still applies** to out-of-window candidates,
 unchanged and as sequential filters: the host dispatch budget (the
-proxy-owned audit budget / `GET {proxyUrl}/llama/local/audit/status` for the
+proxy-owned audit budget / `GET {proxyUrl}/llama/local/audit/availability` for the
 audit tier; `maxImplement` / the legacy `maxAudit` for the implement/legacy
 paths), the per-item/per-kind attempt budget, free-slot minimums, the
 code-freeze split-by-skill, the host-CPU gate, the review-queue depth hold,
@@ -1181,7 +1181,7 @@ unchanged) and the pane-arg/env forwarding;
 `tests/herdr/send-to-pi.test.ts` pins `--reservation-ticket` →
 `PI_LOCAL_RESERVATION_TICKET` in the pane process.
 
-### Proxy audit availability (provisional wire contract, parent WL-0MW95GBEG005ERHS, child WL-0MWAMS1PW000O3OS)
+### Proxy audit availability (shipped wire contract, parent WL-0MW95GBEG005ERHS, child WL-0MWAMS1PW000O3OS)
 
 **Why.** The audit tier used to assert a **per-host** `budget.json` cap
 (`maxAudit`, default `1`). The resource an audit actually contends for is the
@@ -1194,30 +1194,39 @@ contract, exactly as the reserve-handshake slice C1 pinned its shape
 (`downtime-worker.local-reservation.ts`); the admission mapping built on it is
 in *Proxy-derived audit admission* below.
 
-**The proxy side is sibling llm item `LP-0MW95FYMH006XYNK` and has not
-shipped.** Probed **2026-11-10** against the live proxy
-(`http://192.168.0.199:8000`): `/openapi.json` lists only
-`/llama/local/status` and `/llama/local/reserve`, and `/llama/local/audit`,
-`/llama/local/budget` and `/llama/local/audit/status` all answer **`404`**.
-The contract is therefore **provisional**; the final path is one constant
-(`AUDIT_AVAILABILITY_PATH`) and a field rename on either side is a one-line
-change because the parser reads documented aliases.
+**The proxy side is sibling llm item `LP-0MW95FYMH006XYNK` and has
+SHIPPED.** Validated **2026-11-13** against the live proxy
+(`http://192.168.0.199:8000`): `/openapi.json` lists exactly
+`/llama/local/audit/availability`, `/llama/local/audit/lease`,
+`/llama/local/audit/lease/renew` and `/llama/local/audit/lease/{session_id}`.
+`GET /llama/local/audit/availability` answers `200`; there is **no**
+`/llama/local/audit/status` (it answers `404`). The path is one constant
+(`AUDIT_AVAILABILITY_PATH`, default `/llama/local/audit/availability`) with a
+documented `HERDR_AUDIT_AVAILABILITY_PATH` override, and a field rename on
+either side is a one-line change because the parser reads documented aliases.
+**Availability-only admission is a pre-check, not a reservation** — see the
+lease-scope note below.
 
-**Provisional wire contract** (`packages/herdr/src/downtime-worker.audit-availability.contract.ts`):
+**Shipped wire contract** (`packages/herdr/src/downtime-worker.audit-availability.contract.ts`):
 
 ```
-GET {proxyUrl}/llama/local/audit/status
+GET {proxyUrl}/llama/local/audit/availability
 
-200 -> { "cap": <n>, "live": <n>, "available": <bool>,
+200 -> { "cap": <n>, "live": <n>, "available": <0|1>,
          "leases": [ { "id": "<id>", "expires_at": <epoch ms> } ],
-         "reclaimed": <n>, "reason": "<open vocabulary>" }
+         "reclaimed": <n>, "reason": "<open vocabulary>",
+         "max_audits": <n> }   // additive, ignored
 ```
+
+The captured shipped payload (2026-11-13) is
+`{"cap":1,"live":0,"available":1,"leases":[],"max_audits":1}`: the
+`available` verdict is the NUMBER `0`/`1`, not a boolean.
 
 | Field | Aliases read | Rule |
 |---|---|---|
 | audit cap | `cap`, `max`, `max_audit` | finite, `>= 0` |
 | live leases | `live`, `in_flight`, `live_leases` | finite, `>= 0` |
-| availability verdict | `available`, `can_admit` | must be a real boolean — **never derived** from cap/live |
+| availability verdict | `available`, `can_admit` | a real boolean OR the shipped numeric `0`/`1` (coerced to a boolean); any other value fails closed — **never derived** from cap/live |
 | lease expiry | `expires_at`, `expires_at_ms`, `expiry`, `expiresAt` | positive epoch-ms number or a `Date.parse`-able ISO-8601 string |
 | lease identity | `id`, `lease_id`, `ticket_id`, `owner` | optional non-empty string |
 | reclaimed leases | `reclaimed` | finite, `>= 0` |
@@ -1225,22 +1234,43 @@ GET {proxyUrl}/llama/local/audit/status
 
 **Fail-closed parse.** `parseAuditAvailabilityResponse(raw, httpStatus)` returns
 `null` for **every** unusable payload — a non-2xx status, a non-object body, a
-missing/non-finite/negative `cap` or `live`, a missing/non-boolean availability
+missing/non-finite/negative `cap` or `live`, a missing/invalid availability
 verdict, a `leases` value that is not an array, a malformed lease entry, or a
-malformed `reclaimed` count. A garbage payload can therefore never be read as
-"available". `available` is copied from the proxy's own field and never derived
-locally: two sides reading the same verdict is what keeps a dispatcher
+malformed `reclaimed` count. The verdict is accepted only as a real boolean or
+the proxy's shipped numeric `0`/`1`; `2`, `-1`, `"true"`, `"1"`, `null`, an
+object or an array all resolve `null`. A garbage payload can therefore never be
+read as "available". `available` is copied from the proxy's own field and never
+derived locally: two sides reading the same verdict is what keeps a dispatcher
 admission and a proxy refusal from disagreeing (parent AC2). Additive proxy
-fields are ignored, so the contract can evolve without breaking this reader.
+fields (such as `max_audits`) are ignored, so the contract can evolve without
+breaking this reader.
 
 **Behaviour now consumed.** The contract was pinned before the proxy existed;
 the client (`WL-0MWAMSCOP003R837`) was its first consumer and the audit gate
 (`WL-0MWAMSDNW000SL0E`) is the client's — see *Proxy-derived audit admission*.
 The contract test still pins the allowed reader set, so widening the
 dispatch-path consumers is a deliberate, reviewed change.
-`AUDIT_AVAILABILITY_PATH` lives in `downtime-worker.constants.ts`; the contract
-module, the client and their key symbols are re-exported from the
-`downtime-worker.ts` barrel.
+`AUDIT_AVAILABILITY_PATH` lives in `downtime-worker.constants.ts` (resolved per
+call via `resolveAuditAvailabilityPath()`, so `HERDR_AUDIT_AVAILABILITY_PATH`
+overrides it without a rebuild); the contract module, the client and their key
+symbols are re-exported from the `downtime-worker.ts` barrel.
+
+**Availability-only admission is a pre-check, not a reservation.**
+`GET /llama/local/audit/availability` is a point-in-time observation of
+`{ cap, live, available, leases }` — its own OpenAPI description calls it "the
+dispatcher's lease-derived availability signal". It **observes** leases; it
+neither creates nor reserves one, so two hosts that both read
+`live: 0, available: 1` in the same window can both dispatch (the 2026-11-03
+two-audits-on-one-GPU failure). The atomic cross-host arbiter is the proxy's
+lease protocol — `POST /llama/local/audit/lease` (`200` acquired/ renewed,
+`429 audit-budget-saturated` with a bounded `retry_after_s` when a *different
+session* holds the budget, `503 audit-budget-unavailable` on registry failure),
+plus `POST /llama/local/audit/lease/renew` and
+`DELETE /llama/local/audit/lease/{session_id}`. Herdr does **not** call it yet:
+lease acquisition is deferred to **WL-0MWFJH3NW006F5GN**. Single-machine
+concurrency is already serialised by the machine-wide downtime leader plus the
+host-budget ledger, but the audit budget is **cross-machine**, so only the
+proxy can arbitrate it atomically.
 
 **The client** (`packages/herdr/src/downtime-worker.audit-availability.ts`,
 child `WL-0MWAMSCOP003R837`) is the counterpart of `createLocalReserver` and
@@ -1251,9 +1281,11 @@ createAuditAvailabilityClient(proxyUrl, fetcher = globalThis.fetch, timeoutMs = 
   -> () => Promise<AuditAvailabilityOutcome>
 ```
 
-One call = one `GET {proxyUrl}{AUDIT_AVAILABILITY_PATH}` (URL normalised with
-the reserve client's trailing-slash convention, `accept: application/json`),
-bounded by the poller's timeout. It **never throws** and resolves exactly one
+One call = one `GET {proxyUrl}{resolveAuditAvailabilityPath()}` (default
+`/llama/local/audit/availability`, overridable via
+`HERDR_AUDIT_AVAILABILITY_PATH`; URL normalised with the reserve client's
+trailing-slash convention, `accept: application/json`), bounded by the
+poller's timeout. It **never throws** and resolves exactly one
 typed outcome:
 
 | Outcome | Cause |
@@ -1279,7 +1311,7 @@ every path (no open handle after a call). The audit gate maps `endpoint-absent`,
 `maxAudit` cap. The proxy owns the audit budget and the live audit-lease
 registry (sibling llm item `LP-0MW95FYMH006XYNK`), and every ContextHub host
 already talks to the proxy for model traffic, so
-`GET {proxyUrl}/llama/local/audit/status` is the single **cross-machine**
+`GET {proxyUrl}/llama/local/audit/availability` is the single **cross-machine**
 serialisation of the resource an audit actually contends for (the one local
 `llama-server` GPU). Two hosts can no longer independently believe they are
 under their own cap while contending for the same GPU — the 2026-11-03
@@ -3135,7 +3167,7 @@ path. Capping the `plan` / `intake` / `risk-effort` tiers is likewise out of
 scope (`kind` is recorded, so extending is trivial). **Multi-machine
 coordination is no longer out of scope for the audit budget:** the local
 ledger remains single-machine, and the **proxy-owned audit budget queried over
-HTTP** (`GET {proxyUrl}/llama/local/audit/status`) is the cross-machine
+HTTP** (`GET {proxyUrl}/llama/local/audit/availability`) is the cross-machine
 serialisation that supersedes the old `machine-coordination.ts` note. See
 *Proxy-derived audit admission* above.
 
@@ -3191,7 +3223,7 @@ recorded.
 > **Current state (WL-0MW95GBEG005ERHS).** The per-host ledger cap described
 > below is **no longer the audit-admission authority**. Audit admission is
 > proxy-derived: `getActiveAudit` and `admitHostDispatch` read the proxy's
-> `GET {proxyUrl}/llama/local/audit/status` verdict and fail closed as
+> `GET {proxyUrl}/llama/local/audit/availability` verdict and fail closed as
 > `audit-budget-unknown` when it cannot answer. The ledger's audit entries and
 > `budget.json` `maxAudit` are **observability only** for admission
 > (header/dialog/sweep) and the **one-release legacy path**
@@ -3257,7 +3289,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 
 | Guard | Scope | Sees | Action |
 |---|---|---|---|
-| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/status`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
+| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/availability`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
 | **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip that audit candidate and keep scanning; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
 | **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |
@@ -3282,7 +3314,7 @@ per-user; ledger writes run under the existing coordination lock with an
 atomic tmp+rename, so the audit tier adds no read-modify-write contention on
 the shared `downtime-coordination.json`). **Cross-machine serialisation** of
 the audit resource is the **proxy-owned audit budget queried over HTTP** —
-`GET {proxyUrl}/llama/local/audit/status` — not flock/NFS. This supersedes the
+`GET {proxyUrl}/llama/local/audit/availability` — not flock/NFS. This supersedes the
 old single-machine note in `machine-coordination.ts`; see *Proxy-derived audit
 admission* above.
 
@@ -3719,7 +3751,7 @@ Every refusal still applies on both settings: unusable per-slot detail
 (`contention_queue_depth > 0` / `prefill_gate_waiters > 0`), the prefill
 serialisation gate (`evaluatePrefillPacing`), owned slots
 (`countFreeUnownedSlots` excludes them), the proxy-owned audit budget
-(`GET {proxyUrl}/llama/local/audit/status`; the legacy `maxAudit` cap only
+(`GET {proxyUrl}/llama/local/audit/availability`; the legacy `maxAudit` cap only
 under `HERDR_AUDIT_LOCAL_BUDGET=1`) and a
 `parent`/unclassifiable candidate. The relaxed slot stays **pinned** to that
 one leaf audit (`ctx.leafAuditAdmission`, the C4 single-tier pin), so no
@@ -4413,7 +4445,7 @@ likewise re-read live every tick and clamped on load
   live-audit-lease count, possibly held by ANOTHER ContextHub host sharing the
   same local `llama-server` GPU. This is expected cross-machine serialisation,
   not a failure: audits resume when a live lease expires or is released on the
-  proxy. Inspect the proxy read (`curl <proxyUrl>/llama/local/audit/status`) and
+  proxy. Inspect the proxy read (`curl <proxyUrl>/llama/local/audit/availability`) and
   the decision log (`grep 'audit-budget-saturated'
   <root>/.worklog/downtime-coordination.log`). **To raise the audit cap now,
   change the proxy's audit-budget configuration** (sibling llm item
@@ -4424,7 +4456,7 @@ likewise re-read live every tick and clamped on load
   client use.
 - **Audits skipped with `audit-budget-unknown` (WL-0MW95GBEG005ERHS):** the
   audit tier **failed closed** because the proxy cannot answer — `404`
-  (`endpoint-absent`, the proxy predates `/llama/local/audit/status`),
+  (`endpoint-absent`, the proxy predates `/llama/local/audit/availability`),
   `unreachable` (timeout/network/`http-<status>`), `unparsable` (`bad-body`),
   or no availability seam wired. Audit dispatch stops with a named reason
   rather than silently trusting a per-host cap. Check the proxy URL reachability
