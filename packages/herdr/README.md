@@ -404,9 +404,12 @@ dispatches; the other herdr instances coordinate instead of polling:
   by the classifier) and rewritten as v2 on the next check-in — no v1 file is
   dropped by the upgrade.
 - **Leader dispatch** — only the leader polls the proxy; once idle for the
-  threshold, it first checks **scheduled-prompts** (a due prompt dispatches
-  immediately — WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*); otherwise it
-  reads the machine-wide offer list and dispatches ENTRIES in **file order**,
+  threshold it walks the single canonical candidate universe, in the one order
+  stated in
+  [*Which cross-root mechanism applies when*](../../docs/dev/downtime-dispatcher.md#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots)
+  (a due scheduled prompt dispatches immediately on its own cadence —
+  WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*). The offer rung reads the
+  machine-wide offer list and dispatches ENTRIES in **file order**,
   iterating the **offers inside each entry** (each entry advertises up to one
   nominee per bucket — see *Shared coordination file* above). Every offer is
   re-validated **at dispatch time**
@@ -432,16 +435,21 @@ dispatches; the other herdr instances coordinate instead of polling:
   that offer** (`removeOffer`) — the entry keeps its remaining nominees and
   `lastUpdated`, so the next tick can dispatch the next tier without a new
   check-in — and an entry whose last offer is dispatched is removed exactly as
-  before. If no offer is dispatchable, the leader first **sweeps the
-  registered worklog roots** (`downtimeWorklogRoots`) in round-robin order —
+  before. If no offer is dispatchable, the leader continues down the
+  canonical candidate universe (link above): it **sweeps the registered worklog
+  roots** (`downtimeWorklogRoots`) in round-robin order —
   extra roots with no running instance, read through the same canonical
   ranking and the same sequential safety gates (see *Registered-root
-  discovery* below) — and then may fall back to its **own backlog** — a
+  discovery* below and the
+  [dispatcher doc's sweep section](../../docs/dev/downtime-dispatcher.md#registered-root-discovery--sweeping-roots-with-no-running-instance-parent-wl-0mvr8gdj3008wy3y-option-o1))
+  — and the own-backlog fallback (a
   bounded window extension of the same ranking beyond the sprint view, own
-  root only — and, on a successful own-backlog dispatch, voluntarily steps
-  down via `releaseLeadership()` so another instance can take over
-  (WL-0MUU4XFU90008E24; see the *Own-backlog fallback & leadership hand-off*
-  paragraph below). The dispatched entry is
+  root only — see the *Own-backlog fallback & leadership hand-off* paragraph
+  below, WL-0MUU4XFU90008E24; a successful own-backlog dispatch voluntarily
+  steps down via `releaseLeadership()` so another instance can take over).
+  The overall composition order is owned once by the
+  [cross-root mechanism section](../../docs/dev/downtime-dispatcher.md#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots).
+  The dispatched entry is
   **removed**; its owner re-offers its next Herdr head at the next
   check-in. There is **no TTL-based pruning**. **Cost (parent AC10):** the
   per-offer re-validation adds **one `fetchItem` per offered item per tick** —

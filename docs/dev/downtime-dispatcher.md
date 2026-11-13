@@ -557,20 +557,15 @@ its own backlog, so it must not step down (stepping down on every sweep would
 flap the machine-wide election). The own-backlog hand-off and the empty-leader
 step-down are unchanged.
 
-**Composition summary.**
-
-| Order | Source | Scope |
-|---|---|---|
-| 1 | Scheduled prompts | a due prompt dispatches immediately |
-| 2 | Offer list (`downtime-coordination.json`) | live peer entries in file order, **offers iterated inside each entry** (v2: up to one nominee per bucket, drain-aware tie-break among admissible offers, remove only the dispatched offer) |
-| 3 | **Registered roots (`downtimeWorklogRoots`)** | **round-robin sweep, per-root gates** |
-| 4 | Own backlog (`opts.cwd`) | bounded extension, own root only, then hand off |
-
-The offer-list rung is the only changed rung under v2: it still runs after
-scheduled prompts and before the registered-root sweep, and it still walks
-entries in file order — the change is *within* an entry (per-offer validation
-and dispatch instead of one offer per entry), so the outer composition order,
-the root-level round-robin and every downstream gate are untouched.
+**Composition.** The full candidate-universe order and the per-rung scope are
+stated once, in the canonical composition block under
+[*Which cross-root mechanism applies when*](#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots)
+— this section owns the sweep rung only. What matters for the registry: the
+sweep runs only when the offer list yielded nothing dispatchable, it runs
+*before* the leader's own out-of-view backlog (AC4), and the v2 offer change
+never moves it (the offer-list rung is the only changed rung — still between
+scheduled prompts and the sweep, still walking entries in file order, with the
+change *within* an entry).
 
 **Liveness-aware peer predicate (AC7).** Independent of the registry, the
 `no-candidate` pause-arm/cancel predicate `hasPeerOffer`
@@ -591,6 +586,136 @@ that is precisely the bug it fixes. Note that the whole-backlog window
 (WL-0MW9XS0XR007K1TH) now lets any path reach deep work; the sweep's distinctive
 job is *cross-root reach* into roots that have no running instance to offer
 work.
+
+## Which cross-root mechanism applies when: offers, passive instances, or downtimeWorklogRoots
+
+Three mechanisms make work in another worklog root reachable to the fleet
+leader, and their boundaries are easy to blur: per-tier **offers** written by
+participating instances, **passive (offer-only)** instances that check in but
+never dispatch, and the operator-maintained **`downtimeWorklogRoots`
+registry**. This section is the operator's single entry point: which mechanism
+fits which situation, what each one costs, and what each one **cannot** do.
+
+### The candidate universe (canonical composition order)
+
+> **Single canonical block.** The composition order below is stated **exactly
+> once**, here. *Whole-backlog dispatch window*, *Registered-root discovery*,
+> *Leader-only dispatch* (step 3) and the herdr README link here instead of
+> restating it. The feature subsections above still own the per-rung
+> mechanics — this block only fixes the order and the boundaries between rungs.
+
+Every dispatch tick walks one candidate universe, in this order, and stops at
+the first candidate that dispatches:
+
+| Order | Source | Scope |
+|---|---|---|
+| 1 | Scheduled prompts | a due prompt dispatches immediately |
+| 2 | Offer list (`downtime-coordination.json`) | live peer entries in file order, **offers iterated inside each entry** (v2: up to one nominee per bucket, drain-aware tie-break among admissible offers, remove only the dispatched offer) |
+| 3 | **Registered roots (`downtimeWorklogRoots`)** | **round-robin sweep, per-root gates** — only when the offer list yielded nothing dispatchable |
+| 4 | Own backlog (`opts.cwd`) | bounded extension, own root only, then hand off |
+
+The offer-list rung is the only changed rung under v2: it still runs after
+scheduled prompts and before the registered-root sweep, and it still walks
+entries in file order — the change is *within* an entry (per-offer validation
+and dispatch instead of one offer per entry), so the outer composition order,
+the root-level round-robin and every downstream gate are untouched. The sweep
+runs only when the offer rung yielded nothing dispatchable, and it runs
+*before* the leader's own out-of-view backlog, so a busy leader root can never
+starve a registered root (parent WL-0MVR8GDJ3008WY3Y AC4).
+
+### Choosing a mechanism: the three-situation decision table
+
+| Your situation | Recommended | Why |
+|---|---|---|
+| The root has an **active dispatching instance** | **Offer — do nothing** | The instance already advertises its own whole ranked backlog at every check-in (up to one nominee per bucket under v2). Registering it in `downtimeWorklogRoots` would be a redundant second path into the same root, and `downtimeOfferOnly` is meaningless for an instance whose dispatch is enabled. |
+| The root has an instance with **dispatch disabled** (`downtimeEnabled: false` or a live `d` disable marker) | **Enable `downtimeOfferOnly`** (recommended), or register the root | A dispatch-disabled instance offers **nothing** unless `downtimeOfferOnly` is on — the enabled/disable gate returns before the check-in, so its backlog is invisible to the fleet. `downtimeOfferOnly` lets the instance publish that backlog by doing the check-in only, at zero registry maintenance cost. The registry is the fallback when the instance's settings cannot be changed (see [Offer-only mode](#offer-only-mode-downtimeofferonly---wl-0mwddhok6009gjcc)). |
+| The root has **no herdr instance at all** | **Register it in `downtimeWorklogRoots`** — the only option | A root with no running instance writes no coordination entry, so only the leader's sweep can reach it. Neither offers nor `downtimeOfferOnly` can help — there is no instance to check in. |
+
+### What each mechanism cannot do
+
+- **A passive instance still cannot dispatch, claim, reserve or lead.**
+  `downtimeOfferOnly` routes the tick through the check-in only
+  (`runOfferOnlyCheckIn`); the instance never polls the llama proxy, takes the
+  leader lease, runs a CAS claim, writes a dispatch marker, reserves capacity
+  or spawns a pane — the gate routes these ticks before the election/poll/
+  dispatch phases are reachable (fail closed in code, WL-0MWDDHOK6009GJCC
+  AC3). It also never renews the lease it may already hold — the transient
+  quiescence after a mode switch is inherent to "must not lead".
+- **A registry entry does not make a root's instance participate or lead.**
+  The sweep is leader-side only: registering a root makes the *leader* read
+  that root's ranked head through `dispatchFromOwnHead`; it never starts an
+  instance in the root, never lets that root's (absent) instance offer, claim,
+  reserve or lead, and a swept dispatch deliberately never hands off
+  leadership.
+- **Neither can admit work past a host budget, code freeze or review-queue
+  hold.** Offers, offer-only check-ins and swept candidates all pass the same
+  full sequential filter chain (classify → dispatched marker → attempt budget
+  → non-terminal cooldown → per-root code freeze → host-CPU gate → audit slot
+  minimum → in-flight guard → review-queue hold → CAS claim), evaluated
+  against the candidate's **own root's** state. A mechanism only changes *how a
+  root enters the candidate universe* — never what happens to a candidate
+  once it is there.
+
+### How each path fails
+
+- **Offers — stale peer.** An entry whose owner stopped checking in is no
+  longer treated as a live peer after **24 h** (`hasPeerOffer`, with
+  `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` in `packages/herdr/src/coordination.ts`).
+  The entry file is never pruned (expiry is a deliberate no-op), but the
+  no-candidate pause/arm predicate ignores stale entries, making the leader
+  *more* willing to sweep/probe, never less.
+- **Offers — undispatchable or refused.** A v2 offer that fails dispatch-time
+  re-validation is **removed eagerly without a pane or dispatched marker** and
+  the walk continues to the next offer (v1 entries were dropped whole). A
+  refused per-tier nominee no longer hides the rest of that root's backlog:
+  the entry keeps its remaining nominees and its `lastUpdated`, so the next
+  tick can dispatch the next tier without waiting for the owner's check-in
+  (parent WL-0MWDDHQON0015T3P AC4–AC8).
+- **Registry — bad entry.** An invalid/unreadable registry entry is dropped
+  **on its own** — it never invalidates a good neighbour, never crashes
+  settings load, and never ends the sweep (the next root is tried).
+- **Registry — empty.** An absent, empty or wholly unresolvable registry is a
+  **byte-for-byte no-op**: the candidate universe stays `offers ∪
+  ownBacklog(opts.cwd)` and `dispatchFromRegisteredRoots` returns immediately
+  with no cursor read/write and no extra `wl` spawn.
+
+### Registry operations (`downtimeWorklogRoots`)
+
+- **Value shape.** Each entry is a worklog **root** — the parent of
+  `.worklog/`, matching `worklogRoot`/`opts.cwd` semantics — and must be an
+  **absolute path** that realpath-resolves to a directory containing
+  `.worklog/worklog.db`; the stored value is that realpath, so a symlinked
+  root can never dispatch into an unexpected workspace
+  (`resolveDowntimeWorklogRoots`). A relative, non-string, blank or duplicated
+  entry is dropped; duplicates collapse first-seen.
+- **Cap.** The list is bounded by `MAX_DOWNTIME_WORKLOG_ROOTS = 32`
+  (`packages/herdr/src/downtime-worker.clamps.ts`), applied **after**
+  filtering so junk never consumes a slot.
+- **Refresh.** The registry is re-read **every tick** (`loadSettings`),
+  so edits apply without a plugin restart.
+- **Per-entry fail-open.** Validation is per entry: an invalid/unreadable
+  root is dropped on its own and never invalidates a good neighbour, and never
+  crashes settings load.
+- **Empty registry is a no-op.** See *How each path fails* above.
+
+The validator (`resolveDowntimeWorklogRoots`) and the sweep
+(`dispatchFromRegisteredRoots`) are the two reference points for this contract.
+
+### Why this exists: the 2026-11-12 head-of-line blocking
+
+The dispatcher gained this section because *which* mechanism applies to a root
+was not just a documentation question — choosing wrong had a concrete failure
+signature. On 2026-11-12, ContextHub offered its implement head from a v1
+single-offer entry while the machine-wide implement budget was at its **2/2
+cap**: the offered head was budget-refused, and because a v1 entry carried
+only ONE item, the rest of that root's backlog stayed invisible — **9
+prep-tier (`idea`/`intake_complete`) and 5 `plan_complete` candidates were
+unreachable** to any leader, across multiple ticks. A refused offer head
+hid the rest of a root's backlog. The v2 per-bucket nominees
+(WL-0MWDDHQON0015T3P) fix exactly that: one nominee per bucket, so a
+budget-refused implement head no longer hides the root's prep-tier candidates.
+If a future change ever reintroduces head-of-line blocking — a single refused
+offer hiding a whole root — this is the regression signature to recognise.
 
 ## Architecture
 
@@ -752,14 +877,15 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    Each entry is eligibility re-checked at dispatch time; stale entries are
    dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
    opens the first passing offer dispatches in the entry's `worklogRoot`. If
-   **no** offer passes, the leader first sweeps the registered worklog roots
-   (`downtimeWorklogRoots`) in round-robin order through the same ranking and
-   the same sequential gates (see *Registered-root discovery* above). If that
-   sweep finds nothing dispatchable, it then performs one bounded own-backlog
-   fallback against its **own** root (`opts.cwd`) and, on a successful fallback
-   dispatch, voluntarily steps down via `releaseLeadership()` so another
-   instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog fallback &
-   leadership hand-off* above).
+   **no** offer passes, the leader continues down the remaining rungs of the
+   canonical candidate universe in the single order stated in
+   [*Which cross-root mechanism applies when*](#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots).
+   The sweep runs in round-robin order through the same ranking and the same
+   sequential gates (see *Registered-root discovery* above); a successful
+   own-backlog fallback dispatches against the leader's **own** root
+   (`opts.cwd`) and voluntarily steps down via `releaseLeadership()` so
+   another instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog
+   fallback & leadership hand-off* above).
 4. The dispatched **offer** is **removed** from the coordination file
    (`removeOffer`); its entry stays while it still has nominees, and is removed
    once the last offer has dispatched. The
@@ -4269,7 +4395,11 @@ likewise re-read live every tick and clamped on load
   last dispatch.
 - **A worklog root with dispatchable work is never served:** if no herdr
   instance runs in that root it writes no coordination offer, so the offer
-  path can never see it. Register the root in `downtimeWorklogRoots` (the
+  path can never see it. A root that *does* run an instance with dispatch
+  disabled is better served by `downtimeOfferOnly` than by the registry —
+  see the decision table under
+  [*Which cross-root mechanism applies when*](#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots).
+  Register a root in `downtimeWorklogRoots` (the
   absolute path of the worklog ROOT — the parent of `.worklog/`), then
   confirm `loadSettings` kept it: a relative path, a missing/unreadable
   directory, or one without `.worklog/worklog.db` is dropped **per entry**
