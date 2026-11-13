@@ -103,6 +103,29 @@ The default-view refresh now spawns far fewer `wl` processes:
     shared with a mandatory subset keep the richer `wl list` audit fields
     (`auditResult`, `auditedAt`, `fingerprint`, `currentFingerprint`), so the
     audit-bucket sort classifies them exactly as before.
+  - **Blocker pinning (WL-0MW7YJYS5009H7WC)** — every ACTIVE blocker of a
+    visible `status=blocked` item is also shown in the default view: a root
+    blocker as itself, a child blocker via its ROOT ancestor (the same
+    "show parents, not children" parent-substitution rule the critical-child
+    path applies — the child itself never renders at the top level). Without
+    this, a saturated review queue (deep `in_review` bucket, `othersLimit 0`)
+    leaves every open blocker cut by the browse window while the blocked rows
+    it waits on stay visible. Each pinned blocker is grouped WITH the blocked
+    item it blocks (same group/label, immediately after it; a blocker that
+    blocks several visible items appears once, in the first/lowest group) and
+    becomes a dispatch candidate from the list head (`getHerdrListHead` feeds
+    the dispatcher the same selection). **Default view only** — the guarantee
+    does not extend to the deliberately narrow stage-filtered views
+    (`fetchItemsByStage`/`fetchItemsByPriority`), which stay strictly
+    root-only and unfiltered by dependency edges (AC11).
+  - **Read cost unchanged (AC8)** — pinning adds NO new `wl` process spawn per
+    visible blocked item: the outbound `depends-on` edges of all selected
+    blocked ids are read in ONE batched in-process pass (the shareable
+    `readOutboundDepsInProcess` reader behind `fetchOutboundDepsForItems`),
+    filtered through the shared `isActiveBlocker` predicate, and ancestor
+    chains are resolved from the same in-process store. Measured before/after
+    on the default refresh: still **1** `wl` spawn (`wl worklist`) — the
+    `fetcher-spawn-cap` / split-guard suites stay green.
   - **Fail-open fallback** — an older `wl` without the command, a non-zero exit,
     a malformed payload or a missing subset key falls back to the per-subset
     spawn path with unchanged behaviour. A *hung* `wl` is deliberately NOT

@@ -27,6 +27,18 @@ import { isAuditFresh } from '@worklog/shared/icons';
  * audit run or any other `updatedAt` churn can never move an item between
  * groups; only a material change (key files, priority, stage/status, or the
  * item set itself) can.
+ *
+ * Blocker pinning (WL-0MW7YJYS5009H7WC) — DEFAULT VIEW ONLY: the optional
+ * pin map passed to `regroupWorkItems` overrides a pinned blocker's group to
+ * the blocked item's group (same label, immediately after it; first/lowest
+ * group wins for multi-block). This is a DELIBERATE exception to the
+ * file-path conflict invariant for the blocker/blocked pair only (AC12): a
+ * blocked row must be followed by the work that unblocks it, even though the
+ * two items' key files never justify sharing a group. The override applies
+ * exclusively to ids present in the pin map, so every other item keeps the
+ * content-derived grouping and an empty pin map is byte-identical to today
+ * (AC5). Stage-filtered views (`fetchItemsByStage`/`fetchItemsByPriority`)
+ * pass no pin map and do not synthesise dependency rows.
  */
 
 // ── File path extraction ──────────────────────────────────────────────

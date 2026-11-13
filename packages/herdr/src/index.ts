@@ -578,6 +578,13 @@ export function createDowntimeDeps(
     // is never produced. `fetchNextItems` applies mandatory-always, browseItemCount windowing,
     // and regroupWorkItems grouping — the sole ranking path.
     //
+    // DISPATCH-HEAD EFFECT OF BLOCKER PINNING (WL-0MW7YJYS5009H7WC AC10): pinning runs INSIDE
+    // fetchNextItems, so the head is the SAME pinned selection the worklist renders. A pinned
+    // blocker of a visible blocked item is therefore a dispatch candidate from the list head —
+    // deliberate, not incidental: the ordering change is covered by
+    // `index.downtime-select.test.ts` ('getHerdrListHead surfaces the pinned blockers of a
+    // visible blocked item (AC10)'). Default-view only; stage-filtered reads never pin.
+    //
     // ROOT-AWARE (WL-0MVR8GDJ3008WY3Y AC3): `cwd` is the worklog ROOT whose head is
     // read. The read targets `<cwd>/.worklog` explicitly (`--worklog-dir`) so the
     // registered-root sweep ranks a FOREIGN root through the SAME canonical path
