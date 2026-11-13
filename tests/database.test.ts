@@ -13,22 +13,12 @@ import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } 
 /**
  * Invoke the `cascadePriorityPromote` façade member under test.
  *
- * The member does not exist yet (it lands with WL-0MWETWNSO001UL2M), so it is
- * reached through a narrow structural cast rather than the façade class type.
- * The `typeof` assertion is deliberate: it proves the feature exists before
- * any behaviour is asserted, so a missing member can never masquerade as a
- * meaningful RED pin.
- *
  * Returns the promoted ancestors as `WorkItem[]` in walk order — the direct
  * parent first, then each successive ancestor up to the root — mirroring
  * `cascadePriorityDowngrade`, which returns the affected children.
  */
 function cascadePriorityPromote(database: WorklogDatabase, itemId: string): WorkItem[] {
-  const promote = (database as unknown as {
-    cascadePriorityPromote?: (id: string) => WorkItem[];
-  }).cascadePriorityPromote;
-  expect(typeof promote).toBe('function');
-  return promote!.call(database, itemId);
+  return database.cascadePriorityPromote(itemId);
 }
 
 describe('WorklogDatabase', () => {
@@ -606,14 +596,12 @@ describe('WorklogDatabase', () => {
   });
 
   // -------------------------------------------------------------------------
-  // cascadePriorityPromote — RED pins (test-first slice WL-0MWETWBS3006D4OI)
+  // cascadePriorityPromote — contract pins (test-first slice WL-0MWETWBS3006D4OI,
+  // primitive landed with WL-0MWETWNSO001UL2M)
   //
   // Contract (parent WL-0MWDD2JE6006CL7I, operator answer Q1-B): a `critical`
   // item promotes every non-critical ancestor to `critical`, transitively to
-  // the root. The primitive itself lands with the sibling child
-  // WL-0MWETWNSO001UL2M, which flips `it.fails(` to `it(` in this block once
-  // the façade member exists. Until then the pins stay RED-as-expected so the
-  // suite is green while the implementation is pending.
+  // the root.
   //
   // Pinned semantics:
   //   * only ancestors are promoted; the critical item itself is untouched
@@ -626,7 +614,7 @@ describe('WorklogDatabase', () => {
   //   * unrelated branches are never touched
   // -------------------------------------------------------------------------
   describe('cascadePriorityPromote', () => {
-    it.fails('should promote the direct parent of a critical child', () => {
+    it('should promote the direct parent of a critical child', () => {
       const parent = db.create({ title: 'Parent', priority: 'medium' });
       const child = db.create({ title: 'Critical child', priority: 'critical', parentId: parent.id });
 
@@ -639,7 +627,7 @@ describe('WorklogDatabase', () => {
       expect(db.get(child.id)?.priority).toBe('critical');
     });
 
-    it.fails('should promote every ancestor transitively to the root, nearest first', () => {
+    it('should promote every ancestor transitively to the root, nearest first', () => {
       const root = db.create({ title: 'Root', priority: 'high' });
       const middle = db.create({ title: 'Middle', priority: 'low', parentId: root.id });
       const parent = db.create({ title: 'Parent', priority: 'medium', parentId: middle.id });
@@ -654,7 +642,7 @@ describe('WorklogDatabase', () => {
       expect(db.get(root.id)?.priority).toBe('critical');
     });
 
-    it.fails('should skip an already-critical ancestor but keep promoting higher ancestors', () => {
+    it('should skip an already-critical ancestor but keep promoting higher ancestors', () => {
       const root = db.create({ title: 'Root', priority: 'high' });
       const alreadyCritical = db.create({ title: 'Already critical', priority: 'critical', parentId: root.id });
       const parent = db.create({ title: 'Parent', priority: 'low', parentId: alreadyCritical.id });
@@ -670,7 +658,7 @@ describe('WorklogDatabase', () => {
       expect(db.get(root.id)?.priority).toBe('critical');
     });
 
-    it.fails('should be a no-op when the item is not critical', () => {
+    it('should be a no-op when the item is not critical', () => {
       const parent = db.create({ title: 'Parent', priority: 'medium' });
       const child = db.create({ title: 'High child', priority: 'high', parentId: parent.id });
 
@@ -680,7 +668,7 @@ describe('WorklogDatabase', () => {
       expect(db.get(parent.id)?.priority).toBe('medium');
     });
 
-    it.fails('should be a no-op for a critical item without a parent', () => {
+    it('should be a no-op for a critical item without a parent', () => {
       const root = db.create({ title: 'Critical root', priority: 'critical' });
 
       const promoted = cascadePriorityPromote(db, root.id);
@@ -689,7 +677,7 @@ describe('WorklogDatabase', () => {
       expect(db.get(root.id)?.priority).toBe('critical');
     });
 
-    it.fails('should return an empty list when every ancestor is already critical', () => {
+    it('should return an empty list when every ancestor is already critical', () => {
       const root = db.create({ title: 'Root', priority: 'critical' });
       const parent = db.create({ title: 'Parent', priority: 'critical', parentId: root.id });
       const child = db.create({ title: 'Child', priority: 'critical', parentId: parent.id });
@@ -701,7 +689,7 @@ describe('WorklogDatabase', () => {
       expect(db.get(root.id)?.priority).toBe('critical');
     });
 
-    it.fails('should be idempotent: a second promotion promotes nothing', () => {
+    it('should be idempotent: a second promotion promotes nothing', () => {
       const parent = db.create({ title: 'Parent', priority: 'medium' });
       const child = db.create({ title: 'Child', priority: 'critical', parentId: parent.id });
 
@@ -709,7 +697,7 @@ describe('WorklogDatabase', () => {
       expect(cascadePriorityPromote(db, child.id)).toEqual([]);
     });
 
-    it.fails('should leave unrelated branches untouched', () => {
+    it('should leave unrelated branches untouched', () => {
       const otherRoot = db.create({ title: 'Other root', priority: 'medium' });
       const otherChild = db.create({ title: 'Other child', priority: 'high', parentId: otherRoot.id });
       const root = db.create({ title: 'Root', priority: 'high' });

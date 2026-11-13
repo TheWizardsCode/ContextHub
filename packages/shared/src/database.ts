@@ -1305,6 +1305,24 @@ export class WorklogDatabase {
   }
 
   /**
+   * Cascade a priority promotion up the ancestor chain.
+   *
+   * When a work item is `critical`, every non-critical ancestor is promoted to
+   * `critical`, transitively to the root, so a critical subtask can never be
+   * buried under a non-critical parent. Ancestors already at `critical` are
+   * skipped but do not stop the walk; unrelated branches are never touched.
+   *
+   * @param itemId - id of the work item that became (or already is) `critical`
+   * @returns the promoted ancestors in walk order — direct parent first, then
+   *   each successive ancestor up to the root (empty when none was promoted)
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MWETWNSO001UL2M).
+   */
+  cascadePriorityPromote(itemId: string): WorkItem[] {
+    return hierarchyModule.cascadePriorityPromote(this.ctx, this.ctx.itemHooks, itemId);
+  }
+
+  /**
    * Demote a parent work item when a child is added to it.
    *
    * A parent cannot be `completed` (status) or `in_review` (stage) while its
