@@ -663,6 +663,26 @@ export default function register(ctx: PluginContext): void {
           }
         }
 
+        // Ancestor promotion cascade (parent WL-0MWDD2JE6006CL7I, operator
+        // answer Q1-B): a `critical` work item must never be buried under a
+        // non-critical ancestor chain. Whenever the item's stored priority is
+        // `critical` after the write — via `--priority critical`, reparenting
+        // an already-critical item, or both in one update — promote every
+        // non-critical ancestor to `critical`, transitively to the root.
+        // Placed after the downgrade/terminal handling so a just-downgraded
+        // item (no longer critical) or a fresh downgrade-away never cascades
+        // (no double work, no conflicts). Best-effort: a promotion failure
+        // must not abort the update. Reversal (auto-downgrading a promoted
+        // ancestor when no critical descendant remains) is out of scope.
+        let promotedAncestors: WorkItem[] = [];
+        if (item.priority === 'critical') {
+          try {
+            promotedAncestors = db.cascadePriorityPromote(normalizedId);
+          } catch (err) {
+            console.error(`Warning: failed to promote ancestors of ${normalizedId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
         // Mark that an impactful change was made if any qualifying fields were
         // included in this per-id update.
         if (updates.status || updates.priority || updates.risk || updates.effort || updates.stage) {
@@ -682,6 +702,7 @@ export default function register(ctx: PluginContext): void {
           ...(downgradedChildren.length > 0 ? { downgradedChildren } : {}),
           ...(downgradedItem ? { downgradedItem } : {}),
           ...(demotedParent ? { demotedParent } : {}),
+          ...(promotedAncestors.length > 0 ? { promotedAncestors } : {}),
           ...(reverted ? { reverted } : {}),
         });
       }
@@ -704,6 +725,9 @@ export default function register(ctx: PluginContext): void {
             }
             if (r.demotedParent) {
               jsonOut.demotedParent = r.demotedParent;
+            }
+            if (r.promotedAncestors?.length) {
+              jsonOut.promotedAncestors = r.promotedAncestors;
             }
             if (r.reverted) {
               jsonOut.reverted = r.reverted;
@@ -731,6 +755,9 @@ export default function register(ctx: PluginContext): void {
             }
             if (r.demotedParent) {
               console.log(`[Parent ${r.demotedParent.parent.id} demoted from ${r.demotedParent.from.status}/${r.demotedParent.from.stage} to ${r.demotedParent.to.status}/${r.demotedParent.to.stage}]`);
+            }
+            if (r.promotedAncestors?.length) {
+              console.log(`[Promoted ${r.promotedAncestors.length} ancestor(s) to critical]`);
             }
             if (r.reverted) {
               console.log(`[${r.reverted.item.id} reverted from ${r.reverted.from.status}/${r.reverted.from.stage} to ${r.reverted.to.status}/${r.reverted.to.stage}]`);

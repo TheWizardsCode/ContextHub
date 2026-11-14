@@ -6,13 +6,9 @@
  * `critical`, transitively to the root. The mirror of the existing
  * `cascadePriorityDowngrade` behaviour in update-priority-cascade.test.ts.
  *
- * The write-path wiring lands with the sibling children
+ * The write-path wiring landed with the sibling children
  * WL-0MWETWS2F006Q1W1 (`wl update`) and WL-0MWETWNSO001UL2M (shared
- * primitive). Until then the *positive* pins stay RED-as-expected via
- * `it.fails(...)` — the same test-first convention used by the sibling slice
- * WL-0MWETWBS3006D4OI in tests/database.test.ts — so the suite is green while
- * the implementation is pending. The owning implementation item flips
- * `it.fails(` to `it(` once the wiring exists.
+ * primitive); the positive pins are now live assertions.
  *
  * Pinned semantics:
  *   * only ancestors are promoted; the critical item and its descendants are
@@ -81,7 +77,7 @@ describe('update priority promote', () => {
   // JSON output
   // =======================================================================
   describe('JSON output', () => {
-    it.fails(
+    it(
       'should promote every ancestor transitively to the root and report them',
       async () => {
         const root = await createItem('Root', '-p medium');
@@ -110,7 +106,7 @@ describe('update priority promote', () => {
       CLI_TIMEOUT
     );
 
-    it.fails(
+    it(
       'should be a no-op when the same update is re-run (already critical)',
       async () => {
         const parent = await createItem('Parent', '-p high');
@@ -137,7 +133,7 @@ describe('update priority promote', () => {
   // Reparenting trigger
   // =======================================================================
   describe('reparenting', () => {
-    it.fails(
+    it(
       'should promote the new ancestor chain when a critical item is reparented',
       async () => {
         const oldRoot = await createItem('Old root', '-p medium');
@@ -241,7 +237,7 @@ describe('update priority promote', () => {
       CLI_TIMEOUT
     );
 
-    it.fails(
+    it(
       'should restrict a batch update to each touched item, with no cross-item leakage',
       async () => {
         const rootA = await createItem('Root A', '-p medium');
@@ -276,7 +272,7 @@ describe('update priority promote', () => {
   // Human-readable output
   // =======================================================================
   describe('human-readable output', () => {
-    it.fails(
+    it(
       'should print a summary of promoted ancestors',
       async () => {
         const root = await createItem('Root', '-p medium');

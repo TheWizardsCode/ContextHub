@@ -314,6 +314,12 @@ Priority downgrade cascade:
 - When an item's priority is downgraded away from `critical` (to `high`, `medium`, or `low`), any direct children still at `critical` priority are automatically downgraded to `high` so that a non-critical parent has no critical subtasks. Children already at `high` or below are left untouched.
 - In JSON mode, the downgraded children are reported in a `downgradedChildren` array. In human-readable mode, a summary line like `[Downgraded 2 child(ren) from critical to high]` is printed.
 
+Priority promotion cascade:
+
+- When an item's stored priority is `critical` after the update — set via `--priority critical`, or reparenting an already-critical item with `--parent <id>` — every non-critical ancestor is promoted to `critical`, transitively to the root, so a critical subtask is never buried under a non-critical parent chain (WL-0MWDD2JE6006CL7I). Ancestors already at `critical` are skipped, but the walk continues to the root. The item's own priority is never changed by the cascade.
+- The cascade runs after the downgrade/terminal handling: an item that left `critical` (terminal auto-downgrade or explicit downgrade) never triggers a promotion, and an already-critical item reparented under a non-critical chain gets the new chain promoted while its previous chain is left untouched (reversal is out of scope).
+- In JSON mode, the promoted ancestors are reported in a `promotedAncestors` array (nearest ancestor first; absent when none were promoted). In human-readable mode, a summary line like `[Promoted 2 ancestor(s) to critical]` is printed when applicable, and omitted when nothing was promoted.
+
 Terminal priority auto-downgrade (WL-0MSJM4EIV001A0V9):
 
 - When an item with `critical` priority transitions to a terminal state — `status` `completed` or `stage` `in_review` — its priority is automatically downgraded to `high`, so finished work stops competing with genuinely urgent open items. Closing via `wl close` is also a terminal transition and downgrades `critical` to `high`.
