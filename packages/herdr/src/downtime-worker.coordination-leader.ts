@@ -21,6 +21,10 @@ import { resolveSprintViewWindow } from './browse-window.js';
 import { removeOffer, type CoordinationEntry } from './coordination.js';
 import type { DowntimeLogEntry } from './downtime-log.js';
 import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
+import {
+  advanceRoundRobinCursor,
+  isConsumedDispatchOutcome,
+} from './downtime-worker.selection.js';
 import { clampDowntimeAuditBatchMax } from './downtime-worker.clamps.js';
 import {
   createCoordinationBatchRuntime,
@@ -482,14 +486,12 @@ async function dispatchFromCoordinationGated(
   // Entries are OFFERS — one per instance, each naming that instance's
   // own worklog Herdr list head at its last check-in (computeMostImportantItem).
   // The leader dispatches in ROUND-ROBIN across worklogRoots: the
-  // least-recently-served project root is selected first (cursor advances
-  // atomically via selectLeastRecentlyServed). WL-0MTMPIQBE001J41P: entries
-  // persist until dispatch-time eligibility finds them non-dispatchable; a
-  // stale offer is removed eagerly (no pane, no marker) and dispatch
-  // continues to the next offer.
-  // Round-robin cross-project dispatch: select the least-recently-served
-  // project root before dispatch iteration (wire in the cursor infrastructure
-  // that was implemented but never connected — WL-0MTQ2FGSK004CBRK).
+  // least-recently-DISPATCHED project root is selected first.
+  // WL-0MTMPIQBE001J41P: entries persist until dispatch-time eligibility finds
+  // them non-dispatchable; a stale offer is removed eagerly (no pane, no
+  // marker) and dispatch continues to the next offer. Selection is a PURE READ
+  // (WL-0MWFIZ8H5005FVNN) — it never advances the cursor; the dispatching root
+  // is charged only when its offer is CONSUMED below.
   const entryRoots = entries
     .filter(e => e.instanceId.length > 0 && entryOffers(e).length > 0)
     .map(e => e.worklogRoot ?? e.directory);
@@ -728,6 +730,11 @@ async function dispatchFromCoordinationGated(
         // of the entry's OTHER offers ride along, so a multi-offer tick never
         // loses its per-offer attribution.
         removeOffer(opts.coordinationDir, entry.instanceId, chosen.offer.workItemId);
+        // Charge the DISPATCHING root — not the selected root — only when the
+        // offer was CONSUMED (WL-0MWFJT3H9008A0LM; fail-open in advanceRoot).
+        if (isConsumedDispatchOutcome(outcome)) {
+          advanceRoundRobinCursor(opts.coordinationDir, worklogRoot, now);
+        }
         return withOfferRejections(
           outcome,
           offerRejections.slice(rejectionsBeforeEntry),
@@ -794,6 +801,11 @@ async function dispatchFromCoordinationGated(
         // standing marker and the in_progress claim prevent double-dispatch,
         // and the entry's other nominees stay dispatchable.
         removeOffer(opts.coordinationDir, entry.instanceId, chosen.offer.workItemId);
+        // Claimed + marked but no pane: the offer is still CONSUMED, so the
+        // dispatching root is charged (WL-0MWFJT3H9008A0LM).
+        if (isConsumedDispatchOutcome(outcome)) {
+          advanceRoundRobinCursor(opts.coordinationDir, worklogRoot, now);
+        }
         return withOfferRejections(
           outcome,
           offerRejections.slice(rejectionsBeforeEntry),

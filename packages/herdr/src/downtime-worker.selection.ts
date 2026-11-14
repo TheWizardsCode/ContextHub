@@ -670,3 +670,43 @@ export function advanceRoundRobinCursor(
   if (root.length === 0) return;
   advanceRoot(coordinationDir, root, now);
 }
+
+// ── Consumed-offer charge contract (WL-0MWFJTCJ5004BKE4 / WL-0MWFJT3H9008A0LM) ──
+
+/**
+ * Reasons that mean an offer was CONSUMED even though no pane appeared: the
+ * item was claimed and the dispatch marker written, but the spawn failed, or
+ * the marker write failed after the claim and the rollback could not move the
+ * item back (it is stranded in `in_progress`). The offer is removed on both,
+ * so the dispatching root is charged exactly as on a real dispatch.
+ */
+const CONSUMED_DISPATCH_REASONS: ReadonlySet<string> = new Set([
+  'spawn-failed',
+  'marker-write-failed',
+]);
+
+/**
+ * True when a dispatch outcome CONSUMED the offer and must therefore charge
+ * the dispatching root's round-robin cursor.
+ *
+ * Consumed: `dispatched` (offer removed), or `spawn-failed` /
+ * `marker-write-failed` (offer removed — the claim + marker prevent a safe
+ * re-offer). Everything else is neutral: a hold that KEEPS the offer
+ * (`claim-failed`, `claim-rolled-back`, `anchor-unavailable`, reservation
+ * `admit: false`, `host-budget-*` / `audit-budget-*`, review/cooldown/budget
+ * holds) or a filter-chain drop of an already non-dispatchable offer — neither
+ * may move the rotation.
+ *
+ * ONE predicate shared by the coordination offer loop and the registered-root
+ * sweep, so the charge rule cannot drift between the two paths
+ * (WL-0MWFIZ8H5005FVNN). Charging itself stays fail-open via `advanceRoot`.
+ */
+export function isConsumedDispatchOutcome(outcome: {
+  dispatched: boolean;
+  reason?: string;
+}): boolean {
+  return (
+    outcome.dispatched ||
+    (outcome.reason !== undefined && CONSUMED_DISPATCH_REASONS.has(outcome.reason))
+  );
+}
