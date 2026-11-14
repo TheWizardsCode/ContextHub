@@ -774,13 +774,7 @@ export interface DowntimeWorkerConfig {
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
      */
     markerStaleWindowMs?: number;
-    /**
-     * Dead-coordination-entry staleness window, ms (WL-0MWFJTULD005DTQI).
-     * Optional for backward compat — defaults to
-     * `DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS` (2 × the check-in
-     * cadence, 10 min). Resolved live each leader tick and passed to the
-     * dead-entry prune.
-     */
+    /** Dead-coordination-entry staleness window, ms (WL-0MWFJTULD005DTQI); defaults to `DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS` (2 × the check-in cadence, 10 min); re-read live each leader tick and passed to the dead-entry prune. */
     coordinationEntryStaleMs?: number;
     /**
      * Stalled-work scan enable (WL-0MUYMBSA90092QV2): read live on every tick.
@@ -837,14 +831,12 @@ export interface DowntimeWorkerConfig {
      * `coordinationLogMaxEntries × (1 + coordinationLogMaxRotatedFiles)`
      * entries and never falls below
      * `coordinationLogMaxEntries × coordinationLogMaxRotatedFiles + 1`.
-     * Defaults (500/file, 3 rotated: always 1,501–2,000 entries ≈ ≥ 25 h at
-     * the observed ≥ 60 decisions/hour) come from
+     * Defaults (500/file, 3 rotated: always 1,501–2,000 entries ≈ ≥ 25 h at the observed ≥ 60 decisions/hour) come from
      * `COORDINATION_LOG_MAX_ENTRIES` / `COORDINATION_LOG_MAX_ROTATED_FILES`
      * in `downtime-log.ts`, and values are clamped by
      * `resolveCoordinationLogPolicy` (10–10,000 entries, 0–20 siblings;
      * 0 siblings = no rotation, single-file trim). Read live on every tick.
-     * The dispatch log is NOT affected (its 100-entry bound keeps the
-     * dispatched-marker readers' contract).
+     * The dispatch log is NOT affected (its 100-entry bound keeps the dispatched-marker readers' contract).
      */
     coordinationLogMaxEntries?: number;
     coordinationLogMaxRotatedFiles?: number;
