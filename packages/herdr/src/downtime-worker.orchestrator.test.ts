@@ -43,7 +43,8 @@ import {
 } from './downtime-worker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import { LEASE_FILE, LEADER_LOCK_FILE, isLeaseValid } from './leader-election.js';
-import { writeCoordinationFile, getEntry } from './coordination.js';
+import { writeCoordinationFile, getEntry, COORDINATION_FILE_VERSION } from './coordination.js';
+import { readCoordinationLogEntries } from './downtime-log.js';
 import { writeDisableMarker } from './downtime-disable-marker.js';
 import {
   idleAllSlotsFree,
@@ -309,6 +310,8 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     instanceId?: string;
     leaseTtlSeconds?: number;
     cooldownMs?: number;
+    /** Real tmp cwd for coordination-log assertions (default '/repo'). */
+    cwd?: string;
     deps?: Partial<DowntimeWorkerDeps>;
     /** Pre-seed another instance's valid lease BEFORE the worker is created. */
     seedLease?: { instanceId: string; atMs: number };
@@ -324,7 +327,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
       thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
       requiredFreeSlots: 0,
       model: 'plan',
-      cwd: '/repo',
+      cwd: overrides.cwd ?? '/repo',
       noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
     };
     const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
@@ -1070,6 +1073,126 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
       expect(worker.isLeader).toBe(true);
       // The legacy no-candidate cooldown is unchanged.
       expect(worker.paused).toBe(true);
+    });
+  });
+
+  // ── Dead-entry prune on the leader check-in path
+  // (WL-0MWFJTKGM006BHLQ) ──────────────────────────────────────────────
+  //
+  // `pruneDeadEntries` runs EXACTLY ONCE per LEADER tick, inside
+  // `runLeaderElectionAndCheckIn`, BEFORE the check-in and therefore before
+  // the dispatch phase reads `entries` later in the same tick (so the
+  // dispatch walk's `entryRoots`/round-robin/cursor see the pruned set).
+  // Followers never prune. One coordination-log `operation: 'prune'` record
+  // is written per pruned entry naming the entry's instanceId, worklogRoot
+  // and last-seen timestamp, with prunedCount 1, the window used and
+  // reason 'staleness-window'.
+  describe('dead-entry prune on the leader tick (WL-0MWFJTKGM006BHLQ)', () => {
+    const PRUNE_START = 1_000_000_000;
+    const DEFAULT_WINDOW_MS = 2 * 5 * 60_000; // 2 × DEFAULT_COORDINATION_CHECK_IN_MS
+
+    /** A peer entry directly seeded into the coordination file. */
+    function seededEntry(instanceId: string, workItemId: string, root: string, atIso: string) {
+      return {
+        instanceId,
+        workItemId,
+        directory: root,
+        worklogRoot: root,
+        assignedAt: atIso,
+        lastUpdated: atIso,
+      };
+    }
+
+    it('a leader tick prunes a stale peer entry and logs one prune record per entry (end-to-end)', async () => {
+      const cwd = coordinationTmpDirs.make('cd-wl-prune-log-');
+      const { worker, coordDir } = makeCoordinationWorker({ cwd });
+      vi.setSystemTime(PRUNE_START);
+      const staleIso = new Date(PRUNE_START - DEFAULT_WINDOW_MS - 1_000).toISOString();
+      const liveIso = new Date(PRUNE_START - 60_000).toISOString();
+      writeCoordinationFile(coordDir, {
+        version: COORDINATION_FILE_VERSION,
+        entries: [
+          seededEntry('dead-1', 'WL-DEAD', '/repo-dead', staleIso),
+          seededEntry('live-1', 'WL-LIVE', '/repo-live', liveIso),
+        ],
+      });
+
+      await worker.tick(); // election → this instance wins → leader prune runs
+      expect(worker.isLeader).toBe(true);
+      expect(getEntry(coordDir, 'dead-1')).toBeNull();
+      expect(getEntry(coordDir, 'live-1')).not.toBeNull();
+
+      const pruneRecords = (await readCoordinationLogEntries(cwd)).filter(
+        (e) => e.operation === 'prune',
+      );
+      expect(pruneRecords).toHaveLength(1);
+      expect(pruneRecords[0]).toMatchObject({
+        kind: 'coordination',
+        operation: 'prune',
+        instanceId: 'dead-1',
+        worklogRoot: '/repo-dead',
+        lastSeen: staleIso,
+        prunedCount: 1,
+        reason: 'staleness-window',
+        staleWindowMs: DEFAULT_WINDOW_MS,
+        at: new Date(PRUNE_START).toISOString(),
+      });
+    });
+
+    it('a follower tick never prunes (leader-only trigger)', async () => {
+      const { worker, coordDir } = makeCoordinationWorker({
+        // Pre-seed ANOTHER instance's valid lease so this instance is a
+        // follower: it checks in but must not touch a peer's stale entry.
+        seedLease: { instanceId: 'inst-b', atMs: PRUNE_START },
+      });
+      vi.setSystemTime(PRUNE_START);
+      const staleIso = new Date(PRUNE_START - DEFAULT_WINDOW_MS - 1_000).toISOString();
+      writeCoordinationFile(coordDir, {
+        version: COORDINATION_FILE_VERSION,
+        entries: [seededEntry('dead-1', 'WL-DEAD', '/repo-dead', staleIso)],
+      });
+
+      await worker.tick();
+      expect(worker.isLeader).toBe(false);
+      // The stale peer entry survived the follower tick untouched.
+      expect(getEntry(coordDir, 'dead-1')).not.toBeNull();
+    });
+
+    it('the same tick dispatch snapshot sees the pruned set (no ghost fetch for a pruned offer)', async () => {
+      const { worker, deps, coordDir } = makeCoordinationWorker({
+        deps: {
+          // Any fetched item is dispatchable — a ghost offer would be fetched.
+          fetchItem: vi.fn().mockResolvedValue({
+            ok: true,
+            info: { id: 'WL-LIVE', title: 'Live', status: 'open', stage: 'intake_complete' },
+          }),
+        },
+      });
+      vi.setSystemTime(PRUNE_START);
+      const staleIso = new Date(PRUNE_START - DEFAULT_WINDOW_MS - 1_000).toISOString();
+      const liveIso = new Date(PRUNE_START - 60_000).toISOString();
+      writeCoordinationFile(coordDir, {
+        version: COORDINATION_FILE_VERSION,
+        entries: [
+          // Stale entry FIRST in file order: before the prune it would be
+          // the round-robin selection and would be fetched.
+          seededEntry('dead-1', 'WL-DEAD', '/repo-dead', staleIso),
+          seededEntry('live-1', 'WL-LIVE', '/repo-live', liveIso),
+        ],
+      });
+
+      // Tick 1: leader prune runs; poll records the idle run start.
+      await worker.tick();
+      expect(getEntry(coordDir, 'dead-1')).toBeNull();
+      // Tick 2 (threshold met): dispatch reads the post-prune snapshot — the
+      // dead offer is gone before the offer walk, so only the live entry's
+      // offer is re-fetched this tick.
+      vi.setSystemTime(PRUNE_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      await worker.tick();
+
+      const fetchedIds = deps.fetchItem.mock.calls.map((c) => c[0]);
+      expect(fetchedIds).toContain('WL-LIVE');
+      expect(fetchedIds).not.toContain('WL-DEAD');
     });
   });
 

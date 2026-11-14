@@ -335,9 +335,10 @@ async function dispatchFromCoordinationGated(
       })),
     );
 
-  // No wall-clock prune (WL-0MTMPIQBE001J41P) — entries persist until
-  // dispatch-time eligibility check (fetchItem+classify) finds them
-  // non-dispatchable. Stale offers are dropped at dispatch, never by age.
+  // Dead-entry prune (WL-0MWFJTKGM006BHLQ): only entries whose instance
+  // STOPPED CHECKING IN are pruned (leader check-in path) — LIVE offers
+  // never expire by age (WL-0MTMPIQBE001J41P), so `entryRoots` de-dup
+  // follows from the prune (a dead/live pair leaves one entry).
 
   // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
   // audit tier needs ≥ 2 slots (parent + Phase 2 child at

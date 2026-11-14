@@ -5,23 +5,17 @@
  * Single responsibility: drive ONE tick — the enabled/disable-marker gates,
  * leader election + coordination check-in, the pane-lifecycle/reaper
  * maintenance passes, the no-candidate cooldown gate and the poll/evaluate
- * phase — applying the decision/starvation/strike helpers the dispatch module
- * owns.
- *
- * Extracted from `downtime-worker.ts` by WL-0MVLII2080074S5L (extract the
- * downtime-worker orchestrator modules). Every tick phase now takes the
- * shared `OrchestratorContext` as its first argument (plan option A): the
- * `createDowntimeWorker` closure vars it used to capture became explicit
- * context fields, so the tick is readable without the enclosing closure.
- * Moved blocks are verbatim (a refusal returns the same
- * `{ polled, dispatched, idle }` shape); no decision, threshold, ordering or
- * log message changed.
+ * phase. Extracted from `downtime-worker.ts` by WL-0MVLII2080074S5L; every
+ * tick phase takes the shared `OrchestratorContext` (plan option A); the
+ * moved blocks are verbatim — no decision, threshold, ordering or log
+ * message changed.
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  */
 
-import { getEntry, hasPeerOffer, readCoordinationFile, upsertLeader } from './coordination.js';
+import { getEntry, hasPeerOffer, pruneDeadEntries, readCoordinationFile, upsertLeader } from './coordination.js';
 import { appendCoordinationLogEntry, coordinationLogPolicyFromConfig } from './downtime-log.js';
+import { logPrunedEntries } from './downtime-log-coordination.js';
 import { DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS } from './capacity-starvation.js';
 import { disableMarkerExists } from './downtime-disable-marker.js';
 import { cleanupStaleElection } from './leader-election.js';
@@ -295,6 +289,12 @@ export async function runLeaderElectionAndCheckIn(
           lastUpdated: new Date(tickNow).toISOString(),
         });
       }
+    }
+
+    // Dead-entry prune (WL-0MWFJTKGM006BHLQ): leader-only, before check-in.
+    if (ctx.leaderState) {
+      const { pruned, staleWindowMs } = pruneDeadEntries(ctx.opts.coordinationDir!, { nowMs: tickNow, leaderInstanceId: ctx.instanceId });
+      await logPrunedEntries(cfg.cwd, pruned, staleWindowMs, new Date(tickNow).toISOString(), coordinationLogPolicyFromConfig(cfg));
     }
 
     // Coordination check-in (parent AC3 — first on startup, then every

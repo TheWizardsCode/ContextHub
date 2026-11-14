@@ -848,6 +848,15 @@ export const DEFAULT_COORDINATION_CHECK_IN_MS = 5 * 60 * 1000;
  */
 export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
 /**
+ * Default dead-entry staleness window (WL-0MWFJTKGM006BHLQ): twice the
+ * coordination check-in cadence (2 × 5 min = 10 min), so ONE missed
+ * check-in is tolerated while an instance that stopped checking in is
+ * removed on the leader's next leader tick. Hard-coded in this child; the
+ * settings key and clamp arrive in the sibling settings child
+ * (WL-0MWFJTULD005DTQI).
+ */
+export const DEFAULT_COORDINATION_STALE_WINDOW_MS = 2 * DEFAULT_COORDINATION_CHECK_IN_MS;
+/**
  * Maximum local DISPATCH-lease TTL (seconds) the llama-proxy can hold a
  * local slot — the cross-repo contract from `llm-manager`
  * (`proxy/proxy/router_helpers.py`, WL-0MU8809SZ0022VZG).

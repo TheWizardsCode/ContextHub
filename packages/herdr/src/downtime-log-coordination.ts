@@ -41,8 +41,30 @@ export interface CoordinationLogEntry {
   instanceId?: string;
   /** Work item id offered at a check-in (or null/absent when emptied). */
   workItemId?: string | null;
-  /** Number of entries removed by a prune operation. */
+  /**
+   * Number of entries removed by a prune operation: `1` on each PER-ENTRY
+   * prune record (a tick's tally is its number of `prune` records — one
+   * record per pruned entry, never one per tick).
+   */
   prunedCount?: number;
+  /**
+   * Dead-entry prune attribution (WL-0MWFJTKGM006BHLQ): the pruned entry's
+   * worklog root — recorded so the log names the dead instance's root.
+   * Additive/optional: every earlier entry shape is unchanged.
+   */
+  worklogRoot?: string;
+  /**
+   * Dead-entry prune attribution (WL-0MWFJTKGM006BHLQ): the pruned entry's
+   * last-seen ISO timestamp (its `lastUpdated` at prune time). Additive/
+   * optional: every earlier entry shape is unchanged.
+   */
+  lastSeen?: string;
+  /**
+   * Dead-entry prune attribution (WL-0MWFJTKGM006BHLQ): the staleness
+   * window (ms) the leader applied when it pruned the entries. Additive/
+   * optional: every earlier entry shape is unchanged.
+   */
+  staleWindowMs?: number;
   /**
    * No-dispatch decision fields (WL-0MU8808ZY0091JIA): recorded on a
    * `kind: 'decision'` / `operation: 'no-dispatch'` entry so the reason a
@@ -222,6 +244,43 @@ export async function appendCoordinationLogEntry(
     );
   } catch {
     // fail-closed: coordination logging must never crash the worker
+  }
+}
+
+/**
+ * Append one `operation: 'prune'` coordination-log record PER pruned entry
+ * (WL-0MWFJTKGM006BHLQ), in order, through the configured rolling policy —
+ * the prune AND its log complete before the leader's own check-in append
+ * starts, so no read-modify-write race loses a record. The caller composes
+ * this with {@link pruneDeadEntries} (the purely-logging split keeps the
+ * log module free of a coordination runtime import cycle). Fail-open
+ * end-to-end: an append failure never throws and never blocks a dispatch.
+ */
+export async function logPrunedEntries(
+  cwd: string,
+  pruned: readonly { instanceId: string; worklogRoot: string; lastSeen: string }[],
+  staleWindowMs: number,
+  at: string,
+  policy?: CoordinationLogPolicyInput,
+): Promise<void> {
+  for (const removed of pruned) {
+    // One record PER pruned entry (never one per tick) — a tick's tally is
+    // its number of prune records, so the coordination log stays bounded.
+    await appendCoordinationLogEntry(
+      cwd,
+      {
+        kind: 'coordination',
+        operation: 'prune',
+        instanceId: removed.instanceId,
+        worklogRoot: removed.worklogRoot,
+        lastSeen: removed.lastSeen,
+        prunedCount: 1,
+        reason: 'staleness-window',
+        staleWindowMs,
+        at,
+      },
+      policy,
+    );
   }
 }
 

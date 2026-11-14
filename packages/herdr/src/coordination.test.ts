@@ -25,6 +25,7 @@ import {
   removeOffer,
   getEntry,
   pruneStaleEntries,
+  pruneDeadEntries,
   mergeEntries,
   tryAcquireCoordLock,
   hasPeerOffer,
@@ -205,6 +206,152 @@ describe('pruneStaleEntries (no-op, WL-0MTMPIQBE001J41P)', () => {
   });
 });
 
+// ── pruneDeadEntries (WL-0MWFJTKGM006BHLQ) ──────────────────────────
+// Dead-instance pruning is back, but ONLY for entries whose instance
+// STOPPED CHECKING IN (`lastUpdated` older than the bounded staleness
+// window, default 2 × the check-in cadence): the leader's check-in path
+// removes them in ONE `withCoordLock` read-modify-write. A LIVE instance's
+// offers never expire by age (the non-expiring contract above is
+// untouched). Fail-open on every error path (missing/corrupt file, lock
+// contention, write failure) → `[]` and no throw; no write at all when
+// nothing is stale (byte-identical file).
+
+describe('pruneDeadEntries (dead-entry pruning, WL-0MWFJTKGM006BHLQ)', () => {
+  const NOW = 2_000_000_000_000; // fixed epoch ms for deterministic tests
+  // Default window: 2 × the 5-minute check-in cadence (10 min).
+  const DEFAULT_WINDOW_MS = 2 * DEFAULT_COORDINATION_CHECK_IN_MS;
+  /** An ISO timestamp `agoMs` before NOW. */
+  const iso = (agoMs: number) => new Date(NOW - agoMs).toISOString();
+
+  it('removes a stale entry and keeps a live one; returns the pruned entry with worklogRoot + lastSeen, and the window used', () => {
+    const staleIso = iso(DEFAULT_WINDOW_MS + 1_000); // just past the window
+    const liveIso = iso(60_000); // well within the window
+    upsertEntry(testDir, makeEntry('live-1', 'WL-LIVE', { lastUpdated: liveIso }));
+    upsertEntry(testDir, makeEntry('dead-1', 'WL-DEAD', { lastUpdated: staleIso }));
+
+    const result = pruneDeadEntries(testDir, { nowMs: NOW });
+    expect(result.staleWindowMs).toBe(DEFAULT_WINDOW_MS);
+    expect(result.pruned).toEqual([
+      { instanceId: 'dead-1', worklogRoot: testDir, lastSeen: staleIso },
+    ]);
+    expect(getEntry(testDir, 'dead-1')).toBeNull();
+    expect(getEntry(testDir, 'live-1')).not.toBeNull();
+    expect(getEntry(testDir, 'live-1')!.lastUpdated).toBe(liveIso);
+  });
+
+  it('prunes a stale duplicate for a root with a live entry, leaving the live offers intact (AC b)', () => {
+    const liveIso = iso(60_000);
+    const staleIso = iso(DEFAULT_WINDOW_MS + 60_000);
+    // Live instance owns root with two offers; a dead instance's stale
+    // duplicate advertises the SAME root.
+    upsertEntry(testDir, {
+      ...makeEntry('live-root', 'WL-A', { lastUpdated: liveIso }),
+      offers: [
+        { kind: 'implement', workItemId: 'WL-A' },
+        { kind: 'audit', workItemId: 'WL-AA' },
+      ],
+    });
+    upsertEntry(testDir, {
+      ...makeEntry('dead-dup', 'WL-DEAD', { lastUpdated: staleIso }),
+      offers: [{ kind: 'implement', workItemId: 'WL-DEAD' }],
+    });
+
+    const result = pruneDeadEntries(testDir, { nowMs: NOW });
+    expect(result.pruned.map((p) => p.instanceId)).toEqual(['dead-dup']);
+    // The freshest live entry survives with every offer untouched.
+    const live = getEntry(testDir, 'live-root')!;
+    expect(live.workItemId).toBe('WL-A');
+    expect((live as unknown as { offers?: unknown[] }).offers).toHaveLength(2);
+    expect(live.lastUpdated).toBe(liveIso);
+    expect(getEntry(testDir, 'dead-dup')).toBeNull();
+  });
+
+  it('leaves a corrupt/unreadable file untouched and fails open (AC c)', () => {
+    writeFileSync(COORD_PATH(), '{ corrupt json !!!', 'utf-8');
+    expect(() => pruneDeadEntries(testDir, { nowMs: NOW })).not.toThrow();
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+    expect(readFileSync(COORD_PATH(), 'utf-8')).toBe('{ corrupt json !!!');
+  });
+
+  it('is idempotent: a second prune writes nothing (byte-identical) (AC d)', () => {
+    const staleIso = iso(DEFAULT_WINDOW_MS + 1_000);
+    upsertEntry(testDir, makeEntry('dead-1', 'WL-D', { lastUpdated: staleIso }));
+    upsertEntry(testDir, makeEntry('live-1', 'WL-L', { lastUpdated: iso(60_000) }));
+
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toHaveLength(1);
+    const afterFirst = readFileSync(COORD_PATH(), 'utf-8');
+    // Second tick: nothing stale remains → no write, file byte-identical.
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+    expect(readFileSync(COORD_PATH(), 'utf-8')).toBe(afterFirst);
+  });
+
+  it('never prunes a live-but-idle instance (no offers, refreshed within the window) (AC e)', () => {
+    const idleIso = iso(60_000);
+    const idle: CoordinationEntry = {
+      instanceId: 'idle-1',
+      workItemId: '',
+      directory: testDir,
+      worklogRoot: testDir,
+      assignedAt: idleIso,
+      lastUpdated: idleIso,
+      offers: [],
+    };
+    expect(upsertEntry(testDir, idle)).toBe(true);
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+    expect(getEntry(testDir, 'idle-1')).not.toBeNull();
+  });
+
+  it('fails open on lock contention — the stale entry survives and the prune returns []', () => {
+    upsertEntry(testDir, makeEntry('dead-1', 'WL-D', { lastUpdated: iso(DEFAULT_WINDOW_MS + 1_000) }));
+    const release = tryAcquireCoordLock(testDir);
+    expect(release).not.toBe(null);
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+    expect(getEntry(testDir, 'dead-1')).not.toBeNull();
+    release!();
+  });
+
+  it('fails open on a missing file', () => {
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+  });
+
+  it('prunes an entry whose lastUpdated does not parse (not verifiably live)', () => {
+    upsertEntry(testDir, makeEntry('garbage-1', 'WL-G', { lastUpdated: 'not-a-date' }));
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([
+      { instanceId: 'garbage-1', worklogRoot: testDir, lastSeen: 'not-a-date' },
+    ]);
+    expect(getEntry(testDir, 'garbage-1')).toBeNull();
+  });
+
+  it('honours injectable nowMs and staleWindowMs', () => {
+    const sixMinIso = new Date(NOW - 6 * 60_000).toISOString(); // 6 min old
+    // Stale under a 5-minute window…
+    upsertEntry(testDir, makeEntry('mid-a', 'WL-M', { lastUpdated: sixMinIso }));
+    expect(pruneDeadEntries(testDir, { nowMs: NOW, staleWindowMs: 5 * 60_000 }).pruned).toHaveLength(1);
+    expect(getEntry(testDir, 'mid-a')).toBeNull();
+    // …live under a 10-minute window: a fresh 6-min-old entry survives, no write.
+    writeCoordinationFile(testDir, {
+      version: COORDINATION_FILE_VERSION,
+      entries: [makeEntry('mid-b', 'WL-N', { lastUpdated: sixMinIso })],
+    });
+    const before = readFileSync(COORD_PATH(), 'utf-8');
+    expect(pruneDeadEntries(testDir, { nowMs: NOW, staleWindowMs: 10 * 60_000 }).pruned).toEqual([]);
+    expect(getEntry(testDir, 'mid-b')).not.toBeNull();
+    expect(readFileSync(COORD_PATH(), 'utf-8')).toBe(before);
+  });
+
+  it('exempts the leader\'s own entry (it is live by definition; its check-in refreshes it this tick)', () => {
+    const staleIso = iso(DEFAULT_WINDOW_MS + 1_000);
+    upsertEntry(testDir, makeEntry('leader-inst', 'WL-L', { lastUpdated: staleIso }));
+    expect(pruneDeadEntries(testDir, { nowMs: NOW, leaderInstanceId: 'leader-inst' }).pruned).toEqual([]);
+    expect(getEntry(testDir, 'leader-inst')).not.toBeNull();
+  });
+
+  it('defaults nowMs to Date.now() when not provided', () => {
+    upsertEntry(testDir, makeEntry('fresh', 'WL-F')); // written at Date.now()
+    expect(pruneDeadEntries(testDir).pruned).toEqual([]);
+  });
+});
+
 // ── mergeEntries (batch check-in) ──────────────────────────────────────
 
 describe('mergeEntries', () => {
@@ -304,7 +451,10 @@ describe('machine-wide shared file (AC1)', () => {
 // The actual machine dir used above is `process.env.HERDR_COORDINATION_DIR`;
 // this import just proves the symbol is reachable from this test module.
 import { getMachineCoordinationDir as getMachineCoordinationDirForTest } from './machine-coordination.js';
-import { DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS } from './downtime-worker.constants.js';
+import {
+  DEFAULT_COORDINATION_CHECK_IN_MS,
+  DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+} from './downtime-worker.constants.js';
 
 // ── hasPeerOffer liveness-aware staleness (WL-0MVR8GDJ3008WY3Y AC7) ──
 

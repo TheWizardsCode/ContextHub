@@ -28,9 +28,15 @@
  *    the single-machine v1 scope) followed by an atomic tmp+rename write,
  *    so two instances updating simultaneously never corrupt the file and a
  *    crash never leaves a half-written JSON.
- *  - Entries do NOT expire by wall-clock age (WL-0MTMPIQBE001J41P): the
- *    leader validates eligibility at dispatch time via fetchItem+classify,
- *    so an offer persists until dispatched or dropped as non-dispatchable.
+ *  - Live entries do NOT expire by wall-clock age (WL-0MTMPIQBE001J41P):
+ *    the leader validates eligibility at dispatch time via
+ *    fetchItem+classify, so a LIVE instance's offers persist until
+ *    dispatched or dropped as non-dispatchable. DEAD entries — an instance
+ *    that STOPPED CHECKING IN (`lastUpdated` older than the bounded
+ *    staleness window, default 2 × the check-in cadence) — ARE pruned by
+ *    the leader on its check-in path (WL-0MWFJTKGM006BHLQ):
+ *    `pruneDeadEntries` removes exactly those entries, so the machine file
+ *    holds only live herdr instances.
  *
  * Fail-safe by contract (parent constraint): a missing or unreadable
  * coordination file, or a failed lock acquisition, degrades to the
@@ -42,7 +48,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getMachineCoordinationDir, ensureMachineCoordinationDir } from './machine-coordination.js';
-import { DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS } from './downtime-worker.constants.js';
+import {
+  DEFAULT_COORDINATION_CHECK_IN_MS,
+  DEFAULT_COORDINATION_STALE_WINDOW_MS,
+  DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+} from './downtime-worker.constants.js';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -711,9 +721,14 @@ export function removeLeader(worklogDir: string): boolean {
  * deliberately conservative: the worst that can happen is one extra idle tick
  * polling the offer list, never starvation.
  *
- * Entry expiry remains a deliberate no-op (`pruneStaleEntries` returns 0 and
- * never mutates the file, WL-0MTMPIQBE001J41P) — liveness lives ONLY in this
- * read predicate, so the coordination file keeps its non-expiring contract.
+ * LIVE entries never expire by wall-clock age: `pruneStaleEntries` stays a
+ * no-op that returns 0 and never mutates the file (WL-0MTMPIQBE001J41P), and
+ * dead-entry pruning (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ) removes only
+ * instances that STOPPED CHECKING IN (check-in staleness, default 2 × the
+ * check-in cadence) — an in-window entry's offers keep the non-expiring
+ * contract. Liveness thus lives in this read predicate AND in the leader's
+ * dead-entry prune; the coordination file keeps its non-expiring contract
+ * for every live instance.
  *
  * Deliberately cheap and fail-open: it is a pure in-memory scan of entries
  * the caller has already read (the dispatch attempt reads them once), so no
@@ -744,11 +759,13 @@ export function hasPeerOffer(
 }
 
 /**
- * @deprecated Time-based expiry removed (WL-0MTMPIQBE001J41P) — entries do
- * NOT expire by wall-clock age. The dispatcher validates eligibility at
- * dispatch time (fetchItem+classify), so an offer persists until
- * dispatched or found non-dispatchable. Kept as a no-op for compat;
- * always returns 0 and never mutates the file.
+ * @deprecated Time-based OFFER expiry removed (WL-0MTMPIQBE001J41P) — a
+ * LIVE instance's offers do NOT expire by wall-clock age; the dispatcher
+ * validates eligibility at dispatch time (fetchItem+classify). DEAD-entry
+ * pruning is implemented by {@link pruneDeadEntries} (WL-0MWFJTKGM006BHLQ),
+ * which removes only entries whose instances stopped checking in. This
+ * legacy helper stays a no-op for compat; always returns 0 and never
+ * mutates the file.
  */
 export function pruneStaleEntries(
   _worklogDir: string,
@@ -756,6 +773,98 @@ export function pruneStaleEntries(
   _nowMs: number = Date.now(),
 ): number {
   return 0;
+}
+
+/**
+ * One entry removed by {@link pruneDeadEntries}: the dead instance's
+ * identity, the worklog root it offered work from, and the timestamp of its
+ * last check-in (its `lastUpdated` at prune time).
+ */
+export interface PrunedEntry {
+  instanceId: string;
+  /** The worklog root the dead instance offered work from. */
+  worklogRoot: string;
+  /** The entry's last-seen timestamp (its `lastUpdated` at prune time). */
+  lastSeen: string;
+}
+
+/**
+ * Remove entries whose instances STOPPED CHECKING IN (dead-entry pruning,
+ * WL-0MWFJTKGM006BHLQ): an entry whose `lastUpdated` does not parse or is
+ * older than `staleWindowMs` (default
+ * {@link DEFAULT_COORDINATION_STALE_WINDOW_MS}, 2 × the check-in cadence, so
+ * one missed check-in is tolerated) is removed on the leader's check-in path
+ * BEFORE the dispatch walk reads the file — a crashed/killed instance's
+ * ghost offer never reaches `entryRoots`, the round-robin cursor or the
+ * dispatch scan.
+ *
+ * ONE `withCoordLock` read-modify-write: read the file, keep every entry
+ * whose `lastUpdated` parses and is within the window, and write ONLY when
+ * at least one entry was removed (nothing stale ⇒ no write — the file stays
+ * byte-identical). A duplicate stale entry for a root that also has a live
+ * entry is pruned while the freshest live entry (and its offers) survives
+ * unchanged, so `entryRoots` never sees the same root twice for a dead/live
+ * pair.
+ *
+ * LIVE offers never expire by age (WL-0MTMPIQBE001J41P); the only removal
+ * is by check-in staleness. The leadership holder may pass its own
+ * `opts.leaderInstanceId`: that entry is exempt because it is live by
+ * definition (its check-in refreshes it within this same tick) — pruning it
+ * would ghost the dispatcher's own offer until the next successful check-in.
+ *
+ * FAIL-OPEN on every error path (missing/corrupt file, lock contention,
+ * write failure): returns `[]` (plus the window) and never throws — the
+ * prune is skipped and retried on the next leader tick, and no prune record
+ * is reported for an entry that was not actually persisted as removed.
+ *
+ * Returns the pruned entries (with `worklogRoot` and the last-seen
+ * timestamp) plus the window that was applied, so the caller can write one
+ * `operation: 'prune'` coordination-log record per entry carrying the
+ * window.
+ */
+export function pruneDeadEntries(
+  coordinationDir: string,
+  opts: {
+    /** Injectable clock (ms since epoch); defaults to `Date.now()` in tests/callers. */
+    nowMs?: number;
+    /** Injectable staleness window (ms); defaults to {@link DEFAULT_COORDINATION_STALE_WINDOW_MS}. */
+    staleWindowMs?: number;
+    /** The leader's own instanceId — its entry is exempt (it is live by definition). */
+    leaderInstanceId?: string;
+  } = {},
+): { pruned: PrunedEntry[]; staleWindowMs: number } {
+  const nowMs = opts.nowMs ?? Date.now();
+  const staleWindowMs = opts.staleWindowMs ?? DEFAULT_COORDINATION_STALE_WINDOW_MS;
+  const empty = { pruned: [] as PrunedEntry[], staleWindowMs };
+  const result = withCoordLock(coordinationDir, () => {
+    const data = readCoordinationFile(coordinationDir);
+    if (data === null) return empty; // missing/corrupt → fail-open
+    const pruned: PrunedEntry[] = [];
+    const keep: CoordinationEntry[] = [];
+    for (const entry of data.entries) {
+      if (entry.instanceId === opts.leaderInstanceId) {
+        keep.push(entry); // the leader is live by definition
+        continue;
+      }
+      const updatedMs = Date.parse(entry.lastUpdated);
+      if (Number.isFinite(updatedMs) && nowMs - updatedMs <= staleWindowMs) {
+        keep.push(entry); // verified-live within the window
+      } else {
+        pruned.push({
+          instanceId: entry.instanceId,
+          worklogRoot: entry.worklogRoot ?? entry.directory,
+          lastSeen: entry.lastUpdated,
+        });
+      }
+    }
+    if (pruned.length === 0) return empty; // nothing stale → no write
+    // Write failed → the removal did not persist; report nothing (the next
+    // leader tick retries) so no prune record claims a removal that did not
+    // happen.
+    if (!writeCoordinationFile(coordinationDir, { ...data, entries: keep })) return empty;
+    return { pruned, staleWindowMs };
+  });
+  return result ?? empty; // lock contention → fail-open
 }
 
 /**
