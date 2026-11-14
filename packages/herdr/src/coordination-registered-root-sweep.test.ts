@@ -61,7 +61,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -73,6 +73,7 @@ import {
 } from './downtime-worker.js';
 import {
   ROUND_ROBIN_BY_ROOT_FILE_NAME,
+  advanceRoot,
   loadRoundRobinCursor,
   saveRoundRobinCursor,
 } from './downtime-round-robin-by-root.js';
@@ -433,8 +434,12 @@ describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
       expect(first.dispatched).toBe(true);
       expect(spawnCwd(firstDeps)).toBe(rootA);
 
-      // The cursor is advanced on dispatch: rootA is now the most recently
-      // served root, so the next tick must serve rootB.
+      // Rewritten for WL-0MWFIZ8H5005FVNN: selection no longer charges, so the
+      // dispatch charge is applied EXPLICITLY here (standing in for the sweep's
+      // consumed-offer charge). This keeps the fairness spec independent of
+      // WHERE the production charge lands; the charge point itself is pinned by
+      // the dedicated sweep charge specs below.
+      advanceRoot(coordinationDir, rootA, Date.now());
       const afterFirst = loadRoundRobinCursor(coordinationDir);
       expect(Date.parse(afterFirst[rootA] ?? '')).toBeGreaterThan(
         Date.parse('2026-01-02T00:00:00.000Z'),
@@ -492,6 +497,85 @@ describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
 
       expect(outcome.dispatched).toBe(true);
       expect(spawnCwd(deps)).toBe(rootBusy);
+    },
+  );
+});
+
+// ── Dispatch-driven charge (WL-0MWFIZ8H5005FVNN) ──────────────────────
+//
+// RED BASELINE (TDD): the sweep must charge the root whose swept candidate is
+// CONSUMED, not the root selection happened to start from. WL-0MWFJTCJ5004BKE4
+// (sweep charge) flips these specs to `it(...)`. Each fails on the current code
+// because `dispatchFromRegisteredRoots` relies on selection-time charging.
+describe('registered-root sweep — dispatch-driven charge (WL-0MWFIZ8H5005FVNN)', () => {
+  it.fails(
+    'charges the DISPATCHING root on a sweep dispatch, not the selected-but-empty root',
+    async () => {
+      const rootEmpty = makeRoot('charge-empty'); // cursor-oldest, nothing dispatchable
+      const rootBusy = makeRoot('charge-busy'); // second position, dispatches
+      saveRoundRobinCursor(coordinationDir, {
+        [rootEmpty]: '2020-01-01T00:00:00.000Z',
+        [rootBusy]: '2020-01-02T00:00:00.000Z',
+      });
+      const before = loadRoundRobinCursor(coordinationDir);
+      const deps = makeDeps({
+        getHerdrListHead: rankedHeads({
+          [LEADER_ROOT]: [],
+          [rootEmpty]: [],
+          [rootBusy]: [headItem({ id: 'WL-SWEEP-CHARGE' })],
+        }),
+      });
+
+      const outcome = await dispatch(deps, [rootEmpty, rootBusy]);
+
+      expect(outcome.dispatched).toBe(true);
+      expect(spawnCwd(deps)).toBe(rootBusy);
+      const after = loadRoundRobinCursor(coordinationDir);
+      // Selected-but-empty root: selection is pure, so it is never charged.
+      expect(after[rootEmpty]).toBe(before[rootEmpty]);
+      // The dispatching root is charged.
+      expect(Date.parse(after[rootBusy] ?? '')).toBeGreaterThan(Date.parse(before[rootBusy] ?? ''));
+    },
+  );
+
+  it.fails(
+    'a sweep that visits roots and dispatches nothing charges no root (cursor byte-identical)',
+    async () => {
+      const rootA = makeRoot('nocharge-a');
+      const rootB = makeRoot('nocharge-b');
+      saveRoundRobinCursor(coordinationDir, {
+        [rootA]: '2020-01-01T00:00:00.000Z',
+        [rootB]: '2020-01-02T00:00:00.000Z',
+      });
+      const cursorPath = join(coordinationDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
+      const before = readFileSync(cursorPath, 'utf8');
+      const deps = makeDeps({
+        getHerdrListHead: rankedHeads({ [LEADER_ROOT]: [], [rootA]: [], [rootB]: [] }),
+      });
+
+      const outcome = await dispatch(deps, [rootA, rootB]);
+
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      expect(readFileSync(cursorPath, 'utf8')).toBe(before);
+
+      // Control: "nothing charges" is also true before the sweep charge
+      // exists. Pin the positive half so this spec stays RED until the sweep
+      // charge lands (WL-0MWFJTCJ5004BKE4).
+      const busyRoot = makeRoot('nocharge-control');
+      saveRoundRobinCursor(coordinationDir, { [busyRoot]: '2020-01-01T00:00:00.000Z' });
+      const busyDeps = makeDeps({
+        getHerdrListHead: rankedHeads({
+          [LEADER_ROOT]: [],
+          [busyRoot]: [headItem({ id: 'WL-SWEEP-CONTROL' })],
+        }),
+      });
+      const control = await dispatch(busyDeps, [busyRoot]);
+      expect(control.dispatched).toBe(true);
+      expect(spawnCwd(busyDeps)).toBe(busyRoot);
+      expect(Date.parse(loadRoundRobinCursor(coordinationDir)[busyRoot] ?? '')).toBeGreaterThan(
+        Date.parse('2020-01-01T00:00:00.000Z'),
+      );
     },
   );
 });

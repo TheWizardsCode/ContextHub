@@ -1,8 +1,10 @@
 /**
  * F4 cross-root offer-list dispatch proof (WL-0MTII45EP002DWK6 +
  * WL-0MTK1ILM2009QYB2): the leader dispatches OFFERS in ROUND-ROBIN order
- * across worklogRoots (least-recently-served root selected first; cursor
- * advances atomically via selectLeastRecentlyServed — WL-0MTQ2FGSK004CBRK).
+ * across worklogRoots (least-recently-served root selected first).
+ * WL-0MWFIZ8H5005FVNN: selection is a PURE READ — the cursor is charged when a
+ * dispatching root's offer is consumed, not at selection time. Specs that need
+ * a cursor change across ticks apply it explicitly via `advanceRoot`.
  * Each offer is its root's Herdr list head at the owner's check-in. The
  * cross-root tier priority / critical override ordering is retired: no
  * second ranking on the dispatch path. Spawns the pane in the entry's
@@ -15,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatchFromCoordination, type DowntimeWorkerDeps, type DowntimeItemInfo, type HerdrPaneRecord } from './downtime-worker.js';
 import type { CoordinationEntry } from './coordination.js';
-import { saveRoundRobinCursor } from './downtime-round-robin-by-root.js';
+import { advanceRoot, saveRoundRobinCursor } from './downtime-round-robin-by-root.js';
 import {
   scanStalledPanes,
   resumeStalledPane,
@@ -396,10 +398,15 @@ describe('round-robin still governs root order (parent AC8)', () => {
     expect(String(spawn[0])).toContain('WL-PREP');
   }));
 
-  it('rotates across successive ticks: after rootB dispatches, the SELECTION ITSELF advances the cursor so the next tick favours rootA', withShared(async () => {
+  it('rotates across successive ticks when the dispatching root is charged (WL-0MWFIZ8H5005FVNN)', withShared(async () => {
     const rootA = '/repo/a'; const rootB = '/repo/b';
-    // Seed BOTH roots as known, rootB strictly older → tick 1 selects rootB;
-    // the selection advances rootB to now, so tick 2 selects rootA.
+    // Seed BOTH roots as known, rootB strictly older → tick 1 selects rootB.
+    // Rewritten for WL-0MWFIZ8H5005FVNN (post-dispatch charge): selection no
+    // longer advances the cursor, so the charge is applied EXPLICITLY here via
+    // `advanceRoot` (standing in for the consumed-offer charge). This keeps the
+    // spec pinning cursor-driven rotation independently of WHERE the production
+    // charge lands; the charge point itself is pinned by the charge-table specs
+    // in coordination-dispatch.test.ts.
     saveRoundRobinCursor(shared, {
       [rootA]: '2026-06-01T00:00:00.000Z',
       [rootB]: '2026-01-01T00:00:00.000Z',
@@ -417,6 +424,9 @@ describe('round-robin still governs root order (parent AC8)', () => {
     );
     expect(first.dispatched).toBe(true);
     expect((d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1].cwd).toBe(rootB);
+    // The dispatch charge (new contract) — explicit so this spec is independent
+    // of the charge point.
+    advanceRoot(shared, rootB, Date.now());
     // Tick 2 (same two roots, fresh file not needed — the cursor is the
     // shared state): rootB was just served, so rootA is now least-recently-served.
     const second = await dispatchFromCoordination(

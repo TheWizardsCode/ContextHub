@@ -741,13 +741,21 @@ describe('dispatchFromCoordination', () => {
 
 // ── Eligibility re-check at dispatch time (WL-0MTMPIQBE001J41P / WL-0MTOC170J001QMIT) ─
 // Entries are never pruned by age; dispatch-time fetchItem+classify is the sole gate.
-// Stale entries are removed eagerly (no pane, no marker). The round-robin cursor
-// IS advanced for the selected root at selection time (WL-0MTQ2FGSK004CBRK — the
-// cursor advances atomically via selectLeastRecentlyServed even if the entry is
-// later skipped or removed).
+// Stale entries are removed eagerly (no pane, no marker).
+//
+// Rewritten for WL-0MWFIZ8H5005FVNN (post-dispatch round-robin charge): the
+// round-robin cursor is charged when an offer is CONSUMED, not when a root is
+// selected. Selection is a pure read, so an entry dropped by the filter chain
+// charges nothing and only the root whose offer actually dispatches is charged.
+// The old comments here documented selection-time charging (WL-0MTQ2FGSK004CBRK)
+// and are deliberately replaced, not deleted.
 
 describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', () => {
-  it('removes a needsProducerReview entry without cursor advance and dispatches next eligible', async () => {
+  // RED BASELINE (WL-0MWFIZ8H5005FVNN): the post-dispatch charge lands in
+  // WL-0MWFJT3H9008A0LM, which flips this spec to `it(...)`. It currently
+  // fails because the selected (stale) root is charged at selection time while
+  // the dispatching root is never charged.
+  it.fails('removes a needsProducerReview entry without charging it and charges the dispatching root', async () => {
     const stale = makeEntry('inst-stale', 'WL-STALE', '/roots/contexthub');
     const ok = makeEntry('inst-ok', 'WL-OK', '/roots/sorraagents');
     writeCoordinationFile(testDir, { version: 1, entries: [stale, ok] });
@@ -769,11 +777,14 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(spawnCall).toContain('WL-OK');
     // Stale entry eagerly removed, no pane/marker for it
     expect(getEntry(testDir, 'inst-stale')).toBe(null);
-    // The round-robin cursor IS advanced for the selected root at selection
-    // time, even though the entry is later removed (WL-0MTQ2FGSK004CBRK).
+    // Rewritten for WL-0MWFIZ8H5005FVNN (dispatch-driven charge): the stale
+    // contexthub offer was dropped by the filter chain, so its root is NOT
+    // charged; the root that actually dispatched (sorraagents) IS charged.
+    // (The old assertion — "selected root advanced" — encoded the selection-
+    // time charging this change removes.)
     const after = loadRoundRobinCursor(testDir);
-    expect(after['/roots/contexthub']).not.toBe(before['/roots/contexthub']); // selected root advanced
-    expect(after['/roots/sorraagents']).toBe(before['/roots/sorraagents']); // unselected root untouched
+    expect(after['/roots/contexthub']).toBe(before['/roots/contexthub']); // filter-chain drop: no charge
+    expect(after['/roots/sorraagents']).not.toBe(before['/roots/sorraagents']); // dispatch charges its own root
     // Exactly one spawn, for the eligible entry
     expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
@@ -868,13 +879,18 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(getEntry(testDir, 'inst-old')).toBe(null); // removed via dispatch path, not prune
   });
 
-  it('when all entries are stale the result is no-candidate with all stale removed and cursor untouched', async () => {
+  // RED BASELINE (WL-0MWFIZ8H5005FVNN): selection becomes a pure read in
+  // WL-0MWFJSVXT0033M9M, which flips this spec to `it(...)`. It currently
+  // fails because `selectLeastRecentlyServed` advances the selected root even
+  // when the tick dispatches nothing.
+  it.fails('when all entries are stale the result is no-candidate with all stale removed and the cursor byte-identical', async () => {
     const a = makeEntry('inst-a', 'WL-A', '/roots/a');
     const b = makeEntry('inst-b', 'WL-B', '/roots/b');
     writeCoordinationFile(testDir, { version: 1, entries: [a, b] });
-    const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    const { saveRoundRobinCursor, ROUND_ROBIN_BY_ROOT_FILE_NAME } = await import('./downtime-round-robin-by-root.js');
     saveRoundRobinCursor(testDir, { '/roots/a': '2026-09-01T00:00:00.000Z', '/roots/b': '2026-09-01T00:00:00.000Z' });
-    const before = loadRoundRobinCursor(testDir);
+    const cursorPath = join(testDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
+    const before = readFileSync(cursorPath, 'utf8');
     const deps = makeCoordinationDeps({
       fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-X', status: 'in_progress', stage: 'in_progress' }) }),
       spawnAgentPane: vi.fn(),
@@ -885,11 +901,368 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     expect(getEntry(testDir, 'inst-a')).toBe(null);
     expect(getEntry(testDir, 'inst-b')).toBe(null);
+    // Rewritten for WL-0MWFIZ8H5005FVNN: nothing was consumed, so the tick
+    // must leave the cursor byte-identical — selection performs no write.
+    // (The old assertion encoded selection-time charging — WL-0MTQ2FGSK004CBRK.)
+    expect(readFileSync(cursorPath, 'utf8')).toBe(before);
+  });
+});
+
+// ── Dispatch-driven round-robin charge (WL-0MWFIZ8H5005FVNN) ────────────
+//
+// RED BASELINE (TDD): the specs below encode the NEW contract — selection is a
+// pure read and the cursor is charged only when an offer is CONSUMED
+// (`dispatched`, `spawn-failed`, `marker-write-failed`). They are wrapped in
+// `it.fails(...)` so the red baseline commits green (the repo's documented TDD
+// pattern, as used by the registered-root sweep and clamps suites). The
+// implementation children flip each spec to `it(...)`:
+//   - WL-0MWFJSVXT0033M9M (pure selection) → ONLY the selection-purity specs
+//     (this file's "a tick where every offer is held" and the all-stale spec;
+//     plus the selection-purity block in downtime-round-robin-by-root.test.ts).
+//   - WL-0MWFJT3H9008A0LM (consumed-offer charge) → the charge table (both the
+//     positive charge rows and the neutral rows' positive control), the
+//     non-front-dispatch fixtures, the needsProducerReview rewrite and the
+//     four-root fairness spec.
+//   - WL-0MWFJTCJ5004BKE4 (sweep charge) → the sweep specs in
+//     coordination-registered-root-sweep.test.ts.
+// Every spec fails on the pre-change code for a CHARGE-SEMANTICS reason — an
+// advanced cursor where none should be, or an unadvanced dispatching root —
+// never for a compile/import error.
+
+const CHARGE_ROOT_A = '/roots/charge-a';
+const CHARGE_ROOT_B = '/roots/charge-b';
+const CHARGE_SEED_A = '2026-01-01T00:00:00.000Z';
+const CHARGE_SEED_B = '2026-01-02T00:00:00.000Z';
+const CHARGE_NOW = Date.parse('2026-01-03T00:00:00.000Z');
+const HELD_ITEM_ID = 'WL-HELD-A';
+
+/** An implement candidate. */
+function implementCandidate(id: string, overrides: Partial<DowntimeItemInfo> = {}): DowntimeItemInfo {
+  return itemInfo({ id, status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S', ...overrides });
+}
+
+/**
+ * Deps for a two-root charge fixture: `heldRoot`'s implement offer is KEPT but
+ * skipped by the review-queue gate (the selected root consumes nothing), while
+ * `dispatchItem` in the other root drives the outcome under test.
+ */
+function chargeFixtureDeps(opts: {
+  heldRoot: string;
+  heldItemId: string;
+  dispatchItem: DowntimeItemInfo;
+  overrides?: Partial<DowntimeWorkerDeps>;
+}): DowntimeWorkerDeps {
+  return makeCoordinationDeps({
+    // A deep queue only for the held root holds its non-critical implement
+    // offer without removing it — a neutral hold that must never charge.
+    getReviewQueueCount: vi.fn(async (root: string) => (root === opts.heldRoot ? 20 : 0)),
+    fetchItem: vi.fn(async (id: string) => ({
+      ok: true as const,
+      info: id === opts.heldItemId
+        ? implementCandidate(opts.heldItemId)
+        : opts.dispatchItem,
+    })),
+    ...opts.overrides,
+  });
+}
+
+/**
+ * Control probe: a minimal fresh tick must charge the root whose offer is
+ * CONSUMED. Used by the neutral-outcome rows so each row depends on the
+ * consumed-offer charge existing (WL-0MWFJT3H9008A0LM) — otherwise a neutral
+ * row would already be green under pure selection alone (WL-0MWFJSVXT0033M9M)
+ * and could not pin the charge contract.
+ */
+async function expectConsumedOfferChargeLive(): Promise<void> {
+  const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+  const root = '/roots/charge-live';
+  const seed = '2020-01-01T00:00:00.000Z';
+  const nowMs = Date.parse('2026-01-05T00:00:00.000Z');
+  saveRoundRobinCursor(testDir, { [root]: seed });
+  const entry = makeEntry('inst-live', 'WL-LIVE', root);
+  writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+  const deps = makeCoordinationDeps({
+    fetchItem: vi.fn(async (id: string) => ({ ok: true as const, info: implementCandidate(id) })),
+  });
+  const outcome = await dispatchFromCoordination(
+    deps,
+    [entry],
+    { model: 'plan', cwd: root, coordinationDir: testDir },
+    nowMs,
+  );
+  expect(outcome.dispatched).toBe(true);
+  expect(loadRoundRobinCursor(testDir)[root]).toBe(new Date(nowMs).toISOString());
+}
+
+describe('dispatch-driven round-robin charge (WL-0MWFIZ8H5005FVNN)', () => {
+  it.fails('charges the DISPATCHING root B when the selected root A holds its offer (non-front dispatch)', async () => {
+    const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_A, [CHARGE_ROOT_B]: CHARGE_SEED_B });
+    const entryA = makeEntry('inst-held-a', HELD_ITEM_ID, CHARGE_ROOT_A);
+    const entryB = makeEntry('inst-b', 'WL-DISPATCH-B', CHARGE_ROOT_B);
+    writeCoordinationFile(testDir, { version: 1, entries: [entryA, entryB] });
+
+    const deps = chargeFixtureDeps({
+      heldRoot: CHARGE_ROOT_A,
+      heldItemId: HELD_ITEM_ID,
+      dispatchItem: implementCandidate('WL-DISPATCH-B'),
+    });
+    const outcome = await dispatchFromCoordination(
+      deps,
+      [entryA, entryB],
+      { model: 'plan', cwd: CHARGE_ROOT_A, coordinationDir: testDir },
+      CHARGE_NOW,
+    );
+
+    expect(outcome.dispatched).toBe(true); // B dispatched
     const after = loadRoundRobinCursor(testDir);
-    // Cursor IS advanced for the selected root even when all entries are stale
-    // (WL-0MTQ2FGSK004CBRK — selection advances atomically, removal doesn't undo).
-    expect(after['/roots/a']).not.toBe(before['/roots/a']); // selected root advanced
-    expect(after['/roots/b']).toBe(before['/roots/b']);     // unselected root untouched
+    expect(after[CHARGE_ROOT_A]).toBe(CHARGE_SEED_A); // selected-but-held root: never charged
+    expect(after[CHARGE_ROOT_B]).toBe(new Date(CHARGE_NOW).toISOString()); // dispatching root charged
+  });
+
+  it.fails('charges the DISPATCHING root A when the selected root B holds its offer (mirrored non-front dispatch)', async () => {
+    const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    // Mirror: B is cursor-oldest (selected) and holds; A (second position) dispatches.
+    saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_B, [CHARGE_ROOT_B]: CHARGE_SEED_A });
+    const entryA = makeEntry('inst-a', 'WL-DISPATCH-A', CHARGE_ROOT_A);
+    const entryB = makeEntry('inst-held-b', 'WL-HELD-B', CHARGE_ROOT_B);
+    writeCoordinationFile(testDir, { version: 1, entries: [entryA, entryB] });
+
+    const deps = chargeFixtureDeps({
+      heldRoot: CHARGE_ROOT_B,
+      heldItemId: 'WL-HELD-B',
+      dispatchItem: implementCandidate('WL-DISPATCH-A'),
+    });
+    const outcome = await dispatchFromCoordination(
+      deps,
+      [entryA, entryB],
+      { model: 'plan', cwd: CHARGE_ROOT_A, coordinationDir: testDir },
+      CHARGE_NOW,
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    const after = loadRoundRobinCursor(testDir);
+    expect(after[CHARGE_ROOT_B]).toBe(CHARGE_SEED_A); // selected-but-held root: never charged
+    expect(after[CHARGE_ROOT_A]).toBe(new Date(CHARGE_NOW).toISOString()); // dispatching root charged
+  });
+
+  it.fails('selection purity: a tick where every offer is held leaves the cursor file byte-identical', async () => {
+    const { saveRoundRobinCursor, ROUND_ROBIN_BY_ROOT_FILE_NAME } = await import('./downtime-round-robin-by-root.js');
+    saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_A, [CHARGE_ROOT_B]: CHARGE_SEED_B });
+    const cursorPath = join(testDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
+    const before = readFileSync(cursorPath, 'utf8');
+
+    const deps = makeCoordinationDeps({
+      // EVERY root's queue is deep: both implement offers are kept but held.
+      getReviewQueueCount: vi.fn(async () => 20),
+      fetchItem: vi.fn(async (id: string) => ({ ok: true as const, info: implementCandidate(id) })),
+    });
+    const entries = [
+      makeEntry('inst-a', 'WL-A', CHARGE_ROOT_A),
+      makeEntry('inst-b', 'WL-B', CHARGE_ROOT_B),
+    ];
+    const outcome = await dispatchFromCoordination(
+      deps,
+      entries,
+      { model: 'plan', cwd: CHARGE_ROOT_A, coordinationDir: testDir },
+      CHARGE_NOW,
+    );
+
+    expect(outcome.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(readFileSync(cursorPath, 'utf8')).toBe(before);
+  });
+
+  // Table-driven per-outcome contract: the outcome classes named in the
+  // parent ACs (WL-0MWFIZ8H5005FVNN). Each row is one offer outcome; `charges`
+  // says whether the dispatching root is charged.
+  type ChargeTableRow = {
+    outcome: string;
+    charges: boolean;
+    item: DowntimeItemInfo;
+    overrides?: Partial<DowntimeWorkerDeps>;
+  };
+  const auditCandidate = (id: string): DowntimeItemInfo =>
+    itemInfo({ id, status: 'completed', stage: 'in_review', updatedAt: new Date(CHARGE_NOW - 60_000).toISOString() });
+  const table: ChargeTableRow[] = [
+    { outcome: 'dispatched', charges: true, item: implementCandidate('WL-CONSUME') },
+    {
+      outcome: 'spawn-failed',
+      charges: true,
+      item: implementCandidate('WL-SPAWN-FAILED'),
+      overrides: { spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'boom', exitCode: 1 }) },
+    },
+    {
+      outcome: 'marker-write-failed',
+      charges: true,
+      item: implementCandidate('WL-MARKER-FAILED'),
+      overrides: {
+        recordDispatch: vi.fn().mockResolvedValue(false),
+        // Rollback also fails → the claimed item is stranded; the offer is
+        // consumed (removed) so the dispatching root is charged.
+        rollbackClaim: vi.fn().mockResolvedValue(false),
+      },
+    },
+    {
+      outcome: 'claim-failed',
+      charges: false,
+      item: implementCandidate('WL-CLAIM-FAILED'),
+      overrides: { claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }) },
+    },
+    {
+      outcome: 'claim-rolled-back',
+      charges: false,
+      item: implementCandidate('WL-CLAIM-ROLLED-BACK'),
+      overrides: {
+        recordDispatch: vi.fn().mockResolvedValue(false),
+        rollbackClaim: vi.fn().mockResolvedValue(true),
+      },
+    },
+    {
+      outcome: 'reservation admit:false',
+      charges: false,
+      item: implementCandidate('WL-RESERVED'),
+      overrides: {
+        reserveLocalCapacity: vi.fn().mockResolvedValue({
+          status: 'refused',
+          refusal: { reason: 'queue-full', retryAfterSeconds: 12 },
+        }),
+      },
+    },
+    {
+      outcome: 'anchor-unavailable',
+      charges: false,
+      item: implementCandidate('WL-ANCHOR'),
+      overrides: { getDispatcherAnchor: vi.fn().mockResolvedValue(null) },
+    },
+    {
+      outcome: 'host-budget-implement',
+      charges: false,
+      item: implementCandidate('WL-HOST-BUDGET'),
+      overrides: {
+        admitHostDispatch: vi.fn().mockResolvedValue({ admitted: false, live: 2, max: 2, reason: 'host-budget-implement' }),
+        rollbackClaim: vi.fn().mockResolvedValue(true),
+      },
+    },
+    {
+      outcome: 'audit-budget-saturated',
+      charges: false,
+      item: auditCandidate('WL-AUDIT-BUDGET'),
+      overrides: {
+        admitHostDispatch: vi.fn().mockResolvedValue({ admitted: false, live: 1, max: 1, reason: 'audit-budget-saturated' }),
+        rollbackClaim: vi.fn().mockResolvedValue(true),
+      },
+    },
+    {
+      outcome: 'non-dispatchable filter-chain removal',
+      charges: false,
+      item: implementCandidate('WL-FILTERED', { needsProducerReview: true }),
+    },
+  ];
+
+  for (const row of table) {
+    it.fails(`${row.charges ? 'charges' : 'does not charge'} on \`${row.outcome}\``, async () => {
+      const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+      saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_A, [CHARGE_ROOT_B]: CHARGE_SEED_B });
+      const entryA = makeEntry('inst-held-a', HELD_ITEM_ID, CHARGE_ROOT_A);
+      const entryB = makeEntry('inst-outcome', row.item.id, CHARGE_ROOT_B);
+      writeCoordinationFile(testDir, { version: 1, entries: [entryA, entryB] });
+      const deps = chargeFixtureDeps({
+        heldRoot: CHARGE_ROOT_A,
+        heldItemId: HELD_ITEM_ID,
+        dispatchItem: row.item,
+        overrides: row.overrides ?? {},
+      });
+      await dispatchFromCoordination(
+        deps,
+        [entryA, entryB],
+        { model: 'plan', cwd: CHARGE_ROOT_A, coordinationDir: testDir },
+        CHARGE_NOW,
+      );
+
+      const after = loadRoundRobinCursor(testDir);
+      // The selected-but-held root must never be charged — selection is pure
+      // (this half fails on the current code for EVERY row).
+      expect(after[CHARGE_ROOT_A]).toBe(CHARGE_SEED_A);
+      if (row.charges) {
+        expect(after[CHARGE_ROOT_B]).toBe(new Date(CHARGE_NOW).toISOString());
+      } else {
+        expect(after[CHARGE_ROOT_B]).toBe(CHARGE_SEED_B);
+        // A neutral hold must not charge — but "nothing charges" is also true
+        // before the charge exists at all. Pin the positive half so this row
+        // stays RED until the consumed-offer charge lands (WL-0MWFJT3H9008A0LM).
+        await expectConsumedOfferChargeLive();
+      }
+    });
+  }
+
+  it.fails('four-root fairness: no admissible root is skipped while surplus capacity exists', async () => {
+    const { saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    const roots = ['/roots/fair-1', '/roots/fair-2', '/roots/fair-3', '/roots/fair-4'];
+    saveRoundRobinCursor(testDir, {
+      [roots[0]]: '2025-12-01T00:00:00.000Z',
+      [roots[1]]: '2025-12-02T00:00:00.000Z',
+      [roots[2]]: '2025-12-03T00:00:00.000Z',
+      [roots[3]]: '2025-12-04T00:00:00.000Z',
+    });
+    // roots[0] always holds (deep review queue); the other three always offer
+    // an admissible implement. Under the CURRENT code the selected-but-held
+    // root is charged while a non-front winner is not, letting one productive
+    // root dispatch twice in a row (R2,R2,R3,R4,...) while its peers wait.
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn(async (root: string) => (root === roots[0] ? 20 : 0)),
+      fetchItem: vi.fn(async (id: string) => ({ ok: true as const, info: implementCandidate(id) })),
+    });
+    // The coordination file rotates like the real append-only check-in: a
+    // consumed offer is removed and its owner re-offers at the TAIL.
+    let order = roots.map((root, index) => makeEntry(`inst-fair-${index}`, `WL-FAIR-${index}`, root));
+    const dispatched: string[] = [];
+    const dispatchedAt: number[] = [];
+    for (let tick = 0; tick < 6; tick++) {
+      writeCoordinationFile(testDir, { version: 1, entries: order });
+      const nowMs = Date.parse('2026-01-04T00:00:00.000Z') + tick * 1_000;
+      const outcome = await dispatchFromCoordination(
+        deps,
+        [...order],
+        { model: 'plan', cwd: '/roots/leader', coordinationDir: testDir },
+        nowMs,
+      );
+      expect(outcome.dispatched).toBe(true);
+      const spawnCalls = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls;
+      const spawnOpts = spawnCalls[tick][1] as { cwd: string };
+      dispatched.push(spawnOpts.cwd);
+      dispatchedAt.push(nowMs);
+      const consumed = order.find((entry) => (entry.worklogRoot ?? entry.directory) === spawnOpts.cwd);
+      expect(consumed).toBeDefined();
+      order = [
+        ...order.filter((entry) => entry !== consumed),
+        makeEntry(consumed!.instanceId, consumed!.workItemId, spawnOpts.cwd),
+      ];
+    }
+
+    // The permanently held root never consumes a dispatch slot.
+    expect(dispatched).not.toContain(roots[0]);
+    // No productive root dispatches twice in a row while its peers hold
+    // admissible offers and surplus capacity exists.
+    for (let i = 1; i < dispatched.length; i++) {
+      expect(dispatched[i]).not.toBe(dispatched[i - 1]);
+    }
+    // Every productive root is served at least twice in the six-tick window.
+    for (const root of roots.slice(1)) {
+      expect(dispatched.filter((cwd) => cwd === root).length).toBeGreaterThanOrEqual(2);
+    }
+    // The cursor records exactly who was served: every tick charges the root
+    // that dispatched at that tick (and nothing else). This half keeps the spec
+    // RED until the consumed-offer charge lands (WL-0MWFJT3H9008A0LM).
+    const { loadRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    const cursor = loadRoundRobinCursor(testDir);
+    const chargedRoots = Object.keys(cursor).filter(
+      (root) => Date.parse(cursor[root]) >= Date.parse('2026-01-04T00:00:00.000Z'),
+    );
+    expect(chargedRoots.sort()).toEqual([...new Set(dispatched)].sort());
+    for (let i = 0; i < dispatched.length; i++) {
+      expect(cursor[dispatched[i]]).toBe(new Date(dispatchedAt[i]).toISOString());
+    }
   });
 });
 

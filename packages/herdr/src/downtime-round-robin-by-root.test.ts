@@ -11,8 +11,10 @@
  * 2. Atomic persistence: save/load round-trip via tmp+rename
  * 3. Selection: least-recently-served root is selected among known roots
  * 4. New roots: unknown roots sort first (never penalised)
- * 5. Cursor advance: selected root's timestamp is updated and persisted
- * 6. Concurrent access: lock contention returns first root (fail-open)
+ * 5. Selection purity: selection writes nothing and takes no coordination
+ *    lock — `advanceRoot` is the only writer (WL-0MWFIZ8H5005FVNN)
+ * 6. Concurrent access: lock contention never affects read-only selection;
+ *    `advanceRoot` fails open under contention
  * 7. Machine-dir resolution: all paths resolve relative to coordination dir
  */
 
@@ -290,9 +292,14 @@ describe('new roots sort first', () => {
   });
 });
 
-// ── Test 7: Cursor advance on selection ─────────────────────────────────
-
-describe('cursor advance on selection', () => {
+// ── Test 7: Selection purity — `advanceRoot` is the only writer ─────────
+//
+// WL-0MWFIZ8H5005FVNN (post-dispatch round-robin charge): selection is a PURE
+// READ. These specs are the RED baseline for WL-0MWFJSVXT0033M9M (pure
+// selection), which flips them to `it(...)`. On the current code
+// `selectLeastRecentlyServed` writes the cursor, so every spec below fails at
+// a cursor-content assertion (never at an import/compile error).
+describe('selection purity — advanceRoot is the only writer (WL-0MWFIZ8H5005FVNN)', () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -303,59 +310,39 @@ describe('cursor advance on selection', () => {
     cleanupDir(tmpDir);
   });
 
-  it('updates the selected root\'s timestamp after selection', () => {
+  it.fails('writes nothing — the cursor file bytes are unchanged', () => {
+    const cursorPath = path.join(tmpDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
     saveRoundRobinCursor(tmpDir, {
       'alpha': '2026-09-02T00:00:00.000Z',
       'beta': '2026-09-02T01:00:00.000Z',
     });
-    const before = loadRoundRobinCursor(tmpDir);
-    const selected = selectLeastRecentlyServed(
-      tmpDir,
-      ['alpha', 'beta'],
-      1_700_000_000_000, // fixed timestamp
-    );
-    expect(selected).toBe('alpha'); // oldest
-    const after = loadRoundRobinCursor(tmpDir);
-    expect(after['alpha']).toBe(new Date(1_700_000_000_000).toISOString());
-    expect(after['beta']).toBe('2026-09-02T01:00:00.000Z'); // unchanged
+    const before = fs.readFileSync(cursorPath, 'utf-8');
+
+    const selected = selectLeastRecentlyServed(tmpDir, ['alpha', 'beta'], 1_700_000_000_000);
+
+    expect(selected).toBe('alpha'); // oldest still selected
+    expect(fs.readFileSync(cursorPath, 'utf-8')).toBe(before);
   });
 
-  it('unknown root gets a timestamp after first selection', () => {
-    const result = selectLeastRecentlyServed(
-      tmpDir,
-      ['alpha', 'beta'],
-      1_700_000_000_000,
-    );
-    expect(result).toBe('alpha'); // unknown, alpha-sort
-    const data = loadRoundRobinCursor(tmpDir);
-    expect(data['alpha']).toBe(new Date(1_700_000_000_000).toISOString());
-    expect(data['beta']).toBeUndefined(); // beta still unknown
+  it.fails('does not write a timestamp for a previously unknown root', () => {
+    const selected = selectLeastRecentlyServed(tmpDir, ['alpha', 'beta'], 1_700_000_000_000);
+
+    expect(selected).toBe('alpha'); // unknown, alpha-sort
+    expect(loadRoundRobinCursor(tmpDir)).toEqual({}); // no history written
   });
 
-  it('consecutive selections cycle through roots', () => {
-    // First dispatch: alpha is unknown → selected
-    const first = selectLeastRecentlyServed(
-      tmpDir,
-      ['alpha', 'beta'],
-      1_700_000_000_000,
-    );
+  it.fails('repeated selection without a charge re-selects the same root (no rotation)', () => {
+    saveRoundRobinCursor(tmpDir, {
+      'alpha': '2020-01-01T00:00:00.000Z',
+      'beta': '2020-01-02T00:00:00.000Z',
+    });
+    const nowMs = Date.parse('2020-01-03T00:00:00.000Z');
+
+    const first = selectLeastRecentlyServed(tmpDir, ['alpha', 'beta'], nowMs);
+    const second = selectLeastRecentlyServed(tmpDir, ['alpha', 'beta'], nowMs + 1_000);
+
     expect(first).toBe('alpha');
-
-    // Second dispatch: beta is now the only unknown → selected
-    const second = selectLeastRecentlyServed(
-      tmpDir,
-      ['alpha', 'beta'],
-      1_700_000_001_000,
-    );
-    expect(second).toBe('beta'); // beta was never served, alpha was
-
-    // Third dispatch: both known, alpha is oldest → selected
-    const third = selectLeastRecentlyServed(
-      tmpDir,
-      ['alpha', 'beta'],
-      1_700_000_002_000,
-    );
-    expect(third).toBe('alpha'); // alpha was served at 000, beta at 001
+    expect(second).toBe('alpha'); // nothing was charged between the reads
   });
 });
 
@@ -418,8 +405,9 @@ describe('cursor persists across restart', () => {
     cleanupDir(tmpDir);
   });
 
-  it('cursor state survives a simulated leader restart', () => {
-    // First "leader instance": selects and advances cursor
+  // RED BASELINE (WL-0MWFIZ8H5005FVNN): flipped by WL-0MWFJSVXT0033M9M.
+  it.fails('a selection-only restart does not advance the cursor', () => {
+    // First "leader instance": selects but dispatches nothing.
     const first = selectLeastRecentlyServed(
       tmpDir,
       ['alpha', 'beta', 'gamma'],
@@ -427,21 +415,19 @@ describe('cursor persists across restart', () => {
     );
     expect(first).toBe('alpha'); // unknown, alpha-sort
 
-    // Simulate restart: reload from disk
-    const data = loadRoundRobinCursor(tmpDir);
-    expect(data['alpha']).toBe(new Date(1_700_000_000_000).toISOString());
-    expect(data['beta']).toBeUndefined();
+    // Selection is pure: no history was written.
+    expect(loadRoundRobinCursor(tmpDir)).toEqual({});
 
-    // Second "leader instance": beta should be selected next (only unknown)
+    // Second "leader instance": nothing was charged, so the same root wins.
     const second = selectLeastRecentlyServed(
       tmpDir,
       ['alpha', 'beta', 'gamma'],
       1_700_000_001_000,
     );
-    expect(second).toBe('beta'); // unknown
+    expect(second).toBe('alpha');
   });
 
-  it('oldest-root selection persists across restarts', () => {
+  it('explicit advanceRoot charges move the oldest-root selection across restarts', () => {
     // Pre-populate cursor: alpha oldest, gamma newest.
     saveRoundRobinCursor(tmpDir, {
       'alpha': '2026-09-02T00:00:00.000Z',
@@ -452,13 +438,14 @@ describe('cursor persists across restart', () => {
     const firstMs = new Date('2026-09-02T03:00:00.000Z').getTime();
     const secondMs = new Date('2026-09-02T04:00:00.000Z').getTime();
 
-    // Restart 1: alpha is oldest → selected, advanced to 03:00
+    // The dispatch charge (new contract) is explicit: selection itself is not.
     const first = selectLeastRecentlyServed(tmpDir, ['alpha', 'beta', 'gamma'], firstMs);
     expect(first).toBe('alpha'); // oldest known
+    advanceRoot(tmpDir, first!, firstMs);
 
-    // Restart 2: alpha now at 03:00 (newest), beta at 01:00 (oldest) → beta
+    // alpha is now newest, beta is the oldest → beta next.
     const second = selectLeastRecentlyServed(tmpDir, ['alpha', 'beta', 'gamma'], secondMs);
-    expect(second).toBe('beta'); // beta is now oldest after alpha advanced
+    expect(second).toBe('beta');
   });
 });
 
@@ -504,19 +491,28 @@ describe('concurrent access safety', () => {
     cleanupDir(tmpDir);
   });
 
-  it('returns first root when lock is contended (fail-open)', async () => {
+  // RED BASELINE (WL-0MWFIZ8H5005FVNN): flipped by WL-0MWFJSVXT0033M9M.
+  it.fails('selection takes no coordination lock — the oldest root still wins under contention', async () => {
+    saveRoundRobinCursor(tmpDir, {
+      'alpha': '2026-09-02T01:00:00.000Z', // first in input, NEWER
+      'beta': '2026-09-02T00:00:00.000Z', // second in input, OLDEST
+    });
     const { tryAcquireCoordLock: tryLock } = await import('./coordination.js');
     const release = tryLock(tmpDir);
     expect(release).not.toBeNull();
 
-    // Now selectLeastRecentlyServed should fail-open to first root.
-    const result = selectLeastRecentlyServed(
-      tmpDir,
-      ['beta', 'alpha'],
-      Date.now(),
-    );
-    expect(result).toBe('beta'); // fail-open: original order, first root
-    release!();
+    try {
+      // A read-only selection ignores the writer lock entirely and returns
+      // the true oldest root, not the fail-open first-in-array root.
+      const result = selectLeastRecentlyServed(
+        tmpDir,
+        ['alpha', 'beta'],
+        Date.now(),
+      );
+      expect(result).toBe('beta');
+    } finally {
+      release!();
+    }
   });
 
   it('advanceRoot is safe under lock contention', async () => {
@@ -543,26 +539,40 @@ describe('round-robin alternation', () => {
     cleanupDir(tmpDir);
   });
 
-  it('two non-critical entries from different projects alternate', () => {
+  // RED BASELINE (WL-0MWFIZ8H5005FVNN): flipped by WL-0MWFJSVXT0033M9M.
+  it.fails('selection alone never alternates — it re-selects the same root', () => {
     const roots = ['contexthub', 'sorraagents'];
     const results: string[] = [];
 
-    // Simulate consecutive dispatch cycles.
-    for (let i = 0; i < 6; i++) {
-      const selected = selectLeastRecentlyServed(
-        tmpDir,
-        roots,
-        1_700_000_000_000 + i * 1000,
-      );
-      results.push(selected!);
+    for (let i = 0; i < 4; i++) {
+      results.push(selectLeastRecentlyServed(tmpDir, roots, 1_700_000_000_000 + i * 1000)!);
     }
 
-    // Should alternate: contexthub, sorraagents, contexthub, sorraagents, ...
+    // No consumed offer charged the cursor, so the same root wins every tick.
+    expect(new Set(results).size).toBe(1);
     expect(results[0]).toBe('contexthub');
-    expect(results[1]).toBe('sorraagents');
-    expect(results[2]).toBe('contexthub');
-    expect(results[3]).toBe('sorraagents');
-    expect(results[4]).toBe('contexthub');
-    expect(results[5]).toBe('sorraagents');
+  });
+
+  it('alternates when each dispatch charges the served root via advanceRoot', () => {
+    const roots = ['contexthub', 'sorraagents'];
+    const results: string[] = [];
+
+    // Simulate consecutive dispatch cycles: select, then charge the consumed
+    // offer explicitly (the new post-dispatch contract).
+    for (let i = 0; i < 6; i++) {
+      const nowMs = 1_700_000_000_000 + i * 1000;
+      const selected = selectLeastRecentlyServed(tmpDir, roots, nowMs)!;
+      results.push(selected);
+      advanceRoot(tmpDir, selected, nowMs);
+    }
+
+    expect(results).toEqual([
+      'contexthub',
+      'sorraagents',
+      'contexthub',
+      'sorraagents',
+      'contexthub',
+      'sorraagents',
+    ]);
   });
 });
