@@ -719,6 +719,11 @@ export async function performDispatch(
           // Absent on every other outcome, so existing entry shapes are
           // unchanged.
           ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+          // Audit-lease cooldown (WL-0MWFJH3NW006F5GN AC2): the proxy's
+          // bounded `retry_after_s` on a 429 audit-lease refusal — the
+          // deferral advice an operator reads to know when the tier re-checks.
+          // Absent on every other outcome.
+          ...(outcome.retryAfterS !== undefined ? { retryAfterS: outcome.retryAfterS } : {}),
           // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
           // slice C2): a refusal carries its reason as the decision reason
           // (distinct header token) plus `admit: false`, `retryAfterS` and

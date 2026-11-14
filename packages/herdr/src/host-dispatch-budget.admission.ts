@@ -13,16 +13,27 @@
  * `host-dispatch-budget.ts` and is not restated here.
  *
  * ## Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, parent
- * ## WL-0MW95GBEG005ERHS)
+ * ## WL-0MW95GBEG005ERHS; lease gate WL-0MWFJH3NW006F5GN)
  *
- * The **audit** tier's capacity decision is the proxy's audit-availability
- * verdict (the shared local resource), NOT the per-host `budget.json`
- * `maxAudit` cap. `admitHostDispatch` maps the proxy read through
- * {@link decideAuditAvailability} — the same helper the dispatcher's
- * `getActiveAudit` pre-check uses — so the pre-check and admission can never
- * disagree and the refusal tokens are the proxy's (`audit-budget-saturated` /
- * `audit-budget-unknown`). A proxy read that cannot be trusted fails CLOSED as
- * `audit-budget-unknown` with the failing exchange recorded.
+ * The **audit** tier's capacity decision is the proxy's shared-local-resource
+ * arbitration, NOT the per-host `budget.json` `maxAudit` cap. Since
+ * WL-0MWFJH3NW006F5GN admission is TWO steps, never one:
+ *
+ *  1. the availability read is the PRE-CHECK ({@link decideAuditAvailability}
+ *     — the same helper the dispatcher's `getActiveAudit` pre-check uses, so
+ *     the pre-check and admission can never disagree). Its result alone can
+ *     never admit: it only gates HOW EARLY an acquire is attempted and stays
+ *     the divergence/evidence signal. A proxy read that cannot be trusted
+ *     fails CLOSED as `audit-budget-unknown` with the failing exchange
+ *     recorded;
+ *  2. the proxy audit-LEASE acquire ({@link decideAuditLeaseAdmission}) is
+ *     THE admission decision: dispatch proceeds only on `200`, a `429` maps
+ *     to `audit-budget-saturated` with the proxy's `retry_after_s` honoured
+ *     as the cooldown, a `503` maps to `audit-budget-unavailable` (proxy
+ *     registry fault, distinct from the local unknown token) and a transport
+ *     failure still fails closed as `audit-budget-unknown`. The caller
+ *     acquires only when the pre-check admits, so a refused read never
+ *     churns or leaks a lease.
  *
  * The local `dispatch-budget.json` ledger is **observability only** for the
  * audit tier: an admitted audit is still reserved (and confirmed/released on
@@ -119,8 +130,10 @@ import {
 import {
   AUDIT_BUDGET_SATURATED_REASON,
   AUDIT_BUDGET_UNKNOWN_REASON,
+  AUDIT_BUDGET_UNAVAILABLE_REASON,
 } from './downtime-worker.audit-availability.contract.js';
 import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js';
 import {
   AUDIT_BUDGET_DIVERGENCE_REASON,
   AUDIT_BUDGET_LEGACY_REASON,
@@ -172,6 +185,7 @@ export type HostBudgetRefusalReason =
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL
   | typeof HOST_BUDGET_CORRUPT_REFUSAL
   | typeof AUDIT_BUDGET_SATURATED_REASON
+  | typeof AUDIT_BUDGET_UNAVAILABLE_REASON
   | typeof AUDIT_BUDGET_UNKNOWN_REASON;
 
 /** The refusal tokens the AUDIT tier can report (never `host-budget-implement`). */
@@ -227,6 +241,19 @@ export interface HostBudgetAdmissionOptions extends HostBudgetOptions {
    * skipped the proxy) and fails CLOSED with `audit-budget-unknown`.
    */
   auditAvailability?: AuditAvailabilityOutcome;
+  /**
+   * The proxy's audit-lease ACQUIRE outcome for THIS dispatch attempt
+   * (WL-0MWFJH3NW006F5GN). Acquired by the caller ONLY when the availability
+   * pre-check admitted (see {@link decideAuditAvailability}) and the legacy
+   * flag is off, so the admission sees the lease outcome exactly when it is
+   * the deciding gate — the availability read alone can never admit.
+   *
+   * `undefined` on the proxy path means the lease seam was not provided and
+   * ADMISSION FAILS CLOSED as `audit-budget-unknown` with
+   * `detail: 'lease-seam-absent'` (availability-only admission is the exact
+   * race this item removes).
+   */
+  auditLease?: AuditLeaseAcquireOutcome;
   /**
    * Audit-budget decision-log sink (WL-0MWAMSK9H005BOHD). Invoked at most once
    * per admission: a `divergence` event when the proxy and the local ledger
@@ -289,6 +316,21 @@ export interface HostBudgetAdmission {
    * belonging to an earlier, still-running dispatch of the same item.
    */
   attemptId?: string;
+  /**
+   * The PROXY AUDIT LEASE this admission holds (WL-0MWFJH3NW006F5GN AC1):
+   * present on an AUDIT admission whose acquire answered `200`. The caller
+   * releases with `auditLeaseSessionId(itemId)` on every terminal path (the
+   * id is derived from the item, so it never needs threading).
+   */
+  lease?: { sessionId: string; expiresAt?: number };
+  /**
+   * The proxy's bounded `retry_after_s` cooldown on a `429` lease refusal
+   * (WL-0MWFJH3NW006F5GN AC2): carried on the `audit-budget-saturated`
+   * refusal so the dispatcher honours the proxy's advice instead of
+   * re-attempting immediately. Absent when the proxy did not serve one or the
+   * refusal was not a 429.
+   */
+  retryAfterS?: number;
 }
 
 function refuseReason(kind: HostBudgetKind): HostBudgetRefusalReason {
@@ -376,6 +418,75 @@ export function decideAuditAvailability(
     return { active: true, reason: AUDIT_BUDGET_SATURATED_REASON, budget };
   }
   return { active: false, budget };
+}
+
+/**
+ * The audit tier's lease-map leading decision (WL-0MWFJH3NW006F5GN AC2).
+ *
+ * The SINGLE mapping from one proxy audit-lease ACQUIRE outcome to an
+ * admission answer — the step that makes the availability read a PRE-CHECK
+ * that can never admit on its own:
+ *
+ *  - `undefined` (no lease seam on the proxy path) ⇒ refuse
+ *    `audit-budget-unknown` with `detail: 'lease-seam-absent'`
+ *    (fail closed — availability-only admission is the race being removed);
+ *  - `ok` (200) ⇒ admit, carrying the held lease for the release discipline;
+ *  - `saturated` (429) ⇒ refuse `audit-budget-saturated` with the proxy's
+ *    bounded `retry_after_s` honoured as the cooldown;
+ *  - `unavailable` (503) ⇒ refuse `audit-budget-unavailable` (a proxy
+ *    registry fault, NOT a local unknown) and fall back per the documented
+ *    bounded wait — the next idle tick re-checks;
+ *  - `endpoint-absent` / `unreachable` / `unparsable` ⇒ refuse
+ *    `audit-budget-unknown` naming the failing exchange in `detail`
+ *    (fail closed).
+ */
+export function decideAuditLeaseAdmission(
+  lease: AuditLeaseAcquireOutcome | undefined,
+): AuditLeaseAdmissionDecision {
+  if (lease === undefined) {
+    return {
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'lease-seam-absent',
+    };
+  }
+  switch (lease.status) {
+    case 'ok':
+      return {
+        admitted: true,
+        lease: { sessionId: lease.lease.sessionId, ...(lease.lease.expiresAt !== undefined ? { expiresAt: lease.lease.expiresAt } : {}) },
+      };
+    case 'saturated':
+      return {
+        admitted: false,
+        reason: AUDIT_BUDGET_SATURATED_REASON,
+        ...(lease.retryAfterS !== undefined ? { retryAfterS: lease.retryAfterS } : {}),
+      };
+    case 'unavailable':
+      return { admitted: false, reason: AUDIT_BUDGET_UNAVAILABLE_REASON };
+    case 'endpoint-absent':
+    case 'unreachable':
+    case 'unparsable':
+      return {
+        admitted: false,
+        reason: AUDIT_BUDGET_UNKNOWN_REASON,
+        detail: lease.reason,
+      };
+  }
+}
+
+/**
+ * The audit-lease admission answer ({@link decideAuditLeaseAdmission}):
+ * `admitted: true` with the held {@link HostBudgetAdmission.lease} evidence;
+ * `admitted: false` with the shared refusal token, the proxy's `retry_after_s`
+ * cooldown (on a `saturated` refusal) and/or the failing exchange `detail`.
+ */
+export interface AuditLeaseAdmissionDecision {
+  admitted: boolean;
+  reason?: typeof AUDIT_BUDGET_SATURATED_REASON | typeof AUDIT_BUDGET_UNAVAILABLE_REASON | typeof AUDIT_BUDGET_UNKNOWN_REASON;
+  detail?: string;
+  retryAfterS?: number;
+  lease?: { sessionId: string; expiresAt?: number };
 }
 
 /**
@@ -598,12 +709,21 @@ function admitAuditLegacy(
 
 /**
  * The audit branch: proxy-derived by default, local behind the one-release
- * flag (WL-0MWAMSK9H005BOHD).
+ * flag (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN).
  *
- * The proxy verdict decides. The local ledger is read only to detect a
- * DIVERGENCE (and to reserve an observability entry after an admission); an
- * entry can never cause a refusal and a reservation failure never changes the
- * answer.
+ * The proxy verdict decides — TWO steps, never one (WL-0MWFJH3NW006F5GN):
+ *
+ *  1. the availability read is the PRE-CHECK ({@link decideAuditAvailability});
+ *     it gates HOW EARLY an acquire is attempted and stays the divergence
+ *     evidence, but its result alone can never admit;
+ *  2. the lease ACQUIRE outcome ({@link decideAuditLeaseAdmission}) is THE
+ *     admission decision: the dispatch proceeds only on `200`, and a `429` /
+ *     `503` / transport error maps to the shared refusal token with the
+ *     proxy's `retry_after_s` honoured.
+ *
+ * The local ledger is read only to detect a DIVERGENCE (and to reserve an
+ * observability entry after an admission); an entry can never cause a refusal
+ * and a reservation failure never changes the answer.
  */
 function admitAuditDispatch(
   input: HostBudgetAdmissionInput,
@@ -617,7 +737,8 @@ function admitAuditDispatch(
       message:
         `${HERDR_AUDIT_LOCAL_BUDGET_ENV}=1 — audit admission uses the per-host ` +
         'budget.json maxAudit cap and local ledger (one-release legacy path; ' +
-        'remove the flag to return to the proxy-managed budget)',
+        'remove the flag to return to the proxy-managed budget) — no proxy ' +
+        'read and no audit lease',
     });
     return admitAuditLegacy(input, opts);
   }
@@ -640,6 +761,9 @@ function admitAuditDispatch(
     });
   }
 
+  // Step 1 — the PRE-CHECK: an availability refusal stops the attempt before
+  // any lease churn; the caller only ever acquires when this admits, so the
+  // admission and the caller reach the same decision from the same state.
   if (decision.active) {
     return {
       admitted: false,
@@ -653,12 +777,28 @@ function admitAuditDispatch(
     };
   }
 
+  // Step 2 — the LEASE is the admission decision (WL-0MWFJH3NW006F5GN AC2):
+  // only a `200` admit; every refusal maps to the shared token and, on a
+  // `429`, carries the proxy's bounded `retry_after_s` as the cooldown.
+  const leaseDecision = decideAuditLeaseAdmission(opts.auditLease);
+  if (!leaseDecision.admitted) {
+    return {
+      admitted: false,
+      live: decision.budget?.live ?? 0,
+      max: decision.budget?.max ?? 0,
+      reason: leaseDecision.reason ?? AUDIT_BUDGET_UNKNOWN_REASON,
+      ...(leaseDecision.detail !== undefined ? { detail: leaseDecision.detail } : {}),
+      ...(leaseDecision.retryAfterS !== undefined ? { retryAfterS: leaseDecision.retryAfterS } : {}),
+    };
+  }
+
   const attemptId = reserveAuditForObservability(input, ledgerOptions);
   return {
     admitted: true,
     live: decision.budget?.live ?? 0,
     max: decision.budget?.max ?? 0,
     ...(attemptId !== undefined ? { attemptId } : {}),
+    ...(leaseDecision.lease !== undefined ? { lease: leaseDecision.lease } : {}),
   };
 }
 

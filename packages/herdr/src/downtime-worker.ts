@@ -237,14 +237,32 @@ export type {
   AuditAvailabilityLease,
 } from './downtime-worker.audit-availability.contract.js';
 // The fail-closed client (WL-0MWAMSCOP003R837): one bounded GET per call,
-// resolved as a typed outcome. Not called on the dispatch path yet — the audit
-// gate (WL-0MWAMSDNW000SL0E) is its first consumer.
+// resolved as a typed outcome — the PRE-CHECK arm of proxy-derived audit
+// admission (it observes, it never reserves; the audit-lease client below is
+// the dispatch gate).
 export { createAuditAvailabilityClient } from './downtime-worker.audit-availability.js';
 export type {
   AuditAvailabilityClient,
   AuditAvailabilityFetcher,
   AuditAvailabilityOutcome,
 } from './downtime-worker.audit-availability.js';
+
+// ── Proxy audit-lease client (WL-0MWFJH3NW006F5GN) ─────────────────────
+// The bounded acquire/renew/release client over the proxy's atomic audit
+// budget arbiter: admission acquires a lease keyed to the dispatched item,
+// dispatch proceeds only on `200`, and every terminal path releases. The
+// budget vocabulary it maps onto (`audit-budget-saturated` /
+// `audit-budget-unavailable` / `audit-budget-unknown`) is re-exported above
+// with the availability contract.
+export { createAuditLeaseClient, auditLeaseSessionId } from './downtime-worker.audit-lease.js';
+export type {
+  AuditLease,
+  AuditLeaseAcquireOutcome,
+  AuditLeaseClient,
+  AuditLeaseFetcher,
+  AuditLeaseReleaseOutcome,
+  AuditLeaseRenewOutcome,
+} from './downtime-worker.audit-lease.js';
 
 // ── Observed routing outcome (WL-0MVWEZF4Z004UNYT AC10) ──────────────
 // Reader + split computation over the bounded route log (`local-route.log`,

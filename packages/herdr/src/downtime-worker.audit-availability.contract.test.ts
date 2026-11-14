@@ -335,6 +335,10 @@ describe('barrel wiring and contract pinning (AC1, AC5)', () => {
     'downtime-worker.ts', // the barrel re-export
     'downtime-worker.constants.ts', // declares AUDIT_AVAILABILITY_PATH
     'downtime-worker.audit-availability.ts', // the client (first consumer)
+    // The audit-LEASE client (WL-0MWFJH3NW006F5GN) consumes the shared budget
+    // tokens DIRECTLY (`audit-budget-saturated` / `audit-budget-unavailable`)
+    // so its 429/503 arms quote the same vocabulary as admission.
+    'downtime-worker.audit-lease.ts',
     // The admission choke point (WL-0MWAMSK9H005BOHD) consumes the contract's
     // proxy refusal tokens DIRECTLY (`audit-budget-saturated` /
     // `audit-budget-unknown`) so its answer and the pre-check use one spelling.

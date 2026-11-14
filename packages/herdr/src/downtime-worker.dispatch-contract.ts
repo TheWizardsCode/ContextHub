@@ -193,6 +193,23 @@ export interface DowntimeDispatchDeps {
     cwd: string,
     release?: DowntimeHostBudgetRelease,
   ): Promise<void>;
+  /**
+   * Release a dispatched audit's PROXY LEASE (WL-0MWFJH3NW006F5GN AC3):
+   * called on every terminal path after an audit ADMITTED with a held lease
+   * (marker-write failure, spawn failure, anchor-unavailable, pane close) so
+   * a released audit never holds the shared GPU past its own run. The session
+   * id is derived from the item id (`auditLeaseSessionId(itemId)`), so no
+   * state is threaded. Must be idempotent and never throw — an unheld session
+   * is a successful no-op and a leaked lease is bounded by the proxy's own
+   * expiry (the availability read reports `reclaimed`). OPTIONAL — absent for
+   * legacy/test callers means the release is skipped (the dispatch outcome is
+   * never changed by a release failure).
+   */
+  releaseAuditLease?(
+    itemId: string,
+    cwd: string,
+    release?: { reason?: string },
+  ): Promise<void>;
   /** Machine-wide stalled-work scan (see `DowntimeWorkerDeps`). */
   scanStalledPanes?(cwd: string, opts: StalledScanOptions): Promise<StalledPaneCandidate[]>;
   /**
@@ -259,6 +276,21 @@ export interface DowntimeHostBudgetAdmission {
    * only ever remove this dispatch's own entry.
    */
   attemptId?: string;
+  /**
+   * The PROXY AUDIT LEASE this admission holds (WL-0MWFJH3NW006F5GN AC1):
+   * present on an AUDIT admission whose acquire answered `200`. The release
+   * discipline re-derives the session id from the item id
+   * (`auditLeaseSessionId(itemId)`), so this is evidence for the decision log
+   * and the TTL-bound assertion, not a threaded handle.
+   */
+  lease?: { sessionId: string; expiresAt?: number };
+  /**
+   * The proxy's bounded `retry_after_s` cooldown on a `429` lease refusal
+   * (WL-0MWFJH3NW006F5GN AC2): carried on the `audit-budget-saturated`
+   * refusal so the dispatcher honours the proxy's deferral advice. Absent
+   * when the proxy did not serve one or the refusal was not a 429.
+   */
+  retryAfterS?: number;
 }
 
 /**
@@ -487,6 +519,12 @@ export interface DowntimeDispatchOutcome {
    * and logs are unchanged. All of these are NEUTRAL skips — no strike, no
    * attempt budget, no no-candidate cooldown — so the next idle tick re-checks
    * as soon as a slot frees. `budget` carries the `live`/`max` evidence.
+   *
+   * Proxy audit lease (WL-0MWFJH3NW006F5GN): the AUDIT admission is decided
+   * by the lease acquire, not the availability read. `audit-budget-saturated`
+   * is here a 429 lease refusal too (the same shared token), and
+   * `audit-budget-unavailable` names a 503 proxy registry failure;
+   * `retryAfterS` carries the proxy's bounded deferral advice on the 429.
    */
   reason?: string;
   /**
@@ -506,6 +544,13 @@ export interface DowntimeDispatchOutcome {
    * outcome (WL-0MWDDHVF2004PTYX AC3).
    */
   detail?: string;
+  /**
+   * The proxy's bounded audit-lease cooldown on a `429` refusal
+   * (`audit-budget-saturated`, WL-0MWFJH3NW006F5GN AC2): the proxy's own
+   * `retry_after_s`, honoured as the deferral advice carried on the decision
+   * entry. Absent on every other outcome.
+   */
+  retryAfterS?: number;
   /**
    * Spawn-level error message ('spawn-failed' trace, e.g. ENOENT on
    * send-to-pi.sh — WL-0MSLWJ3I70031Z8U AC2).

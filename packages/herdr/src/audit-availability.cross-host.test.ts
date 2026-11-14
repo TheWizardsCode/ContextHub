@@ -30,11 +30,11 @@
  *
  * ## Scenario → acceptance-criterion map
  *
- *   case 1  host A admitted, live lease then refuses host B          (AC1)
+ *   case 1  availability-only reads BOTH admit; the ATOMIC lease arbitrates (AC1/AC4)
  *   pin     pre-change per-host caps admit BOTH hosts concurrently  (AC2)
  *   case 2  both hosts refused with one token and one evidence set  (AC3)
  *   case 3  unreachable proxy fails both hosts closed, no pane      (AC4)
- *   case 4  expired leases reclaimed, both hosts dispatch           (AC5)
+ *   case 4  an expired lease is reclaimed, a live lease refuses     (AC3/AC5)
  *   case 5  the implement tier is unaffected by the audit verdict    (AC6)
  *
  * The stub is the CONTRACT RECORD (the pinned availability contract): if the
@@ -50,9 +50,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createAuditAvailabilityClient,
-  type AuditAvailabilityFetcher,
   type AuditAvailabilityOutcome,
 } from './downtime-worker.audit-availability.js';
+import {
+  createAuditLeaseClient,
+  auditLeaseSessionId,
+  type AuditLeaseFetcher,
+} from './downtime-worker.audit-lease.js';
 import {
   AUDIT_BUDGET_SATURATED_REASON,
   AUDIT_BUDGET_UNKNOWN_REASON,
@@ -81,6 +85,14 @@ const CLEAN_ENV: Readonly<Record<string, string | undefined>> = {};
 
 /** One hour in ms, for an already-expired lease. */
 const HOUR_MS = 60 * 60 * 1000;
+/** The stub proxy's lease TTL (bounded; a leaked lease expires). */
+const LEASE_TTL_MS = 5 * 60 * 1000;
+/** The proxy's bounded retry on a saturated acquire, pinning the 429 body. */
+const SATURATED_RETRY_S = 30;
+/** The pinned lease/availability paths the stub proxy routes (contract record). */
+const AUDIT_LEASE_PATH_PIN = '/llama/local/audit/lease';
+const AUDIT_LEASE_RENEW_PATH_PIN = `${AUDIT_LEASE_PATH_PIN}/renew`;
+const AUDIT_AVAILABILITY_PATH_PIN = '/llama/local/audit/availability';
 
 /** The two fake ContextHub hosts sharing the single local GPU. */
 type HostId = 'A' | 'B';
@@ -112,22 +124,69 @@ interface StubAvailabilityBody {
 /**
  * A single in-process stub proxy shared by BOTH hosts. It serves the mutable
  * availability body through the injected `fetcher` seam, records every body it
- * serves (the contract record the lease-evidence assertions read) and can be
- * closed to model an unreachable proxy.
+ * serves (the contract record the lease-evidence assertions read), can be
+ * closed to model an unreachable proxy, AND runs the ATOMIC audit-lease
+ * registry (WL-0MWFJH3NW006F5GN): `POST /llama/local/audit/lease` grants the
+ * first session and answers `429` with the pinned `retry_after_s` while a
+ * DIFFERENT session holds the budget — the cross-host arbiter the scenarios
+ * prove. The availability body is deliberately SERVED SEPARATELY (and can
+ * therefore go stale): that is the point-in-time-observation race this suite
+ * pins.
  */
 function createStubProxy(initial: StubAvailabilityBody) {
   let body: StubAvailabilityBody = { ...initial };
   let unreachable = false;
   const served: StubAvailabilityBody[] = [];
-  const fetcher: AuditAvailabilityFetcher = async () => {
+  // The audit-lease registry: session id -> absolute expiry (epoch ms).
+  const registry = new Map<string, number>();
+  const fetcher: AuditLeaseFetcher = async (url, init) => {
     if (unreachable) {
-      // A connection refusal / DNS failure: the client classifies this as
-      // `unreachable/network` and fails closed — never a throw to the caller.
+      // A connection refusal / DNS failure: the clients classify this as
+      // `unreachable/network` and fail closed — never a throw to the caller.
       throw Object.assign(new Error('fetch failed'), { name: 'TypeError' });
     }
-    const snapshot = structuredClone(body);
-    served.push(snapshot);
-    return jsonResponseFixture(snapshot, 200);
+    const path = new URL(url).pathname;
+    if (path === AUDIT_LEASE_RENEW_PATH_PIN) {
+      const session = (JSON.parse(String(init.body)) as { session_id?: string }).session_id;
+      if (session === undefined || !registry.has(session)) return jsonResponseFixture({}, 404);
+      registry.set(session, Date.now() + LEASE_TTL_MS);
+      return jsonResponseFixture({ session_id: session, expires_at: Date.now() + LEASE_TTL_MS }, 200);
+    }
+    if (path === AUDIT_LEASE_PATH_PIN && init.method === 'POST') {
+      const session = (JSON.parse(String(init.body)) as { session_id?: string }).session_id;
+      if (session === undefined) return jsonResponseFixture({}, 400);
+      // Reap expired leases, then arbitrate: a DIFFERENT live session holding
+      // the budget is a 429 with the pinned saturated contract.
+      const now = Date.now();
+      for (const [held, expiresAt] of [...registry]) {
+        if (expiresAt <= now) registry.delete(held);
+      }
+      if (registry.size > 0 && !registry.has(session)) {
+        return jsonResponseFixture(
+          {
+            reason: AUDIT_BUDGET_SATURATED_REASON,
+            retry_after_s: SATURATED_RETRY_S,
+          },
+          429,
+        );
+      }
+      registry.set(session, now + LEASE_TTL_MS);
+      return jsonResponseFixture(
+        { session_id: session, lease_id: `lease-${session}`, expires_at: now + LEASE_TTL_MS },
+        200,
+      );
+    }
+    if (path.startsWith(`${AUDIT_LEASE_PATH_PIN}/`)) {
+      const session = decodeURIComponent(path.slice(AUDIT_LEASE_PATH_PIN.length + 1));
+      registry.delete(session);
+      return jsonResponseFixture({}, 200);
+    }
+    if (init.method === 'GET' && path === AUDIT_AVAILABILITY_PATH_PIN) {
+      const snapshot = structuredClone(body);
+      served.push(snapshot);
+      return jsonResponseFixture(snapshot, 200);
+    }
+    return jsonResponseFixture({}, 404);
   };
   return {
     fetcher,
@@ -137,9 +196,17 @@ function createStubProxy(initial: StubAvailabilityBody) {
     set(next: StubAvailabilityBody): void {
       body = { ...next };
     },
+    /** The session ids currently holding an audit lease (registry evidence). */
+    heldSessions(): string[] {
+      return [...registry.keys()];
+    },
     /** The proxy becomes unreachable (connection refused). */
     close(): void {
       unreachable = true;
+    },
+    /** Seed a lease for a scenario (e.g. an already-expired one to reclaim). */
+    seedLease(session: string, expiresAt: number): void {
+      registry.set(session, expiresAt);
     },
   };
 }
@@ -219,6 +286,10 @@ function createHost(opts: {
   implementCandidate?: DowntimeCandidate | null;
 }): { id: HostId; deps: DowntimeWorkerDeps; spawnAgentPane: ReturnType<typeof vi.fn> } {
   const client = createAuditAvailabilityClient('http://stub-proxy:0', opts.proxy.fetcher);
+  // The atomic arbiter (WL-0MWFJH3NW006F5GN): the SAME proxy URL, exercised
+  // through the REAL lease client so the acquire/release wire protocol is
+  // what the scenarios prove — not a re-implementation.
+  const leaseClient = createAuditLeaseClient('http://stub-proxy:0', opts.proxy.fetcher);
 
   const readAvailability = async (): Promise<AuditAvailabilityOutcome> => {
     const outcome = await client();
@@ -248,11 +319,23 @@ function createHost(opts: {
     };
   };
 
-  // Mirror `index.ts`'s admission seam: the SAME proxy read decides, so the
-  // pre-check and admission agree and quote one vocabulary.
+  // Mirror `index.ts`'s admission seam (WL-0MWFJH3NW006F5GN AC2): the SAME
+  // availability pre-check AND the proxy's atomic audit lease decide, so the
+  // pre-check and admission agree and quote one vocabulary. The acquire is
+  // attempted ONLY when the pre-check admits (never any churn on a refused
+  // read) and the session id is derived from the item, so a retry renews
+  // rather than competes.
   const admit: DowntimeWorkerDeps['admitHostDispatch'] = async (input) => {
     const audit = input.kind === 'audit';
     const auditAvailability = audit ? await readAvailability() : undefined;
+    const preCheck =
+      audit && auditAvailability !== undefined
+        ? decideAuditAvailability(auditAvailability)
+        : undefined;
+    const auditLease =
+      audit && preCheck !== undefined && !preCheck.active
+        ? await leaseClient.acquire(auditLeaseSessionId(input.itemId))
+        : undefined;
     const events: AuditBudgetLogEvent[] = [];
     const admission = admitHostDispatch(
       {
@@ -268,6 +351,7 @@ function createHost(opts: {
         ...(auditAvailability !== undefined
           ? { auditAvailability, onAuditBudgetEvent: (event: AuditBudgetLogEvent) => events.push(event) }
           : {}),
+        ...(auditLease !== undefined ? { auditLease } : {}),
       },
     );
     opts.decisionLog.admissions.push({ host: opts.id, admission, events });
@@ -317,7 +401,7 @@ function hostRoot(label: HostId): string {
 // ── Scenarios ─────────────────────────────────────────────────────────
 
 describe('cross-host audit serialisation (parent WL-0MW95GBEG005ERHS)', () => {
-  it('case 1: host A is admitted on available:true, then host B is refused once the live lease is visible', async () => {
+  it('case 1: host A is admitted on available:true; host B reads the SAME stale availability and is refused by the atomic lease (the 2026-11-03 race)', async () => {
     const rootA = hostRoot('A');
     const rootB = hostRoot('B');
     const proxy = createStubProxy({ cap: 1, live: 0, available: true });
@@ -325,31 +409,30 @@ describe('cross-host audit serialisation (parent WL-0MW95GBEG005ERHS)', () => {
     const hostA = createHost({ id: 'A', proxy, root: rootA, decisionLog, auditCandidate: AUDIT_ON_A });
     const hostB = createHost({ id: 'B', proxy, root: rootB, decisionLog, auditCandidate: AUDIT_ON_B });
 
-    // Host A: the proxy reports an open audit budget → admitted, pane spawned.
+    // Host A: the proxy reports an open budget → availability pre-check
+    // admits, the lease acquire answers 200 → pane spawned.
     const first = await dispatchDowntimeWork(hostA.deps, { model: 'plan', cwd: rootA });
     expect(first).toMatchObject({ dispatched: true, kind: 'audit' });
     expect(first.candidate?.id).toBe(AUDIT_ON_A.id);
     expect(hostA.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(proxy.heldSessions()).toEqual([auditLeaseSessionId(AUDIT_ON_A.id)]);
 
-    // Host A's audit is now live on the shared GPU: the proxy reports the lease
-    // and refuses further admissions.
-    proxy.set({ cap: 1, live: 1, available: false, reason: AUDIT_BUDGET_SATURATED_REASON });
-
-    // Host B: the shared proxy refuses → no audit, no pane.
+    // THE RACE: the availability body is NOT updated — host B reads the SAME
+    // point-in-time observation (available:true, live:0) that admitted A. The
+    // pre-check alone would admit again; ONLY the proxy's atomic lease
+    // registry arbitrates, answering 429 for B's different session.
     const second = await dispatchDowntimeWork(hostB.deps, { model: 'plan', cwd: rootB });
     expect(second.dispatched).toBe(false);
+    // The refusal quotes the shared saturated token AND the bounded cooldown.
     expect(second.reason).toBe(AUDIT_BUDGET_SATURATED_REASON);
-    expect(second.budget).toEqual({ live: 1, max: 1 });
+    expect(second.retryAfterS).toBe(SATURATED_RETRY_S);
     expect(hostB.spawnAgentPane).not.toHaveBeenCalled();
 
-    // The decision log proves the refusal came from the proxy verdict, not
-    // from host B's own (empty) ledger.
+    // Demotion pin (AC4): the availability read that would have admitted B
+    // (pre-check active:false) did NOT suffice — the lease gate refused.
     const hostBPreCheck = decisionLog.preChecks.find((entry) => entry.host === 'B');
-    expect(hostBPreCheck).toMatchObject({
-      active: true,
-      reason: AUDIT_BUDGET_SATURATED_REASON,
-      budget: { live: 1, max: 1 },
-    });
+    expect(hostBPreCheck).toMatchObject({ active: false, budget: { live: 0, max: 1 } });
+    expect(proxy.heldSessions()).toEqual([auditLeaseSessionId(AUDIT_ON_A.id)]);
   });
 
   it('regression pin: with per-host caps (pre-change) BOTH hosts admit — the incident this suite prevents', () => {
@@ -481,7 +564,7 @@ describe('cross-host audit serialisation (parent WL-0MW95GBEG005ERHS)', () => {
     ).toBe(true);
   });
 
-  it('case 4: only expired leases are reported, so the proxy reclaims and both hosts dispatch', async () => {
+  it('case 4: an EXPIRED lease is reclaimed at acquire time — the first host dispatches, and only a LIVE lease refuses the second (a leak holds the tier only until its expiry)', async () => {
     const restartedAt = Date.now();
     const expiredLease = { id: 'lease-stale', expires_at: restartedAt - HOUR_MS };
     const proxy = createStubProxy({
@@ -491,25 +574,33 @@ describe('cross-host audit serialisation (parent WL-0MW95GBEG005ERHS)', () => {
       leases: [expiredLease],
       reclaimed: 1,
     });
+    // The registry holds the SAME expired lease the availability body
+    // reports: it must not phantom-block a fresh acquire (AC3 — a leaked
+    // lease never holds the audit tier past its expiry).
+    proxy.seedLease('lease-stale', restartedAt - HOUR_MS);
     const decisionLog = emptyDecisionLog();
     const rootA = hostRoot('A');
     const rootB = hostRoot('B');
     const hostA = createHost({ id: 'A', proxy, root: rootA, decisionLog, auditCandidate: AUDIT_ON_A });
     const hostB = createHost({ id: 'B', proxy, root: rootB, decisionLog, auditCandidate: AUDIT_ON_B });
 
+    // Host A: the expired lease is reaped on acquire → 200 → dispatched.
     const a = await dispatchDowntimeWork(hostA.deps, { model: 'plan', cwd: rootA });
-    const b = await dispatchDowntimeWork(hostB.deps, { model: 'plan', cwd: rootB });
-
-    // The reclamation is reflected: the stale lease does NOT hold a phantom
-    // slot, so both hosts dispatch.
     expect(a).toMatchObject({ dispatched: true, kind: 'audit' });
-    expect(b).toMatchObject({ dispatched: true, kind: 'audit' });
     expect(hostA.spawnAgentPane).toHaveBeenCalledTimes(1);
-    expect(hostB.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(proxy.heldSessions()).toEqual([auditLeaseSessionId(AUDIT_ON_A.id)]);
 
-    // The lease evidence is in the decision log (the read reflects the proxy's
-    // reclamation: the expired lease with its reclaimed count survives the
-    // pinned parser).
+    // Host B reads the SAME stale availability body (still available:true)
+    // but its acquire is refused by host A's LIVE lease — the arbitration is
+    // the lease, never the point-in-time read.
+    const b = await dispatchDowntimeWork(hostB.deps, { model: 'plan', cwd: rootB });
+    expect(b).toMatchObject({ dispatched: false, reason: AUDIT_BUDGET_SATURATED_REASON });
+    expect(hostB.spawnAgentPane).not.toHaveBeenCalled();
+    expect(proxy.heldSessions()).toEqual([auditLeaseSessionId(AUDIT_ON_A.id)]);
+
+    // The lease evidence is still in the decision log (the diagnostic read
+    // reflects the proxy's reclamation: the expired lease with its reclaimed
+    // count survives the pinned parser).
     const read = decisionLog.reads.find((entry) => entry.host === 'A');
     expect(read?.outcome).toMatchObject({
       status: 'ok',

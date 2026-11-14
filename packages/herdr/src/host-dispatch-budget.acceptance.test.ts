@@ -66,6 +66,14 @@ import {
 } from './downtime-worker.audit-availability.contract.js';
 import { repairBudgetLedgerFromPanes } from './host-dispatch-budget.repair.js';
 import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js';
+import { auditLeaseSessionId } from './downtime-worker.audit-lease.js';
+
+/** A held proxy-lease acquire outcome for the admission-admitting cases. */
+const LEASE_OK = (itemId: string): AuditLeaseAcquireOutcome => ({
+  status: 'ok',
+  lease: { sessionId: `herdr-audit-${itemId}` },
+});
 import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
 import { readCoordinationLogEntries } from './downtime-log.js';
 import {
@@ -181,6 +189,7 @@ function budgetSeams(
     now?: number;
     env?: Readonly<Record<string, string | undefined>>;
     auditAvailability?: AuditAvailabilityOutcome;
+    auditLease?: AuditLeaseAcquireOutcome;
     onAuditBudgetEvent?: (event: AuditBudgetLogEvent) => void;
   } = {},
 ): Pick<DowntimeWorkerDeps, 'admitHostDispatch' | 'confirmHostDispatch' | 'releaseHostDispatch'> {
@@ -206,6 +215,7 @@ function budgetSeams(
             ...(opts.auditAvailability !== undefined
               ? { auditAvailability: opts.auditAvailability }
               : {}),
+            ...(opts.auditLease !== undefined ? { auditLease: opts.auditLease } : {}),
             ...(opts.onAuditBudgetEvent !== undefined
               ? { onAuditBudgetEvent: opts.onAuditBudgetEvent }
               : {}),
@@ -1090,6 +1100,9 @@ describe('proxy-derived audit admission (WL-0MWAMSK9H005BOHD)', () => {
             status: 'ok',
             availability: { cap: 1, live: 0, available: true },
           },
+          // The lease is THE admission gate (WL-0MWFJH3NW006F5GN AC2): this
+          // end-to-end case holds one so the proxy admission proceeds.
+          auditLease: LEASE_OK(AUDIT_CANDIDATE.id),
         }),
       });
 
@@ -1143,6 +1156,9 @@ describe('proxy-derived audit admission (WL-0MWAMSK9H005BOHD)', () => {
             availability: { cap: 1, live: 0, available: true },
           },
           onAuditBudgetEvent: (event) => events.push(event),
+          // The lease is THE admission gate (WL-0MWFJH3NW006F5GN AC2): this
+          // divergence case holds one so the proxy admission proceeds.
+          auditLease: LEASE_OK(AUDIT_CANDIDATE.id),
         }),
       });
 
@@ -1180,7 +1196,20 @@ describe('audit pre-check and admission agree (WL-0MWAMSK9H005BOHD AC2)', () => 
         const preCheck = await deps.getActiveAudit(INSTANCE_A_ROOT);
         const admission = admitHostDispatch(
           { kind: 'audit', itemId: 'WL-AGREE', instanceId: 'instance-a', root: INSTANCE_A_ROOT },
-          { dir, livePanes: [], now: T0, env: CLEAN_ENV, auditAvailability: availability },
+          {
+            dir,
+            livePanes: [],
+            now: T0,
+            env: CLEAN_ENV,
+            auditAvailability: availability,
+            // Lease gate (WL-0MWFJH3NW006F5GN AC2): a held lease accompanies an
+            // admitting pre-check so the agreement assertion stays about the
+            // availability path; a refused availability never reaches it.
+            auditLease:
+              availability.status === 'ok' && availability.availability.available
+                ? LEASE_OK('WL-AGREE')
+                : undefined,
+          },
         );
 
         expect(preCheck.ok).toBe(true);
@@ -1231,6 +1260,52 @@ describe('audit divergence logged by the real pre-check (WL-0MWAMSK9H005BOHD AC2
           local: { live: 0, maxAudit: 5 },
         });
       });
+    });
+  });
+});
+
+// ── Proxy audit-LEASE release at pane close (WL-0MWFJH3NW006F5GN AC3) ──
+
+describe('audit lease released at audit pane close (WL-0MWFJH3NW006F5GN AC3)', () => {
+  it('the real recordPaneClose seam releases the proxy lease for a closed audit pane', async () => {
+    await withMachineDir(async (dir) => {
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'dispatcher');
+      const released: string[] = [];
+      deps.auditLeaseClient = {
+        acquire: async () => ({ status: 'ok', lease: { sessionId: 'x', expiresAt: 0 } }),
+        renew: async () => ({ status: 'ok', lease: { sessionId: 'x', expiresAt: 0 } }),
+        release: vi.fn(async (sessionId: string) => {
+          released.push(sessionId);
+          return { status: 'ok' } as const;
+        }),
+      } as unknown as NonNullable<DowntimeWorkerDeps['auditLeaseClient']>;
+
+      // An AUDIT pane closing is the terminal path of an admitted audit: the
+      // shared GPU must be given back, re-deriving the session id from the
+      // item (nothing threaded).
+      await deps.recordPaneClose(
+        { itemId: 'WL-CLOSED', kind: 'audit', paneId: 'w9:p9' },
+        dir,
+      );
+      expect(released).toEqual([auditLeaseSessionId('WL-CLOSED')]);
+
+      // A NON-audit pane close never touches the lease.
+      await deps.recordPaneClose(
+        { itemId: 'WL-CLOSED', kind: 'implement', paneId: 'w9:p9' },
+        dir,
+      );
+      expect(released).toEqual([auditLeaseSessionId('WL-CLOSED')]);
+    });
+  });
+
+  it('an unwired lease client is a non-event (the pane-close record still lands)', async () => {
+    await withMachineDir(async (dir) => {
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'dispatcher');
+      deps.auditLeaseClient = undefined;
+      // The close path runs to completion with no lease client and no throw.
+      await expect(
+        deps.recordPaneClose({ itemId: 'WL-C', kind: 'audit', paneId: 'p:1' }, dir),
+      ).resolves.toBeUndefined();
     });
   });
 });

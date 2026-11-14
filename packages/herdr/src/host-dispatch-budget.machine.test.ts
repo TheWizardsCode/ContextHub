@@ -46,6 +46,7 @@ import {
   admitHostDispatch,
   confirmHostDispatch,
   decideAuditAvailability,
+  decideAuditLeaseAdmission,
   HOST_BUDGET_AUDIT_REFUSAL,
   HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
   HOST_BUDGET_CORRUPT_REFUSAL,
@@ -59,8 +60,10 @@ import {
 import {
   AUDIT_BUDGET_SATURATED_REASON,
   AUDIT_BUDGET_UNKNOWN_REASON,
+  AUDIT_BUDGET_UNAVAILABLE_REASON,
 } from './downtime-worker.audit-availability.contract.js';
 import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js';
 import { AUDIT_BUDGET_DIVERGENCE_REASON, AUDIT_BUDGET_LEGACY_REASON } from './downtime-log-budget.js';
 import { HOST_BUDGET_CONFIG_FILE, isLegacyAuditBudgetEnabled } from './host-dispatch-budget.js';
 import {
@@ -533,11 +536,18 @@ const proxySaturated = (cap: number, live = cap): AuditAvailabilityOutcome => ({
   availability: { cap, live, available: false },
 });
 
+/** A held-proxy-lease acquire outcome the helper defaults to (AC2). */
+const LEASE_OK = (itemId: string): AuditLeaseAcquireOutcome => ({
+  status: 'ok',
+  lease: { sessionId: `herdr-audit-${itemId}` },
+});
+
 /** One audit asking the PROXY-derived path for a slot. */
 function proxyAuditAdmit(
   itemId: string,
   availability: AuditAvailabilityOutcome | undefined,
   onAuditBudgetEvent?: (event: AuditBudgetLogEvent) => void,
+  auditLease?: AuditLeaseAcquireOutcome,
 ): HostBudgetAdmission {
   return admitHostDispatch(
     { kind: 'audit', itemId, instanceId: INSTANCE_A, root: '/repo/test' },
@@ -546,6 +556,15 @@ function proxyAuditAdmit(
       env: {},
       ...(availability !== undefined ? { auditAvailability: availability } : {}),
       ...(onAuditBudgetEvent !== undefined ? { onAuditBudgetEvent } : {}),
+      // Lease discipline (WL-0MWFJH3NW006F5GN AC2): admission only admits an
+      // AUDIT on a 200 acquire, so the pre-change helper defaults to a held
+      // lease — a refused availability never reaches the lease gate, so the
+      // existing saturation/unknown assertions are untouched, while AVOIDING
+      // the fail-closed `lease-seam-absent` refusal that availability-only
+      // admission now correctly produces.
+      ...(auditLease !== undefined
+        ? { auditLease }
+        : { auditLease: LEASE_OK(itemId) }),
     },
   );
 }
@@ -854,5 +873,119 @@ describe('unknown pane state in admission (WL-0MW9VQX5T001GCUP)', () => {
         reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    }));
+});
+
+// ── Audit-LEASE admission (WL-0MWFJH3NW006F5GN AC2) ────────────────────
+//
+// The availability read is the PRE-CHECK: its result alone can never admit.
+// The admission decision is the proxy's atomic lease acquire — only a `200`
+// admits, and every refusal maps to the shared token with the proxy's
+// `retry_after_s` honoured as the cooldown.
+
+describe('audit-lease admission (WL-0MWFJH3NW006F5GN)', () => {
+  it('a held lease (200) admits and carries the session for the release discipline', () => {
+    expect(
+      decideAuditLeaseAdmission({
+        status: 'ok',
+        lease: { sessionId: 's-1', expiresAt: Date.now() + 60_000 },
+      }),
+    ).toEqual({
+      admitted: true,
+      lease: { sessionId: 's-1', expiresAt: expect.any(Number) },
+    });
+  });
+
+  it('a 429 maps to audit-budget-saturated and carries the proxy retry_after_s as the cooldown', () => {
+    expect(decideAuditLeaseAdmission({ status: 'saturated', reason: 'audit-budget-saturated', retryAfterS: 30 })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_SATURATED_REASON,
+      retryAfterS: 30,
+    });
+    // A payload without retry_after_s still refuses (429 is saturation by
+    // status) — it simply carries no deferral advice.
+    expect(decideAuditLeaseAdmission({ status: 'saturated', reason: 'audit-budget-saturated' })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_SATURATED_REASON,
+    });
+  });
+
+  it('a 503 maps to audit-budget-unavailable (proxy registry fault), NOT the local unknown token', () => {
+    expect(
+      decideAuditLeaseAdmission({ status: 'unavailable', reason: 'audit-budget-unavailable' }),
+    ).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNAVAILABLE_REASON,
+    });
+  });
+
+  it('a transport failure fails CLOSED as audit-budget-unknown with the failing exchange', () => {
+    expect(decideAuditLeaseAdmission({ status: 'endpoint-absent', reason: 'http-404' })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'http-404',
+    });
+    expect(decideAuditLeaseAdmission({ status: 'unreachable', reason: 'timeout' })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'timeout',
+    });
+    expect(decideAuditLeaseAdmission({ status: 'unreachable', reason: 'network' })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'network',
+    });
+  });
+
+  it('a missing lease seam fails CLOSED as audit-budget-unknown/lease-seam-absent — availability alone can never admit', () => {
+    expect(decideAuditLeaseAdmission(undefined)).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'lease-seam-absent',
+    });
+    // The demotion pin (AC4): even a fully ADMITTING availability read cannot
+    // admit through admission without a lease hold.
+    const availabilityAdmitting = {
+      status: 'ok',
+      availability: { cap: 1, live: 0, available: true },
+    } as const;
+    expect(decideAuditAvailability(availabilityAdmitting)).toEqual({
+      active: false,
+      budget: { live: 0, max: 1 },
+    });
+    const admission = admitHostDispatch(
+      { kind: 'audit', itemId: 'WL-DEMOTED', instanceId: INSTANCE_A, root: '/repo/test' },
+      { livePanes: [], env: {}, auditAvailability: availabilityAdmitting },
+    );
+    expect(admission).toEqual({
+      admitted: false,
+      live: 0,
+      max: 1,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'lease-seam-absent',
+    });
+  });
+
+  it('admission passes both gates: availability pre-check AND the lease 200', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      const admission = admitHostDispatch(
+        { kind: 'audit', itemId: 'WL-BOTH', instanceId: INSTANCE_A, root: '/repo/test' },
+        {
+          livePanes: [],
+          env: {},
+          auditAvailability: {
+            status: 'ok',
+            availability: { cap: 1, live: 0, available: true },
+          },
+          auditLease: { status: 'ok', lease: { sessionId: 'herdr-audit-WL-BOTH' } },
+        },
+      );
+      expect(admission).toMatchObject({
+        admitted: true,
+        live: 0,
+        max: 1,
+        lease: { sessionId: 'herdr-audit-WL-BOTH' },
+      });
     }));
 });

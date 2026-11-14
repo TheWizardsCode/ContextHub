@@ -581,14 +581,17 @@ dispatches; the other herdr instances coordinate instead of polling:
     (the fail-open admission rationale is preserved).
   - **Audit tier is proxy-derived (cross-machine)** — the audit budget and the
     live audit-lease registry are **owned by the proxy** (the one local
-    `llama-server` GPU every ContextHub host shares), and herdr queries
-    `GET {proxyUrl}/llama/local/audit/availability` (URL from `downtimeProxyUrl`),
-    mapping the verdict to a refusal with the proxy's own tokens
-    (`audit-budget-saturated`; or `audit-budget-unknown` when the read fails
-    closed). A proxy/local disagreement is logged with both sides' evidence
-    (`audit-budget-divergence`). The local ledger's audit entries are
-    **observability only** (header/dialog/sweep) and can never refuse an
-    audit; `budget.json` `maxAudit` / `HERDR_HOST_MAX_AUDIT` are
+    `llama-server` GPU every ContextHub host shares). herdr reads
+    `GET {proxyUrl}/llama/local/audit/availability` as a PRE-CHECK and — since
+    WL-0MWFJH3NW006F5GN — acquires `POST /llama/local/audit/lease` as THE
+    admission gate (dispatch proceeds only on `200`; `429` maps to
+    `audit-budget-saturated` with the proxy's `retry_after_s`, `503` maps to
+    `audit-budget-unavailable`, transport fails closed as `audit-budget-unknown`;
+    every terminal path releases). A proxy/local disagreement is logged with
+    both sides' evidence (`audit-budget-divergence`). The local ledger's audit
+    entries are **observability only** (header/dialog/sweep) and can never
+    refuse an audit; `budget.json` `maxAudit` /
+    `HERDR_HOST_MAX_AUDIT` are
     implement-tier-only for admission. The one-release
     `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
     decision for a single release.
@@ -1184,15 +1187,19 @@ Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
 makes the item dispatchable again on the next idle poll.
 
 > **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV; host-wide cap
-> generalised by WL-0MVXY0XPF006YUHA F2; proxy-derived by WL-0MW95GBEG005ERHS):**
+> generalised by WL-0MVXY0XPF006YUHA F2; proxy-derived by WL-0MW95GBEG005ERHS;
+> lease-arbitrated by WL-0MWFJH3NW006F5GN):**
 > exactly one audit is dispatched at a time during downtime dispatch by
 > **default** — strictly sequential, never fan-out across candidates. The
 > **proxy-owned audit budget** is the outermost audit-concurrency gate
 > (see *Host-wide dispatch budget* above): the proxy owns the cap and the live
-> audit-lease registry, and herdr reads its verdict from
-> `GET {proxyUrl}/llama/local/audit/availability`, refusing with
+> audit-lease registry; herdr reads its verdict from
+> `GET {proxyUrl}/llama/local/audit/availability` as a PRE-CHECK and acquires
+> the ATOMIC lease (`POST /llama/local/audit/lease`) as the admission gate,
+> refusing with
 > `audit-budget-saturated` (or `audit-budget-unknown` when the read fails
-> closed). The local ledger's audit entries are **observability only** — they
+> closed), and releasing on every terminal path. The local ledger's audit
+> entries are **observability only** — they
 > can never refuse an audit; `budget.json` `maxAudit` is only the one-release
 > legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`). Beneath the proxy gate, before the
 > audit tier selects a candidate, the worker runs the host-wide audit-budget

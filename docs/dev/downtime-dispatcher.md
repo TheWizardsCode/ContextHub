@@ -1304,16 +1304,44 @@ symbols are re-exported from the `downtime-worker.ts` barrel.
 dispatcher's lease-derived availability signal". It **observes** leases; it
 neither creates nor reserves one, so two hosts that both read
 `live: 0, available: 1` in the same window can both dispatch (the 2026-11-03
-two-audits-on-one-GPU failure). The atomic cross-host arbiter is the proxy's
-lease protocol — `POST /llama/local/audit/lease` (`200` acquired/ renewed,
+two-audits-on-one-GPU failure). Since **WL-0MWFJH3NW006F5GN** the atomic
+cross-host arbiter — the proxy's lease protocol — is the DISPATCH gate:
+`POST /llama/local/audit/lease` (`200` acquired/ renewed,
 `429 audit-budget-saturated` with a bounded `retry_after_s` when a *different
-session* holds the budget, `503 audit-budget-unavailable` on registry failure),
-plus `POST /llama/local/audit/lease/renew` and
-`DELETE /llama/local/audit/lease/{session_id}`. Herdr does **not** call it yet:
-lease acquisition is deferred to **WL-0MWFJH3NW006F5GN**. Single-machine
-concurrency is already serialised by the machine-wide downtime leader plus the
-host-budget ledger, but the audit budget is **cross-machine**, so only the
-proxy can arbitrate it atomically.
+session* holds the budget, `503 audit-budget-unavailable` on registry
+failure), plus `POST /llama/local/audit/lease/renew` and
+`DELETE /llama/local/audit/lease/{session_id}`. Herdr **calls it now**:
+admission acquires a lease (session id derived from the dispatched item) once
+the availability pre-check admits, dispatch proceeds **only** on `200`, and
+every terminal path releases. The pre-check therefore never suffices to admit
+— its only roles are gating how early an acquire is attempted and staying the
+divergence/evidence signal. Single-machine concurrency is already serialised
+by the machine-wide downtime leader plus the host-budget ledger, but the audit
+budget is **cross-machine**, so only the proxy can arbitrate it atomically.
+
+**The lease protocol, token mappings and release discipline.**
+`packages/herdr/src/downtime-worker.audit-lease.ts` is the bounded
+acquire/renew/release client (one call per verb, each with the poller's
+timeout; a call that expires is aborted). Session ids are `herdr-audit-<itemId>`
+(`auditLeaseSessionId`), so a retry of the same item re-acquires the SAME
+session — the proxy answers `200` (renew) rather than a competing `429`.
+Token mappings, pinned in captured payloads:
+
+| Acquire response | Admission token | Note |
+|---|---|---|
+| `200` | admit | carries the held lease (session id, expiry when served) for the release discipline; the unverified expiry shape is read through the same tolerant alias normaliser as the availability read |
+| `429` | `audit-budget-saturated` | the proxy's `retry_after_s` is carried as `retryAfterS` on the refusal and the decision entry — the cooldown |
+| `503` | `audit-budget-unavailable` | a proxy REGISTRY failure, distinct from the local fail-closed `audit-budget-unknown`; falls back per the documented bounded wait (the next idle tick re-checks) |
+| `404` / transport / bad body | `audit-budget-unknown` | fail closed with the failing exchange as `detail`; a missing lease seam fails closed as `lease-seam-absent` — availability-only admission is exactly the race this removes |
+
+**Release discipline** mirrors the host-budget ledger: the lease is held from
+admission until a terminal path. Refusal paths never acquire (a refused
+availability/lease reads nothing to release). Marker-write failure, spawn
+failure and anchor-unavailable release through the claim pipeline
+(`releaseDispatchSlotForFailure`); an audit pane closing releases through
+`recordPaneClose`. Releases are idempotent and best-effort — an unheld
+session is a no-op, and a leaked lease is bounded by the proxy's own expiry
+(reported as `reclaimed` on the availability read).
 
 **The client** (`packages/herdr/src/downtime-worker.audit-availability.ts`,
 child `WL-0MWAMSCOP003R837`) is the counterpart of `createLocalReserver` and
@@ -1347,28 +1375,36 @@ every path (no open handle after a call). The audit gate maps `endpoint-absent`,
 (parent AC3).
 
 ### Proxy-derived audit admission — gate, vocabulary and the one-release flag
-### (WL-0MWAMSDNW000SL0E, WL-0MWAMSK9H005BOHD, parent WL-0MW95GBEG005ERHS)
+### (WL-0MWAMSDNW000SL0E, WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN,
+### parent WL-0MW95GBEG005ERHS)
 
 **The contract.** For the **audit tier only**, the capacity decision is the
-**proxy's** audit-availability verdict — not the per-host `budget.json`
+**proxy's** audit-lease arbitration — not the per-host `budget.json`
 `maxAudit` cap. The proxy owns the audit budget and the live audit-lease
 registry (sibling llm item `LP-0MW95FYMH006XYNK`), and every ContextHub host
-already talks to the proxy for model traffic, so
-`GET {proxyUrl}/llama/local/audit/availability` is the single **cross-machine**
-serialisation of the resource an audit actually contends for (the one local
-`llama-server` GPU). Two hosts can no longer independently believe they are
+already talks to the proxy for model traffic, so the availability read is the
+single **cross-machine** serialisation of the resource an audit actually
+contends for (the one local `llama-server` GPU). Two hosts can no longer
+independently believe they are
 under their own cap while contending for the same GPU — the 2026-11-03
 incident. The **implement tier is untouched** and keeps its per-host
 `budget.json` cap + local ledger.
 
-**The decision mapping.** Both the dispatcher's pre-check (`getActiveAudit`)
-and `admitHostDispatch` map one availability read through the SAME helper
-(`decideAuditAvailability`), so a refusal before selection and a refusal at
-admission agree and quote the SAME token. The proxy always wins:
+**The decision mapping (two steps, never one).** The availability read is the
+PRE-CHECK: both the dispatcher's pre-check (`getActiveAudit`) and admission
+map one read through the SAME helper (`decideAuditAvailability`), so a refusal
+before selection and a refusal at admission agree and quote the SAME token.
+Since **WL-0MWFJH3NW006F5GN** the availability verdict is NEVER the
+admission: after it admits, the admission maps the proxy lease ACQUIRE through
+`decideAuditLeaseAdmission` — dispatch proceeds only on a `200` held lease,
+`429`/`503`/transport map per the token table in the lease section above, and
+a missing lease seam fails closed (`lease-seam-absent`). Acquire happens only
+when the pre-check admits (no churn, no leak on a refused read). The proxy
+always wins:
 
 | Availability read | Audit decision | Decision-log reason | Header token |
 |---|---|---|---|
-| proxy `available: true` | admit (reserve locally for observability only) | — | — |
+| proxy `available: true` | ADMISSION still requires a held lease (200) — admit and reserve locally for observability only | — | — |
 | proxy `available: false` | skip that audit candidate and keep scanning (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) | `budget-audit` |
 | `endpoint-absent` (`404`, the proxy predates the endpoint) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'http-404'` | `budget-unknown` |
 | `unreachable` (`timeout` / `network` / `http-<status>`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + the failing exchange as `detail` | `budget-unknown` |
@@ -3434,7 +3470,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 
 | Guard | Scope | Sees | Action |
 |---|---|---|---|
-| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/availability`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
+| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS; lease-arbitrated WL-0MWFJH3NW006F5GN) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (availability read as PRE-CHECK; `POST /llama/local/audit/lease` as THE admission gate) | skip that audit candidate and keep scanning; reason `audit-budget-saturated` (429 lease or saturated availability); a `503` maps to `audit-budget-unavailable`; a non-`ok` read fails closed as `audit-budget-unknown` |
 | **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip that audit candidate and keep scanning; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
 | **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |

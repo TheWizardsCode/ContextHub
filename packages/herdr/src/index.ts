@@ -76,6 +76,11 @@ import {
   type HostBudgetLivePanesResult,
 } from './host-dispatch-budget.admission.js';
 import { isLegacyAuditBudgetEnabled, sweepClosedPanes } from './host-dispatch-budget.js';
+import {
+  auditLeaseSessionId,
+  createAuditLeaseClient,
+  type AuditLeaseAcquireOutcome,
+} from './downtime-worker.audit-lease.js';
 import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
 // User-fired (interactive) host-budget gate (WL-0MVXY0Z93002HKCZ F4): the
 // counterpart of the dispatcher's admission. At/over cap it asks first — with
@@ -1328,6 +1333,17 @@ export function createDowntimeDeps(
       } catch {
         // fail-safe: a release failure must never crash worker
       }
+      // Proxy audit lease (WL-0MWFJH3NW006F5GN AC3): the pane-close terminal
+      // path of an AUDIT pane gives the shared GPU back. Idempotent and
+      // best-effort — this must never block the pane-close record, and the
+      // proxy's own lease expiry remains the backstop.
+      if (entry.kind === 'audit' && typeof this.releaseAuditLease === 'function') {
+        try {
+          await this.releaseAuditLease(entry.itemId, cwd, { reason: 'pane-close' });
+        } catch {
+          // fail-safe: a release failure must never crash worker
+        }
+      }
       await appendPaneCloseLogEntry(cwd, entry);
     },
     // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): classify and close
@@ -1502,14 +1518,34 @@ export function createDowntimeDeps(
     ) {
       const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
       const audit = input.kind === 'audit';
-      // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD): read the SAME
-      // availability the dispatcher's pre-check read and hand the typed outcome
-      // to admission, so both reach the SAME decision. The one-release legacy
-      // flag skips the proxy entirely.
+      // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN):
+      // read the SAME availability the dispatcher's pre-check read and hand
+      // the typed outcome to admission, so both reach the SAME decision. The
+      // one-release legacy flag skips the proxy entirely.
       const auditAvailability =
         audit && !isLegacyAuditBudgetEnabled() && this.readAuditAvailability !== undefined
           ? await this.readAuditAvailability()
           : undefined;
+      // Audit-lease ACQUIRE (WL-0MWFJH3NW006F5GN AC2): the availability read
+      // is a PRE-CHECK that can never admit on its own — the admission
+      // decision is the proxy's atomic lease. The acquire is attempted ONLY
+      // when the pre-check admits (gating on the SAME helper admission uses,
+      // so the caller and admission can never disagree), so a refused
+      // availability read never churns or leaks a lease. The session id is
+      // stable per dispatch attempt (`auditLeaseSessionId(itemId)`), so a
+      // retry of this item renews rather than competes.
+      let auditLease: AuditLeaseAcquireOutcome | undefined;
+      if (
+        audit &&
+        !isLegacyAuditBudgetEnabled() &&
+        this.auditLeaseClient !== undefined &&
+        auditAvailability !== undefined
+      ) {
+        const preCheck = decideAuditAvailability(auditAvailability);
+        if (!preCheck.active) {
+          auditLease = await this.auditLeaseClient.acquire(auditLeaseSessionId(input.itemId));
+        }
+      }
       return admitHostBudgetDispatch(
         {
           kind: audit ? 'audit' : 'implement',
@@ -1527,6 +1563,7 @@ export function createDowntimeDeps(
                 onAuditBudgetEvent: (event: AuditBudgetLogEvent) =>
                   appendAuditBudgetLogEntry(input.cwd, event),
                 ...(auditAvailability !== undefined ? { auditAvailability } : {}),
+                ...(auditLease !== undefined ? { auditLease } : {}),
               }
             : {}),
         },
@@ -1563,6 +1600,20 @@ export function createDowntimeDeps(
           actor: `herdr:${process.pid}`,
         },
       );
+    },
+    // Audit lease release (WL-0MWFJH3NW006F5GN AC3): release the proxy lease
+    // an ADMITTED audit holds, re-deriving the session id from the item id
+    // (`auditLeaseSessionId`) so no state is threaded. Idempotent and
+    // best-effort: an unwired client, an unheld session or a throwing release
+    // is a non-event (a leaked lease is bounded by the proxy's own expiry,
+    // which the availability read reports as `reclaimed`).
+    async releaseAuditLease(this: DowntimeWorkerDeps, itemId: string, cwd: string, release): Promise<void> {
+      if (this.auditLeaseClient === undefined) return;
+      try {
+        await this.auditLeaseClient.release(auditLeaseSessionId(itemId));
+      } catch {
+        // best-effort: a release failure must never change a dispatch outcome
+      }
     },
     // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
     // `needsProducerReview = true` when an item exhausts its automatic
@@ -1799,6 +1850,15 @@ export async function main(): Promise<void> {
   // resolves `endpoint-absent` → the audit gate fails CLOSED as
   // `audit-budget-unknown` (never a silent revert to the per-host cap).
   downtimeDeps.readAuditAvailability = createAuditAvailabilityClient(
+    runSettings.downtimeProxyUrl,
+  );
+  // Audit-lease client (WL-0MWFJH3NW006F5GN): same wiring point as the
+  // availability client, so BOTH reads use the proxy URL from the SAME
+  // `runSettings` snapshot. A missing/older proxy answers 404 → acquire
+  // resolves `endpoint-absent` → admission fails CLOSED as
+  // `audit-budget-unknown` (never a silent revert to availability-only
+  // admission). The session id is derived per item by the admission seam.
+  downtimeDeps.auditLeaseClient = createAuditLeaseClient(
     runSettings.downtimeProxyUrl,
   );
 

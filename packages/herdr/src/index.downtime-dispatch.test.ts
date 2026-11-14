@@ -597,6 +597,19 @@ describe('createDowntimeDeps', () => {
       },
     }));
 
+    // Audit-lease client (WL-0MWFJH3NW006F5GN AC2): the admission gate — the
+    // seam mirrors the proxy state, so window 1 holds a lease (dispatch
+    // proceeds) and a saturated proxy refuses the acquire.
+    deps.auditLeaseClient = {
+      acquire: vi.fn(async () =>
+        proxySaturated
+          ? { status: 'saturated', reason: 'audit-budget-saturated', retryAfterS: 30 }
+          : { status: 'ok', lease: { sessionId: 'herdr-audit-WL-ONCE' } },
+      ),
+      renew: async () => ({ status: 'ok', lease: { sessionId: 'x', expiresAt: 0 } }),
+      release: async () => ({ status: 'ok' }),
+    } as NonNullable<typeof deps.auditLeaseClient>;
+
     // Idle window 1: audit candidate selected and dispatched.
     const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd });
     expect(first.dispatched).toBe(true);

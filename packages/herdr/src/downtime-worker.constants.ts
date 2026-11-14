@@ -49,8 +49,10 @@ export const LOCAL_RESERVE_PATH = '/llama/local/reserve';
  * answers `404`). Note the shipped `available` verdict is the NUMBER `0`/`1`,
  * not a boolean; the fail-closed parser coerces exactly those two values.
  * {@link resolveAuditAvailabilityPath} keeps the path a config change rather
- * than a code edit. Lease acquisition is out of scope here and deferred to
- * WL-0MWFJH3NW006F5GN, so this item reads availability only.
+ * than a code edit. The availability read is a PRE-CHECK (WL-0MWFJH3NW006F5GN):
+ * admission arbitrates the shared GPU through the audit-lease protocol
+ * ({@link AUDIT_LEASE_PATH} / {@link AUDIT_LEASE_RENEW_PATH}), so this read
+ * alone can never admit an audit.
  *
  * Override with {@link AUDIT_AVAILABILITY_PATH_ENV}, so a future proxy path
  * change is a config change rather than a code edit.
@@ -77,6 +79,24 @@ export function resolveAuditAvailabilityPath(
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : AUDIT_AVAILABILITY_PATH;
 }
+/**
+ * Proxy audit-lease endpoint path (WL-0MWFJH3NW006F5GN): `POST
+ * {proxyUrl}/llama/local/audit/lease`, the atomic cross-host arbiter for the
+ * shared audit budget. A `200` answers a new idempotent acquire (or renew of
+ * the caller's own session), `429` with `reason: audit-budget-saturated` and a
+ * bounded `retry_after_s` when a *different* session holds the budget, `503`
+ * with `audit-budget-unavailable` on a registry failure. The release verb is
+ * `DELETE {proxyUrl}/llama/local/audit/lease/{session_id}` — the client builds
+ * it from this constant plus the session id (see
+ * {@link audit-lease|downtime-worker.audit-lease.ts}).
+ */
+export const AUDIT_LEASE_PATH = '/llama/local/audit/lease';
+/**
+ * Proxy audit-lease RENEW path (WL-0MWFJH3NW006F5GN): `POST
+ * {proxyUrl}/llama/local/audit/lease/renew` extends the caller's held lease
+ * (the proxy answers `200`/`404` for a foreign/expired session).
+ */
+export const AUDIT_LEASE_RENEW_PATH = '/llama/local/audit/lease/renew';
 /**
  * Request/response header carrying the granted reservation ticket id
  * (`X-Local-Reservation: <ticketId>`), sent on the pane's FIRST request

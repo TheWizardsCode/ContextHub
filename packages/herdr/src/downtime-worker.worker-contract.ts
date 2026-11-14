@@ -47,6 +47,7 @@ import type {
   DowntimeHostBudgetRelease,
 } from './downtime-worker.dispatch-contract.js';
 import type { AuditAvailabilityClient } from './downtime-worker.audit-availability.js';
+import type { AuditLeaseClient } from './downtime-worker.audit-lease.js';
 import type {
   DowntimeActiveAuditResult,
   DowntimeCandidate,
@@ -366,6 +367,30 @@ export interface DowntimeWorkerDeps {
    * open — because the audit tier cannot prove availability without it.
    */
   readAuditAvailability?: AuditAvailabilityClient;
+  /**
+   * The proxy audit-lease client (WL-0MWFJH3NW006F5GN AC1/AC2): the ATOMIC
+   * cross-host arbiter for the shared audit budget. The audit admission
+   * acquires a lease (session id derived from the dispatched item) once the
+   * availability pre-check admits; dispatch proceeds only on a 200 and
+   * every terminal path releases. Production wires `createAuditLeaseClient(`
+   * `runSettings.downtimeProxyUrl)` beside `readAuditAvailability` (main()).
+   * The client never throws; only `ok` admits, a MISSING seam fails closed
+   * as `audit-budget-unknown`/`lease-seam-absent` — never open, because
+   * availability-only admission is the race this item removes. Optional: a
+   * proxy path wired without a lease seam is refused (fail closed).
+   */
+  auditLeaseClient?: AuditLeaseClient;
+  /**
+   * Release a dispatched audit's PROXY LEASE (WL-0MWFJH3NW006F5GN AC3),
+   * re-deriving the session id from the item id (`auditLeaseSessionId`).
+   * Called on every terminal path after an audit ADMITTED with a held lease;
+   * idempotent, never throws (the proxy's expiry bounds a leak).
+   */
+  releaseAuditLease?(
+    itemId: string,
+    cwd: string,
+    release?: { reason?: string },
+  ): Promise<void>;
   /**
    * Resolve the dedicated machine-wide Dispatcher anchor pane (C0
    * WL-0MTR01EU7005SYZG, F1 WL-0MTR2CD4X006XI7U): the persisted anchor pane
