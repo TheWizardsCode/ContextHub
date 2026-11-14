@@ -460,7 +460,8 @@ orders ENTRIES by **least-recently-dispatched root**
 offers inside each entry
 (see *Leader: iterating an entry's offers* above), and re-validates each offer
 at dispatch time (`fetchItem` + `classifyItemForDispatch` as sequential
-filters, no wall-clock prune). The cross-root **tier priority** (audit → critical → implement → plan → intake) and the
+filters; live offers get no wall-clock age prune — only *dead entries* whose
+instances stopped checking in are pruned, see Lifecycle 3). The cross-root **tier priority** (audit → critical → implement → plan → intake) and the
 **global critical override** are
 **retired** from the leader dispatch path — they were a second ranking and are removed by
 WL-0MTK1ILM2009QYB2 AC1–2; the per-`worklogRoot` **round-robin cursor ordering** is LIVE
@@ -610,10 +611,7 @@ change *within* an entry).
 older than `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h) — a crashed
 instance can no longer masquerade as a live peer. Treating a stale entry as an
 **absent** peer makes the leader *more* willing to sweep/arm the probe, never
-less, so the worst case is one extra idle tick polling the offer list. Entry
-expiry remains a deliberate no-op (`pruneStaleEntries` returns `0` and never
-mutates the file, WL-0MTMPIQBE001J41P); liveness lives only in the read
-predicate. See *No-candidate cooldown & the empty offer file* for the full
+less, so the worst case is one extra idle tick polling the offer list. Wall-clock entry expiry remains a deliberate no-op (`pruneStaleEntries` stays a no-op returning `0`, WL-0MTMPIQBE001J41P) and liveness lives only in this 24 h **read** predicate — distinct from the leader's **write-side** dead-entry prune (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ, Lifecycle 3), which removes entries whose instances stopped checking in on the cadence-based staleness window (default 10 min). The two never conflict: this predicate treats a stale entry as an absent peer, while the prune eventually deletes it from the file. See *No-candidate cooldown & the empty offer file* for the full
 pause contract.
 
 **Constraints preserved.** The sweep remains a **bounded window over an
@@ -900,8 +898,8 @@ offer is CONSUMED — `dispatched`, `spawn-failed` or `marker-write-failed`, via
 the shared `isConsumedDispatchOutcome` predicate — never at selection and
 never on a filter-chain drop; WL-0MWFIZ8H5005FVNN), without spawning a pane or
 writing a dispatched marker, and the offer loop **continues to the next
-offer**. An entry whose last offer is removed is dropped whole, exactly as before. Entries do **not** expire by wall-clock age.
-3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
+offer**. An entry whose last offer is removed is dropped whole, exactly as before. A **live** entry's offers do **not** expire by wall-clock age (see Lifecycle 3 — only entries whose instances stopped checking in are pruned).
+3. **Pruning — dead entries only (WL-0MWFJTKGM006BHLQ)** — wall-clock TTL pruning on `lastUpdated` is retired (`WL-0MTMPIQBE001J41P`): `pruneStaleEntries` stays a no-op returning `0`, and a **live** instance's offers still never expire by age (the dispatcher validates eligibility at dispatch time instead). What IS removed is the entry of an instance that **stopped checking in**: on its check-in path the leader calls `pruneDeadEntries` (`packages/herdr/src/coordination.ts`) once per tick, **before** the dispatch walk reads the file, so `entryRoots`, the least-recently-served ordering and the offer scan all see the pruned set in the same tick. The staleness window defaults to **2 × the check-in cadence — 10 min** (`DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS = 2 × DEFAULT_COORDINATION_CHECK_IN_MS`, so one missed check-in is tolerated), is clamped to **[1 × cadence, 24 h]** (`DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS` / `..._MAX_MS`), and is overridable via the **`downtimeCoordinationEntryStaleMs`** settings key (WL-0MWFJTULD005DTQI). The leader's own entry is exempt (it is live by definition — its check-in refreshes it in this same tick). The prune is **leader-only**, executes inside the existing `withCoordLock` read-modify-write (never a separate unlocked pass), writes the file **only when something was removed** (nothing stale ⇒ byte-identical no-op), and is **fail-open**: an unreadable/corrupt file, a lock-contended prune or a write failure skips the prune and retries next tick, never throwing out of the tick. Each pruned entry writes **one** `operation: 'prune'` coordination-log record (`logPrunedEntries`) carrying `instanceId`, `worklogRoot`, `lastSeen` (the entry's `lastUpdated`), `prunedCount: 1`, `reason: 'staleness-window'` and the `staleWindowMs` applied — so a tick's prune tally is its number of records and the rolling coordination log stays bounded. Coordination operations (check-ins, elections/takeovers, eligibility drops, prunes) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
 ### Leader-only dispatch
 
@@ -2930,10 +2928,7 @@ reads the block as work. Therefore:
   so the worst case is one extra idle tick polling the offer list — never a
   starved offer. Both orchestrator call sites (the tick-time pause-cancel and
   the dispatch-time pause-arm) pass an explicit `nowMs`, and the default
-  window applies to callers that omit the options object. Entry expiry remains
-  a deliberate no-op (`pruneStaleEntries` still returns 0 and never mutates
-  the file, WL-0MTMPIQBE001J41P); liveness lives only in the read predicate.
-  The cooldown
+  window applies to callers that omit the options object. Wall-clock entry expiry remains a deliberate no-op (`pruneStaleEntries` still returns 0 and never mutates the file, WL-0MTMPIQBE001J41P); this 24 h **read** predicate is distinct from the leader's **write-side** dead-entry prune (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ — Lifecycle 3), which deletes entries whose instances stopped checking in on the cadence-based staleness window (default 10 min, settings key `downtimeCoordinationEntryStaleMs`). The cooldown
   duration (`downtimeNoCandidateCooldownMs`, 60 min) is unchanged and still
   arms when there is genuinely nothing anywhere. The empty-leader step-down
   still fires on that cycle (see *Own-backlog fallback & leadership hand-off*
@@ -5131,8 +5126,16 @@ trace.
   (`downtime-round-robin-by-root`)* — the least-recently-DISPATCHED cursor the
   sweep reuses for root-level fairness
 - Work item: **WL-0MTMPIQBE001J41P** *stale coordination entry pruning
-  (deliberate no-op)* — entry expiry stays a no-op; liveness lives only in
-  the `hasPeerOffer` read predicate
+  (deliberate no-op)* — wall-clock TTL entry expiry stays a no-op; liveness
+  lives only in the `hasPeerOffer` read predicate; **dead-entry** pruning
+  (instances that stopped checking in) is implemented by `pruneDeadEntries`
+  (WL-0MWFJTKGM006BHLQ, Lifecycle 3)
+- Work item: **WL-0MWFJTKGM006BHLQ** *Prune dead coordination entries
+  end-to-end* — leader-only `pruneDeadEntries` on the check-in path,
+  one `operation: 'prune'` log record per pruned entry (Lifecycle 3)
+- Work item: **WL-0MWFJTULD005DTQI** *Settings key for coordination entry
+  staleness* — `downtimeCoordinationEntryStaleMs`, default 2 × check-in
+  cadence (10 min), clamped [1 × cadence, 24 h] (Lifecycle 3, timing table)
 - Work item: **WL-0MST3OJ8S0001ROL** *Refactor Downtime Dispatcher: leader
   election with shared coordination file* — the coordination/offer
   architecture the registered-root sweep composes with

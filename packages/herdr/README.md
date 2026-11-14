@@ -391,7 +391,7 @@ dispatches; the other herdr instances coordinate instead of polling:
   migration — stale files orphaned, ignored).
 - **Shared coordination file** — machine-wide
   `~/.herdr/downtime/downtime-coordination.json` (or
-  `HERDR_COORDINATION_DIR`): entries **do not expire by age**; every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 5 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — offering its most-important item as
+  `HERDR_COORDINATION_DIR`): a **live** instance's entry does **not** expire by age (it re-checks in on the cadence, so its entry never reaches the staleness window) — only entries whose instances **stopped checking in** are pruned by the leader (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ; default window 2 × the check-in cadence = 10 min, settings key `downtimeCoordinationEntryStaleMs` — see the dispatcher doc's Lifecycle 3); every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 5 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — offering its most-important item as
   `{instanceId, workItemId, worklogRoot/directory, assignedAt, lastUpdated}`
   (`worklogRoot` lets the single leader dispatch across roots — F4). When the leader dispatches an entry and removes it, the owning instance **re-offers immediately on its next tick** (coordination-file observation — no extra poll). Re-offer also refreshes leadership every tick from the lease file.
   **Schema v2 (tier-aware offers, parent WL-0MWDDHQON0015T3P, per-bucket
@@ -422,7 +422,8 @@ dispatches; the other herdr instances coordinate instead of polling:
   nominee per bucket — see *Shared coordination file* above). Every offer is
   re-validated **at dispatch time**
   (`fetchItem` → `classifyItemForDispatch`/stage+status as the sole gate;
-  no wall-clock prune — WL-0MTMPIQBE001J41P) and the same sequential
+  live offers get no wall-clock age prune — only *dead entries* whose
+  instances stopped checking in are pruned by the leader, WL-0MWFJTKGM006BHLQ) and the same sequential
   safety filters (producer-review gate, code-freeze split-by-skill,
   free-slot minimums) are applied **per offer**, unchanged. The cross-root **tier priority** is **retired**
   (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); the root-level
@@ -462,7 +463,9 @@ dispatches; the other herdr instances coordinate instead of polling:
   [cross-root mechanism section](../../docs/dev/downtime-dispatcher.md#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots).
   The dispatched entry is
   **removed**; its owner re-offers its next Herdr head at the next
-  check-in. There is **no TTL-based pruning**. **Cost (parent AC10):** the
+  check-in. There is **no TTL-based pruning of a live entry's offers** —
+  the only age-based removal is the leader's **dead-entry** prune of
+  instances that stopped checking in (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ). **Cost (parent AC10):** the
   per-offer re-validation adds **one `fetchItem` per offered item per tick** —
   up to **3× the pre-v2 single-offer cost**. Measured at 7 instances
   (`npm run benchmark:leader-tick-cost`): 21 fetches, ≈ 4.0–5.8 s tick with a
