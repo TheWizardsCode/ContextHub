@@ -56,6 +56,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
 | `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota`, `reduceAuditDisplayCounts` |
+| `host-dispatch-budget.audit.ts` | Append-only audit trail for ledger mutations: one JSONL line per reserve/confirm/release/reap/sweep/repair, bounded by the coordination-log retention policy, fail-open (WL-0MWFJDGXQ001OXP8) | `appendBudgetAuditLine`, `budgetAuditTrailPath`, `readBudgetAuditTrail`, `budgetAuditRotatedFiles` |
 | `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (proxy-derived audit admission, fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `decideAuditAvailability`, `detectAuditDivergence`, `readAuditBudgetState` (legacy only), `confirmHostDispatch`, `releaseHostDispatch` |
 | `host-dispatch-budget.interactive.ts` | User-fired over-quota gate half: tier detection and prompt-then-claim (F4) | `budgetKindForAgentCommand`, `prepareInteractiveAgentDispatch` |
 | `host-budget-dialog.ts` | Pure bottom-anchored over-quota dialog + the renderer↔awaiter prompt host (F4) | `formatHostBudgetDialog`, `overlayHostBudgetDialog`, `createHostBudgetPromptHost` |
@@ -2936,6 +2937,54 @@ Beneath the table, existing capacity gates remain the inner limiter: free-slot
 minimums, the local reservation/prefill pacing, contention and the host-CPU
 gate all still apply, in their existing order.
 
+#### The ledger's audit trail (WL-0MWFJDGXQ001OXP8)
+
+The ledger keeps current state only, so "the in-flight count is wrong" used to
+be undiagnosable: nothing recorded *which* operation removed an entry, for
+which item or pane, or why. Every mutation now writes one JSONL line to
+`~/.herdr/downtime/dispatch-budget.log` (`host-dispatch-budget.audit.ts`):
+
+```json
+{"at":"2026-11-13T19:40:02.114Z","op":"release","kind":"implement",
+ "itemId":"AH-0MW0KSCU20096B02","paneId":"w50:p64",
+ "instanceId":"herdr:2711","reason":"anchor-unavailable",
+ "actor":"herdr:2711","liveBefore":5,"liveAfter":4}
+```
+
+- `op` — `reserve` | `confirm` | `release` | `reap` | `sweep` | `repair`.
+  `reap`/`sweep` emit **one line per removed entry**, so each deletion is
+  attributable (the RCA question). `repair` is one line with `kind: "all"`
+  and `itemId: ""`.
+- `reason` — the abort path that caused it (`anchor-unavailable`,
+  `admission-refused`, `marker-write-failed`, `spawn-failed`, `pane-close`) or
+  the operation default (`reap-stale`, `sweep-closed-pane`,
+  `dispatch-reserve`, `dispatch-confirm`, `dispatch-release`,
+  `repair-from-live-panes`).
+- `actor` — who performed the mutation (`herdr:<pid>` by default).
+- `liveBefore` / `liveAfter` — entries of that `kind` before and after the
+  mutation; `-1` means unknowable (a repair over unreadable bytes).
+
+Retention reuses the coordination-log policy (500 lines per file, 3 numbered
+siblings ⇒ 1 501–2 000 retained lines) through the shared rolling-write plan in
+`downtime-log-storage.ts`, so the trail cannot grow without bound. The write is
+**fail-open**: a read-only, full or malformed trail never throws, never blocks a
+dispatch and never changes an admission decision. The over-quota dialog names
+the trail path.
+
+**RCA procedure when the counter disagrees with reality.**
+
+1. `herdr pane list | jq -r '.result.panes[] | select(.label) | .label'` — the
+   panes actually running.
+2. `cat ~/.herdr/downtime/dispatch-budget.json` — the entries the counter
+   believes in.
+3. `grep -h . ~/.herdr/downtime/dispatch-budget.log* | jq -s` (the current file
+   **and** its `.1`…`.3` siblings) and filter by the item or pane in question:
+   every `release`/`reap`/`sweep`/`repair` line names the operation, the
+   reason, the actor and the count before/after, so the operation that removed
+   a live entry is identified by name.
+4. Compare `liveBefore`/`liveAfter` per line against the header figure to see
+   which tick moved the number.
+
 #### Continuable vs terminal outcomes (WL-0MWBT76WY00298AY)
 
 A head scan (`dispatchFromOwnHead`, and both loops of `dispatchFromHerdrList`)
@@ -4407,6 +4456,7 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
 | `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — the least-recently-served root starts the offer ordering and the registered-root sweep (WL-0MTJDX4M4007YH5U; fail-open) |
 | `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `implement`/`audit` dispatch (WL-0MVXY0WQF0069YDJ); audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
+| `~/.herdr/downtime/dispatch-budget.log` | **Append-only audit trail** of every ledger mutation (WL-0MWFJDGXQ001OXP8): one JSONL line per reserve/confirm/release/reap/sweep/repair carrying `at`, `op`, `kind`, `itemId`, `paneId`, `instanceId`, `reason`, `actor`, `liveBefore`, `liveAfter`. Bounded by the coordination-log retention policy (500 lines/file × 4 files). Fail-open — a broken trail never blocks a dispatch. Rotated siblings are `dispatch-budget.log.1`…`.3` |
 | `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
 | `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired** (WL-0MVXY0XPF006YUHA F2): a non-stale file written by an older instance is still read as ONE synthetic audit entry; this version never creates or removes it |
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |

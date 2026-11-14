@@ -87,13 +87,17 @@ async function releaseHostBudgetForFailure(
   kind: DowntimeSkillKind,
   itemId: string,
   cwd: string,
+  reason: string,
 ): Promise<void> {
   // The ledger records only implement/audit entries; plan/intake/scheduled
   // dispatches never reserve, so there is nothing to release.
   if (kind !== 'implement' && kind !== 'audit') return;
   if (typeof deps.releaseHostDispatch !== 'function') return;
   try {
-    await deps.releaseHostDispatch(itemId, cwd);
+    // `reason` labels the abort path in the ledger's audit trail
+    // (WL-0MWFJDGXQ001OXP8): the 2026-11-13 RCA could not attribute a single
+    // deletion, and these four call sites are exactly the candidate culprits.
+    await deps.releaseHostDispatch(itemId, cwd, reason);
   } catch {
     // best-effort: a release failure must never mask the dispatch outcome
   }
@@ -128,7 +132,7 @@ async function abortForAnchorUnavailable(
 ): Promise<DowntimeDispatchOutcome> {
   const releasedReservation: DowntimeReservationEvidence | undefined =
     reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
-  await releaseHostBudgetForFailure(deps, kind, itemId, cwd);
+  await releaseHostBudgetForFailure(deps, kind, itemId, cwd, 'anchor-unavailable');
   const rollbackOk = await rollbackClaimForFailure(deps, itemId, claimExpected, cwd);
   return {
     dispatched: false,
@@ -380,7 +384,7 @@ export async function dispatchClaimedTier(
       // frees a slot (AC2/AC3).
       const releasedReservation: DowntimeReservationEvidence | undefined =
         reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
-      await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
+      await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd, 'admission-refused');
       const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
       return {
         dispatched: false,
@@ -489,7 +493,7 @@ export async function dispatchClaimedTier(
   if (!marked) {
     // Host-budget release (F3 AC3): a claimed-but-unmarked dispatch never
     // spawns, so its reservation must not outlive it.
-    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
+    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd, 'marker-write-failed');
     // Marker-write recovery (WL-0MT32F908002YFFA AC1): the CAS claim
     // succeeded but the marker write failed — the item is stranded in
     // `in_progress` with no marker, invisible to all future tiers.
@@ -559,7 +563,7 @@ export async function dispatchClaimedTier(
   if (!spawn.ok) {
     // Host-budget release (F3 AC3): the pane never appeared, so the reserved
     // slot is given back before the (long) failure-trace path below.
-    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
+    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd, 'spawn-failed');
     // Placeholder root-pane cleanup (WL-0MW5JE0SZ0057K30, defence in depth):
     // the item tab was provisioned but the split failed, so the blank root
     // pane is the only thing left in the tab. Close it (fail-safe — a live

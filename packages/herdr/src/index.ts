@@ -1413,10 +1413,20 @@ export function createDowntimeDeps(
         // pane read no longer lists (operator/herdr close, crashed session).
         // Both are best-effort — the reaper wraps them fail-open.
         releasePaneBudget: async (pane) => {
-          if (pane.itemId !== '') releaseHostBudgetDispatch(pane.itemId);
+          if (pane.itemId !== '') {
+            // `pane-close` in the audit trail: a sibling pane close for the
+            // same item was one of the ways a LIVE entry vanished
+            // (WL-0MWFJDGXQ001OXP8).
+            releaseHostBudgetDispatch(pane.itemId, {
+              reason: 'pane-close',
+              actor: `herdr:${process.pid}`,
+            });
+          }
         },
         sweepBudgetLedger: async (panes) => {
-          sweepClosedPanes(panes.map((pane) => ({ paneId: pane.paneId })));
+          sweepClosedPanes(panes.map((pane) => ({ paneId: pane.paneId })), {
+            actor: `herdr:${process.pid}`,
+          });
         },
       });
       const result = await runScheduledPaneClose(
@@ -1519,8 +1529,11 @@ export function createDowntimeDeps(
         // best-effort: the pane-close release remains the backstop
       }
     },
-    async releaseHostDispatch(itemId): Promise<void> {
-      releaseHostBudgetDispatch(itemId);
+    async releaseHostDispatch(itemId, _cwd, reason): Promise<void> {
+      releaseHostBudgetDispatch(itemId, {
+        ...(reason !== undefined ? { reason } : {}),
+        actor: `herdr:${process.pid}`,
+      });
     },
     // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
     // `needsProducerReview = true` when an item exhausts its automatic

@@ -32,6 +32,11 @@
  * ## `HERDR_COORDINATION_DIR`, see `machine-coordination.ts`)
  *
  *  - `dispatch-budget.json` — the ledger (this module's only write target).
+ *  - `dispatch-budget.log` — the append-only audit trail of every mutation
+ *    (reserve/confirm/release/reap/sweep/repair), written by
+ *    `host-dispatch-budget.audit.ts` from inside the ledger lock. Bounded by
+ *    the coordination-log retention policy; fail-open, so it can never block
+ *    a dispatch or change a decision (WL-0MWFJDGXQ001OXP8).
  *  - `budget.json` — the per-tier caps (read-only here; the operator writes it):
  *    `{ "maxImplement": 2, "maxAudit": 1 }`. `maxImplement` governs the
  *    implement tier; `maxAudit` is the legacy/observability figure only (see
@@ -53,6 +58,16 @@
  * `startedAt`), `release(itemId)` removes. Entries are written by this module
  * only; a hand-edited or future-format document is `unknown`, never silently
  * reinterpreted (a dropped entry would under-count and admit too much work).
+ *
+ * ## Audit trail (WL-0MWFJDGXQ001OXP8)
+ *
+ * Every mutation writes one JSONL line to `dispatch-budget.log` (`at`, `op`,
+ * `kind`, `itemId`, `paneId`, `instanceId`, `reason`, `actor`, `liveBefore`,
+ * `liveAfter`) — one line per removed entry for `reap`/`sweep`, so a
+ * disappeared entry is attributable to the operation, item, pane and instance
+ * that removed it. The write happens inside the ledger lock after the document
+ * write succeeds and is fail-open: a broken trail never changes a ledger
+ * result. See `host-dispatch-budget.audit.ts` for the line contract.
  *
  * ## Concurrency (no new locking scheme)
  *
@@ -172,6 +187,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { withCoordLock } from './coordination.js';
+import {
+  appendBudgetAuditLine,
+  type BudgetAuditKind,
+  type BudgetAuditOp,
+} from './host-dispatch-budget.audit.js';
 import {
   DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS,
   ensureMachineCoordinationDir,
@@ -306,6 +326,19 @@ export interface HostBudgetOptions {
   staleWindowMs?: number;
   /** Environment view for the config env overrides. */
   env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Audit-trail `actor` — who performed the mutation
+   * (`host-dispatch-budget.audit.ts`, WL-0MWFJDGXQ001OXP8). Defaults to
+   * `herdr:<pid>`; the dispatcher passes its own label so a deletion can be
+   * attributed to the process that made it.
+   */
+  actor?: string;
+  /**
+   * Audit-trail `reason` — why this mutation happened (`pane-close`,
+   * `anchor-unavailable`, …). Defaults to a per-operation reason, so a caller
+   * with nothing to add still gets a meaningful line.
+   */
+  reason?: string;
 }
 
 /** Inputs to {@link reserve}. */
@@ -316,6 +349,12 @@ export interface HostBudgetReserveInput {
   root: string;
   paneId?: string;
   override?: { by: 'user' };
+  /**
+   * Which audit-trail operation this write is: a first reservation or the
+   * post-spawn `confirm` that writes the pane id back
+   * (`host-dispatch-budget.audit.ts`). Defaults to `reserve`.
+   */
+  op?: 'reserve' | 'confirm';
 }
 
 /** Why a budget operation could not complete. */
@@ -907,6 +946,83 @@ function withLedgerLock<T extends object>(
   return outcome;
 }
 
+// ── Audit trail (WL-0MWFJDGXQ001OXP8) ──────────────────────────────────
+
+/**
+ * Default audit-trail `reason` per operation, used when the caller supplied
+ * none. Deliberately operation-shaped rather than prose: the trail is grepped
+ * by reason during an RCA.
+ */
+const DEFAULT_AUDIT_REASON: Readonly<Record<BudgetAuditOp, string>> = {
+  reserve: 'dispatch-reserve',
+  confirm: 'dispatch-confirm',
+  release: 'dispatch-release',
+  reap: 'reap-stale',
+  sweep: 'sweep-closed-pane',
+  repair: 'repair-from-live-panes',
+};
+
+/** Entries of `kind` (or the whole document for `all`) — the trail's evidence. */
+function auditCountOf(
+  entries: readonly HostBudgetEntry[],
+  kind: BudgetAuditKind,
+): number {
+  if (kind === 'all') return entries.length;
+  return entries.filter((entry) => entry.kind === kind).length;
+}
+
+/** One audit-trail line to write for a completed mutation. */
+interface BudgetAuditEmission {
+  op: BudgetAuditOp;
+  kind: BudgetAuditKind;
+  itemId: string;
+  paneId?: string;
+  instanceId: string;
+  liveBefore: number;
+  liveAfter: number;
+}
+
+/**
+ * Write the audit-trail lines for one completed mutation
+ * (WL-0MWFJDGXQ001OXP8).
+ *
+ * Fail-open by contract: the trail writer never throws and a failure here
+ * never turns into a ledger failure, so a broken/read-only/unwritable
+ * `dispatch-budget.log` can never block a dispatch or change an admission
+ * decision. Called from INSIDE the ledger lock, after the ledger write
+ * succeeded, so the trail and the document cannot disagree about what
+ * happened.
+ */
+function emitBudgetAudit(
+  dir: string,
+  opts: HostBudgetOptions,
+  emissions: readonly BudgetAuditEmission[],
+): void {
+  if (emissions.length === 0) return;
+  try {
+    const at = new Date(opts.now ?? Date.now()).toISOString();
+    const actor = opts.actor ?? `herdr:${process.pid}`;
+    for (const emission of emissions) {
+      appendBudgetAuditLine(dir, {
+        at,
+        op: emission.op,
+        kind: emission.kind,
+        itemId: emission.itemId,
+        ...(emission.paneId !== undefined && emission.paneId !== ''
+          ? { paneId: emission.paneId }
+          : {}),
+        instanceId: emission.instanceId,
+        reason: opts.reason ?? DEFAULT_AUDIT_REASON[emission.op],
+        actor,
+        liveBefore: emission.liveBefore,
+        liveAfter: emission.liveAfter,
+      });
+    }
+  } catch {
+    // logging is not a gate (fail-open, belt-and-suspenders)
+  }
+}
+
 // ── Public ledger API ──────────────────────────────────────────────────
 
 /**
@@ -965,6 +1081,17 @@ export function reserve(
       ],
     };
     if (!writeBudgetAt(dir, next)) return ioError();
+    emitBudgetAudit(dir, opts, [
+      {
+        op: input.op === 'confirm' ? 'confirm' : 'reserve',
+        kind: input.kind,
+        itemId: input.itemId,
+        ...(paneId !== undefined ? { paneId } : {}),
+        instanceId: input.instanceId,
+        liveBefore: auditCountOf(ledger.entries, input.kind),
+        liveAfter: auditCountOf(next.entries, input.kind),
+      },
+    ]);
     return { ok: true as const, entry };
   });
 }
@@ -979,10 +1106,27 @@ export function release(itemId: string, opts: HostBudgetOptions = {}): ReleaseRe
   const dir = resolveBudgetDir(opts);
   if (dir === null) return noDir();
   return withLedgerLock(dir, (ledger) => {
+    const removedEntry = ledger.entries.find((entry) => entry.itemId === itemId);
     const next = ledger.entries.filter((entry) => entry.itemId !== itemId);
     if (next.length === ledger.entries.length) return { ok: true as const, removed: false };
     if (!writeBudgetAt(dir, { version: DISPATCH_BUDGET_VERSION, entries: next })) {
       return ioError();
+    }
+    // The trail line names the REMOVED entry's own identity (kind, item, pane,
+    // owning instance): an unattributable deletion is exactly what the RCA
+    // could not resolve (WL-0MWFJDGXQ001OXP8).
+    if (removedEntry !== undefined) {
+      emitBudgetAudit(dir, opts, [
+        {
+          op: 'release',
+          kind: removedEntry.kind,
+          itemId: removedEntry.itemId,
+          ...(removedEntry.paneId !== undefined ? { paneId: removedEntry.paneId } : {}),
+          instanceId: removedEntry.instanceId,
+          liveBefore: auditCountOf(ledger.entries, removedEntry.kind),
+          liveAfter: auditCountOf(next, removedEntry.kind),
+        },
+      ]);
     }
     return { ok: true as const, removed: true };
   });
@@ -1017,10 +1161,27 @@ export function replaceBudget(
   }
   if (!ensureMachineCoordinationDir(dir)) return ioError();
   const outcome = withCoordLock(dir, (): ReplaceBudgetResult => {
+    // The pre-write count is best-effort: a repair exists precisely because the
+    // document may be unreadable, so `-1` (unknown) is the honest evidence
+    // (WL-0MWFJDGXQ001OXP8).
+    const before = readBudgetAt(dir);
+    const liveBefore = before.ok ? before.ledger.entries.length : -1;
     const written = writeBudgetAt(dir, {
       version: DISPATCH_BUDGET_VERSION,
       entries: normalized,
     });
+    if (written) {
+      emitBudgetAudit(dir, opts, [
+        {
+          op: 'repair',
+          kind: 'all',
+          itemId: '',
+          instanceId: opts.actor ?? `herdr:${process.pid}`,
+          liveBefore,
+          liveAfter: normalized.length,
+        },
+      ]);
+    }
     return written ? { ok: true as const, count: normalized.length } : ioError();
   });
   if (outcome === null) return { ok: false, unknown: false, reason: 'lock-contention' };
@@ -1056,6 +1217,19 @@ export function reap(
     ) {
       return ioError();
     }
+    emitBudgetAudit(
+      dir,
+      opts,
+      reduction.reaped.map((entry) => ({
+        op: 'reap' as const,
+        kind: entry.kind,
+        itemId: entry.itemId,
+        ...(entry.paneId !== undefined ? { paneId: entry.paneId } : {}),
+        instanceId: entry.instanceId,
+        liveBefore: auditCountOf(ledger.entries, entry.kind),
+        liveAfter: auditCountOf(reduction.retained, entry.kind),
+      })),
+    );
     return { ok: true as const, reaped: reduction.reaped.length, counts: reduction.counts };
   });
 }
@@ -1093,6 +1267,19 @@ export function sweepClosedPanes(
     ) {
       return ioError();
     }
+    emitBudgetAudit(
+      dir,
+      opts,
+      reduction.reaped.map((entry) => ({
+        op: 'sweep' as const,
+        kind: entry.kind,
+        itemId: entry.itemId,
+        ...(entry.paneId !== undefined ? { paneId: entry.paneId } : {}),
+        instanceId: entry.instanceId,
+        liveBefore: auditCountOf(ledger.entries, entry.kind),
+        liveAfter: auditCountOf(reduction.retained, entry.kind),
+      })),
+    );
     return { ok: true as const, reaped: reduction.reaped.length, counts: reduction.counts };
   });
 }

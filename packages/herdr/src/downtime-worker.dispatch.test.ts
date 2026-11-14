@@ -1253,7 +1253,7 @@ describe('host-wide dispatch budget (F3)', () => {
     // in_progress) and the reservation is released on that abort path.
     expect(deps.claimItem).toHaveBeenCalledTimes(1);
     expect(deps.rollbackClaim).toHaveBeenCalledTimes(1);
-    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo');
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo', 'admission-refused');
     // AC5: the tick ends on the neutral refusal — never 'no-candidate' — so the
     // worker enters no cooldown and no strike.
     expect(outcome.reason).not.toBe('no-candidate');
@@ -1289,7 +1289,7 @@ describe('host-wide dispatch budget (F3)', () => {
     expect(outcome.reason).toBe('claim-rolled-back');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     // AC3: marker-write failure is an abort path — no leaked reservation.
-    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo');
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo', 'marker-write-failed');
   });
 
   it('releases the reservation when the pane spawn fails', async () => {
@@ -1304,7 +1304,7 @@ describe('host-wide dispatch budget (F3)', () => {
 
     expect(outcome.reason).toBe('spawn-failed');
     // AC3: spawn failure is an abort path — no leaked reservation.
-    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo');
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-IMP', '/repo', 'spawn-failed');
   });
 
   it('confirms the reservation with the spawned pane id', async () => {
@@ -1378,7 +1378,7 @@ describe('host-wide dispatch budget — audit tier (F2)', () => {
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     expect(deps.recordDispatch).not.toHaveBeenCalled();
     expect(deps.rollbackClaim).toHaveBeenCalledTimes(1);
-    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo');
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo', 'admission-refused');
     // AC4: a neutral skip — never a strike/cooldown token.
     expect(outcome.reason).not.toBe('no-candidate');
   });
@@ -1395,7 +1395,7 @@ describe('host-wide dispatch budget — audit tier (F2)', () => {
 
     expect(outcome.reason).toBe('claim-rolled-back');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo');
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo', 'marker-write-failed');
   });
 
   it('releases the audit reservation when the pane spawn fails (AC5)', async () => {
@@ -1409,7 +1409,7 @@ describe('host-wide dispatch budget — audit tier (F2)', () => {
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.reason).toBe('spawn-failed');
-    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo');
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith('WL-AUD', '/repo', 'spawn-failed');
   });
 
   it('reports the host-budget token the pre-check returned, with its evidence (AC1/AC3)', async () => {

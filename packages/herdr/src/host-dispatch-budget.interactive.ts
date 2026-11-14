@@ -57,6 +57,7 @@ import {
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
 import { getMachineCoordinationDir } from './machine-coordination.js';
+import { budgetAuditTrailPath } from './host-dispatch-budget.audit.js';
 import type { HostBudgetDialogChoice, HostBudgetPromptRequest } from './host-budget-dialog.js';
 import { extractWorkItemId } from './index.pane-capture.js';
 
@@ -290,8 +291,16 @@ export async function prepareInteractiveAgentDispatch(
   }
 
   // At or over cap: ask. `formatHostBudgetHeadline` (the dialog renderer)
-  // quotes the same live/max/overshoot figures.
-  const request: HostBudgetPromptRequest = { kind, live: counted.live, max };
+  // quotes the same live/max/overshoot figures, and `trailPath` names the
+  // ledger's audit trail so the operator knows where to read WHY the figure
+  // moved (WL-0MWFJDGXQ001OXP8).
+  const trailDir = getMachineCoordinationDir();
+  const request: HostBudgetPromptRequest = {
+    kind,
+    live: counted.live,
+    max,
+    ...(trailDir !== null ? { trailPath: budgetAuditTrailPath(trailDir) } : {}),
+  };
   const choice = await deps.confirm(request);
   if (choice !== 'proceed') {
     // Cancel is the safe default: NO claim, NO pane, NO ledger entry (AC6).

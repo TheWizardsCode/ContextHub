@@ -176,6 +176,23 @@ describe('formatHostBudgetDialog (AC1)', () => {
     const output = stripAnsi(formatHostBudgetDialog(100, makeRequest({ live: 4, max: 2 })));
     expect(output).toContain('(4 running, max 2) — over by 3.');
   });
+
+  it('names the ledger audit trail when the request carries its path', () => {
+    // The RCA entry point (WL-0MWFJDGXQ001OXP8): the operator can read the
+    // operations that moved the in-flight figure.
+    const output = stripAnsi(
+      formatHostBudgetDialog(
+        100,
+        makeRequest({ trailPath: '/home/op/.herdr/downtime/dispatch-budget.log' }),
+      ),
+    );
+    expect(output).toContain('trail: /home/op/.herdr/downtime/dispatch-budget.log');
+  });
+
+  it('adds no trail line when the path is unknown', () => {
+    const output = stripAnsi(formatHostBudgetDialog(100, makeRequest()));
+    expect(output).not.toContain('trail:');
+  });
 });
 
 describe('overlayHostBudgetDialog (AC1)', () => {

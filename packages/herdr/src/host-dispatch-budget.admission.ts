@@ -817,6 +817,9 @@ export function confirmHostDispatch(
       instanceId: input.instanceId,
       root: input.root,
       ...(input.paneId !== undefined ? { paneId: input.paneId } : {}),
+      // Distinguished in the audit trail from the first reservation, so an RCA
+      // can see when the pane id was written back (WL-0MWFJDGXQ001OXP8).
+      op: 'confirm',
     },
     opts,
   ).ok;
@@ -826,6 +829,10 @@ export function confirmHostDispatch(
  * Release a dispatch's reservation (pane close, abort path, failed claim
  * rollback). Idempotent and best-effort: never throws, and a missing entry is
  * a successful no-op, so every release path may call it unconditionally.
+ *
+ * `opts.reason` / `opts.actor` are forwarded to the audit trail, so a deletion
+ * records WHY it happened (`anchor-unavailable`, `pane-close`, …) and who did
+ * it — the attribution the 2026-11-13 RCA lacked (WL-0MWFJDGXQ001OXP8).
  */
 export function releaseHostDispatch(
   itemId: string,

@@ -235,7 +235,11 @@ describe('no orphaned placeholder pane — pre-spawn aborts (WL-0MW5JE0SZ0057K30
       { status: 'open', stage: 'plan_complete' },
       '/repo',
     );
-    expect(deps.releaseHostDispatch).toHaveBeenCalledWith(IMPLEMENT_CANDIDATE.id, '/repo');
+    expect(deps.releaseHostDispatch).toHaveBeenCalledWith(
+      IMPLEMENT_CANDIDATE.id,
+      '/repo',
+      'anchor-unavailable',
+    );
   });
 });
 

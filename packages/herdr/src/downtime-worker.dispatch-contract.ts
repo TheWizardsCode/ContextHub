@@ -181,8 +181,12 @@ export interface DowntimeDispatchDeps {
   /**
    * Release a host-budget reservation (AC3): every abort path in the claim
    * pipeline, and the pane-close handler. Idempotent, never throws.
+   *
+   * `reason` (WL-0MWFJDGXQ001OXP8) is recorded verbatim in the ledger's audit
+   * trail so an aborted attempt's deletion is attributable; absent keeps the
+   * trail's default wording.
    */
-  releaseHostDispatch?(itemId: string, cwd: string): Promise<void>;
+  releaseHostDispatch?(itemId: string, cwd: string, reason?: string): Promise<void>;
   /** Machine-wide stalled-work scan (see `DowntimeWorkerDeps`). */
   scanStalledPanes?(cwd: string, opts: StalledScanOptions): Promise<StalledPaneCandidate[]>;
   /**

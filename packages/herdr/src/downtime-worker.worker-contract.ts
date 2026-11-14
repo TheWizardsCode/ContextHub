@@ -572,8 +572,12 @@ export interface DowntimeWorkerDeps {
    * closes. Must be idempotent and never throw — a missing entry is a
    * successful no-op, and stale entries are additionally reaped by the ledger's
    * own staleness rule.
+   *
+   * `reason` (WL-0MWFJDGXQ001OXP8) is recorded in the ledger's audit trail so
+   * an aborted attempt's deletion is attributable to the abort path that
+   * caused it; absent keeps the trail's default wording.
    */
-  releaseHostDispatch?(itemId: string, cwd: string): Promise<void>;
+  releaseHostDispatch?(itemId: string, cwd: string, reason?: string): Promise<void>;
   /**
    * Flag an item for producer review (`needsProducerReview = true`) after its
    * automatic dispatch budget is exhausted (WL-0MUKYEXMK0033MFK AC3). Called
