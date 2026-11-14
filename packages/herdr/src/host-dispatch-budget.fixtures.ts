@@ -74,6 +74,8 @@ export type FakeBudgetKind = 'implement' | 'audit';
 export interface FakeBudgetEntry {
   kind: FakeBudgetKind;
   itemId: string;
+  /** Attempt token (WL-0MWFJD5T4003OM91); absent on legacy entries. */
+  attemptId?: string;
   instanceId: string;
   paneId?: string;
   root: string;
@@ -227,6 +229,7 @@ export function makeBudgetEntry(overrides: Partial<FakeBudgetEntry> = {}): FakeB
   return {
     kind: overrides.kind ?? 'implement',
     itemId: overrides.itemId ?? 'WL-TEST',
+    ...(overrides.attemptId !== undefined ? { attemptId: overrides.attemptId } : {}),
     instanceId: overrides.instanceId ?? 'instance-1',
     ...(overrides.paneId !== undefined ? { paneId: overrides.paneId } : {}),
     root: overrides.root ?? '/repo/test',

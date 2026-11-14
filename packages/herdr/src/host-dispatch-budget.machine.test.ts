@@ -243,7 +243,7 @@ describe('host dispatch budget — machine admission (F3)', () => {
       { kind: 'implement', itemId: 'WL-A', instanceId: INSTANCE_A, root: '/repo/test' },
       { livePanes: makeLivePaneList(['WL-OTHER']), dir: null },
     );
-    expect(admission).toEqual({ admitted: true, live: 0, max: 2 });
+    expect(admission).toMatchObject({ admitted: true, live: 0, max: 2 });
   });
 
   it('honours an operator-written budget.json and counts only fresh, live-pane entries', () =>
@@ -312,7 +312,7 @@ describe('host dispatch budget — audit tier (F2)', () => {
 
       // The first audit reserves the slot. No pane confirmation is needed: the
       // audit tier counts a fresh reservation immediately (marker semantics).
-      expect(auditAdmit('WL-A', panes)).toEqual({ admitted: true, live: 0, max: 1 });
+      expect(auditAdmit('WL-A', panes)).toMatchObject({ admitted: true, live: 0, max: 1 });
 
       // The second audit is refused at the cap, with the retired marker's reason
       // token (existing consumers keep working) and the observed evidence.
@@ -334,8 +334,8 @@ describe('host dispatch budget — audit tier (F2)', () => {
         auditPane('pane-2', 'WL-B'),
       ]);
 
-      expect(auditAdmit('WL-A', panes)).toEqual({ admitted: true, live: 0, max: 2 });
-      expect(auditAdmit('WL-B', panes)).toEqual({ admitted: true, live: 1, max: 2 });
+      expect(auditAdmit('WL-A', panes)).toMatchObject({ admitted: true, live: 0, max: 2 });
+      expect(auditAdmit('WL-B', panes)).toMatchObject({ admitted: true, live: 1, max: 2 });
       expect(auditAdmit('WL-C', panes)).toEqual({
         admitted: false,
         live: 2,
@@ -402,29 +402,44 @@ describe('host dispatch budget — audit tier (F2)', () => {
       );
 
       expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
-      expect(auditAdmit('WL-NEW', [])).toEqual({ admitted: true, live: 0, max: 1 });
+      expect(auditAdmit('WL-NEW', [])).toMatchObject({ admitted: true, live: 0, max: 1 });
       expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-NEW']);
       // Retirement: the stale file is neither counted nor deleted (an operator
       // or the older instance owns it).
       expect(readActiveAuditMarker(dir)).not.toBeNull();
     }));
 
-  it('AC5: every release point (pane close, dispatch failure, claim rollback) frees the slot by item id', () =>
+  it('AC5: every release point (pane close, dispatch failure, claim rollback) frees the slot by identity', () =>
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
 
       // All three abort paths in the claim pipeline call the same release seam
-      // (`releaseHostDispatch` / `releaseHostBudgetForFailure`), so a
-      // release-by-item-id assertion covers each of them; the per-path CALL
-      // SITES are asserted individually in `downtime-worker.dispatch.test.ts`
-      // (marker-write failure, spawn failure, admission refusal) and
-      // `index.test.ts` (pane close).
+      // (`releaseHostDispatch` / `releaseHostBudgetForFailure`), so one release
+      // assertion covers each of them; the per-path CALL SITES are asserted
+      // individually in `downtime-worker.dispatch.test.ts` (marker-write
+      // failure, spawn failure, admission refusal) and `index.test.ts` (pane
+      // close). Since WL-0MWFJD5T4003OM91 the identity is the attempt token the
+      // admission returned, never the item id alone.
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        expect(auditAdmit('WL-AUD', [])).toEqual({ admitted: true, live: 0, max: 1 });
-        expect(releaseHostDispatch('WL-AUD')).toBe(true);
+        const admission = auditAdmit('WL-AUD', []);
+        expect(admission).toMatchObject({ admitted: true, live: 0, max: 1 });
+        expect(typeof admission.attemptId).toBe('string');
+        expect(
+          releaseHostDispatch({
+            itemId: 'WL-AUD',
+            kind: 'audit',
+            attemptId: admission.attemptId,
+          }),
+        ).toBe(true);
         expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
         // Idempotent: a second release for the same dispatch is a no-op success.
-        expect(releaseHostDispatch('WL-AUD')).toBe(true);
+        expect(
+          releaseHostDispatch({
+            itemId: 'WL-AUD',
+            kind: 'audit',
+            attemptId: admission.attemptId,
+          }),
+        ).toBe(true);
       }
     }));
 

@@ -142,7 +142,10 @@ describe('one line per mutation', () => {
       seedBudgetLedger(dir, [
         makeBudgetEntry({ kind: 'implement', itemId: 'WL-ITEM-1', instanceId: 'owner-9', paneId: 'w9:p9' }),
       ]);
-      const result = release('WL-ITEM-1', { dir, reason: 'anchor-unavailable', actor: 'herdr:42' });
+      const result = release(
+        { itemId: 'WL-ITEM-1', kind: 'implement', paneId: 'w9:p9' },
+        { dir, reason: 'anchor-unavailable', actor: 'herdr:42' },
+      );
       expect(result).toMatchObject({ ok: true, removed: true });
 
       const lines = trail(dir);
@@ -164,8 +167,8 @@ describe('one line per mutation', () => {
 
   it('records nothing when a release removes nothing (idempotent no-op)', async () => {
     await withMachineDir((dir) => {
-      const result = release('WL-ABSENT', { dir });
-      expect(result).toMatchObject({ ok: true, removed: false });
+      const result = release({ itemId: 'WL-ABSENT', kind: 'implement', paneId: 'p:1' }, { dir });
+      expect(result).toMatchObject({ ok: true, removed: false, refused: false });
       expect(trail(dir)).toHaveLength(0);
     });
   });
@@ -356,9 +359,13 @@ describe('fail-open — a broken trail never changes a dispatch outcome', () => 
 
   it('release succeeds when the trail path is a directory', async () => {
     await withMachineDir((dir) => {
-      seedBudgetLedger(dir, [makeBudgetEntry({ itemId: 'WL-ITEM-1' })]);
+      seedBudgetLedger(dir, [
+        makeBudgetEntry({ itemId: 'WL-ITEM-1', paneId: 'w9:p9' }),
+      ]);
       mkdirSync(join(dir, DISPATCH_BUDGET_LOG_FILE), { recursive: true });
-      expect(release('WL-ITEM-1', { dir })).toMatchObject({ ok: true, removed: true });
+      expect(
+        release({ itemId: 'WL-ITEM-1', kind: 'implement', paneId: 'w9:p9' }, { dir }),
+      ).toMatchObject({ ok: true, removed: true });
     });
   });
 

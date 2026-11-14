@@ -238,7 +238,7 @@ describe('no orphaned placeholder pane — pre-spawn aborts (WL-0MW5JE0SZ0057K30
     expect(deps.releaseHostDispatch).toHaveBeenCalledWith(
       IMPLEMENT_CANDIDATE.id,
       '/repo',
-      'anchor-unavailable',
+      { kind: 'implement', reason: 'anchor-unavailable' },
     );
   });
 });

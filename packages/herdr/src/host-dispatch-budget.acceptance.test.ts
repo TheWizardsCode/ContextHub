@@ -217,9 +217,21 @@ function budgetSeams(
         );
       },
     ),
-    releaseHostDispatch: vi.fn(async (itemId: string) => {
-      release(itemId, { dir, now, env: CLEAN_ENV });
-    }),
+    releaseHostDispatch: vi.fn(
+      async (itemId: string, _cwd: string, identity?: { kind?: string; paneId?: string; attemptId?: string }) => {
+        release(
+          {
+            itemId,
+            ...(identity?.kind === 'implement' || identity?.kind === 'audit'
+              ? { kind: identity.kind }
+              : {}),
+            ...(identity?.paneId !== undefined ? { paneId: identity.paneId } : {}),
+            ...(identity?.attemptId !== undefined ? { attemptId: identity.attemptId } : {}),
+          },
+          { dir, now, env: CLEAN_ENV },
+        );
+      },
+    ),
   };
 }
 
@@ -321,6 +333,28 @@ function interactiveDeps(
   };
 }
 
+/**
+ * The stored attempt token for one entry — the identity a release must prove
+ * (WL-0MWFJD5T4003OM91). Throws when the test's reservation is missing, so a
+ * silently-absent entry can never make a release assertion vacuous.
+ */
+function attemptOf(
+  dir: string,
+  itemId: string,
+  kind: 'implement' | 'audit' = 'implement',
+): string {
+  const read = readBudget({ dir, now: T0, env: CLEAN_ENV });
+  const entry = read.ok
+    ? read.ledger.entries.find(
+        (candidate) => candidate.itemId === itemId && candidate.kind === kind,
+      )
+    : undefined;
+  if (entry?.attemptId === undefined) {
+    throw new Error(`no attemptId stored for ${kind}:${itemId}`);
+  }
+  return entry.attemptId;
+}
+
 const IMPLEMENT_CMD = '/skill:implement WL-0000000000000001';
 const AUDIT_CMD = '/skill:audit WL-0000000000000001';
 
@@ -348,13 +382,19 @@ describe('AC1 — machine-scoped ledger: read/reserve/release/reap + pure helper
       const read = readBudget({ dir, now: T0, env: CLEAN_ENV });
       expect(read.ok && read.ledger.entries.map((entry) => entry.itemId)).toEqual(['WL-1']);
 
-      // Release is keyed by item id and idempotent — the one seam every
-      // pane-close / dispatch-failure / failed-claim path calls (AC5).
-      expect(release('WL-1', { dir, now: T0, env: CLEAN_ENV })).toMatchObject({
+      // Release is keyed by the reserved attempt's identity and idempotent —
+      // the one seam every pane-close / dispatch-failure / failed-claim path
+      // calls (AC5, WL-0MWFJD5T4003OM91).
+      const identity = {
+        itemId: 'WL-1',
+        kind: 'implement' as const,
+        attemptId: attemptOf(dir, 'WL-1'),
+      };
+      expect(release(identity, { dir, now: T0, env: CLEAN_ENV })).toMatchObject({
         ok: true,
         removed: true,
       });
-      expect(release('WL-1', { dir, now: T0, env: CLEAN_ENV })).toMatchObject({
+      expect(release(identity, { dir, now: T0, env: CLEAN_ENV })).toMatchObject({
         ok: true,
         removed: false,
       });
@@ -489,7 +529,10 @@ describe('AC3 — maxAudit replaces the hard-coded single-flight', () => {
       expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
 
       // The shared release point frees the slot again.
-      release('WL-AUD', { dir, now: T0, env: CLEAN_ENV });
+      release(
+        { itemId: 'WL-AUD', kind: 'audit', attemptId: attemptOf(dir, 'WL-AUD', 'audit') },
+        { dir, now: T0, env: CLEAN_ENV },
+      );
       const third = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
       expect(third.dispatched).toBe(true);
     });
@@ -628,7 +671,12 @@ describe('AC5 — every release path gives the slot back', () => {
         max: 1,
         reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
       });
-      expect(release('WL-NEW', { dir, now: T0, env: CLEAN_ENV })).toMatchObject({ ok: true });
+      expect(
+        release(
+          { itemId: 'WL-NEW', kind: 'audit', attemptId: attemptOf(dir, 'WL-NEW', 'audit') },
+          { dir, now: T0, env: CLEAN_ENV },
+        ),
+      ).toMatchObject({ ok: true });
       expect(auditAdmit()).toMatchObject({ admitted: true, live: 0, max: 1 });
 
       // A killed leader's stale entry is reaped on read and dispatch resumes.
@@ -778,7 +826,12 @@ describe('AC8 — dispatcher-fired over-quota ticks are neutral skips', () => {
 
       // No cooldown was entered: freeing the slot lets the VERY NEXT tick
       // dispatch (a `no-candidate` cooldown would have suppressed it).
-      release('WL-OTHER', { dir, now: T0, env: CLEAN_ENV });
+      // The seeded entry's identity is its pane (it was written raw, so it
+      // carries no attempt token).
+      release(
+        { itemId: 'WL-OTHER', kind: 'implement', paneId: 'pane-1' },
+        { dir, now: T0, env: CLEAN_ENV },
+      );
       await worker.tick();
       expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     });

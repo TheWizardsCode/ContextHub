@@ -2937,6 +2937,28 @@ Beneath the table, existing capacity gates remain the inner limiter: free-slot
 minimums, the local reservation/prefill pacing, contention and the host-CPU
 gate all still apply, in their existing order.
 
+**Release identity (WL-0MWFJD5T4003OM91).** An entry is keyed by
+`(itemId, kind)` and released only by **full identity**: `itemId` + `kind` plus
+either the `attemptId` that `reserve` minted (returned by admission as
+`attemptId`) or the confirmed `paneId`. `release` removes at most that one
+entry and reports:
+
+| Request | Result | Why |
+|---|---|---|
+| identity matches the stored entry | `removed: true` | the caller owns it |
+| the item's entry exists but belongs to another attempt/kind/pane | `removed: false, refused: true, reason: 'identity-mismatch'` | another dispatch still holds the slot |
+| neither `attemptId` nor `paneId` supplied | `removed: false, refused: true, reason: 'incomplete-identity'` | the item-id-keyed primitive that deleted live entries is gone |
+| nothing stored for that item (and kind) | `removed: false, refused: false` | idempotent no-op, every release path may call it unconditionally |
+
+The four claim-pipeline aborts (`admission-refused`, `marker-write-failed`,
+`spawn-failed`, `anchor-unavailable`) and the pane-close paths
+(`recordPaneClose`, the pane-close reaper) all pass that identity; the
+`reason` and `actor` land in the ledger's audit trail, so a deletion names the
+operation that performed it. Every `kind` shares the same release point, so an
+implement abort can never remove an audit entry for the same item, and closing
+an item's finished `intake`/`plan`/`audit` pane can never remove its running
+`implement` entry.
+
 #### The ledger's audit trail (WL-0MWFJDGXQ001OXP8)
 
 The ledger keeps current state only, so "the in-flight count is wrong" used to
@@ -4455,7 +4477,7 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
 | `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — the least-recently-served root starts the offer ordering and the registered-root sweep (WL-0MTJDX4M4007YH5U; fail-open) |
-| `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `implement`/`audit` dispatch (WL-0MVXY0WQF0069YDJ); audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
+| `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, attemptId?, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `(implement OR audit)` dispatch of a work item (WL-0MVXY0WQF0069YDJ; key `(itemId, kind)` since WL-0MWFJD5T4003OM91, so an implement and an audit dispatch of one item coexist). `attemptId` is the release identity `reserve` mints and `release` must present, together with the confirmed `paneId`. Audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
 | `~/.herdr/downtime/dispatch-budget.log` | **Append-only audit trail** of every ledger mutation (WL-0MWFJDGXQ001OXP8): one JSONL line per reserve/confirm/release/reap/sweep/repair carrying `at`, `op`, `kind`, `itemId`, `paneId`, `instanceId`, `reason`, `actor`, `liveBefore`, `liveAfter`. Bounded by the coordination-log retention policy (500 lines/file × 4 files). Fail-open — a broken trail never blocks a dispatch. Rotated siblings are `dispatch-budget.log.1`…`.3` |
 | `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
 | `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired** (WL-0MVXY0XPF006YUHA F2): a non-stale file written by an older instance is still read as ONE synthetic audit entry; this version never creates or removes it |

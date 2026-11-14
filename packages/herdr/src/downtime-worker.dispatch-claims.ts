@@ -88,16 +88,23 @@ async function releaseHostBudgetForFailure(
   itemId: string,
   cwd: string,
   reason: string,
+  attemptId: string | undefined,
 ): Promise<void> {
   // The ledger records only implement/audit entries; plan/intake/scheduled
   // dispatches never reserve, so there is nothing to release.
   if (kind !== 'implement' && kind !== 'audit') return;
   if (typeof deps.releaseHostDispatch !== 'function') return;
   try {
+    // Identity, not just the item id (WL-0MWFJD5T4003OM91): the release can
+    // only remove THIS attempt's entry. An abort that named only the item used
+    // to delete a still-running dispatch's slot — the 2026-11-13 under-count.
     // `reason` labels the abort path in the ledger's audit trail
-    // (WL-0MWFJDGXQ001OXP8): the 2026-11-13 RCA could not attribute a single
-    // deletion, and these four call sites are exactly the candidate culprits.
-    await deps.releaseHostDispatch(itemId, cwd, reason);
+    // (WL-0MWFJDGXQ001OXP8).
+    await deps.releaseHostDispatch(itemId, cwd, {
+      kind,
+      ...(attemptId !== undefined ? { attemptId } : {}),
+      reason,
+    });
   } catch {
     // best-effort: a release failure must never mask the dispatch outcome
   }
@@ -129,10 +136,18 @@ async function abortForAnchorUnavailable(
   claimExpected: DowntimeClaimExpected,
   cwd: string,
   reservation: DowntimeReservationEvidence | undefined,
+  attemptId: string | undefined,
 ): Promise<DowntimeDispatchOutcome> {
   const releasedReservation: DowntimeReservationEvidence | undefined =
     reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
-  await releaseHostBudgetForFailure(deps, kind, itemId, cwd, 'anchor-unavailable');
+  await releaseHostBudgetForFailure(
+    deps,
+    kind,
+    itemId,
+    cwd,
+    'anchor-unavailable',
+    attemptId,
+  );
   const rollbackOk = await rollbackClaimForFailure(deps, itemId, claimExpected, cwd);
   return {
     dispatched: false,
@@ -358,6 +373,10 @@ export async function dispatchClaimedTier(
   // no-candidate cooldown — the next idle tick re-checks. `live`/`max` ride on
   // the outcome as evidence for the observability slice (F5).
   let budgetEvidence: { live: number; max: number } | undefined;
+  // The attempt token of THIS dispatch's reservation (WL-0MWFJD5T4003OM91):
+  // every later abort path releases with it, so it can only remove the entry
+  // this attempt created.
+  let budgetAttemptId: string | undefined;
   if ((kind === 'implement' || kind === 'audit') && typeof deps.admitHostDispatch === 'function') {
     let admission: Awaited<ReturnType<NonNullable<DowntimeDispatchDeps['admitHostDispatch']>>> | null =
       null;
@@ -376,6 +395,7 @@ export async function dispatchClaimedTier(
       admission = { admitted: false, live: 0, max: 0, reason: 'host-budget-unknown' };
     }
     budgetEvidence = { live: admission.live, max: admission.max };
+    budgetAttemptId = admission.attemptId;
     if (!admission.admitted) {
       // Round trip: a granted local-capacity ticket can no longer reach a pane
       // (single-use — recorded released/expired, never reused or leaked), the
@@ -384,7 +404,14 @@ export async function dispatchClaimedTier(
       // frees a slot (AC2/AC3).
       const releasedReservation: DowntimeReservationEvidence | undefined =
         reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
-      await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd, 'admission-refused');
+      await releaseHostBudgetForFailure(
+        deps,
+        kind,
+        candidate.id,
+        opts.cwd,
+        'admission-refused',
+        admission.attemptId,
+      );
       const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
       return {
         dispatched: false,
@@ -427,7 +454,15 @@ export async function dispatchClaimedTier(
     itemId: candidate.id,
   });
   if (!placement.ok) {
-    return abortForAnchorUnavailable(deps, kind, candidate.id, expected, opts.cwd, reservation);
+    return abortForAnchorUnavailable(
+      deps,
+      kind,
+      candidate.id,
+      expected,
+      opts.cwd,
+      reservation,
+      budgetAttemptId,
+    );
   }
   const anchorId = placement.anchorId;
   const anchorIsTabRoot = placement.anchorIsTabRoot;
@@ -493,7 +528,14 @@ export async function dispatchClaimedTier(
   if (!marked) {
     // Host-budget release (F3 AC3): a claimed-but-unmarked dispatch never
     // spawns, so its reservation must not outlive it.
-    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd, 'marker-write-failed');
+    await releaseHostBudgetForFailure(
+      deps,
+      kind,
+      candidate.id,
+      opts.cwd,
+      'marker-write-failed',
+      budgetAttemptId,
+    );
     // Marker-write recovery (WL-0MT32F908002YFFA AC1): the CAS claim
     // succeeded but the marker write failed — the item is stranded in
     // `in_progress` with no marker, invisible to all future tiers.
@@ -563,7 +605,14 @@ export async function dispatchClaimedTier(
   if (!spawn.ok) {
     // Host-budget release (F3 AC3): the pane never appeared, so the reserved
     // slot is given back before the (long) failure-trace path below.
-    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd, 'spawn-failed');
+    await releaseHostBudgetForFailure(
+      deps,
+      kind,
+      candidate.id,
+      opts.cwd,
+      'spawn-failed',
+      budgetAttemptId,
+    );
     // Placeholder root-pane cleanup (WL-0MW5JE0SZ0057K30, defence in depth):
     // the item tab was provisioned but the split failed, so the blank root
     // pane is the only thing left in the tab. Close it (fail-safe — a live

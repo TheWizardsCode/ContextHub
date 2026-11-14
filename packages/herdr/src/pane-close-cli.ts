@@ -125,7 +125,14 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
     // CONFIRMED entries whose pane the trusted read no longer lists. Both are
     // best-effort and never change the reaper outcome.
     releasePaneBudget: async (pane) => {
-      if (pane.itemId !== '') releaseHostDispatch(pane.itemId);
+      // The CLOSED PANE is the identity (WL-0MWFJD5T4003OM91): a sibling pane
+      // close for the same item must not release a live dispatch's entry.
+      if (pane.itemId === '') return;
+      releaseHostDispatch({
+        itemId: pane.itemId,
+        ...(pane.kind === 'implement' || pane.kind === 'audit' ? { kind: pane.kind } : {}),
+        paneId: pane.id,
+      });
     },
     sweepBudgetLedger: async (parsedPanes) => {
       sweepClosedPanes(parsedPanes.map((pane) => ({ paneId: pane.paneId })));

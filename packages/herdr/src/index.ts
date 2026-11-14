@@ -1305,17 +1305,26 @@ export function createDowntimeDeps(
     async recordPaneClose(entry, cwd: string): Promise<void> {
       // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
       // AC2): the audit slot is released by the dispatch-budget ledger release
-      // below (keyed by item id, so it covers every kind and outcome). The
-      // legacy `active-audit` file is never removed by this version.
+      // below. The legacy `active-audit` file is never removed by this version.
       //
       // Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3 AC3): a closed pane
-      // gives its machine-wide slot back immediately, whatever the lifecycle
-      // outcome — the ledger entry is keyed by item id, so this release is
-      // idempotent and safe for every kind/outcome. Best-effort: a failed
-      // release never blocks the pane-close record, and the ledger's stale
-      // reap remains the backstop.
+      // gives its OWN machine-wide slot back. Since WL-0MWFJD5T4003OM91 the
+      // release carries the closed pane id (and its kind), so closing an item's
+      // finished `intake`/`plan`/`audit` pane can no longer delete the entry of
+      // a still-running `implement` dispatch for the same item. Best-effort: a
+      // failed release never blocks the pane-close record, and the ledger's
+      // stale reap remains the backstop.
       try {
-        releaseHostBudgetDispatch(entry.itemId);
+        releaseHostBudgetDispatch(
+          {
+            itemId: entry.itemId,
+            ...(entry.kind === 'implement' || entry.kind === 'audit'
+              ? { kind: entry.kind }
+              : {}),
+            paneId: entry.paneId,
+          },
+          { reason: 'pane-close', actor: `herdr:${process.pid}` },
+        );
       } catch {
         // fail-safe: a release failure must never crash worker
       }
@@ -1414,13 +1423,21 @@ export function createDowntimeDeps(
         // Both are best-effort — the reaper wraps them fail-open.
         releasePaneBudget: async (pane) => {
           if (pane.itemId !== '') {
-            // `pane-close` in the audit trail: a sibling pane close for the
-            // same item was one of the ways a LIVE entry vanished
+            // Identity is the CLOSED PANE, not the item (WL-0MWFJD5T4003OM91):
+            // closing an item's finished `intake`/`plan`/`audit` pane must not
+            // delete the entry of a still-running dispatch for the same item.
+            // `pane-close` labels it in the audit trail
             // (WL-0MWFJDGXQ001OXP8).
-            releaseHostBudgetDispatch(pane.itemId, {
-              reason: 'pane-close',
-              actor: `herdr:${process.pid}`,
-            });
+            releaseHostBudgetDispatch(
+              {
+                itemId: pane.itemId,
+                ...(pane.kind === 'implement' || pane.kind === 'audit'
+                  ? { kind: pane.kind }
+                  : {}),
+                paneId: pane.id,
+              },
+              { reason: 'pane-close', actor: `herdr:${process.pid}` },
+            );
           }
         },
         sweepBudgetLedger: async (panes) => {
@@ -1529,11 +1546,23 @@ export function createDowntimeDeps(
         // best-effort: the pane-close release remains the backstop
       }
     },
-    async releaseHostDispatch(itemId, _cwd, reason): Promise<void> {
-      releaseHostBudgetDispatch(itemId, {
-        ...(reason !== undefined ? { reason } : {}),
-        actor: `herdr:${process.pid}`,
-      });
+    async releaseHostDispatch(itemId, _cwd, release): Promise<void> {
+      // Full identity (WL-0MWFJD5T4003OM91): the kind and the attempt token (or
+      // the closed pane) restrict the removal to the caller's own entry.
+      releaseHostBudgetDispatch(
+        {
+          itemId,
+          ...(release?.kind === 'implement' || release?.kind === 'audit'
+            ? { kind: release.kind }
+            : {}),
+          ...(release?.paneId !== undefined ? { paneId: release.paneId } : {}),
+          ...(release?.attemptId !== undefined ? { attemptId: release.attemptId } : {}),
+        },
+        {
+          ...(release?.reason !== undefined ? { reason: release.reason } : {}),
+          actor: `herdr:${process.pid}`,
+        },
+      );
     },
     // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
     // `needsProducerReview = true` when an item exhausts its automatic

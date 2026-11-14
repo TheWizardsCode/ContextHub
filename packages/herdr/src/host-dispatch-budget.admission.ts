@@ -101,6 +101,7 @@ import {
   type HostBudgetKind,
   type HostBudgetLivePane,
   type HostBudgetOptions,
+  type HostBudgetReleaseInput,
 } from './host-dispatch-budget.js';
 import { DOWNTIME_PANE_LABEL_PREFIX, paneLabelItemId } from './downtime-worker.pane.js';
 import {
@@ -259,6 +260,13 @@ export interface HostBudgetAdmission {
   detail?: string;
   /** True when an unreadable ledger was rewritten from live state (AC6). */
   repaired?: boolean;
+  /**
+   * The attempt token of the reservation this admission created
+   * (WL-0MWFJD5T4003OM91). Every abort path of the dispatch attempt releases
+   * with THIS token, so it can only ever remove its own entry — never one
+   * belonging to an earlier, still-running dispatch of the same item.
+   */
+  attemptId?: string;
 }
 
 function refuseReason(kind: HostBudgetKind): HostBudgetRefusalReason {
@@ -293,10 +301,16 @@ function entriesFromLivePanes(
       continue;
     }
     const itemId = paneLabelItemId(pane.title);
-    if (itemId === null || seen.has(itemId)) continue;
-    seen.add(itemId);
+    if (itemId === null) continue;
+    const kind = kindOf(pane);
+    // One reconstructed entry per (kind, item) — the ledger's entry key
+    // (WL-0MWFJD5T4003OM91) — so an implement and an audit pane for the same
+    // item both survive a repair.
+    const key = `${kind}:${itemId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     entries.push({
-      kind: kindOf(pane),
+      kind,
       itemId,
       instanceId: input.instanceId,
       paneId: pane.paneId,
@@ -563,8 +577,8 @@ export function readAuditBudgetState(
 function reserveAuditForObservability(
   input: HostBudgetAdmissionInput,
   ledgerOptions: HostBudgetOptions,
-): void {
-  reserve(
+): string | undefined {
+  const reserved = reserve(
     {
       kind: 'audit',
       itemId: input.itemId,
@@ -574,6 +588,7 @@ function reserveAuditForObservability(
     },
     ledgerOptions,
   );
+  return reserved.ok ? reserved.entry.attemptId : undefined;
 }
 
 /**
@@ -627,7 +642,12 @@ function admitAuditLegacy(
       reason: HOST_BUDGET_UNKNOWN_REFUSAL,
     };
   }
-  return { admitted: true, live: state.live, max: state.max };
+  return {
+    admitted: true,
+    live: state.live,
+    max: state.max,
+    ...(reserved.entry.attemptId !== undefined ? { attemptId: reserved.entry.attemptId } : {}),
+  };
 }
 
 /**
@@ -687,11 +707,12 @@ function admitAuditDispatch(
     };
   }
 
-  reserveAuditForObservability(input, ledgerOptions);
+  const attemptId = reserveAuditForObservability(input, ledgerOptions);
   return {
     admitted: true,
     live: decision.budget?.live ?? 0,
     max: decision.budget?.max ?? 0,
+    ...(attemptId !== undefined ? { attemptId } : {}),
   };
 }
 
@@ -791,7 +812,12 @@ export function admitHostDispatch(
       reason: HOST_BUDGET_UNKNOWN_REFUSAL,
     };
   }
-  return { admitted: true, live: count.count, max };
+  return {
+    admitted: true,
+    live: count.count,
+    max,
+    ...(reserved.entry.attemptId !== undefined ? { attemptId: reserved.entry.attemptId } : {}),
+  };
 }
 
 /**
@@ -803,8 +829,13 @@ export function admitHostDispatch(
  * admission until the pane id is known). The audit tier counts a fresh entry
  * regardless (the marker semantics), so the confirmation only records the
  * pane id for observability. Best-effort: a failing seam never affects the
- * dispatch, and the release-by-item-id on pane close (or the stale reap)
+ * dispatch, and the release-by-pane-id on pane close (or the stale reap)
  * remains the backstop.
+ *
+ * The confirmation is keyed on (itemId, kind) and keeps the reservation's
+ * attempt token, so it can only ever annotate the caller's own entry — it never
+ * overwrites a different tier's or a different attempt's entry
+ * (WL-0MWFJD5T4003OM91).
  */
 export function confirmHostDispatch(
   input: HostBudgetAdmissionInput,
@@ -827,19 +858,25 @@ export function confirmHostDispatch(
 
 /**
  * Release a dispatch's reservation (pane close, abort path, failed claim
- * rollback). Idempotent and best-effort: never throws, and a missing entry is
- * a successful no-op, so every release path may call it unconditionally.
+ * rollback) by FULL IDENTITY.
+ *
+ * Idempotent and best-effort: never throws, and a missing entry is a successful
+ * no-op, so every release path may call it unconditionally. The identity is the
+ * entry key (`itemId` + optional `kind`) plus the attempt token from admission
+ * or the confirmed pane id — a caller that proves neither is refused, and one
+ * that proves a different identity leaves the entry alone
+ * (WL-0MWFJD5T4003OM91).
  *
  * `opts.reason` / `opts.actor` are forwarded to the audit trail, so a deletion
  * records WHY it happened (`anchor-unavailable`, `pane-close`, …) and who did
  * it — the attribution the 2026-11-13 RCA lacked (WL-0MWFJDGXQ001OXP8).
  */
 export function releaseHostDispatch(
-  itemId: string,
+  identity: HostBudgetReleaseInput,
   opts: HostBudgetOptions = {},
 ): boolean {
   try {
-    return release(itemId, opts).ok;
+    return release(identity, opts).ok;
   } catch {
     return false;
   }

@@ -182,11 +182,17 @@ export interface DowntimeDispatchDeps {
    * Release a host-budget reservation (AC3): every abort path in the claim
    * pipeline, and the pane-close handler. Idempotent, never throws.
    *
-   * `reason` (WL-0MWFJDGXQ001OXP8) is recorded verbatim in the ledger's audit
-   * trail so an aborted attempt's deletion is attributable; absent keeps the
-   * trail's default wording.
+   * `release` carries the identity the caller owns
+   * (WL-0MWFJD5T4003OM91) — `kind` + the admission `attemptId` (or the closed
+   * `paneId`) — and its `reason` lands in the ledger's audit trail
+   * (WL-0MWFJDGXQ001OXP8). Releasing by item id alone could delete a
+   * still-running dispatch's entry, which is the defect this replaces.
    */
-  releaseHostDispatch?(itemId: string, cwd: string, reason?: string): Promise<void>;
+  releaseHostDispatch?(
+    itemId: string,
+    cwd: string,
+    release?: DowntimeHostBudgetRelease,
+  ): Promise<void>;
   /** Machine-wide stalled-work scan (see `DowntimeWorkerDeps`). */
   scanStalledPanes?(cwd: string, opts: StalledScanOptions): Promise<StalledPaneCandidate[]>;
   /**
@@ -247,6 +253,31 @@ export interface DowntimeHostBudgetAdmission {
   detail?: string;
   /** True when an unreadable ledger was rewritten from live panes (AC6). */
   repaired?: boolean;
+  /**
+   * The reservation's attempt token (WL-0MWFJD5T4003OM91). Carried on the
+   * verdict so every abort path of THIS attempt releases by identity — it can
+   * only ever remove this dispatch's own entry.
+   */
+  attemptId?: string;
+}
+
+/**
+ * What a release must prove it owns (WL-0MWFJD5T4003OM91).
+ *
+ * The ledger entry key is `itemId` + `kind`; ownership is proven by the
+ * `attemptId` the admission verdict carries, or by the confirmed `paneId` on a
+ * pane-close path. A release that proves neither is refused by the ledger
+ * rather than deleting whichever entry happens to share the item id.
+ */
+export interface DowntimeHostBudgetRelease {
+  /** Entry kind (`implement`/`audit`); omitted by the pane-close path. */
+  kind?: DowntimeDispatchKind;
+  /** The confirmed pane this release owns. */
+  paneId?: string;
+  /** The attempt token from {@link DowntimeHostBudgetAdmission.attemptId}. */
+  attemptId?: string;
+  /** Why the release happened — recorded in the ledger's audit trail. */
+  reason?: string;
 }
 
 /** Audit event recorded for every successful downtime dispatch. */
