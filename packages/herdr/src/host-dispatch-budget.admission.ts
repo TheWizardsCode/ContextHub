@@ -98,7 +98,6 @@ import {
   freshCount,
   HERDR_AUDIT_LOCAL_BUDGET_ENV,
   isLegacyAuditBudgetEnabled,
-  liveCount,
   readBudgetConfig,
   release,
   replaceBudget,
@@ -109,6 +108,7 @@ import {
   type HostBudgetOptions,
   type HostBudgetReleaseInput,
 } from './host-dispatch-budget.js';
+import { readHostBudgetLiveWork } from './host-dispatch-budget.counting.js';
 import { DOWNTIME_PANE_LABEL_PREFIX, paneLabelItemId } from './downtime-worker.pane.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
@@ -707,7 +707,11 @@ export function admitHostDispatch(
     return { admitted: false, live: 0, max: 0, reason: refuseReason(input.kind) };
   }
 
-  const count = liveCount(input.kind, opts.livePanes, ledgerOptions);
+  // The ONE in-flight rule (WL-0MWFJDD8R005F5BV): ledger entries PLUS live
+  // dispatcher panes that no entry accounts for. Admission and the worklist
+  // header quote the same figure, so the cap can no longer be enforced against
+  // a ledger that has drifted from the panes actually running.
+  const count = readHostBudgetLiveWork(input.kind, opts.livePanes, ledgerOptions);
   if (!count.ok) {
     if (!count.unknown && count.reason === 'no-coordination-dir') {
       // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
@@ -728,10 +732,10 @@ export function admitHostDispatch(
     };
   }
 
-  if (count.count >= max) {
+  if (count.live >= max) {
     return {
       admitted: false,
-      live: count.count,
+      live: count.live,
       max,
       reason: refuseReason(input.kind),
     };
@@ -752,14 +756,16 @@ export function admitHostDispatch(
     // longer be proven within budget, so fail closed.
     return {
       admitted: false,
-      live: count.count,
+      live: count.live,
       max,
       reason: HOST_BUDGET_UNKNOWN_REFUSAL,
     };
   }
+  // The union figure (WL-0MWFJDD8R005F5BV) AND the release identity
+  // (WL-0MWFJD5T4003OM91) belong on the same verdict.
   return {
     admitted: true,
-    live: count.count,
+    live: count.live,
     max,
     ...(reserved.entry.attemptId !== undefined ? { attemptId: reserved.entry.attemptId } : {}),
   };

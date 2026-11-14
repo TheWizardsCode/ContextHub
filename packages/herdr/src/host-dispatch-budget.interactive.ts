@@ -46,7 +46,6 @@
 import {
   HOST_BUDGET_STALE_WINDOW_MS,
   auditDisplayCount,
-  liveCount,
   livePaneIdSet,
   readBudget,
   readBudgetConfig,
@@ -56,6 +55,7 @@ import {
   type HostBudgetLivePanesResult,
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
+import { readHostBudgetLiveWork } from './host-dispatch-budget.counting.js';
 import { getMachineCoordinationDir } from './machine-coordination.js';
 import { budgetAuditTrailPath } from './host-dispatch-budget.audit.js';
 import type { HostBudgetDialogChoice, HostBudgetPromptRequest } from './host-budget-dialog.js';
@@ -152,7 +152,16 @@ export interface InteractiveAgentDispatchPreparation {
  * read must neither delete entries nor invent a zero.
  */
 type CountReadout =
-  | { state: 'counted'; live: number }
+  | {
+      state: 'counted';
+      live: number;
+      /**
+       * Live dispatches counted from PANES with no ledger entry
+       * (WL-0MWFJDD8R005F5BV). Dialog detail only — never a gate, and never
+       * rendered in the worklist header.
+       */
+      unreserved?: number;
+    }
   | { state: 'noLedger' }
   | { state: 'unreadable' };
 
@@ -167,17 +176,25 @@ function readTierCount(
   // the prompt still quotes the documented 0/0 evidence.
   if (max === 0) return { state: 'counted', live: 0 };
   if (kind === 'implement') {
-    // `livePanes` `undefined` = pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
-    // `liveCount` counts by the freshness rule and NEVER reaps on this state,
-    // so the interactive gate cannot delete a stale-but-live entry.
-    const result = liveCount(kind, livePanes, opts);
+    // The ONE in-flight rule (WL-0MWFJDD8R005F5BV): ledger entries PLUS live
+    // dispatcher panes no entry accounts for — the same figure admission and
+    // the header use. `livePanes` `undefined` = pane liveness UNKNOWN
+    // (WL-0MW9VQX5T001GCUP): the rule then counts by freshness and NEVER reaps,
+    // so the gate cannot delete a stale-but-live entry.
+    const result = readHostBudgetLiveWork(kind, livePanes, opts);
     if (!result.ok) {
       if (!result.unknown && result.reason === 'no-coordination-dir') {
         return { state: 'noLedger' };
       }
       return { state: 'unreadable' };
     }
-    return { state: 'counted', live: result.count };
+    return {
+      state: 'counted',
+      live: result.live,
+      ...(result.unreservedPaneIds.length > 0
+        ? { unreserved: result.unreservedPaneIds.length }
+        : {}),
+    };
   }
 
   // Audit tier: pane-aware DISPLAY count, identical to the worklist header
@@ -299,6 +316,7 @@ export async function prepareInteractiveAgentDispatch(
     kind,
     live: counted.live,
     max,
+    ...(counted.unreserved !== undefined ? { unreserved: counted.unreserved } : {}),
     ...(trailDir !== null ? { trailPath: budgetAuditTrailPath(trailDir) } : {}),
   };
   const choice = await deps.confirm(request);
