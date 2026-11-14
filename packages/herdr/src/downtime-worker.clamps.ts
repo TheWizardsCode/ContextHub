@@ -21,6 +21,9 @@ import {
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS,
+  DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS,
+  DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS,
   DOWNTIME_IDLE_THRESHOLD_FLOOR_MS,
   DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS,
   DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS,
@@ -116,6 +119,24 @@ export function clampDowntimeMarkerStaleWindowMs(value: number): number {
   return Math.min(
     Math.max(Math.round(value), DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS),
     DOWNTIME_MARKER_STALE_WINDOW_MAX_MS,
+  );
+}
+/**
+ * Clamp the dead-coordination-entry staleness window
+ * (`downtimeCoordinationEntryStaleMs`, WL-0MWFJTULD005DTQI): reject
+ * non-finite/negative values (fall back to the 10-minute default, derived
+ * from the check-in cadence) and clamp to
+ * [DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS,
+ * DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS] (1 × the check-in cadence – 24 h)
+ * so the window can neither prune a live, cadence-refreshing follower (the
+ * tightest legal value is one full check-in interval) nor let a crashed
+ * instance's ghost entry linger for days.
+ */
+export function clampDowntimeCoordinationEntryStaleMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS),
+    DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS,
   );
 }
 /**

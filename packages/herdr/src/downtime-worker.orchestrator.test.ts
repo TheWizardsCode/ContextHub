@@ -44,6 +44,7 @@ import {
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import { LEASE_FILE, LEADER_LOCK_FILE, isLeaseValid } from './leader-election.js';
 import { writeCoordinationFile, getEntry, COORDINATION_FILE_VERSION } from './coordination.js';
+import { DEFAULT_COORDINATION_CHECK_IN_MS } from './downtime-worker.constants.js';
 import { readCoordinationLogEntries } from './downtime-log.js';
 import { writeDisableMarker } from './downtime-disable-marker.js';
 import {
@@ -315,6 +316,8 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     deps?: Partial<DowntimeWorkerDeps>;
     /** Pre-seed another instance's valid lease BEFORE the worker is created. */
     seedLease?: { instanceId: string; atMs: number };
+    /** Leader-tick dead-entry staleness window (WL-0MWFJTULD005DTQI). */
+    coordinationEntryStaleMs?: number;
   } = {}) {
     const coordDir = coordinationTmpDirs.make('cd-wl-0MTF4A4V3-');
     const instanceId = overrides.instanceId ?? 'inst-a';
@@ -329,6 +332,9 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
       model: 'plan',
       cwd: overrides.cwd ?? '/repo',
       noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
+      ...(overrides.coordinationEntryStaleMs !== undefined
+        ? { coordinationEntryStaleMs: overrides.coordinationEntryStaleMs }
+        : {}),
     };
     const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
     const poller = createDowntimePoller('http://proxy:8000', fetcher);
@@ -1193,6 +1199,78 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
       const fetchedIds = deps.fetchItem.mock.calls.map((c) => c[0]);
       expect(fetchedIds).toContain('WL-LIVE');
       expect(fetchedIds).not.toContain('WL-DEAD');
+    });
+
+    // The window is configurable through `DowntimeWorkerConfig.config()`
+    // (WL-0MWFJTULD005DTQI): a non-default in-range value is read live each
+    // tick and actually applied by the leader prune — NOT the hard-coded
+    // default constant. An absent config field falls back to the default
+    // (covered by the tests above).
+    it('uses a non-default configured window for the leader prune (shorter than the default)', async () => {
+      const cwd = coordinationTmpDirs.make('cd-wl-entry-stale-short-');
+      // In-clamp window BELOW the 10-min default: an entry that is 8 min old
+      // (younger than the default, older than the configured window) must be
+      // pruned — the default would have kept it.
+      const SHORT_WINDOW_MS = 6 * 60_000;
+      const { worker, coordDir } = makeCoordinationWorker({ cwd, coordinationEntryStaleMs: SHORT_WINDOW_MS });
+      vi.setSystemTime(PRUNE_START);
+      const staleIso = new Date(PRUNE_START - 8 * 60_000).toISOString();
+      writeCoordinationFile(coordDir, {
+        version: COORDINATION_FILE_VERSION,
+        entries: [seededEntry('dead-short', 'WL-DEAD', '/repo-dead-short', staleIso)],
+      });
+
+      await worker.tick(); // election → this instance wins → leader prune runs
+      expect(worker.isLeader).toBe(true);
+      expect(getEntry(coordDir, 'dead-short')).toBeNull();
+    });
+
+    it('keeps a peer entry that a longer configured window still considers live', async () => {
+      const cwd = coordinationTmpDirs.make('cd-wl-entry-stale-long-');
+      // In-clamp window ABOVE the 10-min default: an entry that is 20 min old
+      // (staler than the default, fresher than the configured window) must
+      // SURVIVE — the default would have pruned it.
+      const LONG_WINDOW_MS = 60 * 60_000;
+      const { worker, coordDir } = makeCoordinationWorker({ cwd, coordinationEntryStaleMs: LONG_WINDOW_MS });
+      vi.setSystemTime(PRUNE_START);
+      const staleIso = new Date(PRUNE_START - 20 * 60_000).toISOString();
+      writeCoordinationFile(coordDir, {
+        version: COORDINATION_FILE_VERSION,
+        entries: [seededEntry('live-long', 'WL-LIVE', '/repo-live-long', staleIso)],
+      });
+
+      await worker.tick(); // election → leader prune runs
+      expect(worker.isLeader).toBe(true);
+      expect(getEntry(coordDir, 'live-long')).not.toBeNull();
+    });
+
+    it('a window clamped down to the floor can never prune a cadence-refreshing follower (AC3/AC5)', async () => {
+      const cwd = coordinationTmpDirs.make('cd-wl-entry-stale-floor-');
+      // The tightest an operator may set the window is one full check-in
+      // interval. An entry refreshed EXACTLY one check-in ago sits at the
+      // window boundary (age ≤ window ⇒ keep) — it must survive, so the
+      // prune can never remove a follower that refreshes on the cadence.
+      const floor = DEFAULT_COORDINATION_CHECK_IN_MS;
+      const { worker, coordDir } = makeCoordinationWorker({ cwd, coordinationEntryStaleMs: floor });
+      vi.setSystemTime(PRUNE_START);
+      const boundaryIso = new Date(PRUNE_START - floor).toISOString();
+      writeCoordinationFile(coordDir, {
+        version: COORDINATION_FILE_VERSION,
+        entries: [seededEntry('live-floor', 'WL-LIVE', '/repo-live-floor', boundaryIso)],
+      });
+
+      await worker.tick(); // election → leader prune runs
+      expect(worker.isLeader).toBe(true);
+      expect(getEntry(coordDir, 'live-floor')).not.toBeNull();
+      // One microsecond past the floor (age > window): now it is dead.
+      const justPastIso = new Date(PRUNE_START - floor - 1).toISOString();
+      writeCoordinationFile(coordDir, {
+        version: COORDINATION_FILE_VERSION,
+        entries: [seededEntry('dead-past', 'WL-DEAD', '/repo-dead-past', justPastIso)],
+      });
+      await worker.tick();
+      expect(worker.isLeader).toBe(true);
+      expect(getEntry(coordDir, 'dead-past')).toBeNull();
     });
   });
 

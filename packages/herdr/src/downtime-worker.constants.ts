@@ -868,14 +868,57 @@ export const DEFAULT_COORDINATION_CHECK_IN_MS = 5 * 60 * 1000;
  */
 export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
 /**
+ * Default dead-coordination-entry staleness window (settings key
+ * `downtimeCoordinationEntryStaleMs`, WL-0MWFJTULD005DTQI): twice the
+ * coordination check-in cadence (2 × 5 min = 10 min), so ONE missed
+ * check-in is tolerated while an instance that stopped checking in is
+ * removed on the leader's next leader tick.
+ *
+ * Derived from {@link DEFAULT_COORDINATION_CHECK_IN_MS}, NEVER a hard-coded
+ * 10-minute literal, so tightening/loosening the check-in cadence retunes
+ * the default with it.
+ *
+ * WHY THE CADENCE AND NOT THE LEASE TTL: dead-entry pruning decides whether
+ * a Follower stopped checking in. Followers hold NO dispatch lease — the
+ * 5-minute lease TTL belongs to the elected leader only — so the lease TTL
+ * says nothing about a follower's liveness. The check-in cadence is the one
+ * interval every instance (leader and follower alike) promises to refresh
+ * within, so staleness is measured against it: one missed check-in is
+ * tolerated, a second one is a dead instance.
+ */
+export const DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS =
+  2 * DEFAULT_COORDINATION_CHECK_IN_MS;
+/**
+ * Hard floor for the dead-entry staleness window: ONE full check-in interval
+ * ({@link DEFAULT_COORDINATION_CHECK_IN_MS}). A follower that refreshes on
+ * the cadence is never older than the floor, and `pruneDeadEntries` keeps an
+ * entry whose age is ≤ the window (boundary inclusive), so a window clamped
+ * down to the floor can never prune a live, cadence-refreshing follower —
+ * anything below the floor would prune the very followers the leader needs
+ * before their next check-in lands.
+ */
+export const DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS =
+  DEFAULT_COORDINATION_CHECK_IN_MS;
+/**
+ * Hard ceiling for the dead-entry staleness window (24 h): above this a
+ * crashed instance's ghost offer could linger for days, defeating the whole
+ * purpose of dead-entry pruning.
+ */
+export const DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS = 24 * 60 * 60 * 1000;
+/**
  * Default dead-entry staleness window (WL-0MWFJTKGM006BHLQ): twice the
  * coordination check-in cadence (2 × 5 min = 10 min), so ONE missed
  * check-in is tolerated while an instance that stopped checking in is
- * removed on the leader's next leader tick. Hard-coded in this child; the
- * settings key and clamp arrive in the sibling settings child
- * (WL-0MWFJTULD005DTQI).
+ * removed on the leader's next leader tick. Landed hard-coded in that
+ * child; the settings key and clamp arrived in the sibling settings child
+ * (WL-0MWFJTULD005DTQI), so this is now an alias of
+ * {@link DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS} — the configurable
+ * default that the leader tick resolves before calling
+ * {@link pruneDeadEntries} — keeping `pruneDeadEntries`' own fallback a
+ * single source of truth.
  */
-export const DEFAULT_COORDINATION_STALE_WINDOW_MS = 2 * DEFAULT_COORDINATION_CHECK_IN_MS;
+export const DEFAULT_COORDINATION_STALE_WINDOW_MS =
+  DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS;
 /**
  * Maximum local DISPATCH-lease TTL (seconds) the llama-proxy can hold a
  * local slot — the cross-repo contract from `llm-manager`

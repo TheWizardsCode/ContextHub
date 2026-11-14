@@ -1911,6 +1911,10 @@ export async function main(): Promise<void> {
         auditBatchMax: s.downtimeAuditBatchMax,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
+        // Dead-coordination-entry staleness window (WL-0MWFJTULD005DTQI):
+        // re-read each tick like markerStaleWindowMs, so a settings change
+        // applies without a plugin restart.
+        coordinationEntryStaleMs: s.downtimeCoordinationEntryStaleMs,
         // Stalled-work scan before new-item selection (WL-0MUYMBSA90092QV2).
         stallScanEnabled: s.downtimeStallScanEnabled,
         stallScanThresholdMs: s.downtimeStallThresholdMs,

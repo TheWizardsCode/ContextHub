@@ -37,6 +37,7 @@ export type { CoordinationEntry } from './coordination.js';
 export {
   AUDIT_AVAILABILITY_PATH,
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+  DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
   DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
@@ -108,6 +109,7 @@ export type {
 } from './downtime-worker.types.js';
 export {
   clampDowntimeAuditBatchMax,
+  clampDowntimeCoordinationEntryStaleMs,
   clampDowntimeIdleThresholdMs,
   clampDowntimeLongRunningThresholdMs,
   clampDowntimeMarkerStaleWindowMs,

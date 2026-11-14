@@ -292,8 +292,9 @@ export async function runLeaderElectionAndCheckIn(
     }
 
     // Dead-entry prune (WL-0MWFJTKGM006BHLQ): leader-only, before check-in.
+    // Window = live `downtimeCoordinationEntryStaleMs` (WL-0MWFJTULD005DTQI); absent → the default constant.
     if (ctx.leaderState) {
-      const { pruned, staleWindowMs } = pruneDeadEntries(ctx.opts.coordinationDir!, { nowMs: tickNow, leaderInstanceId: ctx.instanceId });
+      const { pruned, staleWindowMs } = pruneDeadEntries(ctx.opts.coordinationDir!, { nowMs: tickNow, leaderInstanceId: ctx.instanceId, staleWindowMs: cfg.coordinationEntryStaleMs });
       await logPrunedEntries(cfg.cwd, pruned, staleWindowMs, new Date(tickNow).toISOString(), coordinationLogPolicyFromConfig(cfg));
     }
 
@@ -306,12 +307,11 @@ export async function runLeaderElectionAndCheckIn(
     // (WL-0MTOCBP1D009P4U3); clamp ≥ 60 s.
     //
     // Leader visibility (WL-0MW1VINII003IL7R): the elected leader's identity
-    // and latest decision token are recorded in a separate `leader` block
+    // and decision token are recorded in a separate `leader` block
     // (`upsertLeader`). The check-in removes the leader's OWN offer whenever
     // its window is empty ("no dead offers"), so before this the one instance
-    // permitted to dispatch could be absent from the file entirely — the
-    // 2026-11-04 outage showed five healthy offers and no dispatcher for eight
-    // hours. The block is evidence only; `entries` semantics are untouched.
+    // permitted to dispatch could be absent entirely — the 2026-11-04 outage
+    // showed five offers and no dispatcher for eight hours. Evidence only.
     //
     // The check-in cycle itself (reOfferDue probe, cadence gate, the
     // `runCoordinationCheckIn` call and the cooldown-cancel semantics) now

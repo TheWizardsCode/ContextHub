@@ -775,6 +775,14 @@ export interface DowntimeWorkerConfig {
      */
     markerStaleWindowMs?: number;
     /**
+     * Dead-coordination-entry staleness window, ms (WL-0MWFJTULD005DTQI).
+     * Optional for backward compat — defaults to
+     * `DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS` (2 × the check-in
+     * cadence, 10 min). Resolved live each leader tick and passed to the
+     * dead-entry prune.
+     */
+    coordinationEntryStaleMs?: number;
+    /**
      * Stalled-work scan enable (WL-0MUYMBSA90092QV2): read live on every tick.
      * Optional for backward compat — defaults to enabled.
      */

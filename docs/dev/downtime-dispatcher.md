@@ -4539,6 +4539,7 @@ status refresh unchanged at 30s.**
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.constants.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.constants.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT; the **same** window bounds the `hasPeerOffer` peer-entry liveness check, WL-0MVR8GDJ3008WY3Y AC7) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
+| Dead-coordination-entry staleness window | **10 min** (`downtimeCoordinationEntryStaleMs`; derived as 2 × the check-in cadence, so one missed check-in is tolerated; clamped to 1 × cadence – 24 h, so a cadence-refreshing follower can never be pruned at the floor; the leader applies it to the dead-entry prune each tick, WL-0MWFJTULD005DTQI) | `DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS` / `DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS` / `DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS` (`downtime-worker.constants.ts`), `clampDowntimeCoordinationEntryStaleMs` (`downtime-worker.clamps.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS` (`downtime-worker.constants.ts`), `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.clamps.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (`downtime-worker.constants.ts`), `clampDowntimeMaxAttempts` (`downtime-worker.clamps.ts`), `countAttempts` (`downtime-log.ts`) |
 | Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (`downtime-worker.constants.ts`), `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.clamps.ts`) |
@@ -4560,7 +4561,12 @@ slot-exhaustion cooldown so that existing sessions have a chance to reclaim
 the slot before a new work item is dispatched. The success-marker staleness
 window (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped
 on load
-(`clampDowntimeMarkerStaleWindowMs`). The non-terminal pane-close cooldown
+(`clampDowntimeMarkerStaleWindowMs`). The dead-coordination-entry staleness
+window (`downtimeCoordinationEntryStaleMs`) is likewise configurable and
+clamped on load (`clampDowntimeCoordinationEntryStaleMs`): its clamped floor
+is exactly one full check-in interval, so an operator can never widen or
+tighten the window into pruning a live follower that refreshes on the
+cadence (WL-0MWFJTULD005DTQI). The non-terminal pane-close cooldown
 (`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
 (`clampDowntimeNonTerminalCooldownMs`). The per-item/per-kind attempt cap
 (`downtimeMaxAttempts`) is likewise configurable and clamped on load
