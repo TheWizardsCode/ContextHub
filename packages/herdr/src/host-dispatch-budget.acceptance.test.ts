@@ -277,6 +277,18 @@ function makeWorkerInstance(opts: {
   const deps = makeDeps({
     getNextImplementCandidate: vi.fn().mockResolvedValue(opts.candidate),
     recordDecision: opts.recordDecision,
+    // The tick's budget-reconcile pass reads the trusted pane list
+    // (WL-0MWFJDEY5002FBRE). Resolved lazily so a test that pushes a freshly
+    // confirmed pane is describing the same world the ledger holds.
+    getRunningDowntimePanes: vi.fn(async () => ({
+      ok: true,
+      count: opts.livePanes.length,
+      paneIds: opts.livePanes.map((pane) => pane.paneId),
+      records: opts.livePanes.map((pane) => ({
+        paneId: pane.paneId,
+        ...(pane.title !== undefined ? { label: pane.title } : {}),
+      })),
+    })),
     ...budgetSeams(opts.dir, {
       instanceId: opts.instanceId,
       livePanes: opts.livePanes,
@@ -862,6 +874,18 @@ describe('AC9 — a corrupt ledger fails closed for the dispatcher, open for a h
 
       const deps = makeDeps({
         getNextImplementCandidate: vi.fn().mockResolvedValue(IMPLEMENT_CANDIDATE),
+        // The tick's budget-reconcile pass reads the trusted pane list: the
+        // worker tests must describe the same world the ledger seeding does
+        // (WL-0MWFJDEY5002FBRE).
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true,
+          count: panes.length,
+          paneIds: panes.map((pane) => pane.paneId),
+          records: panes.map((pane) => ({
+            paneId: pane.paneId,
+            ...(pane.title !== undefined ? { label: pane.title } : {}),
+          })),
+        }),
         ...budgetSeams(dir, { instanceId: 'instance-a', livePanes: panes }),
       });
 

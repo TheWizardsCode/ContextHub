@@ -115,6 +115,12 @@ export interface OrchestratorContext {
   activeAuditBatch: ActiveAuditBatch | null;
   lastPaneMonitorAt: number;
   lastPaneCloseReaperAt: number;
+  /**
+   * Host-budget ledger reconciliation cadence gate
+   * (WL-0MWFJDEY5002FBRE): timestamp of the last reconcile pass. 0 forces a
+   * pass on the first tick.
+   */
+  lastBudgetReconcileAt: number;
   cooldownUntil: number | null;
   errorStrikes: number;
   lastDecisionReason: string | null;

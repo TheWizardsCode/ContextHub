@@ -104,6 +104,18 @@ function makeHarness(opts: HarnessOpts) {
   );
   const deps = makeDeps({
     getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+    // The machine-wide trusted pane list (WL-0MWFJDEY5002FBRE): the tick's
+    // budget-reconcile pass reads it, so the harness must describe the same
+    // world the ledger seeding describes.
+    getRunningDowntimePanes: vi.fn().mockResolvedValue({
+      ok: true,
+      count: opts.livePanes.length,
+      paneIds: opts.livePanes.map((pane) => pane.paneId),
+      records: opts.livePanes.map((pane) => ({
+        paneId: pane.paneId,
+        ...(pane.title !== undefined ? { label: pane.title } : {}),
+      })),
+    }),
     // Exactly the production wiring: the dispatcher's ONE admission reader,
     // pointed at the isolated machine dir and the machine-wide pane list.
     admitHostDispatch: vi.fn(async (input: { itemId: string; kind: 'implement' | 'audit' }) =>
@@ -272,6 +284,10 @@ describe('host-budget observability convergence (AC5)', () => {
         vi.setSystemTime(T0);
         // The audit tier's admission pre-check is the `getActiveAudit` dep in
         // production; it reports the host-wide cap decision it read.
+        // Both audit panes are live: the tick's budget-reconcile pass must see
+        // the same world, or it would legitimately sweep the seeded entries
+        // (WL-0MWFJDEY5002FBRE).
+        const auditPanes = [{ paneId: 'pane-9' }, { paneId: 'pane-10' }];
         const deps = makeDeps({
           getActiveAudit: vi.fn().mockResolvedValue({
             ok: true,
@@ -282,6 +298,15 @@ describe('host-budget observability convergence (AC5)', () => {
           }),
           getNextImplementCandidate: vi.fn().mockResolvedValue(null),
           getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+          getRunningDowntimePanes: vi.fn().mockResolvedValue({
+            ok: true,
+            count: auditPanes.length,
+            paneIds: auditPanes.map((pane) => pane.paneId),
+            records: auditPanes.map((pane) => ({
+              paneId: pane.paneId,
+              label: `Downtime triggered audit Audit it - WL-AUD`,
+            })),
+          }),
           recordDecision,
         });
         const worker = createDowntimeWorker({

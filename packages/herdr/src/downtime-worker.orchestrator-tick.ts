@@ -54,6 +54,7 @@ import {
   type LeafAuditAdmission,
 } from './downtime-worker.gates.js';
 import { paneCloseReaperDue } from './pane-close-scheduler.js';
+import { maybeRunBudgetReconcilePass } from './downtime-worker.budget-reconcile.js';
 import {
   admitDispatch,
   batchMetadata,
@@ -399,18 +400,15 @@ export function runPaneMaintenance(
   // active auto-close path. The block is retained (and the pure
   // classifier + its tests kept) so the design can be revisited.
   //
-  // When enabled it would run on the LEADER (legacy mode: always) and
-  // BEFORE the cooldown
-  // gate, so completed dispatched panes are tidied even while dispatch
-  // is paused in a no-candidate cooldown. Cadence-bounded (default 30 s)
-  // so the ~10 s tick does not re-query the worklog for every open pane
-  // on every tick.
+  // When enabled it would run on the LEADER, BEFORE the cooldown gate, so
+  // completed panes are tidied even while dispatch is paused. Cadence-bounded
+  // (default 30 s) so the ~10 s tick does not re-query per open pane.
   //
   // FIRE-AND-FORGET (deliberately NOT awaited): the single-flight
   // dispatch guard relies on the first in-flight tick setting
   // `dispatching` before a second concurrent tick reaches its check — an
-  // extra await on the pre-dispatch path lets the second tick win that
-  // race and double-dispatch (pinned by the worker single-flight test).
+  // an extra pre-dispatch await would let a second tick win the race
+  // (pinned by the worker single-flight test).
   // The monitor is internally fail-closed and idempotent, so running it
   // concurrently is safe; the `.catch` is belt-and-braces.
   const paneMonitorIntervalMs =
@@ -435,6 +433,8 @@ export function runPaneMaintenance(
   // so the worker continues. A pane already handled by the dispatch
   // monitor above is skipped by the reaper (shared classifier +
   // already-closed set), so the two mechanisms never double-close.
+  // Host-budget ledger reconciliation pass (WL-0MWFJDEY5002FBRE). 
+  maybeRunBudgetReconcilePass(ctx, cfg, tickNow, paneLifecycleWarn);
   if (paneCloseReaperDue(cfg.paneClose, ctx.lastPaneCloseReaperAt, tickNow)) {
     ctx.lastPaneCloseReaperAt = tickNow;
     const paneClose = cfg.paneClose!;
