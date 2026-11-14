@@ -74,6 +74,7 @@ import { getMachineCoordinationDir } from './machine-coordination.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
   HOST_BUDGET_IMPLEMENT_REASON,
+  HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
   isHostBudgetDecisionReason,
   type HostBudgetDecisionReason,
@@ -145,6 +146,9 @@ const TIER_LABEL_BY_REASON: Readonly<Record<HostBudgetDecisionReason, string>> =
   // `host-budget-unknown` can come from either tier (the ledger could not be
   // trusted), so the line names the budget itself rather than guessing a tier.
   [HOST_BUDGET_UNKNOWN_REASON]: 'budget',
+  // A corrupt ledger is a whole-budget failure: the line names the budget, not
+  // a tier (WL-0MWFJD8ZO000J1R8).
+  [HOST_BUDGET_CORRUPT_REASON]: 'budget',
 };
 
 /**

@@ -15,7 +15,16 @@
  * herdr or wl. In fixture mode the producer-review lookup defaults to false
  * and closing is a recorded no-op.
  *
- * Exit code mirrors `runReaperCli`: 0 on success, 1 on any close failure.
+ * Ledger repair mode: `--repair-budget-ledger` (WL-0MWFJD8ZO000J1R8) is the
+ * EXPLICIT operator recovery for a corrupt/unreadable dispatch-budget ledger.
+ * An admission read never rewrites the ledger, so this is how an operator
+ * rebuilds it from the live pane list: every dispatcher label form is decoded
+ * (decoration stripped, `Manually triggered` accepted), and the write is
+ * refused while any live dispatcher pane cannot be accounted for. The
+ * reconstructed set is printed as JSON.
+ *
+ * Exit code mirrors `runReaperCli`: 0 on success, 1 on any close failure (or a
+ * refused/failed ledger repair).
  */
 
 import { execFile } from 'node:child_process';
@@ -31,7 +40,12 @@ import {
 } from './pane-close-herdr.js';
 import { resolveHerdrBin } from './herdr-bin.js';
 import { releaseHostDispatch } from './host-dispatch-budget.admission.js';
-import { sweepClosedPanes } from './host-dispatch-budget.js';
+import {
+  decodeBudgetPaneLabel,
+  repairBudgetLedgerFromPanes,
+} from './host-dispatch-budget.repair.js';
+import { sweepClosedPanes, type HostBudgetLivePane } from './host-dispatch-budget.js';
+import { parseHerdrPaneListOutput } from './downtime-worker.pane.js';
 import type { ReaperDeps } from './pane-close-reaper.js';
 import { runReaperCli } from './pane-close-reaper.js';
 
@@ -46,6 +60,22 @@ export interface PaneCloseCliIo {
   readFile(path: string): string;
   env: NodeJS.ProcessEnv;
   cwd: string;
+}
+
+/**
+ * Split `--repair-budget-ledger` out of argv (WL-0MWFJD8ZO000J1R8).
+ *
+ * Mutually exclusive with the reaper's own flags: the repair prints its own
+ * JSON report and exits, so the remaining argv is irrelevant when it is set.
+ */
+export function extractRepairArg(argv: string[]): { repair: boolean; rest: string[] } {
+  const rest: string[] = [];
+  let repair = false;
+  for (const arg of argv) {
+    if (arg === '--repair-budget-ledger') repair = true;
+    else rest.push(arg);
+  }
+  return { repair, rest };
 }
 
 /** Split `--fixture <path>` out of argv; the remainder is passed through. */
@@ -180,12 +210,106 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
   });
 }
 
+/**
+ * Run one EXPLICIT ledger repair from the machine-wide live pane list
+ * (WL-0MWFJD8ZO000J1R8).
+ *
+ * Prints a JSON report — the reconstructed entries, the panes accounted for and
+ * (on a refusal) the panes that blocked the write — and returns the exit code:
+ * 0 repaired, 1 refused/failed. A failed `herdr pane list` is a refusal (an
+ * unknown pane list must never be treated as "no panes": that would write an
+ * empty ledger over live work).
+ */
+export async function runBudgetLedgerRepair(
+  io: PaneCloseCliIo,
+  fixtureRaw: string | undefined,
+  invokingPaneId: string | undefined,
+): Promise<number> {
+  const herdrBin = resolveHerdrBin(io.env);
+  let raw: string;
+  if (fixtureRaw !== undefined) {
+    raw = fixtureRaw;
+  } else {
+    try {
+      const { stdout } = await io.execFileAsync(herdrBin, ['pane', 'list'], {
+        encoding: 'utf8',
+        timeout: CLI_COMMAND_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+        cwd: io.cwd,
+      });
+      raw = stdout;
+    } catch (err) {
+      process.stderr.write(
+        `[worklog-plugin] budget-ledger repair refused: "herdr pane list" failed ` +
+          `(${err instanceof Error ? err.message : String(err)}) — an unknown pane list ` +
+          'must never be repaired as empty\n',
+      );
+      return 1;
+    }
+  }
+  const records = parseHerdrPaneListOutput(raw);
+  if (records === null) {
+    process.stderr.write(
+      '[worklog-plugin] budget-ledger repair refused: the pane list could not be parsed\n',
+    );
+    return 1;
+  }
+  const panes: HostBudgetLivePane[] = records.map((record) => ({
+    paneId: record.paneId,
+    ...(typeof record.label === 'string' ? { title: record.label } : {}),
+  }));
+
+  const result = repairBudgetLedgerFromPanes(panes, {
+    instanceId: `herdr:${process.pid}`,
+    root: io.cwd,
+  });
+
+  if (!result.ok) {
+    process.stderr.write(`[worklog-plugin] budget-ledger repair: ${result.message}\n`);
+    console.log(
+      JSON.stringify(
+        {
+          repaired: false,
+          reason: result.reason,
+          unaccounted: result.unaccounted ?? [],
+          // Per-pane decode evidence, so the operator can see WHY a pane was
+          // not accounted for.
+          panes: panes.map((pane) => ({
+            paneId: pane.paneId,
+            label: pane.title ?? '',
+            decoded: decodeBudgetPaneLabel(pane.title),
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    return 1;
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        repaired: true,
+        invokingPaneId: invokingPaneId ?? null,
+        count: result.count,
+        entries: result.entries,
+        accountedPaneIds: result.accountedPaneIds,
+      },
+      null,
+      2,
+    ),
+  );
+  return 0;
+}
+
 /** Entry point. Returns the process exit code. */
 export async function main(
   argv: string[] = process.argv.slice(2),
   io?: Partial<PaneCloseCliIo>,
 ): Promise<number> {
-  const { fixture, rest } = extractFixtureArg(argv);
+  const { repair, rest: withoutRepair } = extractRepairArg(argv);
+  const { fixture, rest } = extractFixtureArg(withoutRepair);
   const resolvedIo: PaneCloseCliIo = {
     execFileAsync: io?.execFileAsync ?? execFileAsync,
     readFile: io?.readFile ?? ((path: string) => readFileSync(path, 'utf8')),
@@ -196,6 +320,9 @@ export async function main(
   // Surface the invoking pane id in the JSON envelope so the Python skill can
   // exclude it even though the classifier also computes `isInvokingPane`.
   const invoking = resolvedIo.env.HERDR_PANE_ID ?? resolvedIo.env.HERDR_PANE;
+  if (repair) {
+    return runBudgetLedgerRepair(resolvedIo, fixtureRaw, invoking);
+  }
   const args = [...rest];
   if (invoking && !args.includes('--invoking-pane')) {
     args.push('--invoking-pane', invoking);

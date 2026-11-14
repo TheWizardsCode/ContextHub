@@ -40,11 +40,15 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  repairBudgetLedgerFromPanes,
+} from './host-dispatch-budget.repair.js';
+import {
   admitHostDispatch,
   confirmHostDispatch,
   decideAuditAvailability,
   HOST_BUDGET_AUDIT_REFUSAL,
   HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+  HOST_BUDGET_CORRUPT_REFUSAL,
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
   readAuditBudgetState,
@@ -192,10 +196,11 @@ describe('host dispatch budget — machine admission (F3)', () => {
       ]);
     }));
 
-  it('AC6: an unreadable ledger fails closed, is repaired from live panes, then dispatch resumes', () =>
+  it('AC6 (WL-0MWFJD8ZO000J1R8): an unreadable ledger fails closed and is NEVER rewritten by a read', () =>
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2 });
-      writeRawBudgetLedger(dir, '{ this is not json');
+      const corrupt = '{ this is not json';
+      writeRawBudgetLedger(dir, corrupt);
 
       const livePanes = makeLivePaneList(['WL-RUNNING']);
       const refused = admit(INSTANCE_A, 'WL-NEW', livePanes);
@@ -204,16 +209,27 @@ describe('host dispatch budget — machine admission (F3)', () => {
         admitted: false,
         live: 0,
         max: 2,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-        repaired: true,
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
-      // The ledger was rewritten from live state: the running pane is now an
-      // entry (never a silent zero, which would under-count).
-      const repaired = readBudgetLedger(dir);
-      expect(repaired?.entries.map((entry) => entry.itemId)).toEqual(['WL-RUNNING']);
-      expect(repaired?.entries[0]).toMatchObject({ kind: 'implement', paneId: 'pane-1' });
+      // The bytes are untouched: an admission read never repairs. The old
+      // automatic repair reconstructed only `Downtime …` panes, silently
+      // dropping decorated and manually-triggered ones.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(corrupt);
+      expect(readBudgetLedger(dir)).toBeNull();
 
-      // A subsequent tick against the healed ledger dispatches normally.
+      // A second tick is refused identically — still no rewrite, still corrupt.
+      expect(admit(INSTANCE_A, 'WL-NEW', livePanes)).toMatchObject({
+        admitted: false,
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
+      });
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(corrupt);
+
+      // The EXPLICIT operator repair is the recovery, and dispatch resumes.
+      const repaired = repairBudgetLedgerFromPanes(livePanes, {
+        instanceId: 'operator',
+        root: INSTANCE_A,
+      });
+      expect(repaired.ok).toBe(true);
       const healed = admit(INSTANCE_A, 'WL-NEW', livePanes);
       expect(healed).toMatchObject({ admitted: true, live: 1, max: 2 });
       expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId).sort()).toEqual([
@@ -460,27 +476,31 @@ describe('host dispatch budget — audit tier (F2)', () => {
       expect(readBudgetLedger(dir)?.entries).toEqual([]);
     }));
 
-  it('AC6: an unreadable ledger fails closed and is repaired from the live audit panes', () =>
+  it('AC6 (WL-0MWFJD8ZO000J1R8): an unreadable ledger fails closed and the pre-check NEVER rewrites it', () =>
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
-      writeRawBudgetLedger(dir, '{ this is not json');
+      const corrupt = '{ this is not json';
+      writeRawBudgetLedger(dir, corrupt);
       const livePanes = makeLivePaneList([auditPane('pane-1', 'WL-RUNNING')]);
 
-      expect(readAuditBudgetState({ livePanes })).toEqual({
+      expect(readAuditBudgetState({ livePanes })).toMatchObject({
         atCap: true,
         live: 0,
         max: 1,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-        repaired: true,
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
-      // Self-healing: the running audit pane is now a ledger entry (a silent
-      // zero would under-count and admit a second audit).
-      const repaired = readBudgetLedger(dir);
-      expect(repaired?.entries.map((entry) => entry.itemId)).toEqual(['WL-RUNNING']);
-      expect(repaired?.entries[0]).toMatchObject({ kind: 'audit', paneId: 'pane-1' });
+      // An admission read never repairs: the bytes are untouched, so a repair
+      // is always a deliberate, reported operator action.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(corrupt);
+      expect(readBudgetLedger(dir)).toBeNull();
 
-      // The next tick reads the healed ledger: still at cap, now with the real
-      // single-flight token.
+      // The explicit repair is the recovery: the running audit pane becomes an
+      // entry and the pre-check reports the real single-flight token.
+      const repaired = repairBudgetLedgerFromPanes(livePanes, {
+        instanceId: 'operator',
+        root: '/repo/test',
+      });
+      expect(repaired.ok).toBe(true);
       expect(readAuditBudgetState({ livePanes })).toMatchObject({
         atCap: true,
         live: 1,
@@ -779,11 +799,10 @@ describe('unknown pane state in admission (WL-0MW9VQX5T001GCUP)', () => {
         admitted: false,
         live: 0,
         max: 2,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-        repaired: false,
+        // The corruption is named (WL-0MWFJD8ZO000J1R8) and nothing is
+        // rewritten — a read never repairs, whatever the pane state.
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
-      // The corrupt ledger is left untouched — the next pane-carrying tick
-      // self-heals it instead of a failed pane read deleting everything.
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
     }));
 
@@ -826,12 +845,11 @@ describe('unknown pane state in admission (WL-0MW9VQX5T001GCUP)', () => {
 
       // `livePanes` absent/undefined already means "cannot repair now" on the
       // audit pre-check; a failed pane read must select exactly that arm.
-      expect(readAuditBudgetState({ livePanes: undefined })).toEqual({
+      expect(readAuditBudgetState({ livePanes: undefined })).toMatchObject({
         atCap: true,
         live: 0,
         max: 1,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-        repaired: false,
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
     }));

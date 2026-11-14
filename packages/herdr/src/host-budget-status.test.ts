@@ -35,6 +35,7 @@ import {
 } from './host-dispatch-budget.fixtures.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
+  HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_DECISION_REASONS,
   HOST_BUDGET_IMPLEMENT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
@@ -62,11 +63,14 @@ function writeCaps(dir: string, caps: Record<string, number>): void {
 // ── AC1/AC2: one vocabulary, one header token per reason ───────────────
 
 describe('host-budget reason tokens and header mapping (AC1/AC2)', () => {
-  it('accepts exactly the three budget tokens', () => {
+  it('accepts exactly the documented budget tokens', () => {
     expect([...HOST_BUDGET_DECISION_REASONS]).toEqual([
       'host-budget-implement',
       'host-budget-audit',
       'host-budget-unknown',
+      // The ledger exists but cannot be trusted (WL-0MWFJD8ZO000J1R8): the
+      // decision log names the corruption so an operator repair is actionable.
+      'host-budget-corrupt',
     ]);
     for (const reason of HOST_BUDGET_DECISION_REASONS) {
       expect(isHostBudgetDecisionReason(reason)).toBe(true);
@@ -82,6 +86,9 @@ describe('host-budget reason tokens and header mapping (AC1/AC2)', () => {
     expect(decisionHeaderToken(HOST_BUDGET_IMPLEMENT_REASON)).toBe('budget-implement');
     expect(decisionHeaderToken(HOST_BUDGET_AUDIT_REASON)).toBe('budget-audit');
     expect(decisionHeaderToken(HOST_BUDGET_UNKNOWN_REASON)).toBe('budget-unknown');
+    // A corrupt ledger is a whole-budget failure: same header segment as the
+    // unknown arm, distinct decision-log token.
+    expect(decisionHeaderToken(HOST_BUDGET_CORRUPT_REASON)).toBe('budget-unknown');
     // The AUDIT tier's proxy-derived tokens quote the SAME header segments
     // (`budget-audit` / `budget-unknown`) — the documented decision-reason
     // table, so the header says why the audit tier stopped without one

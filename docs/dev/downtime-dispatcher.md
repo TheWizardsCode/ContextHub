@@ -58,6 +58,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota`, `reduceAuditDisplayCounts` |
 | `host-dispatch-budget.audit.ts` | Append-only audit trail for ledger mutations: one JSONL line per reserve/confirm/release/reap/sweep/repair, bounded by the coordination-log retention policy, fail-open (WL-0MWFJDGXQ001OXP8) | `appendBudgetAuditLine`, `budgetAuditTrailPath`, `readBudgetAuditTrail`, `budgetAuditRotatedFiles` |
 | `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (proxy-derived audit admission, fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `decideAuditAvailability`, `detectAuditDivergence`, `readAuditBudgetState` (legacy only), `confirmHostDispatch`, `releaseHostDispatch` |
+| `host-dispatch-budget.repair.ts` | Explicit operator repair of a damaged ledger from the live pane list: decoration-stripping label decode for every dispatcher form, conservative tier fallback, all-or-nothing reconstruction (WL-0MWFJD8ZO000J1R8) | `decodeBudgetPaneLabel`, `planBudgetRepair`, `repairBudgetLedgerFromPanes` |
 | `host-dispatch-budget.interactive.ts` | User-fired over-quota gate half: tier detection and prompt-then-claim (F4) | `budgetKindForAgentCommand`, `prepareInteractiveAgentDispatch` |
 | `host-budget-dialog.ts` | Pure bottom-anchored over-quota dialog + the renderer↔awaiter prompt host (F4) | `formatHostBudgetDialog`, `overlayHostBudgetDialog`, `createHostBudgetPromptHost` |
 | `host-budget-status.ts` | Read-only host-budget status for the worklist `n/max` counter and the stderr skip line (F5) | `readHostBudgetStatus`, `hostBudgetStatusText`, `hostBudgetSkipLine` |
@@ -2959,6 +2960,38 @@ implement abort can never remove an audit entry for the same item, and closing
 an item's finished `intake`/`plan`/`audit` pane can never remove its running
 `implement` entry.
 
+**A damaged ledger is never repaired by a read (WL-0MWFJD8ZO000J1R8).** An
+admission read (implement tier or the audit pre-check) never rewrites
+`dispatch-budget.json`. When the ledger exists but cannot be trusted the tick
+fails closed with **`host-budget-corrupt`**, the ledger stays **byte-identical**
+and the reason lands in the decision log, so the operator can act instead of
+silently losing slots. The previous behaviour — rewriting the whole document
+from the live pane list — reconstructed entries only from panes whose title
+started with `Downtime`, dropping herdr's `⚠️`/`🚫`-decorated panes and
+`Manually triggered` panes (6 of the 10 running implements on 2026-11-13).
+
+Repair is an **explicit operator action**:
+
+```bash
+node packages/herdr/dist/pane-close-cli.js --repair-budget-ledger
+```
+
+It decodes every dispatcher label form — `Downtime triggered …`,
+`Downtime <kind> …` and `Manually triggered …`, with leading emoji/status
+decoration and whitespace stripped first — and derives the tier from the token
+after the prefix. An unrecognised tier is counted against `implement`
+(over-counting refuses a dispatch; under-counting would admit work the operator
+capped). It then:
+
+| Situation | Behaviour |
+|---|---|
+| every live dispatcher pane yields a work-item id | rewrites the ledger from the live panes and prints `{ repaired: true, count, entries, accountedPaneIds }` |
+| a live dispatcher pane has no work-item id in its label | **refuses** (`repaired: false, reason: "incomplete"`), prints the blocking panes with their per-pane decode, and leaves the ledger untouched |
+| the pane list cannot be read or parsed | refuses — an unknown pane list must never be repaired as empty |
+
+A plan/intake/risk-effort/prompt pane is not dispatch evidence and is ignored
+by both the plan and the refusal check.
+
 #### The ledger's audit trail (WL-0MWFJDGXQ001OXP8)
 
 The ledger keeps current state only, so "the in-flight count is wrong" used to
@@ -4492,6 +4525,16 @@ likewise re-read live every tick and clamped on load
 - **Pane landed in the project workspace but not under the item tab:** the item-ID tab invariant is anchor-by-ID — every automated pane must split the item tab's root pane. Check (a) `herdr tab list --workspace <workspaceId>` shows a tab labelled exactly the work-item id and `herdr pane get <tabRootPaneId>` is alive; (b) the resolved project workspace is the one whose `Work Items` plugin pane has `HERDR_RESOLVED_CWD` equal to the item's worklog root (`herdr pane process-info --pane <pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`); (c) the running plugin loads this repo's code — `herdr plugin list` must show `worklog-selection-list` → `local:/…/packages/herdr` (stale `dist/` or a dangling worktree link breaks resolution; rebuild with `npm run build` in `packages/herdr`). To reset an item tab, close it (`herdr tab close <tabId>`) — the next dispatch re-creates it under the coordination lock.
 - **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** neither the project workspace/item tab nor the Dispatcher fallback anchor could be provisioned (fail-closed, never the leader's pane). For the project path check the `pane list` / `process-info` / `/proc/<pid>/environ` reads (no `Work Items` pane for the root, missing `HERDR_RESOLVED_CWD`, or unreadable `/proc` on non-Linux); for the fallback check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock`), and the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <itemId> --no-focus` JSON parse (shape drift across herdr versions). The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty/missing anchor file or unreadable machine dir is treated as missing (never a crash).
 - **Pane landed in the wrong project's workspace:** resolution is fail-closed — it never selects another root's workspace. Check (a) the item's `cwd` (worklog root) matches exactly the plugin pane's `HERDR_RESOLVED_CWD` (trailing-slash tolerant); (b) when ≥2 `Work Items` panes resolve to the same root the focused pane wins, else the lowest pane id — close the surplus plugin pane to remove the ambiguity; (c) stale `dist/` in the running plugin (rebuild with `npm run build` in `packages/herdr`). If no plugin pane resolves, panes intentionally fall back to the `Dispatcher` workspace — that is AC4, not a misroute.
+- **`host-budget-corrupt` in the decision log / the worklist counter
+  disappears:** the machine ledger exists but cannot be read as a valid
+  document (a partial write from an older version, a hand edit, a byte-level
+  truncation). Admission fails closed and never rewrites it, so every budgeted
+  tier stays refused until it is repaired. Inspect
+  `~/.herdr/downtime/dispatch-budget.json`, keep a copy, then rebuild it from
+  the running panes with `node packages/herdr/dist/pane-close-cli.js
+  --repair-budget-ledger` (it refuses rather than writing a partial
+  reconstruction — close or rename any listed pane whose label carries no
+  work-item id, then re-run).
 - **No dispatches happening:** confirm a leader is elected (lease file
   present + recent `lastUpdated` refresh), the proxy reports idle for ≥ 75 s
   continuously, and the coordination list has offers. Check

@@ -26,20 +26,32 @@
  *  - `host-budget-audit` — the same for the audit tier at any cap other than 1
  *    (the retired marker's `audit-host-saturated` token is kept at cap 1 so
  *    existing consumers are unchanged — it is NOT one of these tokens);
- *  - `host-budget-unknown` — the ledger could not be trusted; the dispatcher
- *    failed closed and repairs the ledger from live state.
+ *  - `host-budget-unknown` — the ledger could not be trusted (lock contention
+ *    or an I/O failure); the dispatcher failed closed;
+ *  - `host-budget-corrupt` — the ledger EXISTS but cannot be read as a valid
+ *    document. The tick fails closed, the bytes are left untouched and an
+ *    operator repair (`host-dispatch-budget.repair.ts`) is the recovery
+ *    (WL-0MWFJD8ZO000J1R8). An admission read never repairs.
  */
 export const HOST_BUDGET_IMPLEMENT_REASON = 'host-budget-implement';
 /** Audit-tier counterpart of {@link HOST_BUDGET_IMPLEMENT_REASON}. */
 export const HOST_BUDGET_AUDIT_REASON = 'host-budget-audit';
-/** The ledger could not be trusted (fail closed + repair). */
+/** The ledger could not be trusted (fail closed). */
 export const HOST_BUDGET_UNKNOWN_REASON = 'host-budget-unknown';
+
+/**
+ * The ledger exists but cannot be trusted (corrupt/unreadable bytes). Fail
+ * closed, leave the bytes alone, and name the damage so the operator knows a
+ * repair is what is needed (WL-0MWFJD8ZO000J1R8).
+ */
+export const HOST_BUDGET_CORRUPT_REASON = 'host-budget-corrupt';
 
 /** Every host-budget decision reason, in the order they are documented. */
 export const HOST_BUDGET_DECISION_REASONS = [
   HOST_BUDGET_IMPLEMENT_REASON,
   HOST_BUDGET_AUDIT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
+  HOST_BUDGET_CORRUPT_REASON,
 ] as const;
 
 /** One of the host-budget refusal tokens. */

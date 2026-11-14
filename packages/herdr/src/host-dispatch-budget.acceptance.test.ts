@@ -44,7 +44,7 @@
  * Run: npx vitest run packages/herdr/src/host-dispatch-budget.acceptance.test.ts
  */
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -54,6 +54,7 @@ import {
   confirmHostDispatch,
   HOST_BUDGET_AUDIT_REFUSAL,
   HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+  HOST_BUDGET_CORRUPT_REFUSAL,
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
   readAuditBudgetState,
@@ -63,6 +64,7 @@ import {
   AUDIT_BUDGET_SATURATED_REASON,
   AUDIT_BUDGET_UNKNOWN_REASON,
 } from './downtime-worker.audit-availability.contract.js';
+import { repairBudgetLedgerFromPanes } from './host-dispatch-budget.repair.js';
 import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
 import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
 import { readCoordinationLogEntries } from './downtime-log.js';
@@ -841,10 +843,11 @@ describe('AC8 — dispatcher-fired over-quota ticks are neutral skips', () => {
 // ── AC9 — corrupt ledger in both fail directions ─────────────────────
 
 describe('AC9 — a corrupt ledger fails closed for the dispatcher, open for a human', () => {
-  it('AC9: the dispatcher refuses with host-budget-unknown and rewrites the ledger from live panes', async () => {
+  it('AC9 (WL-0MWFJD8ZO000J1R8): the dispatcher refuses with host-budget-corrupt and NEVER rewrites the ledger', async () => {
     await withMachineDir(async (dir) => {
       writeCaps(dir, { maxImplement: 2 });
-      writeRawBudgetLedger(dir, '{ this is not json');
+      const corrupt = '{ this is not json';
+      writeRawBudgetLedger(dir, corrupt);
       const panes = [livePane('pane-1', 'WL-LIVE')];
 
       const deps = makeDeps({
@@ -855,15 +858,19 @@ describe('AC9 — a corrupt ledger fails closed for the dispatcher, open for a h
       const refused = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
       expect(refused).toMatchObject({
         dispatched: false,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+        // The decision log names the corruption, not a generic unknown.
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
       expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      // No self-heal: an admission read must leave the bytes alone.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(corrupt);
 
-      // Self-healing: the unreadable document is rewritten from the live pane
-      // list, so a later tick can dispatch normally.
-      const repaired = readBudgetLedger(dir);
-      expect(repaired).not.toBeNull();
-      expect(repaired?.entries.map((entry) => entry.itemId)).toEqual(['WL-LIVE']);
+      // The EXPLICIT operator repair is the recovery path.
+      const repaired = repairBudgetLedgerFromPanes(panes, {
+        instanceId: 'operator',
+        root: INSTANCE_A_ROOT,
+      });
+      expect(repaired.ok).toBe(true);
 
       const healed = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
       expect(healed.dispatched).toBe(true);

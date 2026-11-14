@@ -768,10 +768,10 @@ export type DowntimeClaimResult =
  * `audit-budget-saturated` (verdict `available:false`) or
  * `audit-budget-unknown` (absent/unreachable/unparsable read, fail-closed) —
  * never the legacy `host-budget-audit` / `audit-host-saturated` tokens. On the
- * retained host-wide source the legacy tokens are unchanged. `detail` records
- * the failing exchange on a fail-closed proxy read (`timeout` / `network` /
- * `http-<status>` / `bad-body` / `seam-absent`) for the decision log. Absent on
- * a per-worklog skip.
+ * retained host-wide source the legacy tokens are unchanged (`host-budget-corrupt`
+ * = the ledger exists but is untrustworthy; no read repairs it). `detail`
+ * records the failing exchange on a fail-closed proxy read for the decision
+ * log. Absent on a per-worklog skip.
  */
 export type DowntimeActiveAuditResult =
   | {
@@ -782,6 +782,7 @@ export type DowntimeActiveAuditResult =
         | 'audit-host-saturated'
         | 'host-budget-audit'
         | 'host-budget-unknown'
+        | 'host-budget-corrupt'
         | 'audit-budget-saturated'
         | 'audit-budget-unknown';
       budget?: { live: number; max: number };

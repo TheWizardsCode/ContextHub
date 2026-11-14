@@ -15,6 +15,7 @@ import type { LlamaSlot, LlamaStatus } from './downtime-worker.types.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
   HOST_BUDGET_IMPLEMENT_REASON,
+  HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
   type HostBudgetEvidence,
 } from './downtime-log.js';
@@ -237,6 +238,9 @@ export function decisionHeaderToken(reason: string): string {
     case 'audit-budget-saturated':
       return 'budget-audit';
     case HOST_BUDGET_UNKNOWN_REASON:
+    // A corrupt/unreadable ledger is a ledger-trust failure like the lock/I-O
+    // arm, so it quotes the same header segment (WL-0MWFJD8ZO000J1R8).
+    case HOST_BUDGET_CORRUPT_REASON:
     case 'audit-budget-unknown':
       // `audit-budget-unknown` (a fail-closed proxy read) is a budget stop
       // like `host-budget-unknown`, so both quote `budget-unknown`.

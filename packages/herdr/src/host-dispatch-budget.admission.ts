@@ -7,7 +7,8 @@
  * `host-dispatch-budget.ts`) plus the live pane list into exactly ONE
  * admission decision for a dispatch — admit (and reserve), refuse because the
  * tier is at/over its cap, or refuse because the ledger cannot be trusted
- * (fail closed + repair from live state). The ledger contract itself
+ * (fail closed; repair is an explicit operator action, never a read side
+ * effect). The ledger contract itself
  * (read/reserve/release/reap, configuration, liveness table) lives in
  * `host-dispatch-budget.ts` and is not restated here.
  *
@@ -60,9 +61,14 @@
  *    degrades exactly as before the budget existed (parent AC11).
  *  - **Ledger exists but cannot be trusted** (`unknown: true` — corrupt bytes,
  *    an invalid document, an unreadable file): REFUSE with
- *    `host-budget-unknown`, and rewrite the ledger from the live pane list so
- *    the NEXT tick can make a real decision (AC6). A dropped/ignored unknown
- *    read would under-count and admit work the operator capped.
+ *    `host-budget-corrupt` and leave the ledger BYTE-IDENTICAL
+ *    (WL-0MWFJD8ZO000J1R8). An admission read never rewrites the document: the
+ *    old automatic whole-ledger repair reconstructed entries only from panes
+ *    whose title started with `Downtime`, so it silently dropped decorated
+ *    (`⚠️`/`🚫`) and `Manually triggered` panes — 6 of 10 live implements on
+ *    2026-11-13. Recovery is the explicit, complete, operator-initiated
+ *    `host-dispatch-budget.repair.ts`. A dropped/ignored unknown read would
+ *    still under-count, hence the refusal.
  *  - **Lock contention / I/O failure while reserving**: REFUSE with
  *    `host-budget-unknown`. The reservation could not be recorded, so the
  *    dispatcher cannot prove the host is within budget — the fail-closed arm.
@@ -106,6 +112,7 @@ import {
 import { DOWNTIME_PANE_LABEL_PREFIX, paneLabelItemId } from './downtime-worker.pane.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
+  HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_IMPLEMENT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
 } from './downtime-log.js';
@@ -145,8 +152,17 @@ export const HOST_BUDGET_AUDIT_REFUSAL = HOST_BUDGET_AUDIT_REASON;
  */
 export const HOST_BUDGET_AUDIT_SATURATED_REFUSAL = 'audit-host-saturated';
 
-/** Refusal reason: the ledger could not be trusted (fail closed + repair). */
+/** Refusal reason: the ledger could not be trusted (lock/I-O failure). */
 export const HOST_BUDGET_UNKNOWN_REFUSAL = HOST_BUDGET_UNKNOWN_REASON;
+
+/**
+ * Refusal reason: the ledger EXISTS but cannot be trusted (corrupt/unreadable
+ * bytes). Distinct from {@link HOST_BUDGET_UNKNOWN_REFUSAL} so the decision log
+ * names the damage rather than a generic unknown, and so an operator knows a
+ * repair (`host-dispatch-budget.repair.ts`) is what is needed
+ * (WL-0MWFJD8ZO000J1R8).
+ */
+export const HOST_BUDGET_CORRUPT_REFUSAL = HOST_BUDGET_CORRUPT_REASON;
 
 /** The refusal tokens this module can return. */
 export type HostBudgetRefusalReason =
@@ -154,6 +170,7 @@ export type HostBudgetRefusalReason =
   | typeof HOST_BUDGET_AUDIT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL
+  | typeof HOST_BUDGET_CORRUPT_REFUSAL
   | typeof AUDIT_BUDGET_SATURATED_REASON
   | typeof AUDIT_BUDGET_UNKNOWN_REASON;
 
@@ -162,6 +179,7 @@ export type HostBudgetAuditRefusalReason =
   | typeof HOST_BUDGET_AUDIT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL
+  | typeof HOST_BUDGET_CORRUPT_REFUSAL
   | typeof AUDIT_BUDGET_SATURATED_REASON
   | typeof AUDIT_BUDGET_UNKNOWN_REASON;
 
@@ -258,7 +276,11 @@ export interface HostBudgetAdmission {
    * implement refusal and on a `saturated` (proxy answered) audit refusal.
    */
   detail?: string;
-  /** True when an unreadable ledger was rewritten from live state (AC6). */
+  /**
+   * Always absent from this version: an admission read never rewrites the
+   * ledger (WL-0MWFJD8ZO000J1R8). Kept on the wire so an older consumer's
+   * optional check keeps compiling.
+   */
   repaired?: boolean;
   /**
    * The attempt token of the reservation this admission created
@@ -273,86 +295,17 @@ function refuseReason(kind: HostBudgetKind): HostBudgetRefusalReason {
   return kind === 'audit' ? HOST_BUDGET_AUDIT_REFUSAL : HOST_BUDGET_IMPLEMENT_REFUSAL;
 }
 
-function kindOf(pane: HostBudgetLivePane): HostBudgetKind {
-  const title = pane.title;
-  if (typeof title === 'string') {
-    const match = /^Downtime (?:triggered )?(implement|audit)\b/.exec(title);
-    if (match !== null) return match[1] as HostBudgetKind;
-  }
-  // Conservative default: a live downtime pane whose kind cannot be read is
-  // counted against the implement tier. Over-counting refuses a dispatch
-  // (fail-closed); guessing `audit` could over-admit implement work.
-  return 'implement';
-}
-
-function entriesFromLivePanes(
-  livePanes: readonly HostBudgetLivePane[],
-  input: HostBudgetAdmissionInput,
-  now: number,
-): HostBudgetEntry[] {
-  const at = new Date(now).toISOString();
-  const entries: HostBudgetEntry[] = [];
-  const seen = new Set<string>();
-  for (const pane of livePanes) {
-    // Only dispatcher-created panes can be reconstructed: their title carries
-    // the downtime prefix and the work-item id suffix. Any other live pane is
-    // not evidence of a dispatch (and must never be counted as one).
-    if (typeof pane.title !== 'string' || !pane.title.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) {
-      continue;
-    }
-    const itemId = paneLabelItemId(pane.title);
-    if (itemId === null) continue;
-    const kind = kindOf(pane);
-    // One reconstructed entry per (kind, item) — the ledger's entry key
-    // (WL-0MWFJD5T4003OM91) — so an implement and an audit pane for the same
-    // item both survive a repair.
-    const key = `${kind}:${itemId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    entries.push({
-      kind,
-      itemId,
-      instanceId: input.instanceId,
-      paneId: pane.paneId,
-      root: input.root,
-      startedAt: at,
-      heartbeatAt: at,
-    });
-  }
-  return entries;
-}
-
-/**
- * Rewrite an unreadable ledger from the live pane list (AC6).
- *
- * Only live downtime panes whose label carries a work-item id can be
- * reconstructed (`paneLabelItemId` — the dispatcher's own pane-title
- * convention); a pane with no id is skipped because there is no entry key to
- * write. Best-effort: returns false when the write fails, which does NOT
- * change the refusal (the tick is skipped either way).
- */
-export function repairLedgerFromLivePanes(
-  livePanes: readonly HostBudgetLivePane[],
-  input: HostBudgetAdmissionInput,
-  opts: HostBudgetOptions = {},
-): boolean {
-  const entries = entriesFromLivePanes(livePanes, input, opts.now ?? Date.now());
-  return replaceBudget(entries, opts).ok;
-}
-
 /**
  * Options for the audit tier's admission pre-check ({@link readAuditBudgetState}).
  *
- * `livePanes` is OPTIONAL and only consulted when the ledger cannot be read
- * (AC6): the dispatch loop calls this pre-check once per audit candidate, so an
- * eager pane-list subprocess would add a `herdr pane list` per candidate. Absent
- * panes means "cannot repair now" — the tick still fails closed, and the next
- * call that can supply panes repairs the ledger. Absence is exactly the
- * UNKNOWN pane state of WL-0MW9VQX5T001GCUP: an unknown read must never rewrite
- * a corrupt ledger as empty, so "no list ⇒ no repair" is the safe arm.
+ * `livePanes` is accepted for call-site compatibility but NO LONGER triggers a
+ * repair: an admission read never rewrites the ledger
+ * (WL-0MWFJD8ZO000J1R8). A damaged ledger fails closed with
+ * `host-budget-corrupt` and the operator runs the explicit repair in
+ * `host-dispatch-budget.repair.ts`.
  */
 export interface HostBudgetAuditStateOptions extends HostBudgetOptions {
-  /** Live pane list used ONLY to repair an unreadable ledger (AC6). */
+  /** Accepted but unused: admission never repairs (WL-0MWFJD8ZO000J1R8). */
   livePanes?: readonly HostBudgetLivePane[];
   /** Instance identity recorded on repaired entries (diagnostics only). */
   instanceId?: string;
@@ -501,8 +454,9 @@ function emitAuditBudgetEvent(
  *     (AC3 — a disabled tier is refused whatever the ledger holds);
  *  3. count fresh audit entries (no live-pane requirement, plus a non-stale
  *     legacy marker as one synthetic entry);
- *  4. unreadable ledger ⇒ repair from the live pane list and report
- *     `host-budget-unknown` (AC6 — fail closed, self-heal for the next tick);
+ *  4. unreadable ledger ⇒ report `host-budget-corrupt` (bytes untouched, no
+ *     repair — WL-0MWFJD8ZO000J1R8); a lock/I-O failure reports
+ *     `host-budget-unknown`;
  *  5. unresolvable coordination dir ⇒ not at cap: with no machine dir there is
  *     no ledger and no new failure mode (parent AC11);
  *  6. at/over cap ⇒ `audit-host-saturated` when `max === 1`, otherwise
@@ -530,26 +484,15 @@ export function readAuditBudgetState(
       // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
       return { atCap: false, live: 0, max };
     }
-    // Repair from observed live state only when the caller could supply a pane
-    // list; a caller that cannot (the per-candidate pre-check) still fails
-    // closed, and the next pane-carrying call self-heals the ledger.
-    const repaired =
-      opts.livePanes === undefined
-        ? false
-        : repairLedgerFromLivePanes(
-            opts.livePanes,
-            {
-              kind: 'audit',
-              // The synthetic entry key is never written by a repair:
-              // reconstructed entries take their own item ids from the pane
-              // labels.
-              itemId: '',
-              instanceId: opts.instanceId ?? `herdr:${process.pid}`,
-              root: opts.root ?? '',
-            },
-            ledgerOptions,
-          );
-    return { atCap: true, live: 0, max, reason: HOST_BUDGET_UNKNOWN_REFUSAL, repaired };
+    // NO repair (WL-0MWFJD8ZO000J1R8): an admission read never rewrites the
+    // ledger. A damaged document fails closed and is left byte-identical, and
+    // the refusal token names the corruption so the operator can act.
+    return {
+      atCap: true,
+      live: 0,
+      max,
+      reason: count.unknown ? HOST_BUDGET_CORRUPT_REFUSAL : HOST_BUDGET_UNKNOWN_REFUSAL,
+    };
   }
 
   if (count.count >= max) {
@@ -596,10 +539,13 @@ function reserveAuditForObservability(
  *
  * Byte-for-byte the pre-proxy behaviour: {@link readAuditBudgetState} decides
  * from `budget.json` `maxAudit` + the local ledger, the refusal tokens are the
- * legacy ones, the ledger is repaired when unreadable, and the slot is
+ * legacy ones, an unreadable ledger fails closed without being rewritten, and
+ * the slot is
  * reserved only when the state admits. The proxy is never consulted, and a
  * reservation failure fails CLOSED exactly as before (the ledger could not
- * prove the host is within budget).
+ * prove the host is within budget). An unreadable ledger is NOT repaired here
+ * either (WL-0MWFJD8ZO000J1R8): the legacy path fails closed and reports the
+ * corruption.
  */
 function admitAuditLegacy(
   input: HostBudgetAdmissionInput,
@@ -728,9 +674,9 @@ function admitAuditDispatch(
  *  3. count live dispatches (reaping stale, pane-less entries on read — but
  *     with an UNKNOWN pane list (`livePanes: undefined`) the freshness rule
  *     counts and nothing is reaped, WL-0MW9VQX5T001GCUP);
- *  4. unreadable ledger ⇒ when the pane list is KNOWN, repair from live panes
- *     and refuse (`unknown`); when it is unknown, refuse WITHOUT rewriting
- *     (the next pane-carrying tick self-heals);
+ *  4. unreadable ledger ⇒ refuse `host-budget-corrupt` with the bytes
+ *     untouched (never repaired from a read — WL-0MWFJD8ZO000J1R8); a
+ *     lock/I-O failure is `host-budget-unknown`;
  *  5. at/over cap ⇒ refuse with the observed `live`/`max` (AC2);
  *  6. otherwise reserve the slot and admit.
  *
@@ -767,19 +713,18 @@ export function admitHostDispatch(
       // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
       return { admitted: true, live: 0, max };
     }
-    // Repair from observed live state ONLY when the pane read succeeded and
-    // the list is authoritative; an unknown pane state (failed read) must
-    // never rewrite a corrupt ledger from nothing (WL-0MW9VQX5T001GCUP AC1).
-    const repaired =
-      opts.livePanes === undefined
-        ? false
-        : repairLedgerFromLivePanes(opts.livePanes, input, ledgerOptions);
+    // NO repair (WL-0MWFJD8ZO000J1R8): an admission read never rewrites the
+    // ledger. Repairs are an explicit operator action
+    // (`host-dispatch-budget.repair.ts`), because a reconstruction from the
+    // live pane list used to drop decorated and manually-triggered panes —
+    // 6 of the 10 running implements on 2026-11-13. The tick fails closed and
+    // the ledger stays byte-identical; `host-budget-corrupt` names the damage
+    // so the decision log carries it.
     return {
       admitted: false,
       live: 0,
       max,
-      reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-      repaired,
+      reason: count.unknown ? HOST_BUDGET_CORRUPT_REFUSAL : HOST_BUDGET_UNKNOWN_REFUSAL,
     };
   }
 
