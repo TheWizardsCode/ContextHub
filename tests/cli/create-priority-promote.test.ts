@@ -10,13 +10,20 @@
  *
  * Work item: WL-0MWETWJQK008TIPE
  *
- * RED-pinned: the promotion tests are wrapped in `it.fails(...)` because the
- * create-side cascade lands with the sibling implementation children
- * (WL-0MWETWNSO001UL2M shared primitive, WL-0MWETWWBE005CJEL create wiring).
- * The pin keeps the gated suite green while the behaviour is pending; the
- * implementation child flips `it.fails(` → `it(` once `wl create` promotes.
- * The non-critical / own-priority specs assert behaviour that already holds
- * today and therefore stay green (`it`) either way.
+ * Implementation: the create-side cascade landed with the sibling
+ * implementation children (WL-0MWETWNSO001UL2M shared primitive,
+ * WL-0MWETWWBE005CJEL create wiring); the promotion tests were flipped from
+ * RED-pinned `it.fails(...)` to active `it(...)` when `wl create` started
+ * promoting. The non-critical / own-priority specs assert behaviour that
+ * holds regardless of the cascade.
+ *
+ * Scope note: the legacy "critical item under a non-critical ancestor" shape
+ * (which would pin "skip an already-critical ancestor, keep walking above
+ * it") is not constructible through the CLI once create/reparent promotion
+ * lands — the setup's own critical creation promotes the root. That rule is
+ * pinned at unit level (tests/database.test.ts); the CLI suite pins the
+ * reachable all-critical case, where already-critical ancestors are never
+ * rewritten.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -118,9 +125,9 @@ describe('create priority promotion', () => {
   });
 
   // =======================================================================
-  // RED pins — the create-side promotion cascade (flip to `it` when it lands)
+  // The create-side promotion cascade (active 'it' specs)
   // =======================================================================
-  it.fails(
+  it(
     'promotes the direct parent of a critical child and reports it in JSON',
     async () => {
       const parentId = await createItem('Promote direct parent', '-p medium');
@@ -141,7 +148,7 @@ describe('create priority promotion', () => {
     60_000
   );
 
-  it.fails(
+  it(
     'promotes every ancestor to the root when a grandchild is created critical',
     async () => {
       const root = await createItem('Deep root', '-p high');
@@ -166,35 +173,35 @@ describe('create priority promotion', () => {
     60_000
   );
 
-  it.fails(
-    'skips an already-critical ancestor but keeps promoting above it',
+  it(
+    'does not rewrite ancestors that are already critical',
     async () => {
-      const root = await createItem('Skip-walk root', '-p high');
-      const alreadyCritical = await createItem(
-        'Skip-walk already critical',
-        `-p critical --parent ${root}`
-      );
+      // An all-critical chain: the create cascade must leave every ancestor
+      // untouched and report no promotions. (The legacy shape — a critical
+      // item under a *non-critical* ancestor — is not constructible through
+      // the CLI once create/reparent promotion lands, because the setup's own
+      // critical creation would promote the root; that rule stays pinned at
+      // unit level by tests/database.test.ts.)
+      const root = await createItem('All-critical root', '-p critical');
       const parent = await createItem(
-        'Skip-walk parent',
-        `-p medium --parent ${alreadyCritical}`
+        'All-critical parent',
+        `-p critical --parent ${root}`
       );
 
       const result = await createItemJson(
-        'Skip-walk critical child',
+        'All-critical child',
         `-p critical --parent ${parent}`
       );
 
-      const ids = promotedIds(result);
-      expect(ids).toEqual([parent, root]);
-      // The already-critical ancestor is left untouched and not reported.
-      expect(ids).not.toContain(alreadyCritical);
-      expect((await showItem(alreadyCritical)).priority).toBe('critical');
+      expect(result.success).toBe(true);
+      expect(promotedIds(result)).toEqual([]);
       expect((await showItem(root)).priority).toBe('critical');
+      expect((await showItem(parent)).priority).toBe('critical');
     },
     60_000
   );
 
-  it.fails(
+  it(
     'prints a human-readable summary line naming the promoted ancestors',
     async () => {
       const parentId = await createItem('Human summary parent', '-p medium');

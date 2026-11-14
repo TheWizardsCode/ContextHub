@@ -258,6 +258,16 @@ parent's lifecycle (WL-0MTWU4XUD0001ALR). Every demotion writes an audit-trail
 comment on the parent naming the attached child, the actor, and the transition
 (WL-0MTWU4Y82001B3UH).
 
+When a new child is created with `-p critical --parent <id>`, every
+non-critical ancestor is promoted to `critical` — transitively to the root —
+so a critical subtask is never buried under a non-critical parent
+(WL-0MWDD2JE6006CL7I). Ancestors already at `critical` are skipped, but the
+walk continues to the root. In JSON mode the response carries the promoted
+items in `promotedAncestors` (nearest ancestor first); human mode prints a
+`[Promoted ancestors to critical: <ids>]` summary line. Non-critical creations
+never trigger the cascade, and the created item's own priority is never
+changed.
+
 Dedup guard:
 
 - Retrying an identical `wl create` (common when agents lose the tool result to output trimming) returns the existing recent non-terminal item with a `duplicateOf` marker instead of creating a byte-identical twin. Only items created within the `--dedup-window` (default 5 minutes) whose title matches case- and whitespace-insensitively are reused; completed/deleted items are never matched. Pass `--allow-duplicate` when a genuinely new item is needed. In JSON mode the response carries a top-level `id` field first and a `duplicateOf` field on a dedup hit; human mode prints an `ID: <id>` line first.
