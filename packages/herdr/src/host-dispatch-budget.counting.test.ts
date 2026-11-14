@@ -12,19 +12,27 @@
  * admission decision reach exactly the same figure.
  */
 
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { admitHostDispatch } from './host-dispatch-budget.admission.js';
 import { countLiveWork, readHostBudgetLiveWork } from './host-dispatch-budget.counting.js';
 import { HOST_BUDGET_STALE_WINDOW_MS } from './host-dispatch-budget.js';
 import { readHostBudgetStatus } from './host-budget-status.js';
+import { HOST_BUDGET_CONFIG_FILE } from './host-dispatch-budget.js';
 import {
   makeBudgetEntry,
   makeLivePaneList,
   withMachineDir,
-  writeBudgetConfig,
   writeBudgetLedger,
 } from './host-dispatch-budget.fixtures.js';
+
+/** Write `budget.json` into the isolated machine dir (per-tier caps). */
+function writeCaps(dir: string, caps: { maxImplement?: number; maxAudit?: number }): void {
+  writeFileSync(join(dir, HOST_BUDGET_CONFIG_FILE), JSON.stringify(caps, null, 2), 'utf8');
+}
 
 const NOW = Date.parse('2026-11-13T22:00:00.000Z');
 const HOUR = 60 * 60 * 1000;
@@ -235,7 +243,7 @@ describe('AC3 — the 2026-11-13 host reads 10, not 3', () => {
 
   it('the header and admission agree, and the dispatcher refuses at max 6 quoting live=10', async () => {
     await withMachineDir(async (dir) => {
-      writeBudgetConfig(dir, { maxImplement: 6 });
+      writeCaps(dir, { maxImplement: 6 });
       writeBudgetLedger(dir, LEDGER);
 
       const status = readHostBudgetStatus({ dir, now: NOW, livePanes: panes() });
@@ -258,7 +266,7 @@ describe('AC3 — the 2026-11-13 host reads 10, not 3', () => {
 
   it('admits again once the unreserved panes close', async () => {
     await withMachineDir((dir) => {
-      writeBudgetConfig(dir, { maxImplement: 6 });
+      writeCaps(dir, { maxImplement: 6 });
       writeBudgetLedger(dir, LEDGER);
 
       // Only the three ledger-confirmed panes remain live.
@@ -277,7 +285,7 @@ describe('AC3 — the 2026-11-13 host reads 10, not 3', () => {
 describe('the header gains no new chrome (AC6)', () => {
   it('renders the same segment shape, with the union figure', async () => {
     await withMachineDir((dir) => {
-      writeBudgetConfig(dir, { maxImplement: 6 });
+      writeCaps(dir, { maxImplement: 6 });
       writeBudgetLedger(dir, [makeBudgetEntry({ itemId: 'WL-1', paneId: 'p:1' })]);
       const status = readHostBudgetStatus({
         dir,

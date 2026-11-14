@@ -47,7 +47,7 @@
  * the item-id-in-pane-title convention (`pane-title.ts`): a pane belongs to
  * a dispatch when its `paneId` is in the list and its `title` embeds the
  * work-item id. `makeLivePaneList` builds titles that embed the id
- * (`Downtime triggered - <id>`, mirroring the dispatcher's pane titles) and a
+ * (`Downtime triggered implement - <id>`, the dispatcher's real pane title) and a
  * bare string spec is shorthand for that item id. A pane spec with no
  * `itemId`/`title` yields an empty title — "a live pane that belongs to no
  * work item" — and is never inferred to belong to one.
@@ -151,7 +151,7 @@ export type FakePaneSpec = string | { paneId?: string; title?: string; itemId?: 
  * Build a fake live pane list (see the fake-pane-list contract above).
  *
  * Deterministic: an omitted `paneId` becomes `pane-<n>` (1-based index), and
- * an omitted `title` is `Downtime triggered - <itemId>` when an item id is
+ * an omitted `title` is `Downtime triggered implement - <itemId>` when an item id is
  * given, otherwise `''`. An explicit `title` always wins, so a test can
  * simulate a pane whose title carries a DIFFERENT id (or none).
  */
@@ -159,9 +159,14 @@ export function makeLivePaneList(specs: readonly FakePaneSpec[] = []): FakeLiveP
   return specs.map((spec, index) => {
     const fallbackPaneId = `pane-${index + 1}`;
     if (typeof spec === 'string') {
-      return { paneId: fallbackPaneId, title: `Downtime triggered - ${spec}` };
+      // The real dispatcher form names the tier; the in-flight counting rule
+      // reads it, and an unrouted label counts against `implement`
+      // (WL-0MWFJDD8R005F5BV).
+      return { paneId: fallbackPaneId, title: `Downtime triggered implement - ${spec}` };
     }
-    const itemSuffix = spec.itemId ? `Downtime triggered - ${spec.itemId}` : '';
+    const itemSuffix = spec.itemId
+      ? `Downtime triggered implement - ${spec.itemId}`
+      : '';
     return {
       paneId: spec.paneId ?? fallbackPaneId,
       title: spec.title ?? itemSuffix,

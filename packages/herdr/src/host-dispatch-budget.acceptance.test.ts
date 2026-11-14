@@ -156,9 +156,16 @@ function writeCaps(dir: string, caps: { maxImplement?: number; maxAudit?: number
   writeFileSync(budgetConfigPath(dir), JSON.stringify(caps) + '\n', 'utf8');
 }
 
-/** A live pane owned by `itemId` (the dispatcher's pane-title convention). */
-function livePane(paneId: string, itemId: string): HostBudgetLivePane {
-  return { paneId, title: `Downtime triggered - ${itemId}` };
+/**
+ * A live pane owned by `itemId` (the dispatcher's pane-title convention, which
+ * names the tier — the in-flight counting rule reads it, WL-0MWFJDD8R005F5BV).
+ */
+function livePane(
+  paneId: string,
+  itemId: string,
+  kind: 'implement' | 'audit' = 'implement',
+): HostBudgetLivePane {
+  return { paneId, title: `Downtime triggered ${kind} - ${itemId}` };
 }
 
 /**
@@ -834,6 +841,9 @@ describe('AC8 — dispatcher-fired over-quota ticks are neutral skips', () => {
         { itemId: 'WL-OTHER', kind: 'implement', paneId: 'pane-1' },
         { dir, now: T0, env: CLEAN_ENV },
       );
+      // The pane has closed too, so the union count no longer sees it
+      // (WL-0MWFJDD8R005F5BV).
+      panes.length = 0;
       await worker.tick();
       expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     });
@@ -908,7 +918,7 @@ describe('AC10 — the four observability surfaces quote one ledger state', () =
       const panes = [
         livePane('pane-1', 'WL-IMP-1'),
         livePane('pane-2', 'WL-IMP-2'),
-        livePane('pane-3', 'WL-AUD-1'),
+        livePane('pane-3', 'WL-AUD-1', 'audit'),
       ];
       writeBudgetLedger(dir, [
         makeBudgetEntry({ kind: 'implement', itemId: 'WL-IMP-1', paneId: 'pane-1', heartbeatAt: new Date(T0).toISOString() }),

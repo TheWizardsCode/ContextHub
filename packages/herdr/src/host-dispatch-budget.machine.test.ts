@@ -123,16 +123,18 @@ describe('host dispatch budget — machine admission (F3)', () => {
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2 });
 
-      // Instance A reserves WL-A with pane-1 live; instance B reserves WL-B
-      // with pane-2 live. Each admission counts the OTHER's entry too.
-      const first = admit(INSTANCE_A, 'WL-A', makeLivePaneList(['WL-A']));
+      // Instance A reserves WL-A; pane-1 then goes live. Instance B reserves
+      // WL-B, whose pane does not exist yet — so the list it counts holds only
+      // A's dispatch (WL-0MWFJDD8R005F5BV counts LIVE panes, and a dispatch
+      // that has not spawned has none).
+      const first = admit(INSTANCE_A, 'WL-A', makeLivePaneList([]));
       expect(first).toMatchObject({ admitted: true, live: 0, max: 2 });
       confirm(INSTANCE_A, 'WL-A', 'pane-1');
 
       const second = admit(
         INSTANCE_B,
         'WL-B',
-        makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-A' }, 'WL-B']),
+        makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-A' }]),
       );
       expect(second).toMatchObject({ admitted: true, live: 1, max: 2 });
       confirm(INSTANCE_B, 'WL-B', 'pane-2');

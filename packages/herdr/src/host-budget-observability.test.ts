@@ -156,7 +156,9 @@ describe('host-budget observability convergence (AC5)', () => {
         { paneId: 'pane-2', itemId: 'WL-IMP-2' },
         // The audit pane is live so the pane-aware display counts it; a dead
         // audit pane is covered separately in host-budget-status.test.ts.
-        { paneId: 'pane-3', itemId: 'WL-AUD-1' },
+        // The label names the tier, as the dispatcher writes it: the union
+        // counting rule reads the tier (WL-0MWFJDD8R005F5BV).
+        { paneId: 'pane-3', title: 'Downtime triggered audit Audit it - WL-AUD-1' },
       ]);
       writeCaps(dir, { maxImplement: 2, maxAudit: 1 });
       writeBudgetLedger(dir, [

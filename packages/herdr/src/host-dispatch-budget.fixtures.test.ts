@@ -229,8 +229,11 @@ describe('fake records', () => {
         { title: 'no work item' },
       ]),
     ).toEqual([
-      { paneId: 'pane-1', title: 'Downtime triggered - WL-A' },
-      { paneId: 'p-2', title: 'Downtime triggered - WL-B' },
+      // The real dispatcher form names the tier: the in-flight counting rule
+      // reads it, and an unrouted label counts against `implement`
+      // (WL-0MWFJDD8R005F5BV).
+      { paneId: 'pane-1', title: 'Downtime triggered implement - WL-A' },
+      { paneId: 'p-2', title: 'Downtime triggered implement - WL-B' },
       { paneId: 'p-3', title: 'unrelated title' },
       { paneId: 'pane-4', title: 'no work item' },
     ]);
