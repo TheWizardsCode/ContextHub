@@ -409,16 +409,20 @@ dispatches; the other herdr instances coordinate instead of polling:
   [*Which cross-root mechanism applies when*](../../docs/dev/downtime-dispatcher.md#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots)
   (a due scheduled prompt dispatches immediately on its own cadence —
   WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*). The offer rung reads the
-  machine-wide offer list and dispatches ENTRIES in **file order**,
+  machine-wide offer list and orders ENTRIES by **least-recently-dispatched
+  root** (`selectLeastRecentlyServed` — a pure read that writes nothing),
   iterating the **offers inside each entry** (each entry advertises up to one
   nominee per bucket — see *Shared coordination file* above). Every offer is
   re-validated **at dispatch time**
   (`fetchItem` → `classifyItemForDispatch`/stage+status as the sole gate;
   no wall-clock prune — WL-0MTMPIQBE001J41P) and the same sequential
   safety filters (producer-review gate, code-freeze split-by-skill,
-  free-slot minimums) are applied **per offer**, unchanged. The cross-root **tier priority** and the **global
-  cross-project round-robin cursor** ordering are **retired**
-  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); the v2 bucket
+  free-slot minimums) are applied **per offer**, unchanged. The cross-root **tier priority** is **retired**
+  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); the root-level
+  round-robin cursor is LIVE — `selectLeastRecentlyServed` orders offers by
+  least-recently-*dispatched* root (pure read) and only a CONSUMED offer charges
+  its root via `advanceRoundRobinCursor`, never at selection
+  (WL-0MWFIZ8H5005FVNN). The v2 bucket
   offers are a scoped reversal of that item's single-offer *contract* (what is
   offered, and how the leader walks it), never of that retirement —
   `COORDINATION_TIER_ORDER` stays retired and the classifier remains the single
@@ -631,8 +635,8 @@ to the first dispatchable item deeper in the same sequence (never a re-ranking).
 selection feeds the coordination check-in offer (`computeMostImportantItem`), so the
 leader's dispatch and each root's check-in agree on the ranking by construction
 (the leader dispatches ENTRIES in file order and the offers inside each in
-bucket order; the cross-root tier priority / round-robin
-cursor ordering are retired — see the *Leader dispatch* bullet above).
+bucket order; the cross-root tier priority is retired and the root-level
+round-robin cursor ordering is live — see the *Leader dispatch* bullet above).
 Per-root "critical first" is preserved inside the ranking: smart-selection always places
 critical items at the Herdr head, so a critical item dispatches as soon as it is the
 first classifyable list item (WL-0MSI8H3HP000K0RG audit, WL-0MSMAYPQP001FLR6 implement,
@@ -679,9 +683,10 @@ nothing dispatchable — before its own out-of-view backlog. Each root is read
 through the **same canonical ranking window** (`getHerdrListHead` plus the
 bounded extension) with the **full sequential filter chain** applied against
 that root's own state (freeze, review queue, in-flight panes, cooldown log,
-claim target). The sweep starts at the least-recently-served registry root via
-the `downtime-round-robin-by-root` cursor and visits the rest in registry
-order, so no single root can monopolise the leader. An unreadable/missing root
+claim target). The sweep starts at the least-recently-DISPATCHED registry root
+via the `downtime-round-robin-by-root` cursor (selection is a pure read — only
+a sweep CONSUMPTION charges its root, WL-0MWFIZ8H5005FVNN) and visits the rest
+in registry order, so no single root can monopolise the leader. An unreadable/missing root
 is skipped without a strike, and a swept dispatch is recorded with
 `selectionPath: registered-root-sweep` and does **not** hand off leadership.
 An **absent or empty registry is a no-op** — the candidate universe stays

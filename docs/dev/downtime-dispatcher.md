@@ -433,17 +433,25 @@ WL-0MWDVN2HN004CQ1O):** the shared coordination file holds ONE entry per
 instance — each entry advertises that instance's own Herdr list head at its
 check-in (`computeMostImportantItem`, which walks the same Herdr sequence with
 the same filters) as up to one nominee per dispatch bucket. The leader
-dispatches ENTRIES in **file order**, iterating the offers inside each entry
+orders ENTRIES by **least-recently-dispatched root**
+(`selectLeastRecentlyServed`, a pure read that writes nothing), iterating the
+offers inside each entry
 (see *Leader: iterating an entry's offers* above), and re-validates each offer
 at dispatch time (`fetchItem` + `classifyItemForDispatch` as sequential
-filters, no wall-clock prune). The cross-root **tier priority** (audit → critical → implement → plan → intake), the
-**global critical override** and the per-`worklogRoot` **round-robin cursor ordering** are
+filters, no wall-clock prune). The cross-root **tier priority** (audit → critical → implement → plan → intake) and the
+**global critical override** are
 **retired** from the leader dispatch path — they were a second ranking and are removed by
-WL-0MTK1ILM2009QYB2 AC1–2. Per-root "critical first" is preserved *by construction*: the
+WL-0MTK1ILM2009QYB2 AC1–2; the per-`worklogRoot` **round-robin cursor ordering** is LIVE
+(see *Fair scheduling* below — the ``selectLeastRecentlyServed`` selection and the
+dispatch-driven charge are not part of that retirement). Per-root "critical first" is preserved *by construction*: the
 Herdr list (smart-selection) orders critical items first, so a root's critical head is what
-its check-in offers. The retired cursor helpers (`sortEntriesByRoundRobin`,
-`advanceRoundRobinCursor`, `COORDINATION_TIER_ORDER`, `coordinationTierRank`) remain
-exported for the module tests only — nothing on the dispatch path calls them.
+its check-in offers. The retired per-tier ranking helpers
+(`COORDINATION_TIER_ORDER`, `coordinationTierRank`) remain exported only for
+module tests; the dead per-tier cursor sort `sortEntriesByRoundRobin` is
+deleted (WL-0MWFIZ8H5005FVNN). The root-level round-robin cursor ordering is
+LIVE: `selectLeastRecentlyServed` picks the least-recently-dispatched root
+(pure read) and a consumed offer charges its root via `advanceRoundRobinCursor`
+(see *Fair scheduling: global cross-project round-robin*).
 
 **This is a deliberate, scoped reversal of WL-0MTK1ILM2009QYB2's single-offer
 contract (parent WL-0MWDDHQON0015T3P).** The tier-aware offers change **what**
@@ -518,14 +526,17 @@ owner offering its head, so the sweep scans the **whole** window (head plus
 extension); the own-backlog fallback still scans only the extension, because
 in-view items belong to the offer path.
 
-**Round-robin fairness (AC4).** The sweep starts at the least-recently-served
-registry root, selected with the existing `selectLeastRecentlyServed` cursor
-from `downtime-round-robin-by-root.ts` (WL-0MTJDX4M4007YH5U) — the same cursor
-the offer path uses for cross-root ordering; it advances atomically for the
-selected root. The remaining roots follow in **registry order** (the cursor is
-a tie break, never a re-ranking). A root with nothing dispatchable does not
-end the sweep: the next root is tried, and a dispatch anywhere in the sweep
-ends the tick.
+**Round-robin fairness (AC4).** The sweep starts at the least-recently-
+DISPATCHED registry root, selected with the existing `selectLeastRecentlyServed`
+cursor from `downtime-round-robin-by-root.ts` (WL-0MTJDX4M4007YH5U) — the same
+cursor the offer path uses for cross-root ordering. Selection is a **pure
+read**: it advances nothing (WL-0MWFIZ8H5005FVNN). A root is charged ONLY when
+the sweep consumes one of its items (`dispatched` / `spawn-failed` /
+`marker-write-failed`, via the shared `isConsumedDispatchOutcome` predicate); a
+visit that dispatches nothing charges no root. The remaining roots follow in
+**registry order** (the cursor is a tie break, never a re-ranking). A root with
+nothing dispatchable does not end the sweep: the next root is tried, and a
+dispatch anywhere in the sweep ends the tick.
 
 **No gate bypass (AC2).** Every swept candidate passes the **full sequential
 filter chain** in `dispatchFromOwnHead`, evaluated against **its own root's**
@@ -566,7 +577,9 @@ stated once, in the canonical composition block under
 sweep runs only when the offer list yielded nothing dispatchable, it runs
 *before* the leader's own out-of-view backlog (AC4), and the v2 offer change
 never moves it (the offer-list rung is the only changed rung — still between
-scheduled prompts and the sweep, still walking entries in file order, with the
+scheduled prompts and the sweep, still walking entries in least-recently-
+dispatched root order via the pure `selectLeastRecentlyServed` read (the
+charge moved to a consumed offer — WL-0MWFIZ8H5005FVNN), with the
 change *within* an entry).
 
 **Liveness-aware peer predicate (AC7).** Independent of the registry, the
@@ -860,7 +873,12 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    (or removing their own entry via `removeEntry` on a genuinely empty backlog / `wl` error fail-open — entry retained). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
    also checks in on the follower cadence (WL-0MWDDHOK6009GJCC — see *Offer-only mode*
    below), so a passive root still contributes an offer to the leader. When the leader removes an entry's last offer on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
-2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**, for **each offer** of an entry. A non-dispatchable offer (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via **`removeOffer`** — only that offer, never its entry's siblings — **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the offer loop **continues to the next offer**. An entry whose last offer is removed is dropped whole, exactly as before. Entries do **not** expire by wall-clock age.
+2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**, for **each offer** of an entry. A non-dispatchable offer (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via **`removeOffer`** — only that offer, never its entry's siblings — **without** charging the round-robin cursor (the cursor advances only when an
+offer is CONSUMED — `dispatched`, `spawn-failed` or `marker-write-failed`, via
+the shared `isConsumedDispatchOutcome` predicate — never at selection and
+never on a filter-chain drop; WL-0MWFIZ8H5005FVNN), without spawning a pane or
+writing a dispatched marker, and the offer loop **continues to the next
+offer**. An entry whose last offer is removed is dropped whole, exactly as before. Entries do **not** expire by wall-clock age.
 3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
 ### Leader-only dispatch
@@ -870,12 +888,13 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    below).
 2. When a **scheduled prompt** is due, it dispatches immediately
    (WL-0MSS1Q5ER007QDKX).
-3. Otherwise the leader reads the coordination OFFER list and dispatches the
-   first offer in **file order** that passes the dispatch-time filters
+3. Otherwise the leader reads the coordination OFFER list, orders the entries
+   by **least-recently-dispatched root** (`selectLeastRecentlyServed` — pure
+   read) and dispatches the first offer that passes the dispatch-time filters
    (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` +
    producer-review gate + code-freeze split-by-skill + free-slot minimums;
    see *Ranking contract* above — the cross-root tier priority / critical
-   override / round-robin ordering are retired by WL-0MTK1ILM2009QYB2).
+   override are retired by WL-0MTK1ILM2009QYB2).
    Each entry is eligibility re-checked at dispatch time; stale entries are
    dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
    opens the first passing offer dispatches in the entry's `worklogRoot`. If
@@ -4173,10 +4192,13 @@ through.
 > achieved by offer removal + re-offer: a dispatched offer is removed (only the
 > last offer drops its entry) and the owner re-offers its next head at the next
 > check-in, so the next cycle serves the next offer in the file. The cursor module
-> (`downtime-round-robin-by-root.ts`) and `sortEntriesByRoundRobin` /
-> `advanceRoundRobinCursor` remain exported only for module tests — nothing on
-> the dispatch path calls them. The historical description below is retained
-> for the record.
+> (`downtime-round-robin-by-root.ts`) is LIVE on the dispatch path (the per-tier
+> second ranking `sortEntriesByRoundRobin` is deleted — WL-0MWFIZ8H5005FVNN):
+> `selectLeastRecentlyServed` orders the offers (pure read, no write) and
+> `advanceRoundRobinCursor` charges the dispatching root on every consumed
+> offer (`dispatched` / `spawn-failed` / `marker-write-failed`), never at
+> selection. The historical description below is retained for the record,
+> updated to the dispatch-driven charge.
 
 Within each tier, non-critical entries are dispatched in **global
 cross-project round-robin** order, not file order. This prevents any single
@@ -4193,16 +4215,23 @@ have offers in the coordination list.
   project** among those with offers in the current tier.
 - **New/unknown roots sort first** — a project that has never been
   dispatched is never penalised; it is served before any known root.
-- After selection, the cursor is advanced: the chosen root's timestamp is
-  updated to the current time and persisted atomically (tmp+rename).
+- After an offer is CONSUMED, the dispatching root's cursor entry is advanced
+  (via `advanceRoundRobinCursor`) and persisted atomically (tmp+rename);
+  selection itself advances nothing (WL-0MWFIZ8H5005FVNN).
+
+**Accounting identity:** the cursor file and `.worklog/downtime-dispatches.log`
+agree about who was served — every dispatch row in the log corresponds to
+exactly one charge of that root's cursor entry, and a charge never happens
+without a consumed offer (`dispatched` / `spawn-failed` /
+`marker-write-failed`).
 
 **Fail-open:** a missing, corrupt, or unreadable cursor degrades to
 file order (the pre-refactor behaviour) — the cursor never blocks
-dispatch. Lock contention during cursor reads/writes also degrades
-gracefully.
+dispatch. Lock contention during cursor WRITES also degrades gracefully
+(selection is a lock-free read; WL-0MWFIZ8H5005FVNN).
 
 **Cursor persistence across restarts:** the cursor is written to disk
-after every selection, so a leader restart picks up the most-recently
+whenever an offer is consumed, so a leader restart picks up the most-recently
 served root from the persisted file. No cursor state is lost.
 
 **Critical override (global pre-tier):** the critical tier is evaluated
@@ -4234,8 +4263,10 @@ masquerade as "no critical work").
 ### Multi-worklog support (F4 cross-root + F5 single budget)
 
 Each machine-wide entry records `worklogRoot` (preferred) + `directory` alias.
-The single leader dispatches offers in **file order** (each offer is its root's
-Herdr list head) **across worklogRoots** and spawns each pane in the entry's
+The single leader dispatches offers across **worklogRoots** in
+**least-recently-dispatched root order** (`selectLeastRecentlyServed` — a pure
+read; the cursor records last dispatch and a consumed offer charges it,
+WL-0MWFIZ8H5005FVNN) and spawns each pane in the entry's
 `worklogRoot`. The slot budget is machine-wide: ONE leader poll →
 ONE `freeSlots` snapshot **derived from the per-slot array** — the only
 trusted availability source (fail-closed contract, WL-0MUXVPXAZ005RESW) —
@@ -4509,7 +4540,7 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
-| `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — the least-recently-served root starts the offer ordering and the registered-root sweep (WL-0MTJDX4M4007YH5U; fail-open) |
+| `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — records each root's LAST DISPATCH; the least-recently-dispatched root starts the offer ordering and the registered-root sweep. Selection is a pure read; only a consumed offer charges the cursor (WL-0MTJDX4M4007YH5U, WL-0MWFIZ8H5005FVNN; fail-open) |
 | `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, attemptId?, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `(implement OR audit)` dispatch of a work item (WL-0MVXY0WQF0069YDJ; key `(itemId, kind)` since WL-0MWFJD5T4003OM91, so an implement and an audit dispatch of one item coexist). `attemptId` is the release identity `reserve` mints and `release` must present, together with the confirmed `paneId`. Audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
 | `~/.herdr/downtime/dispatch-budget.log` | **Append-only audit trail** of every ledger mutation (WL-0MWFJDGXQ001OXP8): one JSONL line per reserve/confirm/release/reap/sweep/repair carrying `at`, `op`, `kind`, `itemId`, `paneId`, `instanceId`, `reason`, `actor`, `liveBefore`, `liveAfter`. Bounded by the coordination-log retention policy (500 lines/file × 4 files). Fail-open — a broken trail never blocks a dispatch. Rotated siblings are `dispatch-budget.log.1`…`.3` |
 | `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
@@ -5033,7 +5064,7 @@ trace.
   the `downtimeWorklogRoots` setting + validation, the registered-root
   sweep, and the liveness-aware `hasPeerOffer`
 - Work item: **WL-0MTJDX4M4007YH5U** *global round-robin cursor module
-  (`downtime-round-robin-by-root`)* — the least-recently-served cursor the
+  (`downtime-round-robin-by-root`)* — the least-recently-DISPATCHED cursor the
   sweep reuses for root-level fairness
 - Work item: **WL-0MTMPIQBE001J41P** *stale coordination entry pruning
   (deliberate no-op)* — entry expiry stays a no-op; liveness lives only in

@@ -24,21 +24,15 @@
 
 import { isAuditFresh } from '@worklog/shared/icons';
 import { isDispatcherAssignee } from './assignee-identities.js';
-import type { CoordinationEntry } from './coordination.js';
 import { DOWNTIME_AUDIT_RECENCY_WINDOW_MS } from './downtime-worker.constants.js';
 import { criticalSkillKind, type CriticalCandidate } from './downtime-worker.parsers.js';
 import type {
   AuditCandidate,
   DowntimeCandidate,
-  DowntimeItemInfo,
-  DowntimeSkillKind,
   ImplementCandidate,
 } from './downtime-worker.types.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
-import {
-  advanceRoot,
-  loadRoundRobinCursor,
-} from './downtime-round-robin-by-root.js';
+import { advanceRoot } from './downtime-round-robin-by-root.js';
 
 // ── Candidate eligibility guards (SA-0MUJBLZC60085DI9 / WL-0MV85WCJJ0087VMP)
 // Provisional home: these two predicates are consumed by the selectors
@@ -599,68 +593,28 @@ export async function resolveDependencyFrontier(
   return walk(candidate, 0);
 }
 
-// ── Round-robin helpers (WL-0MTJE0FXC006WAOX) ──────────────────────────
-
-/** Internal tier-group entry: a CoordinationEntry paired with its dispatch info. */
-type TierEntry = { entry: CoordinationEntry; info: DowntimeItemInfo; skill: DowntimeSkillKind };
+// ── Round-robin charge (WL-0MTJE0FXC006WAOX / WL-0MWFIZ8H5005FVNN) ──────
 
 /**
- * Sort a tier group by round-robin cursor order (WL-0MTJE0FXC006WAOX).
- *
- * Uses `loadRoundRobinCursor` (fail-open → `{}` → file order) to order
- * entries: unknown/new roots first (never penalised), known roots oldest
- * last-served first; stable sort preserves file order for timestamp ties.
- *
- * This is a pure sort — it does NOT advance the cursor. Advancement
- * happens only when the dispatched entry is consumed (every `removeEntry`
- * path).
- */
-export function sortEntriesByRoundRobin(
-  group: TierEntry[],
-  coordinationDir: string,
-): TierEntry[] {
-  if (group.length <= 1) return group;
-
-  // Load cursor state (fail-open → {}). No lock needed for read-only sort.
-  const cursor = loadRoundRobinCursor(coordinationDir);
-
-  // Stable sort: unknown roots first, then oldest known first.
-  return [...group].sort((a, b) => {
-    const rootA = a.entry.worklogRoot ?? a.entry.directory;
-    const rootB = b.entry.worklogRoot ?? b.entry.directory;
-
-    const aKnown = rootA in cursor;
-    const bKnown = rootB in cursor;
-
-    // Unknown roots sort before known roots.
-    if (!aKnown && bKnown) return -1;
-    if (aKnown && !bKnown) return 1;
-
-    // Both known: oldest timestamp first (stable sort preserves file order for ties).
-    if (aKnown && bKnown) {
-      const tsA = new Date(cursor[rootA]).getTime();
-      const tsB = new Date(cursor[rootB]).getTime();
-      const diff = tsA - tsB;
-      if (diff !== 0) return diff;
-    }
-
-    // Both unknown or timestamp tie: stable sort (preserve original file order).
-    return 0;
-  });
-}
-
-/**
- * Advance the round-robin cursor for a given root (WL-0MTJE0FXC006WAOX).
+ * Advance the round-robin cursor for a root whose offer was just CONSUMED
+ * (WL-0MTJE0FXC006WAOX).
  *
  * Calls `advanceRoot` from the cursor module under the coordination lock.
- * Fail-open: lock contention or I/O error silently tolerates the missed
- * advance (the project will be selected sooner on the next cycle).
+ * Fail-open: lock contention or an I/O error silently tolerates the missed
+ * advance (the project will be selected sooner on the next cycle) — it never
+ * blocks or fails a dispatch.
  *
- * This is called AFTER `removeEntry` on every consumed-entry path:
- * - critical tier dispatched
- * - critical tier spawn-failed / marker-write-failed
- * - non-critical tier dispatched
- * - non-critical tier spawn-failed / marker-write-failed
+ * This is the ONE public charge helper and it is called AFTER `removeOffer`
+ * only on a consumed offer (WL-0MWFIZ8H5005FVNN):
+ * - the leader offer loop: `outcome.dispatched`, and `spawn-failed` /
+ *   `marker-write-failed` (downtime-worker.coordination-leader.ts), and
+ * - the registered-root sweep after a sweep dispatch
+ *   (downtime-worker.head-scan.ts).
+ *
+ * Every other outcome keeps the offer (`claim-failed`, `claim-rolled-back`,
+ * reservation `admit: false`, `anchor-unavailable`, `host-budget-*` /
+ * `audit-budget-*`) and charges nothing; the caller decides with the shared
+ * `isConsumedDispatchOutcome` predicate. Selection never charges.
  */
 export function advanceRoundRobinCursor(
   coordinationDir: string,
