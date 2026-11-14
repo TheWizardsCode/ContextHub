@@ -680,7 +680,7 @@ export interface CoordinationNominee { kind: 'implement' | 'audit' | 'prep'; wor
 /**
  * Outcome of the check-in most-important-item computation. `{ok:true,
  * kind/candidate}` — a dispatchable item was found (plus `nominees`, the
- * per-bucket candidates of the same window); `{ok:true, noCandidate:true}`
+ * per-bucket candidates); `{ok:true, noCandidate:true}`
  * — nothing dispatchable (the own entry may be removed); `{ok:false}` —
  * wl/CLI errors (fail-open: keep the entry, retry at the next check-in).
  */
@@ -689,12 +689,12 @@ export type MostImportantItemResult =
       ok: true;
       kind: DowntimeSkillKind;
       candidate: DowntimeCandidate;
-      /**
-       * Per-bucket nominees (parent AC2/AC3): canonical first offerable item
-       * of each dispatch bucket, in `COORDINATION_OFFER_BUCKETS` order, from
-       * the SAME single head read; empty for escalation/extension paths.
-       */
+      /** Per-bucket nominees (canonical first offerable item of each bucket, bucket order; buckets fill from the whole ranked backlog since WL-0MWFJ8R1P005G1H1). Widening: buckets filled beyond the window + items read; absent when window-sourced (byte-identical). */
       nominees: CoordinationNominee[];
+      filledBeyondWindow?: {
+        buckets: Array<'implement' | 'audit' | 'prep'>;
+        itemsRead: number;
+      };
     }
   /**
    * `attribution` (WL-0MVR8FKMU009XTED AC1) names WHY nothing was offered —

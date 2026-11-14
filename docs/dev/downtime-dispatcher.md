@@ -45,7 +45,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (shipped path + numeric `0`/`1` verdict, sibling proxy item `LP-0MW95FYMH006XYNK`) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON`, `AUDIT_BUDGET_UNKNOWN_REASON` |
 | `downtime-worker.audit-availability.ts` | The fail-closed audit-availability `GET` client — one bounded call, one typed outcome; consumed by the audit pre-check and admission (WL-0MWAMSDNW000SL0E) | `createAuditAvailabilityClient` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
-| `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
+| `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees — buckets fill from the whole ranked backlog, window-visible and beyond) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch (per-offer iteration), own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
 | `downtime-worker.offer-selection.ts` | The leader's drain-aware tie-break over one entry's ADMISSIBLE offers (pure ordering arithmetic — never a gate, never a cross-root ranking) | `entryOffers`, `drainAwareRank`, `orderAdmissibleOffers` |
 | `downtime-worker.terminal-reason.ts` | The neutral terminal-reason precedence chain for a tick that dispatched nothing | `resolveTerminalOutcome` |
@@ -160,7 +160,7 @@ Contract:
   offerable item of its bucket in the same window order the single-offer path
   uses; no priority/age/scoring logic is added and `classifyItemForDispatch`
   stays the single classifier (no bucket logic lives in it).
-- **One head read.** All three nominees are partitioned from the SAME single
+- **One read path.** All three nominees are partitioned from the SAME single
   `getHerdrListHead(cwd, sprintWindow)` read — no per-bucket `wl` list spawn.
 - **Filters preserved per bucket.** The same sequential filter chain the
   single-offer path applies (classifier gates, dispatched marker, attempt
@@ -169,15 +169,34 @@ Contract:
   window. The pass stops as soon as both the single offer and every bucket are
   resolved, so filter side effects never extend past the window-first offerable
   item.
-- **Nothing is widened to fill a bucket.** A bucket with no offerable item in
-  the window nominates nothing (the window is never extended per bucket), and
-  the stall-scan short-circuit plus the `{ok:false}` fail-open contract are
-  unchanged.
-- **Escalation and extension paths keep the single offer.** A critical item
-  escalated ahead of the window walk, and an offer found only by the
-  whole-backlog extension (see *Whole-backlog dispatch window* below), return
-  `nominees: []`; the check-in then writes a single-offer `offers` payload,
-  exactly the pre-tier-aware entry.
+- **Buckets are filled from the whole ranked backlog (parent
+  WL-0MWFJ8R1P005G1H1).** The visible window is a RENDERING bound, not a
+  dispatch bound. A bucket with no offerable item in the window is filled from
+  beyond it by the same geometric whole-backlog widening the single-offer path
+  uses — one read path, the same canonical ranking, the same filters, in the
+  same order — until the bucket has a nominee or the tail is exhausted. The
+  walk runs only when a bucket is unfilled and stops as soon as every bucket
+  is filled, so the extra reads are bounded (`DOWNTIME_DISPATCH_EXTEND_MAX`
+  growth, `DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS` cap) and only paid when the
+  visible window leaves a bucket empty. (This supersedes the previous AC3
+  wording "the window is never widened to fill a bucket".) The stall-scan
+  short-circuit and the `{ok:false}` fail-open contract are unchanged, and
+  a widened scan flags attempt-budget-exhausted items for producer review
+  exactly like the window scan does (accepted side-effect amplification,
+  see `downtime-worker.coordination.ts`).
+- **The widening is observable.** When at least one bucket is filled beyond
+  the visible window, the check-in result carries
+  `filledBeyondWindow: { buckets, itemsRead }` — which buckets the extension
+  first filled and how many extra ranked items were read — and the check-in
+  log line records it, so an operator can see a root being reached past its
+  visible list (the `tce-the-rising` 13 Nov 2026 evidence).
+- **Window-only entries stay byte-identical.** An entry whose nominees are
+  all window-sourced (the window already fills every bucket → no widening
+  read at all, or a widening that adds nothing) carries no `filledBeyondWindow`
+  and the same `offers` payload as before.
+- **Escalation keeps the single offer.** A critical item escalated ahead of
+  the window walk returns `nominees: []`; the check-in then writes a
+  single-offer `offers` payload, exactly the pre-tier-aware entry.
 
 The check-in writes the nominees as the v2 `offers` array (canonical bucket
 order `implement` → `audit` → `prep`) with `workItemId` mirroring the first
@@ -297,7 +316,10 @@ exhausted.
 
 **The TUI worklist is unchanged**: it keeps rendering exactly
 `browseItemCount` items (plus the mandatory set). The window bounds only
-*rendering*; it no longer bounds *dispatch*.
+*rendering*; it no longer bounds *dispatch* — and, since
+WL-0MWFJ8R1P005G1H1, it no longer bounds the *per-bucket nominees* either:
+`computeMostImportantItem` fills a bucket left empty by the visible window
+from the same ranked tail (see *Per-bucket nominees from one head read*).
 
 **Prioritisation is unchanged.** Ordering remains
 `fetchNextItems` → `selectWorkItems` → `regroupWorkItems`: priority

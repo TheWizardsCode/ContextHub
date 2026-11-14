@@ -1406,9 +1406,26 @@ describe('runCoordinationCheckIn', () => {
 
   it('updates the entry when the most-important (Herdr head) item changes', async () => {
     const deps = makeCoordinationDeps({
+      // Three-bucket windows (implement/audit/prep) fill EVERY bucket from the
+      // visible list, so the check-in needs exactly the one head read per pass
+      // (no widening on a fully-filled window — WL-0MWFJ8R1P005G1H1 test d).
       getHerdrListHead: vi.fn()
-        .mockResolvedValueOnce({ ok: true, items: [headItem({ id: 'WL-A', stage: 'idea', status: 'open' })] })
-        .mockResolvedValueOnce({ ok: true, items: [headItem({ id: 'WL-B', stage: 'intake_complete', status: 'open' })] }),
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-A', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-A2', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+            headItem({ id: 'WL-A3', stage: 'intake_complete', status: 'open' }),
+          ],
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-B', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-B2', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+            headItem({ id: 'WL-B3', stage: 'intake_complete', status: 'open' }),
+          ],
+        }),
     });
     await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
     await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
@@ -1419,7 +1436,14 @@ describe('runCoordinationCheckIn', () => {
     // First offer something, then the backlog empties.
     const deps = makeCoordinationDeps({
       getHerdrListHead: vi.fn()
-        .mockResolvedValueOnce({ ok: true, items: [headItem({ id: 'WL-A', stage: 'idea', status: 'open' })] })
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-A', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-A2', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+            headItem({ id: 'WL-A3', stage: 'intake_complete', status: 'open' }),
+          ],
+        })
         .mockResolvedValueOnce({ ok: true, items: [] }),
     });
     await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
@@ -1486,7 +1510,7 @@ describe('runCoordinationCheckIn', () => {
     ]);
   });
 
-  it('offers only the buckets present in the window — no read to widen for a missing bucket', async () => {
+  it('widens a missing bucket into the tail — a window-sourced entry stays byte-identical when the tail adds nothing', async () => {
     const getHerdrListHead = vi.fn().mockResolvedValue({
       ok: true,
       items: [
@@ -1496,9 +1520,10 @@ describe('runCoordinationCheckIn', () => {
     });
     const deps = makeCoordinationDeps({ getHerdrListHead });
     await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
-    // The missing prep bucket nominated nothing and was NOT sought beyond the
-    // window (parent AC3): still exactly one head read.
-    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    // The missing prep bucket IS sought beyond the window (WL-0MWFJ8R1P005G1H1
+    // supersedes AC3's "never widened"), but the mock tail adds nothing, so
+    // the window-sourced offer payload is byte-identical. No widen signal.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(2);
     const entry = getEntry(testDir, 'inst-1');
     expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
       { kind: 'implement', workItemId: 'WL-IMP' },
@@ -1509,9 +1534,9 @@ describe('runCoordinationCheckIn', () => {
   it('falls back to a single-offer entry when the visible window yields nothing and the offer comes from the whole-backlog extension', async () => {
     // The only window item is freshly dispatched (marker exclusion filters the
     // WHOLE window); the whole-backlog extension then finds the next
-    // implement. The entry carries ONE offer (the window partition is empty —
-    // AC3: the window is never widened to fill a bucket), so a v1-era leader
-    // keeps reading exactly the pre-tier-aware offer.
+    // implement. The entry carries ONE implement offer (the deepened nominee
+    // IS the single offer — the window partition contributed nothing), so a
+    // v1-era leader keeps reading exactly the pre-tier-aware offer.
     const root = mkdtempSync(join(tmpdir(), 'herdr-checkin-ext-'));
     try {
       writeDowntimeLog(root, [
@@ -4645,13 +4670,20 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     expect(getHerdrListHead).toHaveBeenCalledWith('/repo', expect.any(Number));
   });
 
-  it('AC3: a bucket empty in the window nominates NOTHING and the window is not widened', async () => {
-    const getHerdrListHead = vi.fn().mockResolvedValue({
-      ok: true,
-      // No idea / intake_complete / risk-effort item anywhere → the prep
-      // bucket is empty; the computation must not re-read to find one.
-      items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1')],
-    });
+  it('AC3: a bucket empty in the window is widened into the tail — an eligible tail item fills it and the widening is observed', async () => {
+    // The prep bucket is empty in the window; the tail (extension) holds one
+    // eligible prep item. The computation must keep walking the SAME ranking
+    // until the bucket has a nominee or the tail is exhausted (supersedes
+    // AC3's "the window is never widened to fill a bucket", WL-0MWFJ8R1P005G1H1).
+    const getHerdrListHead = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1')],
+      })
+      .mockResolvedValue({
+        ok: true,
+        items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-21')],
+      });
     const deps = makeCoordinationDeps({ getHerdrListHead });
 
     const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
@@ -4659,9 +4691,13 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     expect(nomineesOf(result)).toEqual([
       { kind: 'implement', workItemId: 'WL-IMP-1' },
       { kind: 'audit', workItemId: 'WL-AUD-1' },
+      { kind: 'prep', workItemId: 'WL-PREP-21' },
     ]);
-    // No widening read for the missing prep bucket.
-    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    // The fill used the SAME read path (one widening read, never per-bucket).
+    expect((result as { filledBeyondWindow?: { buckets: string[]; itemsRead: number } }).filledBeyondWindow).toEqual({
+      buckets: ['prep'],
+      itemsRead: 1,
+    });
   });
 
   it('AC3: per-bucket filters preserved — a fresh dispatch marker on the implement head skips to the NEXT offerable implement, other buckets unaffected', async () => {
@@ -4730,6 +4766,226 @@ describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
     expect(result.stalledResume).toBe(true);
     // Short-circuit before the (single shared) head read — preserved per bucket.
     expect(getHerdrListHead).not.toHaveBeenCalled();
+  });
+});
+
+// ── Per-bucket widening beyond the visible window (WL-0MWFJ8R1P005G1H1) ──
+//
+// The stray-window AC3 ("the window is never widened to fill a bucket") is
+// SUPERSEDED: the visible window is a RENDERING bound, not a dispatch bound,
+// so a bucket the window leaves empty is filled from beyond the window by the
+// whole-backlog extension — the SAME canonical ranking, the same sequential
+// filters, one read path (never a per-bucket read, never a second ranking).
+// These cases pin the widening contract: an unfilled bucket is sought in the
+// tail, the fill is observable (`filledBeyondWindow` names the buckets + items
+// read), and the fail-open / cost-bounding properties of the single-offer
+// extension are preserved.
+describe('per-bucket widening beyond the visible window (WL-0MWFJ8R1P005G1H1)', () => {
+  interface NomineeWitness {
+    kind: 'implement' | 'audit' | 'prep';
+    workItemId: string;
+  }
+
+  const nomineesOf = (result: unknown): NomineeWitness[] | undefined =>
+    (result as { nominees?: NomineeWitness[] }).nominees;
+
+  const implementItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Implement ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', sortIndex });
+  const auditItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Audit ${id}`, status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString(), sortIndex });
+  const prepItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Prep ${id}`, status: 'open', stage: 'intake_complete', sortIndex });
+  /** A fully-gated window filler (producer-review gate blocks every bucket). */
+  const gatedItem = (id: string, sortIndex: number): DowntimeHerdrItem =>
+    headItem({ id, title: `Gated ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', needsProducerReview: true, sortIndex });
+  /** Ranked list mock: window size = prefix of the canonical ranking. */
+  const rankedHead = (ranked: readonly DowntimeHerdrItem[]) =>
+    vi.fn().mockImplementation(async (_cwd: string, windowSize: number) => ({
+      ok: true,
+      items: ranked.slice(0, windowSize),
+    }));
+
+  it('(a) a fully-gated 20-item window + tail plan/implement yields both nominees, canonical order, with the widen signal', async () => {
+    const ranked = [
+      ...Array.from({ length: 20 }, (_, i) => gatedItem(`WL-G${i}`, i)),
+      prepItem('WL-PLAN-21', 1000),
+      implementItem('WL-IMP-22', 1001),
+    ];
+    const getHerdrListHead = rankedHead(ranked);
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    // The window contributed NO nominee (fully gated); the widening filled the
+    // prep + implement buckets from the SAME ranked tail, in canonical order.
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-22' },
+      { kind: 'prep', workItemId: 'WL-PLAN-21' },
+    ]);
+    expect((result as { filledBeyondWindow?: { buckets: string[]; itemsRead: number } }).filledBeyondWindow).toEqual({
+      buckets: ['implement', 'prep'],
+      itemsRead: 2,
+    });
+  });
+
+  it('(c) a tail with nothing eligible still resolves noCandidate with unchanged attribution (windowSize = head + reads)', async () => {
+    // 20 gated in-window + 40 gated beyond: the extension reads the tail but
+    // nothing is eligible, so the outcome and the attribution are unchanged.
+    const ranked = Array.from({ length: 60 }, (_, i) => gatedItem(`WL-G${i}`, i));
+    const getHerdrListHead = rankedHead(ranked);
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('noCandidate' in result) || !result.noCandidate) throw new Error('expected noCandidate');
+    // The empty path keeps today's windowSize accounting: head + every
+    // extended item actually read (20 + 30 + 10 = 60 after two geometric
+    // rounds), so the attribution is byte-identical to the pre-change result.
+    expect(result.attribution?.windowSize).toBe(60);
+    expect((result as { filledBeyondWindow?: unknown }).filledBeyondWindow).toBeUndefined();
+  });
+
+  it('(d) the extension is NOT entered when the window already fills every bucket (no extra reads)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1')],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-1' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+      { kind: 'prep', workItemId: 'WL-PREP-1' },
+    ]);
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    expect((result as { filledBeyondWindow?: unknown }).filledBeyondWindow).toBeUndefined();
+  });
+
+  it('(e) a wl failure in the extension leaves the window result unchanged (fail-open)', async () => {
+    // Window: implement + audit (single offer, 2 buckets). The 3rd bucket is
+    // unfilled → the extension is entered, but its lookup fails: the result is
+    // the SAME window-only nominees, byte-identical to the pre-change offer.
+    const getHerdrListHead = vi.fn()
+      .mockResolvedValueOnce({ ok: true, items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1')] })
+      .mockResolvedValueOnce({ ok: false, error: 'wl exploded' });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected candidate');
+    expect(result.candidate.id).toBe('WL-IMP-1');
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-1' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+    ]);
+    // No extra read surfaced anything, no widen signal.
+    expect((result as { filledBeyondWindow?: unknown }).filledBeyondWindow).toBeUndefined();
+  });
+
+  it('(b) after the leader refuses an audit offer, the same entry’s PREP nominee dispatches in the same tick', async () => {
+    // A root whose widened entry carries the BEST head of every bucket — an
+    // audit AND a prep nominee (the audit budget here is the widow-making
+    // gate from the 2026-11-13 evidence: `tce-the-rising` offered only
+    // [audit], refused it, and the leader had nothing else to fall through to).
+    // The entry is dispatch-shaped exactly like the widened check-in writes it
+    // (audit + prep), and the phase-2 ladder already supports the fall-through
+    // (parent AC4/AC7) — this pins it for the widened entry shape.
+    const entry = v2Entry('inst-1', '/roots/a', [offerAudit('WL-AUD'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      // Deep queue so the leader tries the DRAIN offer (audit) first, then
+      // falls through to prep in the same tick.
+      getReviewQueueCount: vi.fn().mockResolvedValue(5),
+      // The AUDIT admission is refused (budget saturated); the PREP (plan)
+      // admission is granted — the same tick must fall through to the prep.
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'audit'
+          ? { admitted: false, live: 1, max: 1, reason: 'audit-budget-saturated' }
+          : { admitted: true, live: 0, max: 2 },
+      ),
+      fetchItem: fetchById({
+        'WL-AUD': { id: 'WL-AUD', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    // Same tick, NO re-offer round trip: the prep nominee dispatches even
+    // though the audit was refused ahead of it (user story 2).
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-PREP');
+    // The refusal is attributed to the AUDIT offer, not the instance.
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-AUD', gate: 'audit-budget' }),
+      ]),
+    );
+  });
+
+  it('observability: the check-in log names the widened buckets + items read for a widened entry, and is absent for a window-only entry', async () => {
+    async function checkins(root: string): Promise<Array<Record<string, unknown>>> {
+      const entries = await readCoordinationLogEntries(root);
+      return entries
+        .filter((entry) => entry.operation === 'checkin')
+        .map((entry) => entry as unknown as Record<string, unknown>);
+    }
+
+    // Widened root: window = audit only; the eligible plan sits beyond it, so
+    // the computation fills the prep bucket from the tail. The check-in log
+    // line must carry the widening evidence an operator can read.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-widen-signal-'));
+    try {
+      const ranked = [
+        auditItem('WL-AUD', 0),
+        ...Array.from({ length: 19 }, (_, i) => gatedItem(`WL-G${i}`, i + 1)),
+        prepItem('WL-PREP-21', 1000),
+      ];
+      const getHerdrListHead = rankedHead(ranked);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-AUD', root)] });
+      await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      await vi.waitFor(async () => {
+        const log = await checkins(root);
+        expect(log.length).toBeGreaterThan(0);
+        expect(log[log.length - 1].filledBeyondWindow).toEqual({
+          buckets: ['prep'],
+          itemsRead: 1,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    // Window-only root: every bucket filled from the visible window — the
+    // check-in log line must NOT carry the signal (byte-identical entry).
+    const root2 = mkdtempSync(join(tmpdir(), 'herdr-window-signal-'));
+    try {
+      const getHerdrListHead = vi.fn().mockResolvedValue({
+        ok: true,
+        items: [implementItem('WL-IMP'), auditItem('WL-AUD'), prepItem('WL-PREP')],
+      });
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-2', 'WL-IMP', root2)] });
+      await runCoordinationCheckIn(deps, { cwd: root2, coordinationDir: testDir, instanceId: 'inst-2' });
+      await vi.waitFor(async () => {
+        const log = await checkins(root2);
+        expect(log.length).toBeGreaterThan(0);
+        expect(log[log.length - 1].filledBeyondWindow).toBeUndefined();
+      });
+    } finally {
+      rmSync(root2, { recursive: true, force: true });
+    }
   });
 });
 

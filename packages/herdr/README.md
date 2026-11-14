@@ -394,11 +394,18 @@ dispatches; the other herdr instances coordinate instead of polling:
   `HERDR_COORDINATION_DIR`): entries **do not expire by age**; every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 5 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — offering its most-important item as
   `{instanceId, workItemId, worklogRoot/directory, assignedAt, lastUpdated}`
   (`worklogRoot` lets the single leader dispatch across roots — F4). When the leader dispatches an entry and removes it, the owning instance **re-offers immediately on its next tick** (coordination-file observation — no extra poll). Re-offer also refreshes leadership every tick from the lease file.
-  **Schema v2 (tier-aware offers, parent WL-0MWDDHQON0015T3P):** the offer
+  **Schema v2 (tier-aware offers, parent WL-0MWDDHQON0015T3P, per-bucket
+  widening WL-0MWFJ8R1P005G1H1):** the offer
   payload is a bounded `offers` array — at most one nominee per dispatch
   bucket (`implement` / `audit` / `prep`, where `prep` unions the classifier's
   `plan`/`intake`/`risk-effort`), at most three total, duplicate
-  `(kind, workItemId)` pairs collapsed. `workItemId` mirrors the FIRST offer so
+  `(kind, workItemId)` pairs collapsed. The visible window bounds only
+  *rendering*: a bucket the visible list leaves empty is filled from the root's
+  ranked backlog beyond the window by the same geometric whole-backlog
+  extension the single-offer path uses (same ranking, same filters, one read
+  path; see *Whole-backlog dispatch window* in
+  [`docs/dev/downtime-dispatcher.md`](../../docs/dev/downtime-dispatcher.md)).
+  `workItemId` mirrors the FIRST offer so
   an old leader reads one offer and ignores the rest. **Migration:** a v1 file
   (single `workItemId`, no `offers`) is read as a one-offer entry (kind derived
   by the classifier) and rewritten as v2 on the next check-in — no v1 file is

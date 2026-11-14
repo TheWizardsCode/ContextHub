@@ -1228,7 +1228,31 @@ describe('stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2)', () 
     const deps = makeDeps({
       scanStalledPanes: vi.fn().mockResolvedValue([]),
       resumeStalledPane: vi.fn(),
-      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+      // A three-bucket window (implement/audit/prep) fills EVERY bucket from
+      // the visible list, so the normal computation serves the offer from the
+      // window alone — exactly one read (WL-0MWFJ8R1P005G1H1 test d: no
+      // widening when the window already fills every bucket).
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          implementHead('WL-1'),
+          {
+            id: 'WL-AUD-1',
+            title: 'Audit WL-AUD-1',
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: new Date(Date.now() - 60_000).toISOString(),
+            sortIndex: 20,
+          },
+          {
+            id: 'WL-PREP-1',
+            title: 'Prep WL-PREP-1',
+            status: 'open',
+            stage: 'intake_complete',
+            sortIndex: 30,
+          },
+        ],
+      }),
     });
 
     const result = await computeMostImportantItem(

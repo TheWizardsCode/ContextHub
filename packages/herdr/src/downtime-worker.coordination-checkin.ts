@@ -166,11 +166,11 @@ export async function runCoordinationCheckIn(
   // v2 write path (parent WL-0MWDDHQON0015T3P AC1/AC3): the entry carries
   // the bounded per-bucket `offers` payload computed by
   // `computeMostImportantItem` — one nominee per bucket, drawn from the
-  // single head read, in canonical bucket order. The paths that do NOT
-  // partition the window (a critical item escalated ahead of the window
-  // scan, or the only offerable item lying beyond the visible window)
-  // leave `nominees` empty — the entry then carries the single candidate
-  // offer, byte-identical to the pre-tier-aware entry (AC9 legacy compat).
+  // single head read (+ geometric widening since WL-0MWFJ8R1P005G1H1), in
+  // canonical bucket order. The path that does NOT partition the window (a
+  // critical item escalated ahead of the window scan) leaves `nominees`
+  // empty — the entry then carries the single candidate offer,
+  // byte-identical to the pre-tier-aware entry (AC9 legacy compat).
   // `workItemId` mirrors the FIRST offer so a v1-era leader keeps reading
   // the first offer and ignoring the rest (parent AC9).
   const entryKind = toOfferBucket(result.kind);
@@ -199,6 +199,12 @@ export async function runCoordinationCheckIn(
         operation: 'checkin',
         instanceId: coordinator.instanceId,
         workItemId: entry.workItemId,
+        // Per-bucket widening observability (WL-0MWFJ8R1P005G1H1): an entry
+        // whose computation filled a bucket beyond the visible window names
+        // the buckets + items read on the check-in log line.
+        ...(result.filledBeyondWindow !== undefined
+          ? { filledBeyondWindow: result.filledBeyondWindow }
+          : {}),
         at: new Date(now).toISOString(),
       },
       coordinator.coordinationLogPolicy,

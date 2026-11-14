@@ -166,6 +166,19 @@ export interface CoordinationLogEntry {
   /** The wl/CLI error that caused an entry-kept check-in (`reason: 'wl-error'`). */
   error?: string;
   /**
+   * Per-bucket widening signal (WL-0MWFJ8R1P005G1H1): recorded on a
+   * successful `operation: 'checkin'` entry whose computation filled at
+   * least one bucket from beyond the visible window. `buckets` names those
+   * buckets (canonical `COORDINATION_OFFER_BUCKETS` order) and `itemsRead`
+   * counts the extra ranked items read to fill them, so an operator can see
+   * a root being reached past its visible list. Absent on window-only
+   * check-ins (additive/optional schema — every earlier entry is unchanged).
+   */
+  filledBeyondWindow?: {
+    buckets: Array<'implement' | 'audit' | 'prep'>;
+    itemsRead: number;
+  };
+  /**
    * Panes the long-running detector flagged when the starvation signal fired
    * (WL-0MVKNC2N50025HXE AC2/AC3): each entry names the pane, item, kind and
    * how long the item has gone without progress. Bounded; absent when the
