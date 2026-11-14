@@ -879,11 +879,9 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(getEntry(testDir, 'inst-old')).toBe(null); // removed via dispatch path, not prune
   });
 
-  // RED BASELINE (WL-0MWFIZ8H5005FVNN): selection becomes a pure read in
-  // WL-0MWFJSVXT0033M9M, which flips this spec to `it(...)`. It currently
-  // fails because `selectLeastRecentlyServed` advances the selected root even
-  // when the tick dispatches nothing.
-  it.fails('when all entries are stale the result is no-candidate with all stale removed and the cursor byte-identical', async () => {
+  // Flipped to `it(...)` by WL-0MWFJSVXT0033M9M (pure selection): selection no
+  // longer writes, so a tick that dispatches nothing leaves the cursor intact.
+  it('when all entries are stale the result is no-candidate with all stale removed and the cursor byte-identical', async () => {
     const a = makeEntry('inst-a', 'WL-A', '/roots/a');
     const b = makeEntry('inst-b', 'WL-B', '/roots/b');
     writeCoordinationFile(testDir, { version: 1, entries: [a, b] });
@@ -912,13 +910,14 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
 //
 // RED BASELINE (TDD): the specs below encode the NEW contract — selection is a
 // pure read and the cursor is charged only when an offer is CONSUMED
-// (`dispatched`, `spawn-failed`, `marker-write-failed`). They are wrapped in
+// (`dispatched`, `spawn-failed`, `marker-write-failed`). They were wrapped in
 // `it.fails(...)` so the red baseline commits green (the repo's documented TDD
 // pattern, as used by the registered-root sweep and clamps suites). The
 // implementation children flip each spec to `it(...)`:
-//   - WL-0MWFJSVXT0033M9M (pure selection) → ONLY the selection-purity specs
+//   - WL-0MWFJSVXT0033M9M (pure selection) → DONE: the selection-purity specs
 //     (this file's "a tick where every offer is held" and the all-stale spec;
-//     plus the selection-purity block in downtime-round-robin-by-root.test.ts).
+//     plus the selection-purity block in downtime-round-robin-by-root.test.ts)
+//     now run as plain `it(...)`.
 //   - WL-0MWFJT3H9008A0LM (consumed-offer charge) → the charge table (both the
 //     positive charge rows and the neutral rows' positive control), the
 //     non-front-dispatch fixtures, the needsProducerReview rewrite and the
@@ -1046,7 +1045,7 @@ describe('dispatch-driven round-robin charge (WL-0MWFIZ8H5005FVNN)', () => {
     expect(after[CHARGE_ROOT_A]).toBe(new Date(CHARGE_NOW).toISOString()); // dispatching root charged
   });
 
-  it.fails('selection purity: a tick where every offer is held leaves the cursor file byte-identical', async () => {
+  it('selection purity: a tick where every offer is held leaves the cursor file byte-identical', async () => {
     const { saveRoundRobinCursor, ROUND_ROBIN_BY_ROOT_FILE_NAME } = await import('./downtime-round-robin-by-root.js');
     saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_A, [CHARGE_ROOT_B]: CHARGE_SEED_B });
     const cursorPath = join(testDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);

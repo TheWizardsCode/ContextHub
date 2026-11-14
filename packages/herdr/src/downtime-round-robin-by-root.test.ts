@@ -295,10 +295,8 @@ describe('new roots sort first', () => {
 // ── Test 7: Selection purity — `advanceRoot` is the only writer ─────────
 //
 // WL-0MWFIZ8H5005FVNN (post-dispatch round-robin charge): selection is a PURE
-// READ. These specs are the RED baseline for WL-0MWFJSVXT0033M9M (pure
-// selection), which flips them to `it(...)`. On the current code
-// `selectLeastRecentlyServed` writes the cursor, so every spec below fails at
-// a cursor-content assertion (never at an import/compile error).
+// READ. These specs were written by WL-0MWFJSOKM000V8IQ as the RED baseline and
+// flipped to green by WL-0MWFJSVXT0033M9M (pure selection).
 describe('selection purity — advanceRoot is the only writer (WL-0MWFIZ8H5005FVNN)', () => {
   let tmpDir: string;
 
@@ -310,7 +308,7 @@ describe('selection purity — advanceRoot is the only writer (WL-0MWFIZ8H5005FV
     cleanupDir(tmpDir);
   });
 
-  it.fails('writes nothing — the cursor file bytes are unchanged', () => {
+  it('writes nothing — the cursor file bytes are unchanged', () => {
     const cursorPath = path.join(tmpDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
     saveRoundRobinCursor(tmpDir, {
       'alpha': '2026-09-02T00:00:00.000Z',
@@ -324,14 +322,35 @@ describe('selection purity — advanceRoot is the only writer (WL-0MWFIZ8H5005FV
     expect(fs.readFileSync(cursorPath, 'utf-8')).toBe(before);
   });
 
-  it.fails('does not write a timestamp for a previously unknown root', () => {
+  it('structurally pure: the oldest root wins even when it is NOT first in the input array', () => {
+    const cursorPath = path.join(tmpDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
+    // alpha is first in the input array but NEWER; beta is last but OLDEST.
+    // A writer-backed selection would still return beta (and then charge it),
+    // so a wrong result here would mean the read-only path lost its ordering.
+    saveRoundRobinCursor(tmpDir, {
+      'alpha': '2026-09-02T01:00:00.000Z',
+      'beta': '2026-09-02T00:00:00.000Z',
+    });
+    const before = fs.readFileSync(cursorPath, 'utf-8');
+
+    const selected = selectLeastRecentlyServed(
+      tmpDir,
+      ['alpha', 'beta'],
+      1_700_000_000_000,
+    );
+
+    expect(selected).toBe('beta'); // oldest known, not first-in-array
+    expect(fs.readFileSync(cursorPath, 'utf-8')).toBe(before);
+  });
+
+  it('does not write a timestamp for a previously unknown root', () => {
     const selected = selectLeastRecentlyServed(tmpDir, ['alpha', 'beta'], 1_700_000_000_000);
 
     expect(selected).toBe('alpha'); // unknown, alpha-sort
     expect(loadRoundRobinCursor(tmpDir)).toEqual({}); // no history written
   });
 
-  it.fails('repeated selection without a charge re-selects the same root (no rotation)', () => {
+  it('repeated selection without a charge re-selects the same root (no rotation)', () => {
     saveRoundRobinCursor(tmpDir, {
       'alpha': '2020-01-01T00:00:00.000Z',
       'beta': '2020-01-02T00:00:00.000Z',
@@ -405,8 +424,7 @@ describe('cursor persists across restart', () => {
     cleanupDir(tmpDir);
   });
 
-  // RED BASELINE (WL-0MWFIZ8H5005FVNN): flipped by WL-0MWFJSVXT0033M9M.
-  it.fails('a selection-only restart does not advance the cursor', () => {
+  it('a selection-only restart does not advance the cursor', () => {
     // First "leader instance": selects but dispatches nothing.
     const first = selectLeastRecentlyServed(
       tmpDir,
@@ -491,8 +509,7 @@ describe('concurrent access safety', () => {
     cleanupDir(tmpDir);
   });
 
-  // RED BASELINE (WL-0MWFIZ8H5005FVNN): flipped by WL-0MWFJSVXT0033M9M.
-  it.fails('selection takes no coordination lock — the oldest root still wins under contention', async () => {
+  it('selection takes no coordination lock — the oldest root still wins under contention', async () => {
     saveRoundRobinCursor(tmpDir, {
       'alpha': '2026-09-02T01:00:00.000Z', // first in input, NEWER
       'beta': '2026-09-02T00:00:00.000Z', // second in input, OLDEST
@@ -539,8 +556,9 @@ describe('round-robin alternation', () => {
     cleanupDir(tmpDir);
   });
 
-  // RED BASELINE (WL-0MWFIZ8H5005FVNN): flipped by WL-0MWFJSVXT0033M9M.
-  it.fails('selection alone never alternates — it re-selects the same root', () => {
+  // WL-0MWFIZ8H5005FVNN: selection is pure, so selection alone never rotates.
+  // Rotation is driven by the explicit post-dispatch charge (`advanceRoot`).
+  it('selection alone never alternates — it re-selects the same root', () => {
     const roots = ['contexthub', 'sorraagents'];
     const results: string[] = [];
 

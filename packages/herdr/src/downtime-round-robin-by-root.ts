@@ -15,9 +15,13 @@
  * - New / unknown roots sort first (never penalised).
  * - Missing file, empty file, or corrupt JSON → empty state (fail-open).
  * - Writes use atomic tmp+rename (same pattern as `coordination.ts`).
- * - Read-modify-write is guarded by the same coordination-lock mechanism
- *   (`tryAcquireCoordLock`) used for the coordination file — concurrent
- *   leaders do not corrupt the cursor.
+ * - The charge (`advanceRoot`) is a read-modify-write guarded by the same
+ *   coordination-lock mechanism (`tryAcquireCoordLock`) used for the
+ *   coordination file — concurrent leaders do not corrupt the cursor.
+ * - Selection (`selectLeastRecentlyServed`) is a **pure read**: it takes no
+ *   coordination lock and writes nothing. Only a *consumed offer* charges the
+ *   cursor, via `advanceRoot`; a root that is selected but dispatches nothing
+ *   is never charged (WL-0MWFIZ8H5005FVNN).
  *
  * Fail-open by contract: a missing or unreadable cursor file degrades to
  * "no history" — entries are ordered in the original file order, which is the
@@ -134,58 +138,47 @@ export { tryAcquireCoordLock };
  *     is selected first (global cross-project round-robin).
  *  3. Ties among known roots are broken by alphabetical root name (deterministic).
  *
- * After selection, the cursor is advanced: the chosen root's timestamp is
- * updated to `now` (its last-served time) and persisted atomically.
+ * **Pure read:** selection takes no coordination lock, writes no cursor file
+ * and never blocks on a concurrent writer. It therefore cannot charge the
+ * cursor — a root that is selected but consumes no offer stays in place. Only
+ * a consumed offer advances the cursor, via `advanceRoot`
+ * (WL-0MWFIZ8H5005FVNN).
  *
- * **Fail-open:** if the cursor file is missing/corrupt or the lock cannot
- * be acquired, returns the first root from the input array (original file
- * order) — the pre-refactor behaviour.
+ * **Fail-open:** a missing/corrupt cursor yields "no history" (all roots
+ * unknown → alphabetical order, i.e. the first-in-array root for an already
+ * alphabetical input); an empty root set returns `null`. Selection never
+ * throws.
  *
  * @param coordinationDir — The coordination directory.
  * @param roots — The candidate `worklogRoot` values.
- * @param now — Current timestamp (ISO-8601 or `Date.now()`).
+ * @param _now — Unused: selection writes nothing. Retained for call-site
+ *   compatibility with the pre-purity signature.
  * @returns The selected root, or `null` when no roots are provided.
  */
 export function selectLeastRecentlyServed(
   coordinationDir: string,
   roots: string[],
-  now: number = Date.now(),
+  _now: number = Date.now(),
 ): string | null {
   if (roots.length === 0) return null;
 
-  // Acquire coordination lock to protect cursor R-M-W.
-  const release = tryAcquireCoordLock(coordinationDir);
-  if (release === null) {
-    // Lock contention — fail-open to original file order.
-    return roots[0];
-  }
-
-  try {
-    return selectLeastRecentlyServedLocked(coordinationDir, roots, now);
-  } finally {
-    release();
-  }
+  // Read-only: no coordination lock, no write.
+  const data = loadRoundRobinCursor(coordinationDir);
+  return selectLeastRecentlyServedFromCursor(data, roots);
 }
 
 /**
- * Internal: cursor selection under lock.
+ * Internal: pure selection over already-loaded cursor state.
  *
- * 1. Load cursor state (fail-open → `{}`).
- * 2. Partition roots into known (in cursor) and unknown (new).
- * 3. Unknown roots sort first — pick the first unknown.
- * 4. Among known roots, pick the one with the oldest timestamp.
- * 5. Advance the cursor: update the selected root's timestamp to `now`.
- * 6. Persist the updated cursor atomically.
- * 7. Return the selected root.
+ * 1. Partition roots into known (in cursor) and unknown (new).
+ * 2. Unknown roots sort first — pick the first unknown.
+ * 3. Among known roots, pick the one with the oldest timestamp.
+ * 4. Return the selected root — nothing is written.
  */
-function selectLeastRecentlyServedLocked(
-  coordinationDir: string,
+function selectLeastRecentlyServedFromCursor(
+  data: RoundRobinByRootData,
   roots: string[],
-  nowMs: number,
 ): string {
-  const data = loadRoundRobinCursor(coordinationDir);
-  const isoNow = new Date(nowMs).toISOString();
-
   // Partition into unknown (new) and known.
   const unknownRoots: string[] = [];
   const knownRoots: { root: string; timestamp: string }[] = [];
@@ -216,10 +209,6 @@ function selectLeastRecentlyServedLocked(
     selected = knownRoots[0].root;
   }
 
-  // Advance: update the selected root's timestamp.
-  data[selected] = isoNow;
-  saveRoundRobinCursor(coordinationDir, data);
-
   return selected;
 }
 
@@ -227,8 +216,9 @@ function selectLeastRecentlyServedLocked(
  * Advance the cursor for a single root without selecting.
  *
  * Records that the given root was just dispatched, updating its last-served
- * timestamp. This is called after a dispatch (or spawn-failed / marker-write-
- * failed claim that still consumes the entry).
+ * timestamp. This is the **only** cursor writer: it is called after an offer
+ * is consumed (dispatched, or a spawn-failed / marker-write-failed claim that
+ * still removes the offer), never at selection time.
  *
  * **Fail-open:** if the lock cannot be acquired, the cursor state is lost
  * for this cycle but dispatch is not blocked.
