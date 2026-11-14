@@ -195,6 +195,14 @@ describe('pruneStaleEntries (no-op, WL-0MTMPIQBE001J41P)', () => {
   it('returns 0 when the file is missing (fail-safe)', () => {
     expect(pruneStaleEntries(testDir, 300_000)).toBe(0);
   });
+
+  it('returns 0 and leaves the file byte-identical when called without nowMs', () => {
+    upsertEntry(testDir, makeEntry('inst-1', 'WL-ONE'));
+    const before = readFileSync(COORD_PATH(), 'utf-8');
+    const removed = pruneStaleEntries(testDir, 300_000); // no nowMs — uses Date.now()
+    expect(removed).toBe(0);
+    expect(readFileSync(COORD_PATH(), 'utf-8')).toBe(before);
+  });
 });
 
 // ── mergeEntries (batch check-in) ──────────────────────────────────────
@@ -717,5 +725,96 @@ describe('removeOffer — partial removal (parent AC6)', () => {
       offerRemoved: false,
       entryRemoved: false,
     });
+  });
+});
+
+// ── Non-expiring offer contract: staleness never removes entries (partial — see parent WL-0MWFIZIAU007RBER child 1) ──
+//
+// Dead-instance pruning (child 2) is not yet present; this block pins the
+// behaviour that must survive it: an entry whose `lastUpdated` is arbitrarily
+// old is still returned by the read path and persists across the write seams.
+// Removal happens ONLY at dispatch time (`removeOffer` / `removeEntry`), never
+// by wall-clock age.
+
+describe('non-expiring offer contract survives arbitrary staleness', () => {
+  /** An ISO timestamp far beyond the 24 h liveness window (say, 48 h ago). */
+  const ANCIENT_ISO = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+  it('an entry older than 24 h is still returned by readCoordinationFile / getEntry', () => {
+    upsertEntry(testDir, makeEntry('ancient', 'WL-ANCIENT', { lastUpdated: ANCIENT_ISO }));
+
+    const data = readCoordinationFile(testDir);
+    expect(data).not.toBe(null);
+    expect(data!.entries).toHaveLength(1);
+    expect(data!.entries[0].instanceId).toBe('ancient');
+    expect(getEntry(testDir, 'ancient')).not.toBe(null);
+    expect(getEntry(testDir, 'ancient')!.lastUpdated).toBe(ANCIENT_ISO);
+  });
+
+  it('an entry older than 24 h survives an upsertEntry of a different instance', () => {
+    upsertEntry(testDir, makeEntry('ancient', 'WL-ANCIENT', { lastUpdated: ANCIENT_ISO }));
+    upsertEntry(testDir, makeEntry('fresh', 'WL-FRESH'));
+
+    const data = readCoordinationFile(testDir);
+    expect(data!.entries).toHaveLength(2);
+    expect(getEntry(testDir, 'ancient')).not.toBe(null);
+  });
+
+  it('an entry older than 24 h survives a mergeEntries write seam', () => {
+    upsertEntry(testDir, makeEntry('ancient', 'WL-ANCIENT', { lastUpdated: ANCIENT_ISO }));
+    mergeEntries(testDir, [makeEntry('fresh', 'WL-FRESH')]);
+
+    const data = readCoordinationFile(testDir);
+    expect(data!.entries).toHaveLength(2);
+    expect(getEntry(testDir, 'ancient')).not.toBe(null);
+  });
+
+  it('only removeEntry/removeOffer removes an ancient entry', () => {
+    upsertEntry(testDir, makeEntry('ancient', 'WL-ANCIENT', { lastUpdated: ANCIENT_ISO }));
+
+    // Reading and writing other instances never touches it.
+    mergeEntries(testDir, [makeEntry('fresh', 'WL-FRESH')]);
+    expect(getEntry(testDir, 'ancient')).not.toBe(null);
+
+    // Dispatch-time removal does.
+    expect(removeEntry(testDir, 'ancient')).not.toBe(null);
+    expect(getEntry(testDir, 'ancient')).toBe(null);
+  });
+});
+
+// ── Live-but-idle entry survives a read-then-merge cycle ───────────────
+//
+// An idle instance (no offers, fresh `lastUpdated`) is LIVE: it checked in
+// within the window. A read → merge cycle must leave its entry and its owner
+// metadata untouched.
+
+describe('live-but-idle entry survives a read-then-merge cycle unchanged', () => {
+  it('an entry with no offers and a fresh lastUpdated is unchanged after read-then-merge', () => {
+    const freshTs = new Date().toISOString();
+    const idle: CoordinationEntry = {
+      instanceId: 'idle-inst',
+      workItemId: '',
+      directory: testDir,
+      worklogRoot: testDir,
+      assignedAt: freshTs,
+      lastUpdated: freshTs,
+      offers: [],
+    };
+    expect(upsertEntry(testDir, idle)).toBe(true);
+
+    // Read the current file, then merge the same idle entry back (the
+    // check-in shape: re-assert the owner's own entry).
+    const data = readCoordinationFile(testDir)!;
+    const asRead = data.entries[0];
+    mergeEntries(testDir, [asRead]);
+
+    const after = getEntry(testDir, 'idle-inst')!;
+    expect(after.instanceId).toBe('idle-inst');
+    expect(after.lastUpdated).toBe(freshTs);
+    expect(after.assignedAt).toBe(freshTs);
+    // Still no offers — an idle entry stays idle.
+    expect((after as unknown as { offers?: unknown[] }).offers ?? []).toEqual([]);
+    // Still the only entry.
+    expect(readCoordinationFile(testDir)!.entries).toHaveLength(1);
   });
 });
