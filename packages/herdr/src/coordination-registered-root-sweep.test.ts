@@ -503,12 +503,14 @@ describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
 
 // ── Dispatch-driven charge (WL-0MWFIZ8H5005FVNN) ──────────────────────
 //
-// RED BASELINE (TDD): the sweep must charge the root whose swept candidate is
-// CONSUMED, not the root selection happened to start from. WL-0MWFJTCJ5004BKE4
-// (sweep charge) flips these specs to `it(...)`. Each fails on the current code
-// because `dispatchFromRegisteredRoots` relies on selection-time charging.
+// RED BASELINE → FLIPPED (TDD): the sweep charges the root whose swept
+// candidate is CONSUMED, not the root selection happened to start from.
+// WL-0MWFJTCJ5004BKE4 (sweep charge) wired the shared consumed-outcome
+// predicate into `dispatchFromRegisteredRoots`; these specs now run as plain
+// `it(...)`. Each failed on the pre-change code because
+// `dispatchFromRegisteredRoots` relied on selection-time charging.
 describe('registered-root sweep — dispatch-driven charge (WL-0MWFIZ8H5005FVNN)', () => {
-  it.fails(
+  it(
     'charges the DISPATCHING root on a sweep dispatch, not the selected-but-empty root',
     async () => {
       const rootEmpty = makeRoot('charge-empty'); // cursor-oldest, nothing dispatchable
@@ -538,7 +540,7 @@ describe('registered-root sweep — dispatch-driven charge (WL-0MWFIZ8H5005FVNN)
     },
   );
 
-  it.fails(
+  it(
     'a sweep that visits roots and dispatches nothing charges no root (cursor byte-identical)',
     async () => {
       const rootA = makeRoot('nocharge-a');

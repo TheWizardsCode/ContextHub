@@ -40,6 +40,10 @@
  */
 
 import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
+import {
+  advanceRoundRobinCursor,
+  isConsumedDispatchOutcome,
+} from './downtime-worker.selection.js';
 import { readOwnHeadWindow } from './downtime-worker.coordination-batch.js';
 import {
   isAuditBudgetHoldOutcome,
@@ -412,13 +416,16 @@ export async function dispatchFromOwnHead(
  *     bounded extension (`DOWNTIME_DISPATCH_EXTEND_MAX`) the own-backlog
  *     fallback uses. The first eligible item in that canonical order wins; the
  *     sweep is a bounded WINDOW over roots, never a second ranking.
- *  2. **Round-robin fairness (AC4).** The starting root is chosen with the
- *     SAME `selectLeastRecentlyServed` cursor the offer path uses (it advances
- *     the selected root atomically); the sweep then visits the remaining roots
- *     in registry order. A root with nothing dispatchable never consumes the
- *     tick — the sweep continues to the next root. The sweep runs BEFORE the
- *     leader's own out-of-view backlog, so a busy leader root cannot starve the
- *     registry.
+ *  2. **Round-robin fairness (AC4).** The starting root is the
+ *     least-recently-DISPATCHED registered root, chosen with the SAME (pure,
+ *     read-only) `selectLeastRecentlyServed` cursor the offer path uses —
+ *     selection never charges (WL-0MWFIZ8H5005FVNN). A root is charged ONLY
+ *     when the sweep CONSUMES one of its items (`dispatched` /
+ *     `spawn-failed` / `marker-write-failed`, via the shared
+ *     `isConsumedDispatchOutcome` predicate) — a visit that dispatches
+ *     nothing charges no root. The sweep then visits the remaining roots in
+ *     registry order and runs BEFORE the leader's own out-of-view backlog,
+ *     so a busy leader root cannot starve the registry.
  *  3. **No gate bypass (AC2).** Every candidate passes the FULL sequential
  *     filter chain against ITS OWN root's state (freeze marker, review queue,
  *     in-flight panes, cooldown log, claim target). A gate that holds the only
@@ -481,7 +488,20 @@ export async function dispatchFromRegisteredRoots(
     // A dispatch, or a terminal (strike/spawn-failed/…) outcome, ends the
     // tick. A root with nothing dispatchable returns `null` and the sweep
     // continues to the next registered root.
-    if (outcome !== null) return outcome;
+    if (outcome !== null) {
+      // Consumed-offer charge (WL-0MWFJTCJ5004BKE4, parent WL-0MWFIZ8H5005FVNN):
+      // a sweep dispatch, or a claim that was consumed without a pane
+      // (spawn-failed / marker-write-failed), charges EXACTLY the dispatching
+      // root. A neutral hold that keeps the offer (reservation `admit: false`,
+      // host/audit-budget, claim-failed, anchor-unavailable) and a
+      // nothing-dispatchable visit (`null`, `continue` above) charge nothing.
+      // Fail-open: `advanceRoot` skips a lost charge under lock contention or
+      // an I/O error — never blocks a dispatch.
+      if (isConsumedDispatchOutcome(outcome)) {
+        advanceRoundRobinCursor(opts.coordinationDir, root, now);
+      }
+      return outcome;
+    }
   }
   return null;
 }
