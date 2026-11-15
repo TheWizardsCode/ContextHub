@@ -146,6 +146,14 @@ export function readDispatcherWorkspaceId(): string | null {
  * Always writes (even when the entry is unchanged) so a stale entry whose
  * pane was superseded in herdr is corrected rather than left to be
  * re-resolved on every dispatch.
+ *
+ * Self-pruning (WL-0MWHCUX6A002W8ZG): herdr ids are workspace-scoped with a
+ * `<workspaceId>:` prefix, so on every rewrite each carried-over `byPrefix`
+ * entry is kept only when BOTH ids start with the workspace being written —
+ * an entry pointing into a superseded/dead workspace (or holding an
+ * ill-formed id) can never resolve and is dropped, keeping the persisted map
+ * truthful without any `wl`/herdr call. The upserted ids are validated the
+ * same way: an ill-formed id fails closed with `false` and nothing written.
  */
 export function persistPrefixTab(
   dir: string,
@@ -157,8 +165,17 @@ export function persistPrefixTab(
   const current = readTabAnchors(dir);
   const anchors: DispatcherTabAnchors = {
     workspaceId,
-    byPrefix: { ...(current?.byPrefix ?? {}) },
+    byPrefix: {},
   };
+  const wsPrefix = `${workspaceId}:`;
+  if (current !== null) {
+    for (const [p, entry] of Object.entries(current.byPrefix)) {
+      if (entry.tabId.startsWith(wsPrefix) && entry.paneId.startsWith(wsPrefix)) {
+        anchors.byPrefix[p] = entry;
+      }
+    }
+  }
+  if (!tabId.startsWith(wsPrefix) || !paneId.startsWith(wsPrefix)) return false;
   anchors.byPrefix[prefix] = { tabId, paneId };
   return writeTabAnchors(dir, anchors);
 }

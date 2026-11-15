@@ -51,6 +51,7 @@ import {
   STALE_TAB_ANCHORS,
   STALE_TAB_ANCHORS_JSON,
 } from './__fixtures__/stale-dispatcher-anchors.js';
+import { persistPrefixTab } from './dispatcher-anchor.persistence.js';
 
 function mkTmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'da-test-'));
@@ -471,6 +472,7 @@ function makeTabDeps(over: ResolverOverrides & {
   createTab?: DispatcherAnchorDeps['createTab'];
   listPanes?: DispatcherAnchorDeps['listPanes'];
   moveTab?: DispatcherAnchorDeps['moveTab'];
+  probeWorkspace?: DispatcherAnchorDeps['probeWorkspace'];
 } = {}): DispatcherAnchorDeps {
   return {
     createWorkspace: over.createWorkspace ?? (async () => ({ workspaceId: 'wD', paneId: 'wD:p1' })),
@@ -478,6 +480,13 @@ function makeTabDeps(over: ResolverOverrides & {
     listTabs: over.listTabs ?? (async () => [] as DispatcherTabInfo[]),
     createTab: over.createTab ?? (async (ws: string, label: string) => ({ tabId: `${ws}:t${label}`, paneId: `${ws}:t${label}:p1` })),
     listPanes: over.listPanes ?? (async () => [] as DispatcherPaneInfo[]),
+    // The workspace-existence probe (WL-0MWHCUPGQ001FASL) is OPTIONAL on the
+    // deps contract and, when absent, fails closed (parent decision "Missing
+    // ≠ unreadable"). These tab tests exercise the resolver against a VALID
+    // persisted workspace, so the shared default answers `alive`; the
+    // recovery/regression tests (WL-0MWHCUTDM003B39Q) override it with
+    // `missing`/`unreadable`, or build a raw deps object without it.
+    probeWorkspace: over.probeWorkspace ?? (async () => 'alive'),
     ...(over.moveTab ? { moveTab: over.moveTab } : {}),
     ...(over.listMachinePanes ? { listMachinePanes: over.listMachinePanes } : {}),
     ...(over.getPaneProcessInfo ? { getPaneProcessInfo: over.getPaneProcessInfo } : {}),
@@ -1254,6 +1263,320 @@ describe('regression fixtures: stale anchors (WL-0MWH50EN4007C6YH)', () => {
     releaseSlowCheck();
     expect(await second).toEqual({ paneId: 'wB:p1', workspaceId: 'wB' });
     expect(createWorkspace).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Stale workspace recovery (WL-0MWHCUTDM003B39Q) ─────────────────────
+
+// The fix item: validate the persisted Dispatcher workspace on read and
+// re-provision exactly one replacement when it is positively missing. These
+// tests seed the recorded pre-fix state (`w6A`, from the sibling guard
+// fixture) against injected deps whose probe reports `missing`/`unreadable`
+// (AC1/AC3/AC4/AC5/AC8 of WL-0MWHCUTDM003B39Q).
+
+describe('stale workspace recovery — validate on read and re-provision (WL-0MWHCUTDM003B39Q)', () => {
+  // AC1 (parent AC1) — the recorded pre-fix state (w6A gone) self-heals:
+  // getDispatcherTabAnchor validates the persisted workspace, provisions a
+  // fresh Dispatcher workspace and resolves a NEW WL tab in it — instead of
+  // failing closed with `null` forever.
+  it('AC1: a positively-missing persisted workspace is recovered and a new WL tab anchor is returned', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wB', paneId: 'wB:p1' }));
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeTabDeps({
+      createWorkspace,
+      createTab,
+      probeWorkspace: async () => 'missing',
+      isPaneAlive: async (paneId: string) => paneId.startsWith('wB'),
+    });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wB', tabId: 'wB:tWL', paneId: 'wB:tWL:p1' });
+    // Provisioned under the coordination lock, exactly once.
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
+    expect(createWorkspace).toHaveBeenCalledWith(DISPATCHER_WORKSPACE_LABEL);
+    // Both anchor files are rewritten with the recovered ids (AC5 first half).
+    expect(readPersisted()).toEqual({ paneId: 'wB:p1', workspaceId: 'wB' });
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'wB',
+      byPrefix: { WL: { tabId: 'wB:tWL', paneId: 'wB:tWL:p1' } },
+    });
+  });
+
+  // AC3 (parent AC3, first half) — missing ≠ unreadable: a transient or
+  // unreadable herdr still fails closed with `anchor-unavailable` and
+  // provisions NOTHING. Only a positively `missing` workspace may recover.
+  it('AC3: an unreadable probe fails closed and creates zero workspaces', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wX', paneId: 'wX:p1' }));
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      createWorkspace,
+      createTab,
+      probeWorkspace: async () => 'unreadable',
+      isPaneAlive: async () => false,
+    });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it('AC3: an ABSENT probe dep fails closed exactly like unreadable (zero creates)', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wX', paneId: 'wX:p1' }));
+    const createTab = vi.fn(async () => null);
+    // Raw deps object — deliberately omits probeWorkspace (the optional member
+    // must default to `unreadable`, never to `missing`, per the contract).
+    const noProbeDeps: DispatcherAnchorDeps = {
+      createWorkspace,
+      createTab,
+      isPaneAlive: async () => false,
+      listTabs: async () => [],
+    };
+
+    expect(await getDispatcherTabAnchor('/repo', noProbeDeps, 'WL')).toBeNull();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  // AC4 (parent AC3, second half) — two concurrent first-dispatchers that
+  // both observe `missing` create exactly ONE replacement workspace (the
+  // coordination lock + in-lock double-check) and both return the same
+  // anchor. The second caller's probe is parked until the winner has fully
+  // recovered AND resolved its prefix tab, so its recovery double-check
+  // adopts the persisted anchor and its tab re-check adopts the created tab.
+  it('AC4: concurrent missing-observing callers create exactly one workspace and share the anchor', async () => {
+    seedStaleAnchorState(tmpDir);
+
+    // A tiny in-memory herdr so the second caller re-adopts the first
+    // caller's tab instead of creating a duplicate.
+    const tabs: Record<string, { tabId: string; label: string; paneId: string }> = {};
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wB', paneId: 'wB:p1' }));
+    const createTab = vi.fn(async (ws: string, label: string) => {
+      const tabId = `${ws}:t${label}`;
+      const rec = { tabId, label, paneId: `${tabId}:p1` };
+      tabs[tabId] = rec;
+      return rec;
+    });
+    const listTabs = vi.fn(async (ws: string) =>
+      Object.values(tabs)
+        .filter((rec) => rec.tabId.startsWith(`${ws}:`))
+        .map((rec) => ({ tabId: rec.tabId, label: rec.label })),
+    );
+    const listPanes = vi.fn(async (ws: string) =>
+      Object.values(tabs)
+        .filter((rec) => rec.tabId.startsWith(`${ws}:`))
+        .map((rec) => ({ paneId: rec.paneId, tabId: rec.tabId })),
+    );
+    const isPaneAlive = vi.fn(async (paneId: string) => paneId.startsWith('wB'));
+
+    let releaseSecondProbe!: () => void;
+    const secondProbeGate = new Promise<void>((r) => { releaseSecondProbe = r; });
+    let probeCalls = 0;
+    const probeWorkspace = vi.fn(async (workspaceId: string) => {
+      probeCalls += 1;
+      // Park the SECOND caller's probe until the winner has fully recovered.
+      if (workspaceId === 'w6A' && probeCalls === 2) await secondProbeGate;
+      return 'missing';
+    });
+    const deps = makeTabDeps({
+      createWorkspace, createTab, listTabs, listPanes, isPaneAlive, probeWorkspace,
+    });
+
+    const first = getDispatcherTabAnchor('/repo', deps, 'WL');
+    const second = getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    // The winner recovers, resolves the WL tab and persists both files while
+    // the racer is parked on its probe.
+    expect(await first).toEqual({ workspaceId: 'wB', tabId: 'wB:tWL', paneId: 'wB:tWL:p1' });
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
+    expect(createTab).toHaveBeenCalledTimes(1);
+
+    // Release the racer: its lock attempt now succeeds, the in-lock
+    // double-check adopts the persisted anchor and the tab re-check adopts
+    // the created tab — no second workspace, no second tab.
+    releaseSecondProbe();
+    expect(await second).toEqual({ workspaceId: 'wB', tabId: 'wB:tWL', paneId: 'wB:tWL:p1' });
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
+    expect(createTab).toHaveBeenCalledTimes(1);
+  });
+
+  // AC5 — recovery persists BOTH anchors; a second resolution reuses them
+  // with no probe and no provisioning (idempotent — no per-tick
+  // re-provisioning loop, parent AC5/AC10).
+  it('AC5: the recovered anchor is persisted and a second resolution reuses it without re-provisioning', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wB', paneId: 'wB:p1' }));
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const probeWorkspace = vi.fn(async () => 'missing');
+    const isPaneAlive = vi.fn(async (paneId: string) => !paneId.startsWith('w6A'));
+    const deps = makeTabDeps({ createWorkspace, createTab, probeWorkspace, isPaneAlive });
+
+    const first = await getDispatcherTabAnchor('/repo', deps, 'WL');
+    expect(first).toEqual({ workspaceId: 'wB', tabId: 'wB:tWL', paneId: 'wB:tWL:p1' });
+    expect(readPersisted()).toEqual({ paneId: 'wB:p1', workspaceId: 'wB' });
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'wB',
+      byPrefix: { WL: { tabId: 'wB:tWL', paneId: 'wB:tWL:p1' } },
+    });
+
+    // Second resolution → healthy fast path: same anchor, no probe (the
+    // healthy path never consults the probe — AC8), no createWorkspace.
+    const second = await getDispatcherTabAnchor('/repo', deps, 'WL');
+    expect(second).toEqual(first);
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
+    expect(probeWorkspace).toHaveBeenCalledTimes(1);
+    expect(probeWorkspace).toHaveBeenCalledWith('w6A');
+    expect(createTab).toHaveBeenCalledTimes(1);
+  });
+
+  // AC8 (parent AC10) — a healthy resolution issues exactly the same herdr
+  // calls as today: one pane-liveness check and nothing else. The probe is
+  // consulted only after a stale-pane fast-path miss; the placement code
+  // path adds no `wl` invocation (the probe's own suite pins the no-wl
+  // spawn at the CLI level).
+  it('AC8: healthy resolution makes no probe / list / create calls and exactly one liveness check', async () => {
+    writePersisted({ paneId: 'wD:p1', workspaceId: 'wD' });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({ workspaceId: 'wD', byPrefix: { WL: { tabId: 'wD:tWL', paneId: 'wD:tWL:p1' } } }),
+      'utf-8',
+    );
+    const probeWorkspace = vi.fn(async () => 'alive');
+    const listTabs = vi.fn(async () => [] as DispatcherTabInfo[]);
+    const createWorkspace = vi.fn(async () => { throw new Error('must not be called'); });
+    const createTab = vi.fn(async () => null);
+    const isPaneAlive = vi.fn(async () => true);
+    const deps = makeTabDeps({ probeWorkspace, listTabs, createWorkspace, createTab, isPaneAlive });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    expect(probeWorkspace).not.toHaveBeenCalled();
+    expect(listTabs).not.toHaveBeenCalled();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(createTab).not.toHaveBeenCalled();
+    expect(isPaneAlive).toHaveBeenCalledTimes(1);
+    expect(isPaneAlive).toHaveBeenCalledWith('wD:tWL:p1');
+  });
+});
+
+// ── persistPrefixTab pruning (WL-0MWHCUX6A002W8ZG) ──────────────────────
+// The persisted per-prefix map is rewritten whenever a dispatch resolves a
+// tab; entries whose ids cannot belong to the workspace being written (a
+// superseded/dead workspace, or an ill-formed hand-edited id) are pruned so
+// dead ids cannot accumulate and mask a later wedge. Herdr ids are
+// workspace-scoped (`<workspaceId>:` prefix), so membership is decided from
+// the ids alone — no CLI call.
+
+describe('persistPrefixTab pruning (WL-0MWHCUX6A002W8ZG)', () => {
+  it('AC2: a dead-workspace entry is dropped on rewrite; live siblings and the upsert survive', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({
+        workspaceId: 'w6B',
+        byPrefix: {
+          // Dead workspace: every id carries the superseded w6A prefix.
+          WL: { tabId: 'w6A:t2', paneId: 'w6A:p5' },
+          // Live sibling in the workspace being written — must survive.
+          TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' },
+        },
+      }),
+      'utf-8',
+    );
+
+    persistPrefixTab(tmpDir, 'w6B', 'WL', 'w6B:t2', 'w6B:p5');
+
+    // AC3: the map-level workspaceId is always the workspace being written.
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'w6B',
+      byPrefix: {
+        WL: { tabId: 'w6B:t2', paneId: 'w6B:p5' },
+        TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' },
+      },
+    });
+  });
+
+  it('AC4: after recovery the persisted map carries no dead w6A ids and holds the recovered entry', () => {
+    // Seed the recorded pre-fix map (workspaceId w6A owns WL) as-is.
+    seedStaleAnchorState(tmpDir);
+
+    // Simulate the first dispatch write after recovery to the new workspace.
+    persistPrefixTab(tmpDir, 'w6B', 'WL', 'w6B:t2', 'w6B:p5');
+
+    const persisted = readTabAnchorsPersisted();
+    expect(persisted?.workspaceId).toBe('w6B');
+    expect(JSON.stringify(persisted)).not.toContain('w6A');
+    expect(persisted?.byPrefix.WL).toEqual({ tabId: 'w6B:t2', paneId: 'w6B:p5' });
+  });
+
+  it('AC5: two prefixes in the same live workspace are both retained across a rewrite', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({
+        workspaceId: 'w6B',
+        byPrefix: {
+          WL: { tabId: 'w6B:t2', paneId: 'w6B:p5' },
+          TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' },
+        },
+      }),
+      'utf-8',
+    );
+
+    persistPrefixTab(tmpDir, 'w6B', 'TCE', 'w6B:t6', 'w6B:p31');
+
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'w6B',
+      byPrefix: {
+        WL: { tabId: 'w6B:t2', paneId: 'w6B:p5' },
+        TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' },
+      },
+    });
+  });
+
+  it('AC6: an ill-formed id (no `<workspaceId>:` prefix) is dropped rather than retained', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({
+        workspaceId: 'w6B',
+        byPrefix: {
+          // Hand-edited: no w6B: prefix, so it can never resolve here.
+          WL: { tabId: 't2', paneId: 'p5' },
+        },
+      }),
+      'utf-8',
+    );
+
+    persistPrefixTab(tmpDir, 'w6B', 'TCE', 'w6B:t6', 'w6B:p31');
+
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'w6B',
+      byPrefix: { TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' } },
+    });
+  });
+
+  it('AC1/AC7: an ill-formed upsert fails closed (false, nothing written, no tmp residue)', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({ workspaceId: 'w6B', byPrefix: {} }),
+      'utf-8',
+    );
+
+    expect(persistPrefixTab(tmpDir, 'w6B', 'WL', 't2', 'p5')).toBe(false);
+    expect(readTabAnchorsPersisted()).toEqual({ workspaceId: 'w6B', byPrefix: {} });
+    expect(fs.existsSync(path.join(tmpDir, `${DISPATCHER_TAB_ANCHORS_FILE}.tmp`))).toBe(false);
   });
 });
 

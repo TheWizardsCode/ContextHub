@@ -103,6 +103,11 @@ export function makeWorstCasePanes(count = 60): HydratorPane[] {
 /**
  * Worst-case in-progress volume: `count` (default 25) pane-less candidates,
  * all at `plan_complete` so every one is eligible for demotion.
+ *
+ * Each item carries past-the-grace-window recency (parent
+ * WL-0MWH56SWX004HSKQ AC5) so "today's rule" applies deterministically — a
+ * claim age well past `HYDRATOR_CLAIM_GRACE_MS` (120 s) under any real
+ * clock. Timestamp-less fixtures would be kept as fresh claims (fail-open).
  */
 export function makeWorstCaseItems(count = 25): HydratorItem[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -110,6 +115,8 @@ export function makeWorstCaseItems(count = 25): HydratorItem[] {
     title: `Stuck item ${i}`,
     status: 'in-progress',
     stage: 'plan_complete',
+    updatedAt: '2020-01-01T00:00:00.000Z',
+    activityAt: '2020-01-01T00:00:00.000Z',
   }));
 }
 

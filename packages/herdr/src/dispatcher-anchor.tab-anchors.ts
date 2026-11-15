@@ -7,7 +7,11 @@
  * per-work-item-prefix tab anchor inside it (`getDispatcherTabAnchor`), plus
  * the resolution helpers they share. The coordination lock
  * (`tryAcquireCoordLock`), the in-lock double-check and the stale-pane
- * re-provision semantics live here unchanged.
+ * re-provision semantics live here unchanged, as does the persisted-workspace
+ * validation added by WL-0MWHCUTDM003B39Q: a persisted Dispatcher workspace
+ * that no longer exists is re-provisioned exactly once under the same
+ * coordination lock (`provisionDispatcherAnchorUnderLock`) instead of wedging
+ * the per-prefix resolver with `anchor-unavailable` forever.
  *
  * Moved verbatim out of `dispatcher-anchor.ts` (parent WL-0MVGKHCP9005SJPZ;
  * child WL-0MW0JHC92005XRT1). No logic, signature or coordination-semantics
@@ -58,20 +62,119 @@ import {
 } from './dispatcher-anchor.herdr-cli.js';
 
 /**
- * Ensure the Dispatcher workspace exists and return its workspace id: reuse
- * the id persisted by the legacy single anchor, else provision a fresh
- * workspace. Returns `null` on failure (caller fails closed).
+ * Result of ensuring the Dispatcher workspace.
+ *
+ *  - `workspaceId` — the workspace to use (the persisted id, the freshly
+ *    provisioned id, or the recovered replacement).
+ *  - `recovered` — true when the persisted workspace was positively `missing`
+ *    and exactly one replacement was provisioned (or adopted from a racing
+ *    recovery) under the coordination lock. A recovered workspace rewrote the
+ *    persisted ids, so every cached per-prefix entry is stale by construction.
+ */
+interface EnsuredDispatcherWorkspace {
+  workspaceId: string;
+  recovered: boolean;
+}
+
+/**
+ * Ensure the Dispatcher workspace exists and return its id (plus whether it
+ * was recovered). Validates the persisted workspace id against live herdr
+ * state BEFORE reuse so a workspace that no longer exists self-heals instead
+ * of wedging the per-prefix resolver (parent WL-0MWH50EN4007C6YH):
+ *
+ *  - persisted id + `probeWorkspace` — `alive` reuses it; `missing` recovers
+ *    via {@link provisionDispatcherAnchorUnderLock} (exactly one replacement
+ *    under the coordination lock); `unreadable`/absent probe fails closed with
+ *    NOTHING provisioned (a transient herdr must never duplicate the
+ *    workspace — missing ≠ unreadable, parent AC3).
+ *  - no persisted id → provision as today.
+ *
+ * The probe is consulted ONLY here, on the recovery path — never on a healthy
+ * fast-path resolution (AC8, parent AC10). Returns `null` on failure (the
+ * caller fails closed with `anchor-unavailable`).
  */
 async function ensureDispatcherWorkspace(
   deps: DispatcherAnchorDeps,
-): Promise<string | null> {
+): Promise<EnsuredDispatcherWorkspace | null> {
   const existing = readDispatcherWorkspaceId();
-  if (existing !== null) return existing;
+  if (existing === null) {
+    try {
+      const created = await deps.createWorkspace(DISPATCHER_WORKSPACE_LABEL);
+      return { workspaceId: created.workspaceId, recovered: false };
+    } catch {
+      return null;
+    }
+  }
+
+  let verdict: 'alive' | 'missing' | 'unreadable';
   try {
-    const created = await deps.createWorkspace(DISPATCHER_WORKSPACE_LABEL);
-    return created.workspaceId;
+    verdict = deps.probeWorkspace ? await deps.probeWorkspace(existing) : 'unreadable';
   } catch {
+    verdict = 'unreadable';
+  }
+  if (verdict === 'unreadable') return null; // fail closed — never duplicate
+  if (verdict === 'alive') return { workspaceId: existing, recovered: false };
+
+  // Positively missing → exactly one replacement under the coordination lock.
+  const dir = getMachineCoordinationDir();
+  if (dir === null) return null;
+  const recovered = await provisionDispatcherAnchorUnderLock(dir, deps);
+  return recovered === null ? null : { workspaceId: recovered.workspaceId, recovered: true };
+}
+
+/**
+ * Provision exactly ONE Dispatcher anchor under the machine coordination lock
+ * (lock → in-lock double-check → create workspace → adopt root pane → write
+ * anchor → release). Returns the anchor, or `null` on any failure.
+ *
+ * Shared by `getDispatcherAnchor` (stale-pane re-provision) and the recovery
+ * path in `ensureDispatcherWorkspace` (positively-missing workspace) — the
+ * single provisioning mechanism of the anchor family (AC2), so racing callers
+ * can never create two Dispatcher workspaces.
+ */
+async function provisionDispatcherAnchorUnderLock(
+  dir: string,
+  deps: DispatcherAnchorDeps,
+): Promise<DispatcherAnchor | null> {
+  const release = tryAcquireCoordLock(dir);
+  if (release === null) {
+    // Another holder is provisioning — re-read whatever they wrote, or null.
+    const raced = readAnchor(dir);
+    if (raced !== null) {
+      try {
+        const alive = await deps.isPaneAlive(raced.paneId);
+        if (alive) return raced;
+      } catch { return null; }
+    }
     return null;
+  }
+
+  try {
+    // Double-check inside the lock: another instance may have written between
+    // our earlier read and acquiring the lock.
+    const inside = readAnchor(dir);
+    if (inside !== null) {
+      try {
+        const alive = await deps.isPaneAlive(inside.paneId);
+        if (alive) return inside;
+      } catch { return null; }
+      // stale inside-lock → re-provision below (overwrite)
+    }
+
+    let created: { workspaceId: string; paneId: string };
+    try {
+      created = await deps.createWorkspace(DISPATCHER_WORKSPACE_LABEL);
+    } catch {
+      return null;
+    }
+    // Adopt the freshly-provisioned root pane into its own tab so the
+    // workspace never shows a blank pane (WL-0MU2EOHK900425VU).
+    await adoptRootPaneIntoNewTab(deps, created.paneId);
+    const anchor: DispatcherAnchor = { paneId: created.paneId, workspaceId: created.workspaceId };
+    if (!writeAnchor(dir, anchor)) return null;
+    return anchor;
+  } finally {
+    release();
   }
 }
 
@@ -140,46 +243,7 @@ export async function getDispatcherAnchor(
   }
 
   // Provision under the coordination lock so concurrent first-dispatches do not duplicate.
-  const release = tryAcquireCoordLock(dir);
-  if (release === null) {
-    // Another holder is provisioning — re-read whatever they wrote, or null.
-    const raced = readAnchor(dir);
-    if (raced !== null) {
-      try {
-        const alive = await deps.isPaneAlive(raced.paneId);
-        if (alive) return raced;
-      } catch { return null; }
-    }
-    return null;
-  }
-
-  try {
-    // Double-check inside the lock: another instance may have written between
-    // our earlier read and acquiring the lock.
-    const inside = readAnchor(dir);
-    if (inside !== null) {
-      try {
-        const alive = await deps.isPaneAlive(inside.paneId);
-        if (alive) return inside;
-      } catch { return null; }
-      // stale inside-lock → re-provision below (overwrite)
-    }
-
-    let created: { workspaceId: string; paneId: string };
-    try {
-      created = await deps.createWorkspace(DISPATCHER_WORKSPACE_LABEL);
-    } catch {
-      return null;
-    }
-    // Adopt the freshly-provisioned root pane into its own tab so the
-    // workspace never shows a blank pane (WL-0MU2EOHK900425VU).
-    await adoptRootPaneIntoNewTab(deps, created.paneId);
-    const anchor: DispatcherAnchor = { paneId: created.paneId, workspaceId: created.workspaceId };
-    if (!writeAnchor(dir, anchor)) return null;
-    return anchor;
-  } finally {
-    release();
-  }
+  return provisionDispatcherAnchorUnderLock(dir, deps);
 }
 
 /**
@@ -288,19 +352,26 @@ async function resolvePrefixTab(
  * a project workspace for the item's root.
  *
  * Algorithm:
- *  1. Ensure the Dispatcher workspace exists (re-use the legacy single
- *     anchor's workspace id when available, or provision it).
- *  2. List tabs in the Dispatcher workspace and look for one labelled with
+ *  1. Read the persisted anchors (cheap file reads — no probe, no CLI). A
+ *     healthy cached pane whose workspace still matches both persistence files
+ *     is reused directly.
+ *  2. Ensure the Dispatcher workspace exists: validate the persisted id
+ *     against live herdr state (`probeWorkspace`), recovering a positively
+ *     missing workspace under the coordination lock. `unreadable`/absent
+ *     probe fails closed with NOTHING provisioned; a recovered workspace gets
+ *     a fresh id.
+ *  3. List tabs in the Dispatcher workspace and look for one labelled with
  *     the prefix.
- *  3. If found, validate the root pane is alive (`pane get`); if alive,
+ *  4. If found, validate the root pane is alive (`pane get`); if alive,
  *     return it.
- *  4. If absent or stale, provision under the coordination lock:
+ *  5. If absent or stale, provision under the coordination lock:
  *     a. Double-check `tab list` inside the lock (a racing caller may have
  *        created the same tab).
  *     b. If still absent, `herdr tab create --workspace <id> --label <prefix>
  *        --no-focus`.
- *     c. Persist the new mapping in `downtime-dispatch-tab-anchors.json`.
- *  5. Return `{ workspaceId, tabId, paneId }` or `null` on any failure.
+ *     c. Persist the new mapping in `downtime-dispatch-tab-anchors.json`,
+ *        rewriting the workspace id when it was recovered.
+ *  6. Return `{ workspaceId, tabId, paneId }` or `null` on any failure.
  *
  * Idempotency: the coordination lock serialises tab creation and the
  * double-check inside the lock prevents duplicate tabs from concurrent
@@ -321,20 +392,23 @@ export async function getDispatcherTabAnchor(
 
   const listTabs = deps.listTabs ?? ((ws: string) => listTabsInWorkspace(cwd, ws));
 
-  // 1. Ensure the Dispatcher workspace exists.
-  let workspaceId: string | null = null;
-  try {
-    workspaceId = await ensureDispatcherWorkspace(deps);
-  } catch {
-    workspaceId = null;
-  }
-  if (workspaceId === null || workspaceId === '') return null;
+  // 1. Cheap persisted reads — no probe, no CLI. A healthy fast-path
+  //    resolution therefore issues exactly the herdr calls it made before the
+  //    workspace-validation fix (AC8, parent AC10: the probe is only
+  //    consulted after a stale-pane fast-path miss).
+  const persisted = readTabAnchors(dir);
+  const persistedWorkspaceId = readDispatcherWorkspaceId();
 
   // 2. Fast path: a persisted anchor for this prefix whose pane is still
-  //    alive is reused directly (no `tab list` round-trip).
-  const persisted = readTabAnchors(dir);
-  const cached = persisted?.byPrefix[prefix];
-  if (cached !== undefined) {
+  //    alive AND whose workspace agrees with BOTH persistence files is reused
+  //    directly (no `tab list`, no probe). A cached entry for a different
+  //    workspace belongs to a dead/missing workspace and must never short-
+  //    circuit past recovery (AC5).
+  const cached =
+    persistedWorkspaceId !== null && persisted?.workspaceId === persistedWorkspaceId
+      ? persisted?.byPrefix[prefix]
+      : undefined;
+  if (cached !== undefined && persistedWorkspaceId !== null) {
     let alive = false;
     try {
       alive = await deps.isPaneAlive(cached.paneId);
@@ -342,12 +416,30 @@ export async function getDispatcherTabAnchor(
       alive = false; // fail-closed — fall through to re-provision
     }
     if (alive) {
-      return { workspaceId, tabId: cached.tabId, paneId: cached.paneId };
+      return { workspaceId: persistedWorkspaceId, tabId: cached.tabId, paneId: cached.paneId };
     }
     // Stale cache (dead pane / closed tab) → fall through to re-provision.
   }
 
-  // 3. Look for an existing tab labelled with the prefix (authoritative,
+  // 3. Ensure the Dispatcher workspace exists — now VALIDATING the persisted
+  //    id against live herdr state (probe) and recovering a positively missing
+  //    workspace under the coordination lock (AC1/AC3). The probe is consulted
+  //    exactly here; the recovery trigger is the stale-pane miss above, so a
+  //    healthy resolution never probes (AC8).
+  let ensured: EnsuredDispatcherWorkspace | null = null;
+  try {
+    ensured = await ensureDispatcherWorkspace(deps);
+  } catch {
+    ensured = null;
+  }
+  if (ensured === null || ensured.workspaceId === '') return null;
+  const workspaceId = ensured.workspaceId;
+  // A recovered workspace rewrote the persisted ids, so any cached entry
+  // (already rejected above) is stale by construction — the resolution below
+  // runs against the fresh workspace and `persistPrefixTab` rewrites the
+  // per-prefix map with the new workspace id (AC5).
+
+  // 4. Look for an existing tab labelled with the prefix (authoritative,
   //    handles an anchor file lost or written out-of-band).
   const fast = await resolvePrefixTab(cwd, deps, workspaceId, prefix, listTabs);
   if (fast.status === 'unknown') return null; // fail-closed (never duplicate)
@@ -356,7 +448,7 @@ export async function getDispatcherTabAnchor(
     return { workspaceId, tabId: fast.tabId, paneId: fast.paneId };
   }
 
-  // 4. Provision under the coordination lock with a double-check so
+  // 5. Provision under the coordination lock with a double-check so
   //    concurrent first-dispatches for a NEW prefix cannot duplicate tabs.
   const release = tryAcquireCoordLock(dir);
   if (release === null) {
@@ -371,7 +463,7 @@ export async function getDispatcherTabAnchor(
 
   try {
     // Double-check inside the lock: a racing caller may have created the tab
-    // between our step-3 read and acquiring the lock.
+    // between our step-4 read and acquiring the lock.
     const inside = await resolvePrefixTab(cwd, deps, workspaceId, prefix, listTabs);
     if (inside.status === 'unknown') return null;
     if (inside.status === 'found') {

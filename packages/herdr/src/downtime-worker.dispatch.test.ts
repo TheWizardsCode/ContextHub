@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { rmSync } from 'node:fs';
 import {
   dispatchDowntimeWork,
   buildDowntimePaneArgs,
@@ -27,10 +28,17 @@ import {
   type DowntimeHerdrItem,
 } from './downtime-worker.js';
 import {
+  getDispatcherTabAnchor as resolveDispatcherTabAnchor,
+} from './dispatcher-anchor.tab-anchors.js';
+import {
+  seedStaleAnchorState,
+} from './__fixtures__/stale-dispatcher-anchors.js';
+import {
   ago,
   idleAllSlotsFree,
   jsonResponseFixture,
   makeDeps,
+  makeTempDir,
 } from './downtime-worker.fixtures.js';
 import type { StalledPaneCandidate } from './stalled-work.js';
 
@@ -485,6 +493,89 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     expect(outcome.reason).toBe('anchor-unavailable');
     expect(deps.claimItem).toHaveBeenCalled();
     expect(deps.rollbackClaim).toHaveBeenCalled();
+  });
+});
+
+// ── Stale anchor self-healing (WL-0MWHCUTDM003B39Q) ────────────────────
+
+describe('stale Dispatcher anchor self-healing (WL-0MWHCUTDM003B39Q)', () => {
+  const candidateFor = (id: string) => ({
+    id,
+    title: 'Some task',
+    stage: 'intake_complete' as const,
+    status: 'open',
+  });
+
+  // Real per-prefix resolver deps over an in-memory herdr — built here in
+  // describe scope so the test block stays within the per-test `vi.fn()`
+  // mock budget (scripts/check-mock-budget.ts caps inline mocks at 5).
+  function makeRecoveringAnchorDeps() {
+    const tabs: Record<string, { tabId: string; label: string; paneId: string }> = {};
+    return {
+      createWorkspace: vi.fn(async () => ({ workspaceId: 'wB', paneId: 'wB:p1' })),
+      createTab: vi.fn(async (ws: string, label: string) => {
+        const tabId = `${ws}:t${label}`;
+        const rec = { tabId, label, paneId: `${tabId}:p1` };
+        tabs[tabId] = rec;
+        return rec;
+      }),
+      listTabs: vi.fn(async (ws: string) =>
+        Object.values(tabs)
+          .filter((rec) => rec.tabId.startsWith(`${ws}:`))
+          .map((rec) => ({ tabId: rec.tabId, label: rec.label })),
+      ),
+      listPanes: vi.fn(async (ws: string) =>
+        Object.values(tabs)
+          .filter((rec) => rec.tabId.startsWith(`${ws}:`))
+          .map((rec) => ({ paneId: rec.paneId, tabId: rec.tabId })),
+      ),
+      isPaneAlive: vi.fn(async (paneId: string) => paneId.startsWith('wB')),
+      probeWorkspace: vi.fn(async () => 'missing'),
+    };
+  }
+
+  // AC6 (parent AC5) — orchestrator-level: with a stale anchor store written
+  // to a real machine coordination dir, consecutive dispatcher ticks show NO
+  // repeated `anchor-unavailable`. The first tick validates the persisted
+  // workspace, recovers it and dispatches; the second tick reuses the
+  // persisted anchor via the healthy fast path (or is refused only for an
+  // unrelated, non-anchor reason).
+  it('AC6: consecutive ticks never repeat anchor-unavailable — the stale workspace is recovered once and reused', async () => {
+    const coordDir = makeTempDir('da-stale-');
+    const previous = process.env.HERDR_COORDINATION_DIR;
+    try {
+      process.env.HERDR_COORDINATION_DIR = coordDir;
+      seedStaleAnchorState(coordDir);
+
+      const anchorDeps = makeRecoveringAnchorDeps();
+      const deps = makeDeps({
+        getDispatcherTabAnchor: (cwd: string, prefix: string) =>
+          resolveDispatcherTabAnchor(cwd, anchorDeps, prefix),
+        resolveProjectWorkspace: async () => null,
+        getNextItem: vi.fn()
+          .mockResolvedValueOnce({ ok: true, candidate: candidateFor('WL-1') })
+          .mockResolvedValueOnce({ ok: true, candidate: candidateFor('WL-2') }),
+      });
+
+      const tick1 = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+      expect(tick1.dispatched).toBe(true);
+      expect(tick1.reason).not.toBe('anchor-unavailable');
+
+      const tick2 = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+      expect(tick2.dispatched).toBe(true);
+      expect(tick2.reason).not.toBe('anchor-unavailable');
+
+      // Exactly one replacement workspace across BOTH ticks — the second
+      // tick reuses the recovered anchor via the healthy fast path: no
+      // per-tick re-provisioning loop and no repeated probe.
+      expect(anchorDeps.createWorkspace).toHaveBeenCalledTimes(1);
+      expect(anchorDeps.probeWorkspace).toHaveBeenCalledTimes(1);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
+    } finally {
+      if (previous !== undefined) process.env.HERDR_COORDINATION_DIR = previous;
+      else delete process.env.HERDR_COORDINATION_DIR;
+      rmSync(coordDir, { recursive: true, force: true });
+    }
   });
 });
 
