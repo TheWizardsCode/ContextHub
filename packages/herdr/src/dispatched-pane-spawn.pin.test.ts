@@ -49,10 +49,13 @@ import {
   buildDowntimeSpawnOptions,
   scrubRepositoryOverrides,
   REPOSITORY_OVERRIDE_ENV_VARS,
-  paneLabelItemId,
 } from './downtime-worker.js';
 import { buildSendToPiArgs, buildRunInPaneArgs } from './index.js';
-import { paneItemIdFromLabel, paneKindFromLabel } from './pane-close-herdr.js';
+import {
+  isDowntimePaneLabel,
+  paneItemIdFromLabel,
+  paneKindFromLabel,
+} from './pane-label.js';
 import { decodeBudgetPaneLabel } from './host-dispatch-budget.repair.js';
 import { LOCAL_RESERVATION_TICKET_ENV } from './downtime-worker.constants.js';
 import { LOCAL_PREFERENCE_ENV_VAR } from './local-preference.js';
@@ -458,67 +461,60 @@ describe('AC2 — buildDowntimeSpawnOptions spawn env', () => {
 
 // ── AC4: pane-label parsing — including the regex-validation divergence ──
 
-describe('AC4 — pane.ts paneLabelItemId (unvalidated suffix parse)', () => {
+describe('AC4 — canonical paneItemIdFromLabel (pane-label.ts, validated suffix parse)', () => {
   it('extracts the token after the LAST ` - `, trimmed', () => {
-    expect(paneLabelItemId('Downtime triggered implement Some item - WL-ABC')).toBe('WL-ABC');
-    expect(paneLabelItemId('Downtime triggered plan A - B - WL-XYZ')).toBe('WL-XYZ');
+    expect(paneItemIdFromLabel('Downtime triggered implement Some item - WL-ABC')).toBe('WL-ABC');
+    expect(paneItemIdFromLabel('Downtime triggered plan A - B - WL-XYZ')).toBe('WL-XYZ');
   });
 
-  it('is NOT regex-validated: any non-empty suffix is returned (divergence from paneItemIdFromLabel)', () => {
-    expect(paneLabelItemId('Downtime triggered implement Foo - not-an-id')).toBe('not-an-id');
-    expect(paneLabelItemId('Downtime triggered implement Foo - WL-abc')).toBe('WL-abc');
-    expect(paneLabelItemId('Downtime triggered implement Foo - 123')).toBe('123');
-  });
-
-  it('returns null for no separator, empty/whitespace suffix, empty/absent label', () => {
-    expect(paneLabelItemId('Downtime intake')).toBeNull();
-    expect(paneLabelItemId('Downtime triggered implement Foo - ')).toBeNull();
-    expect(paneLabelItemId('')).toBeNull();
-    expect(paneLabelItemId(undefined)).toBeNull();
-  });
-});
-
-describe('AC4 — pane-close-herdr.ts paneItemIdFromLabel (regex-validated)', () => {
-  it('extracts only suffixes matching /^[A-Z]{2,}-[A-Z0-9]+$/', () => {
-    expect(paneItemIdFromLabel('Downtime triggered plan Foo - WL-0ABC123')).toBe('WL-0ABC123');
-    expect(paneItemIdFromLabel('Manually triggered implement Bar - CG-0XYZ')).toBe('CG-0XYZ');
-  });
-
-  it('returns empty string for non-conforming suffixes (regex rejects lowercase/digits-only/non-id text)', () => {
+  it('is regex-validated: a non-id suffix is NOT an id (the settled authoritative shape check)', () => {
+    // The former `paneLabelItemId` returned these raw — the validated
+    // canonical shape check is now authoritative for every consumer.
     expect(paneItemIdFromLabel('Downtime triggered implement Foo - not-an-id')).toBe('');
     expect(paneItemIdFromLabel('Downtime triggered implement Foo - WL-abc')).toBe('');
     expect(paneItemIdFromLabel('Downtime triggered implement Foo - 123')).toBe('');
-    expect(paneItemIdFromLabel('foo - not an id')).toBe('');
   });
 
-  it('returns empty string when no suffix exists', () => {
-    expect(paneItemIdFromLabel('Downtime plan')).toBe('');
+  it("returns '' for no separator, empty/whitespace suffix, empty/absent label", () => {
+    // The settled single absent-convention ('' — the former null vs '' split
+    // is retired, WL-0MWHWH1HV009C46C AC2).
+    expect(paneItemIdFromLabel('Downtime intake')).toBe('');
+    expect(paneItemIdFromLabel('Downtime triggered implement Foo - ')).toBe('');
     expect(paneItemIdFromLabel('')).toBe('');
+    expect(paneItemIdFromLabel(undefined)).toBe('');
   });
 });
 
-describe('AC4 — the regex-validation divergence, side by side', () => {
-  it('the three parsers agree on valid ids and diverge exactly where paneLabelItemId is unvalidated', () => {
-    // Valid suffix: all three parsers agree.
+describe('AC4 — the settled convention: every parser now shares one validated parse (WL-0MWHWH1HV009C46C)', () => {
+  it('the dispatcher, the reaper and the budget decode agree everywhere (the former divergence is settled)', () => {
+    // Valid suffix: all parsers agree on the id.
     const valid = 'Downtime triggered implement Foo - WL-ABC';
-    expect(paneLabelItemId(valid)).toBe('WL-ABC');
     expect(paneItemIdFromLabel(valid)).toBe('WL-ABC');
     expect(decodeBudgetPaneLabel(valid).itemId).toBe('WL-ABC');
 
-    // Non-conforming suffix: pane.ts and the repair local return it raw,
-    // pane-close-herdr regex-validates it away.
+    // Non-conforming suffix: the validated canonical parse wins — the former
+    // unvalidated suffix-return (`paneLabelItemId`) and the budget decode's
+    // raw-suffix itemId are both retired, so a pane whose label carries a
+    // non-id token is treated as having NO item (budget: `no-work-item-id`).
     for (const suffix of ['not-an-id', 'WL-abc', '123']) {
       const label = `Downtime triggered implement Foo - ${suffix}`;
-      expect(paneLabelItemId(label)).toBe(suffix);
       expect(paneItemIdFromLabel(label)).toBe('');
-      expect(decodeBudgetPaneLabel(label).itemId).toBe(suffix);
+      expect(decodeBudgetPaneLabel(label).itemId).toBeNull();
     }
 
-    // No suffix: pane.ts/repair return null, pane-close-herdr returns ''.
+    // No suffix: '' (canonical string convention) / null (the budget decode's
+    // string|null contract — the same "no id" fact, adapted at the boundary).
     const none = 'Downtime triggered implement Foo';
-    expect(paneLabelItemId(none)).toBeNull();
     expect(paneItemIdFromLabel(none)).toBe('');
     expect(decodeBudgetPaneLabel(none).itemId).toBeNull();
+  });
+
+  it('isDowntimePaneLabel is the shared prefix predicate — no bare startsWith outside the canonical module (AC3)', () => {
+    expect(isDowntimePaneLabel('Downtime triggered implement Foo - WL-1')).toBe(true);
+    expect(isDowntimePaneLabel('Downtime intake')).toBe(true);
+    expect(isDowntimePaneLabel('Manually triggered implement Foo - WL-1')).toBe(false);
+    expect(isDowntimePaneLabel('')).toBe(false);
+    expect(isDowntimePaneLabel(undefined)).toBe(false);
   });
 });
 

@@ -11,7 +11,7 @@
  *     the injectable spawn boundary,
  *   - `parseHerdrPaneListOutput / countRunningDowntimePanes (AC1)` — pane-list
  *     parsing,
- *   - `paneLabelItemId / runningDowntimePaneItemIds / evaluateCriticalFirstGuard`
+ *   - `paneItemIdFromLabel / runningDowntimePaneItemIds / evaluateCriticalFirstGuard`
  *     — item-scoped in-flight guard helpers,
  *   - `dispatchDowntimeWork: running-pane / owner / contention gates`,
  *   - `worker tick: the LLM idle check is the sole concurrency limiter`,
@@ -34,7 +34,6 @@ import {
   LOCAL_RESERVATION_TICKET_ENV,
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
-  paneLabelItemId,
   isSafeDowntimePaneToClose,
   runningDowntimePaneItemIds,
   evaluateCriticalFirstGuard,
@@ -50,6 +49,9 @@ import {
   type HerdrPaneRecord,
   type InFlightPanes,
 } from './downtime-worker.js';
+// Canonical pane-label parsing (WL-0MWHWH1HV009C46C): the item-id parse
+// tested here is the canonical `pane-label.ts` one.
+import { paneItemIdFromLabel } from './pane-label.js';
 import {
   appendDowntimeLogEntry,
   appendPaneCloseLogEntry,
@@ -393,7 +395,7 @@ describe('parseHerdrPaneListOutput / countRunningDowntimePanes (AC1)', () => {
 // `working` agent as in-flight (terminal/idle panes must not deadlock the
 // item's next tier).
 
-describe('paneLabelItemId / runningDowntimePaneItemIds / evaluateCriticalFirstGuard (WL-0MUBEZ6PE002WLP4)', () => {
+describe('paneItemIdFromLabel / runningDowntimePaneItemIds / evaluateCriticalFirstGuard (WL-0MUBEZ6PE002WLP4)', () => {
   const pane = (overrides: Partial<HerdrPaneRecord> & { paneId: string }): HerdrPaneRecord => ({
     label: 'Downtime triggered implement Some item - WL-ABC',
     agent: 'pi',
@@ -401,13 +403,14 @@ describe('paneLabelItemId / runningDowntimePaneItemIds / evaluateCriticalFirstGu
     ...overrides,
   });
 
-  it('paneLabelItemId extracts the trailing work-item id (buildDowntimePaneTitle suffix contract)', () => {
-    expect(paneLabelItemId('Downtime triggered implement Some item - WL-ABC')).toBe('WL-ABC');
+  it('paneItemIdFromLabel extracts the trailing work-item id (buildDowntimePaneTitle suffix contract, canonical parse)', () => {
+    expect(paneItemIdFromLabel('Downtime triggered implement Some item - WL-ABC')).toBe('WL-ABC');
     // A title containing ` - ` earlier still yields the LAST segment.
-    expect(paneLabelItemId('Downtime triggered plan A - B - WL-XYZ')).toBe('WL-XYZ');
-    // No suffix → null (manual pane).
-    expect(paneLabelItemId('Downtime intake')).toBeNull();
-    expect(paneLabelItemId(undefined)).toBeNull();
+    expect(paneItemIdFromLabel('Downtime triggered plan A - B - WL-XYZ')).toBe('WL-XYZ');
+    // No suffix → '' (manual pane; the settled single convention,
+    // WL-0MWHWH1HV009C46C AC2 — not the former null).
+    expect(paneItemIdFromLabel('Downtime intake')).toBe('');
+    expect(paneItemIdFromLabel(undefined)).toBe('');
   });
 
   it('isSafeDowntimePaneToClose only accepts the downtime pane for the SAME item (AC7)', () => {

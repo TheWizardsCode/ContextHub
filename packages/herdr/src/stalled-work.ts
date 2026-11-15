@@ -13,7 +13,7 @@
  * The resume orchestrator (`resumeStalledPane`) lands in a sibling item
  * (WL-0MUYMBPZ5004LBFX) and builds on this classifier.
  *
- * Reuse, not duplication: `paneLabelItemId` (downtime-worker), the
+ * Reuse, not duplication: `paneItemIdFromLabel` (pane-label), the
  * non-terminal status/stage check (`isActiveBlocker`, hydrator), the
  * non-terminal pane-close cooldown (`isNonTerminalCooldownActive`,
  * downtime-log) and the per-item/per-kind attempt cap
@@ -44,12 +44,15 @@ import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 import {
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   isAttemptBudgetExhausted,
-  paneLabelItemId,
   type DowntimeItemInfo,
   type DowntimeItemResult,
   type DowntimeSkillKind,
   type HerdrPaneRecord,
 } from './downtime-worker.js';
+// Canonical pane-label parsing (WL-0MWHWH1HV009C46C): item-id extraction
+// lives in `pane-label.ts`, not the dispatcher's pane module — one parse
+// for the reaper, the dispatcher and the stalled-work classifier.
+import { paneItemIdFromLabel } from './pane-label.js';
 
 // Re-exported so `stalled-work.ts` keeps its public surface for every existing
 // consumer (WL-0MVLII0NO007JJBA moved the declarations to the shared types
@@ -258,8 +261,8 @@ export function classifyStalledPane(
   }
 
   // 2. The label must carry a work-item id and a dispatch kind.
-  const itemId = paneLabelItemId(pane.label);
-  if (itemId === null) {
+  const itemId = paneItemIdFromLabel(pane.label);
+  if (itemId === '') {
     return { stalled: false, reason: 'no-item-id' };
   }
   const kind = stalledPaneKindFromLabel(pane.label);
@@ -748,8 +751,8 @@ export async function scanStalledPanes(
   for (const pane of panes) {
     // Cheap pre-checks before any per-pane I/O (mirrors the classifier).
     if (typeof pane.agent !== 'string' || pane.agent === '') continue;
-    const itemId = paneLabelItemId(pane.label);
-    if (itemId === null) continue;
+    const itemId = paneItemIdFromLabel(pane.label);
+    if (itemId === '') continue;
     const kind = stalledPaneKindFromLabel(pane.label);
     if (kind === null) continue;
     // Code-freeze split-by-skill: never resume an audit/implement pane while

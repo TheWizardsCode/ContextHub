@@ -24,7 +24,10 @@ import {
   parseHerdrPaneListOutput,
   type HerdrPaneRecord,
 } from './downtime-worker.js';
-import { extractWorkItemIdsFromText } from './hydrator.js';
+// Canonical pane-label parsing (WL-0MWHWH1HV009C46C AC4): the ship guard's
+// blocking-pane scan uses the shared extract-every-ID parser directly from
+// the canonical module rather than through the hydrator's re-export.
+import { extractWorkItemIdsFromText } from './pane-label.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────
 

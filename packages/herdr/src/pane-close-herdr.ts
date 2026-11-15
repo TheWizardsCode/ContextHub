@@ -15,6 +15,13 @@ import { join } from 'node:path';
 import type { PaneStatus, ReaperDeps } from './pane-close-reaper.js';
 import { sessionIdFromSessionPath } from './downtime-worker.route-outcome.js';
 import { terminateProcessGroup } from './process-group.js';
+import { paneItemIdFromLabel, paneKindFromLabel } from './pane-label.js';
+// Canonical label→id / label→kind parsing lives in `pane-label.ts`
+// (WL-0MWHWH1HV009C46C); re-exported so this module's public surface is
+// unchanged — every call site (including the tests) resolves the canonical
+// implementation through one name.
+export { paneItemIdFromLabel, paneKindFromLabel } from './pane-label.js';
+export type { PaneLabelKind as ReaperPaneKind } from './pane-label.js';
 
 // ── Raw herdr pane-list shape ─────────────────────────────────────────
 
@@ -163,37 +170,11 @@ export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
 }
 
 // ── Label → kind / item id ────────────────────────────────────────────
-
-const PANE_KINDS = ['implement', 'risk-effort', 'intake', 'audit', 'plan'] as const;
-export type ReaperPaneKind = PaneStatus['kind'];
-
-/**
- * Derive the pane kind from its label. Scans for the skill keyword the
- * launcher embeds (`Downtime triggered <kind> …`, `Manually triggered
- * <kind> …`, or a bare `<skill> …`). Unknown labels classify as `unknown`
- * (fail-closed: the classifier never auto-closes `unknown` unless the marker
- * or dead-agent/idle rules apply — and those are still bounded by the guards).
- */
-export function paneKindFromLabel(label: string): ReaperPaneKind {
-  const lower = (label ?? '').toLowerCase();
-  for (const kind of PANE_KINDS) {
-    if (lower.includes(kind)) return kind;
-  }
-  return 'unknown';
-}
-
-/**
- * Trailing work-item id in a pane label (`… - WL-XXXX`). Reuses the same
- * suffix convention as the downtime pane titles. Returns `''` when absent.
- */
-export function paneItemIdFromLabel(label: string): string {
-  if (typeof label !== 'string' || label === '') return '';
-  const idx = label.lastIndexOf(' - ');
-  if (idx < 0) return '';
-  const id = label.slice(idx + 3).trim();
-  // Work-item ids are single tokens like WL-0ABC123 or CG-0ABC123.
-  return /^[A-Z]{2,}-[A-Z0-9]+$/.test(id) ? id : '';
-}
+// Canonical: `pane-label.ts` (WL-0MWHWH1HV009C46C). `paneKindFromLabel`
+// (loose keyword scan over PANE_KINDS, `unknown` when absent) and
+// `paneItemIdFromLabel` (validated ` - ` suffix, `''` when absent) are
+// re-exported above and consumed below — one parse for the reaper and the
+// dispatcher.
 
 // ── Session-log tail reading ──────────────────────────────────────────
 

@@ -165,6 +165,12 @@ import { probeClaimHolders, type ClaimHolderVerdict } from './claim-lock.js';
 // `import { isActiveBlocker } from './hydrator.js'` keeps working.
 export { isActiveBlocker };
 
+// Canonical pane-label parsing (WL-0MWHWH1HV009C46C AC4): the ID-extraction
+// scan and its shared regex now live in `pane-label.ts`; this module imports
+// them for its active-pane matching and re-exports them (see the
+// {@link WORK_ITEM_ID_REGEX} / {@link extractWorkItemIdsFromText} exports).
+import { extractWorkItemIdsFromText, WORK_ITEM_ID_REGEX } from './pane-label.js';
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 /** Hydration cadence (ms). Runs inside the worklist pane's TaskScheduler. */
@@ -268,8 +274,13 @@ export const HYDRATOR_MAX_ITEMS_PER_TICK = 50;
  * Work-item ID matcher: an uppercase project prefix, a dash, then the
  * base36 id (e.g. `WL-0MSOJLZD9004P8PI`, `AH-0MTVYBL2L0085G6G`,
  * `CG-0MT5Y1X5T001M4S6`).
+ *
+ * Canonical home is `pane-label.ts` (WL-0MWHWH1HV009C46C AC4) — the
+ * shared regex constant keeps the extract-every-ID scan (different
+ * granularity than the single trailing-suffix parse) honest; re-exported
+ * here so existing importers keep resolving it through the hydrator.
  */
-export const WORK_ITEM_ID_REGEX = /[A-Z][A-Z0-9]*-[0-9A-Z]{6,}/g;
+export { WORK_ITEM_ID_REGEX } from './pane-label.js';
 /**
  * Status → allowed stages, mirroring the project's status/stage
  * compatibility rules (`src/config.ts`, `deriveStageStatusCompatibility`).
@@ -509,13 +520,13 @@ export type HydratorStepLabel =
  * Extract every work-item ID appearing in `text` (e.g. a shell command line
  * or tab/window title). Always returns a fresh array; no shared regex state.
  *
- * Retained for `ship-guard.ts`; also used for active-pane-title matching
- * (see `collectPaneWorkItemIds`).
+ * Canonical implementation is `pane-label.ts::extractWorkItemIdsFromText`
+ * (WL-0MWHWH1HV009C46C AC4 — the different-granularity full-text scan over
+ * the shared {@link WORK_ITEM_ID_REGEX}); re-exported here so the hydrator
+ * and its importers (`ship-guard.ts`) resolve one parse. Used for
+ * active-pane-title matching (see `collectPaneWorkItemIds`).
  */
-export function extractWorkItemIdsFromText(text: string): string[] {
-  if (typeof text !== 'string' || text.length === 0) return [];
-  return text.match(WORK_ITEM_ID_REGEX) ?? [];
-}
+export { extractWorkItemIdsFromText } from './pane-label.js';
 
 /**
  * Collect the set of work-item IDs whose pane title carries the ID

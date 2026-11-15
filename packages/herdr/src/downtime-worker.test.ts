@@ -1652,7 +1652,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
       const coordinationDir = makeDir('dt-oov-inflight-');
       const cwd = makeDir('dt-oov-inflight-root-');
       const deps = makeDeps({
-        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOV-CRIT', { priority: 'critical' })]),
+        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOVCRIT', { priority: 'critical' })]),
         getRunningDowntimePanes: vi.fn().mockResolvedValue({
           ok: true,
           count: 1,
@@ -1660,7 +1660,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
           records: [
             {
               paneId: 'w1:p1',
-              label: 'Downtime triggered implement Backlog - WL-OOV-CRIT',
+              label: 'Downtime triggered implement Backlog - WL-OOVCRIT',
               agent: 'pi',
               agentStatus: 'working',
             },

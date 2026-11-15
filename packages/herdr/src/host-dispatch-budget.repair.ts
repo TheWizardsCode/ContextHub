@@ -51,6 +51,7 @@ import {
   type HostBudgetLivePane,
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
+import { paneItemIdFromLabel } from './pane-label.js';
 
 /** Label form a pane title matched. */
 export type BudgetPaneLabelForm = 'downtime' | 'manual' | 'other';
@@ -125,7 +126,7 @@ export function decodeBudgetPaneLabel(label: string | undefined): DecodedBudgetP
   }
 
   const token = (rest.trim().split(/\s+/)[0] ?? '').toLowerCase();
-  const itemId = paneLabelItemId(normalised);
+  const itemId = toBudgetItemId(paneItemIdFromLabel(normalised));
   if (token === 'implement' || token === 'audit') {
     return { form, kind: token, kindKnown: true, itemId, normalised };
   }
@@ -139,18 +140,14 @@ export function decodeBudgetPaneLabel(label: string | undefined): DecodedBudgetP
 }
 
 /**
- * Work-item id of a label: the token after the last ` - ` (the dispatcher
- * preserves the id as a suffix).
- *
- * Duplicated deliberately as a local pure helper rather than importing the
- * pane module: this file is the budget's own decode contract, and the budget
- * must not depend on the dispatcher's pane-label module for a two-line parse.
+ * Adapt the canonical item-id parse (`pane-label.ts::paneItemIdFromLabel`)
+ * to this module's `string | null` decode contract: the canonical parser
+ * returns `''` for "no id" (the settled single convention,
+ * WL-0MWHWH1HV009C46C AC2), and the budget decode distinguishes
+ * `null` (no id) from a present id for its `no-work-item-id` accounting.
  */
-function paneLabelItemId(label: string): string | null {
-  const idx = label.lastIndexOf(' - ');
-  if (idx < 0) return null;
-  const id = label.slice(idx + 3).trim();
-  return id === '' ? null : id;
+function toBudgetItemId(itemId: string): string | null {
+  return itemId === '' ? null : itemId;
 }
 
 /** A live pane the repair could not turn into an entry. */

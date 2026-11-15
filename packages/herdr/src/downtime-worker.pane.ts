@@ -39,6 +39,10 @@ import {
   type PaneCloseLogEntry,
   type PaneLifecycleKind,
 } from './downtime-log.js';
+import {
+  isDowntimePaneLabel,
+  paneItemIdFromLabel,
+} from './pane-label.js';
 import { LOCAL_PREFERENCE_ENV_VAR, type LocalPreference } from './local-preference.js';
 import { parseHerdrPaneCloseList } from './pane-close-herdr.js';
 import {
@@ -88,8 +92,13 @@ export interface DowntimePaneDeps {
  * Prefix of every downtime dispatched pane label (`buildDowntimePaneTitle`
  * produces `Downtime triggered <kind> …` / `Downtime <kind>`). Pane labels
  * are set by send-to-pi.sh via `herdr pane rename`.
+ *
+ * Canonical home is `pane-label.ts` (WL-0MWHWH1HV009C46C) — re-exported
+ * here for backward compatibility with callers that import the prefix from
+ * the pane module; prefix matching itself goes through
+ * {@link isDowntimePaneLabel}.
  */
-export const DOWNTIME_PANE_LABEL_PREFIX = 'Downtime';
+export { DOWNTIME_PANE_LABEL_PREFIX } from './pane-label.js';
 
 /**
  * Parse `herdr pane list` JSON output into records. Thin adapter over the
@@ -135,7 +144,7 @@ export function countRunningDowntimePanes(panes: HerdrPaneRecord[]): string[] {
   const running: string[] = [];
   for (const pane of panes) {
     if (typeof pane.label !== 'string') continue;
-    if (!pane.label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) continue;
+    if (!isDowntimePaneLabel(pane.label)) continue;
     if (typeof pane.agent !== 'string' || pane.agent.length === 0) continue;
     const status = (pane.agentStatus ?? '').toLowerCase();
     if (status === 'done' || status === 'exited') continue;
@@ -147,26 +156,18 @@ export function countRunningDowntimePanes(panes: HerdrPaneRecord[]): string[] {
 /**
  * Trailing work-item id in a downtime pane label (WL-0MUBEZ6PE002WLP4).
  *
- * `buildDowntimePaneTitle` preserves the item id as a SUFFIX
- * (`Downtime triggered <kind> <title> - <ITEM-ID>`, via
- * `truncatePaneTitlePreservingSuffix`), so the id is the token after the last
- * ` - `. A manually-named pane (`Downtime <kind>`) has no id → `null`.
- *
- * Exported (not module-private) so the coordination offer path (F4,
- * WL-0MUBVKYH5009CGBI) reuses exactly this parse — no logic duplication.
+ * Canonical implementation is `pane-label.ts::paneItemIdFromLabel`
+ * (WL-0MWHWH1HV009C46C): the validated suffix parse that returns `''` when
+ * absent (the settled single convention, AC2). The former local
+ * `paneLabelItemId` (suffix-only, `null`) is retired — the dispatcher and
+ * the reaper now share one parse.
  */
-export function paneLabelItemId(label: string | undefined): string | null {
-  if (typeof label !== 'string' || label === '') return null;
-  const idx = label.lastIndexOf(' - ');
-  if (idx < 0) return null;
-  const id = label.slice(idx + 3).trim();
-  return id === '' ? null : id;
-}
 
 /**
  * Safe-close predicate (WL-0MU4US5MP001JFEN AC7): true ONLY when a LIVE herdr
  * pane record exists for `paneId`, its label is a downtime pane label
- * (`DOWNTIME_PANE_LABEL_PREFIX`) AND its item-id suffix equals `itemId`.
+ * (the `DOWNTIME_PANE_LABEL_PREFIX` predicate) AND its item-id suffix equals
+ * `itemId`.
  *
  * Guarding the close with this predicate means a stale dispatch-log entry can
  * never close an unrelated/operator pane whose pane id happens to collide with
@@ -182,8 +183,8 @@ export function isSafeDowntimePaneToClose(
   const rec = records.find((p) => p.paneId === paneId);
   if (rec === undefined) return false;
   const label = rec.label ?? '';
-  if (!label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) return false;
-  return paneLabelItemId(label) === itemId;
+  if (!isDowntimePaneLabel(label)) return false;
+  return paneItemIdFromLabel(label) === itemId;
 }
 
 /**
@@ -210,12 +211,12 @@ export function runningDowntimePaneItemIds(panes: HerdrPaneRecord[]): Set<string
   const inFlight = new Set<string>();
   for (const pane of panes) {
     if (typeof pane.label !== 'string') continue;
-    if (!pane.label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) continue;
+    if (!isDowntimePaneLabel(pane.label)) continue;
     if (typeof pane.agent !== 'string' || pane.agent.length === 0) continue;
     const status = (pane.agentStatus ?? '').toLowerCase();
     if (status !== 'working') continue;
-    const itemId = paneLabelItemId(pane.label);
-    if (itemId !== null) inFlight.add(itemId);
+    const itemId = paneItemIdFromLabel(pane.label);
+    if (itemId !== '') inFlight.add(itemId);
   }
   return inFlight;
 }

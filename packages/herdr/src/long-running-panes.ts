@@ -31,8 +31,11 @@ import {
   DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS,
   DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS,
   clampDowntimeLongRunningThresholdMs,
-  paneLabelItemId,
 } from './downtime-worker.js';
+// Canonical pane-label parsing (WL-0MWHWH1HV009C46C): item-id extraction
+// lives in `pane-label.ts`, one parse across the dispatcher, reaper,
+// stalled-work and long-running-panes.
+import { paneItemIdFromLabel } from './pane-label.js';
 import {
   itemAdvancedPastKind,
   resolveLastActivityAt,
@@ -135,8 +138,8 @@ export function classifyLongRunningPane(
   if (typeof pane.agent !== 'string' || pane.agent === '') {
     return { longRunning: false, reason: 'no-agent' };
   }
-  const itemId = paneLabelItemId(pane.label);
-  if (itemId === null) {
+  const itemId = paneItemIdFromLabel(pane.label);
+  if (itemId === '') {
     return { longRunning: false, reason: 'no-item-id' };
   }
   const kind = stalledPaneKindFromLabel(pane.label);
@@ -216,8 +219,8 @@ export async function scanLongRunningPanes(
   for (const pane of panes) {
     // Cheap pre-checks before any per-pane I/O (mirrors the classifier).
     if (typeof pane.agent !== 'string' || pane.agent === '') continue;
-    const itemId = paneLabelItemId(pane.label);
-    if (itemId === null) continue;
+    const itemId = paneItemIdFromLabel(pane.label);
+    if (itemId === '') continue;
     if (stalledPaneKindFromLabel(pane.label) === null) continue;
     const root = deps.resolveRoot(pane, fallbackCwd);
     if (root === null) continue;

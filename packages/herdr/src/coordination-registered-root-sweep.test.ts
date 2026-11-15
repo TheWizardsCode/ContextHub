@@ -806,8 +806,7 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
       const deps = makeDeps({
         getHerdrListHead: rankedHeads({
           [LEADER_ROOT]: [],
-          [root]: [headItem({ id: 'WL-CRIT-RUNNING', priority: 'critical' })],
-        }),
+          [root]: [headItem({ id: 'WL-CRITRUNNING', priority: 'critical' })],        }),
         getRunningDowntimePanes: vi.fn().mockImplementation(async (cwd: string) => ({
           ok: true,
           count: cwd === root ? 1 : 0,
@@ -817,7 +816,7 @@ describe('registered-root sweep — no gate bypass (parent AC2)', () => {
               ? [
                   {
                     paneId: 'w1:p9',
-                    label: 'Downtime triggered implement Running crit - WL-CRIT-RUNNING',
+                    label: 'Downtime triggered implement Running crit - WL-CRITRUNNING',
                     agent: 'pi',
                     agentStatus: 'working',
                     cwd: root,

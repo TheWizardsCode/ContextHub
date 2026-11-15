@@ -177,7 +177,6 @@ export {
   defaultDowntimeSpawn,
   isSafeDowntimePaneToClose,
   monitorDispatchedPanes,
-  paneLabelItemId,
   parseHerdrPaneListOutput,
   resolveInFlightPanes,
   runningDowntimePaneItemIds,

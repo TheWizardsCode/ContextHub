@@ -120,7 +120,6 @@ import {
   type HostBudgetReleaseInput,
 } from './host-dispatch-budget.js';
 import { readHostBudgetLiveWork } from './host-dispatch-budget.counting.js';
-import { DOWNTIME_PANE_LABEL_PREFIX, paneLabelItemId } from './downtime-worker.pane.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
   HOST_BUDGET_CORRUPT_REASON,

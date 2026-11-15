@@ -31,9 +31,9 @@ import {
 import { buildDowntimePrompt } from './downtime-worker.prompts.js';
 import { TIER_EXPECTED } from './downtime-worker.gates.js';
 import {
-  DOWNTIME_PANE_LABEL_PREFIX,
-  paneLabelItemId,
-} from './downtime-worker.pane.js';
+  isDowntimePaneLabel,
+  paneItemIdFromLabel,
+} from './pane-label.js';
 import { resolveScheduledPromptPriority } from './scheduled-prompts.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { DispatcherAnchor } from './dispatcher-anchor.js';
@@ -801,7 +801,7 @@ export async function recordDispatchEnrichmentBestEffort(
       const panes = await deps.getRunningDowntimePanes(base.cwd);
       if (panes.ok && Array.isArray(panes.records)) {
         const match = panes.records.find(
-          (rec) => rec.label?.startsWith(DOWNTIME_PANE_LABEL_PREFIX) && paneLabelItemId(rec.label) === base.itemId,
+          (rec) => isDowntimePaneLabel(rec.label) && paneItemIdFromLabel(rec.label) === base.itemId,
         );
         paneId = match?.paneId ?? null;
       }
