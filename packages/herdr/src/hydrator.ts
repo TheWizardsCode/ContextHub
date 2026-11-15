@@ -250,6 +250,14 @@ export function clampHydratorClaimGraceMs(value: number): number {
 export const HYDRATOR_RELEASE_COMMENT_TIMEOUT_MS = 2_000;
 
 /**
+ * Cap on the distinct workspace ids listed in a release evidence suffix
+ * (parent WL-0MWHBSY6Q00760H9 AC8). Keeps the comment bounded: beyond this
+ * many distinct workspaces the list shows the first `MAX` sorted ids plus a
+ * `+N` overflow marker instead of unbounded growth.
+ */
+export const HYDRATOR_RELEASE_EVIDENCE_MAX_WORKSPACES = 6;
+
+/**
  * Default cap on candidates processed per hydrate tick. Bounds the number
  * of sequential CLI spawns so a large queue cannot make one run unbounded;
  * the remainder is deferred to the next 30 s tick (WL-0MUY1CYV6008BQWX).
@@ -320,6 +328,32 @@ export interface DemotionOptions {
   previousAssignee?: string;
   /** Human-readable deciding signal, used in the release audit comment. */
   reason?: string;
+  /**
+   * Compact evidence justifying this release (parent AC8): panes seen by
+   * the demotion read, distinct workspace ids scanned, the claim age and
+   * the configured grace window. Rendered into the audit comment's evidence
+   * suffix by {@link buildReleaseComment} when present; optional so the
+   * pre-existing comment shape stays byte-for-byte for old callers.
+   */
+  evidence?: ReleaseEvidence;
+}
+
+/**
+ * Compact evidence appended to a release audit comment (parent AC8,
+ * WL-0MWHBSY6Q00760H9) so a future mis-release is diagnosable from the
+ * comment/log alone — no need to read pane state by hand.
+ */
+export interface ReleaseEvidence {
+  /** Panes seen by the demotion (wider) read — count, never the titles. */
+  paneCount: number;
+  /** Distinct workspace ids scanned, sorted and capped at render time. */
+  workspaceIds: string[];
+  /** Claim age in ms at release time; null when unknowable (fail-open keep). */
+  claimAgeMs: number | null;
+  /** Configured claim grace window (ms). */
+  graceMs: number;
+  /** The released item id (abbreviated in the "none titled WL-…" clause). */
+  itemId: string;
 }
 
 /** The subset of a `herdr pane list` entry the hydrator needs. */
@@ -683,6 +717,11 @@ export function compatibleStage(stage: string, status: string): string {
   return allowed[0] ?? stage;
 }
 
+/** Deciding signal for a pane-less release (shared by the release comment and the evidence formatter). */
+export const RELEASE_REASON_NO_MATCHING_PANE = 'released because no matching pane';
+/** Deciding signal for a pane-less release whose claim holder probe came back dead. */
+export const RELEASE_REASON_NO_PANE_DEAD_HOLDER = 'released because no pane and claim holder dead';
+
 /**
  * Build the body of a release audit comment (WL-0MVWDB7F2003SORI).
  *
@@ -692,20 +731,91 @@ export function compatibleStage(stage: string, status: string): string {
  * An item with no holder records `previous assignee: (none)` — never an
  * ambiguous empty suffix.
  *
+ * When `evidence` is passed (parent AC8), a compact evidence suffix is
+ * appended AFTER today's text, so existing exact-prefix assertions keep
+ * passing, e.g.:
+ *
+ * ```
+ * released because no matching pane; previous assignee: dispatcher;
+ * evidence: 14 panes in 3 workspaces (w5M,w6B,w7C) none titled WL-…; claim age 240s (grace 120s)
+ * ```
+ *
+ * The deciding-signal clause (`none titled WL-…`) is dropped for the
+ * dead-holder variant — the signal is named ONCE by the reason itself, so
+ * the evidence never duplicates it (parent AC8).
+ *
  * @param reason            The deciding signal (e.g. `released because no
  *                          matching pane`).
  * @param previousAssignee  The holder observed this cycle, if any.
+ * @param evidence          Compact release evidence (pane count, workspace
+ *                          ids, claim age, grace); absent ⇒ legacy shape.
  */
 export function buildReleaseComment(
   reason: string,
   previousAssignee?: string,
+  evidence?: ReleaseEvidence,
 ): string {
   const holder =
     typeof previousAssignee === 'string' && previousAssignee.length > 0
       ? previousAssignee
       : '(none)';
   const signal = reason.length > 0 ? reason : 'released';
-  return `${signal}; previous assignee: ${holder}`;
+  const base = `${signal}; previous assignee: ${holder}`;
+  if (evidence === undefined) return base;
+  return `${base}; ${formatReleaseEvidence(reason, evidence)}`;
+}
+
+/**
+ * Format the compact evidence suffix for a release (parent AC8). Kept as its
+ * own pure function so the comment and the log line share one rendering.
+ *
+ * Bounded by design: workspace ids are distinct, sorted and capped at
+ * {@link HYDRATOR_RELEASE_EVIDENCE_MAX_WORKSPACES} with a `+N` overflow
+ * marker, so the suffix cannot grow with the host's pane count.
+ *
+ * @param reason    The deciding signal; the dead-holder variant drops the
+ *                  `none titled …` clause so the signal is named once.
+ * @param evidence  Panes seen, workspace ids scanned, claim age, grace.
+ */
+export function formatReleaseEvidence(
+  reason: string,
+  evidence: ReleaseEvidence,
+): string {
+  const distinct = [...new Set(evidence.workspaceIds)].sort();
+  const cap = HYDRATOR_RELEASE_EVIDENCE_MAX_WORKSPACES;
+  const listed = distinct.slice(0, cap);
+  const overflow = distinct.length - listed.length;
+  const listText =
+    distinct.length > 0
+      ? ` (${listed.join(',')}${overflow > 0 ? `,+${overflow}` : ''})`
+      : '';
+  const noneTitled =
+    reason === RELEASE_REASON_NO_PANE_DEAD_HOLDER
+      ? ''
+      : ` none titled ${abbreviateItemId(evidence.itemId)}`;
+  const age =
+    typeof evidence.claimAgeMs === 'number'
+      ? `${Math.round(evidence.claimAgeMs / 1000)}s`
+      : 'unknown';
+  const grace = `${Math.round(evidence.graceMs / 1000)}s`;
+  const panesWord = evidence.paneCount === 1 ? 'pane' : 'panes';
+  const wsWord = distinct.length === 1 ? 'workspace' : 'workspaces';
+  return (
+    `evidence: ${evidence.paneCount} ${panesWord} in ${distinct.length} ${wsWord}${listText}${noneTitled}; ` +
+    `claim age ${age} (grace ${grace})`
+  );
+}
+
+/**
+ * Abbreviate a work-item id for compact evidence (`WL-0MWHBSY6Q00760H9` →
+ * `WL-…`): the project prefix up to and including the first dash, plus an
+ * ellipsis. The full id lives on the item itself, so the comment only needs
+ * the distinguishing prefix.
+ */
+function abbreviateItemId(itemId: string): string {
+  const dash = itemId.indexOf('-');
+  if (dash <= 0) return `${itemId}…`;
+  return `${itemId.slice(0, dash + 1)}…`;
 }
 
 /**
@@ -960,6 +1070,28 @@ export async function runHydrationOnce(
   }
   const panes = tabStep.value;
 
+  // Parent AC8 evidence: distinct workspace ids scanned by the demotion read
+  // (sorted; the formatter caps the list with +N overflow). The wider seam's
+  // panes carry workspace ids; for the legacy scoped read the scanned
+  // workspace id is recorded explicitly so the evidence is truthful even
+  // when the CLI-scoped payload omits the field.
+  const evidenceWorkspaceIds = [
+    ...new Set(
+      panes
+        .map((pane) => pane.workspace_id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    ),
+  ].sort();
+  if (
+    !deps.listAllActivePanes &&
+    typeof workspaceId === 'string' &&
+    workspaceId.length > 0 &&
+    !evidenceWorkspaceIds.includes(workspaceId)
+  ) {
+    evidenceWorkspaceIds.push(workspaceId);
+    evidenceWorkspaceIds.sort();
+  }
+
   // F4 (WL-0MVJV2ORY002MNFF): resolve every pane match once — the loop used
   // to recompute `collectPaneWorkItemIds` per item (O(panes) per item).
   // Workspace-agnostic demotion: with the wider seam the machine-wide pane
@@ -1142,8 +1274,20 @@ export async function runHydrationOnce(
     const deadClaimHolder =
       verdict !== undefined && !verdict.held && verdict.reason === 'stale';
     const releaseReason = deadClaimHolder
-      ? 'released because no pane and claim holder dead'
-      : 'released because no matching pane';
+      ? RELEASE_REASON_NO_PANE_DEAD_HOLDER
+      : RELEASE_REASON_NO_MATCHING_PANE;
+
+    // Parent AC8: the release evidence (panes seen, workspaces scanned, claim
+    // age, grace window) rides the demotion seam so the audit comment and the
+    // log line can both carry it. A release past the grace window always has
+    // a knowable claim age (a null age stays inside the fail-open keep path).
+    const releaseEvidence: ReleaseEvidence = {
+      paneCount: panes.length,
+      workspaceIds: evidenceWorkspaceIds,
+      claimAgeMs: claimAge,
+      graceMs: claimGraceMs,
+      itemId: item.id,
+    };
 
     const applyStep = await runStep(
       'demotion-apply',
@@ -1154,6 +1298,7 @@ export async function runHydrationOnce(
         deps.applyDemotion(item.id, decision.status, decision.stage, {
           previousAssignee: item.assignee,
           reason: releaseReason,
+          evidence: releaseEvidence,
         }),
     );
     if (applyStep.status === 'timeout') {
@@ -1174,7 +1319,7 @@ export async function runHydrationOnce(
           ? ` claim age ${claimAge}ms past grace window ${claimGraceMs}ms`
           : '';
       log(
-        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (${deadClaimHolder ? 'no pane, claim holder dead' : 'no matching pane'})${graceNote}`,
+        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (${deadClaimHolder ? 'no pane, claim holder dead' : 'no matching pane'})${graceNote} ${formatReleaseEvidence(releaseReason, releaseEvidence)}`,
       );
     } else {
       skipped += 1;
@@ -1501,7 +1646,7 @@ export function createProductionHydratorDeps(
             'add',
             itemId,
             '--comment',
-            buildReleaseComment(opts.reason ?? 'released', previousAssignee),
+            buildReleaseComment(opts.reason ?? 'released', previousAssignee, opts.evidence),
             '--author',
             HYDRATOR_COMMENT_AUTHOR,
             '--json',

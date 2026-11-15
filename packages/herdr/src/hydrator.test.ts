@@ -39,6 +39,7 @@ import {
   type HydratorDeps,
   type HydratorItem,
   type HydratorPane,
+  type ReleaseEvidence,
 } from './hydrator.js';
 import type { ClaimHolderVerdict } from './claim-lock.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -1230,6 +1231,79 @@ describe('release clears the scheduling hold', () => {
     );
   });
 
+  it('appends the compact evidence suffix after the unchanged legacy prefix (parent AC8)', () => {
+    const evidence: ReleaseEvidence = {
+      paneCount: 14,
+      workspaceIds: ['w6B', 'w5M', 'w7C'],
+      claimAgeMs: 240_000,
+      graceMs: 120_000,
+      itemId: WL,
+    };
+    expect(
+      buildReleaseComment('released because no matching pane', 'dispatcher', evidence),
+    ).toBe(
+      'released because no matching pane; previous assignee: dispatcher; evidence: ' +
+        '14 panes in 3 workspaces (w5M,w6B,w7C) none titled WL-…; claim age 240s (grace 120s)',
+    );
+  });
+
+  it('workspace ids are sorted and deduplicated, capped with +N overflow (parent AC8)', () => {
+    const evidence: ReleaseEvidence = {
+      paneCount: 30,
+      workspaceIds: ['wZ', 'wA', 'wC', 'wM', 'wB', 'wD', 'wE', 'wF', 'wA'],
+      claimAgeMs: 60_000,
+      graceMs: 60_000,
+      itemId: WL,
+    };
+    const comment = buildReleaseComment('released because no matching pane', 'implement', evidence);
+    // Sorted, deduplicated (wA appears twice), capped at
+    // HYDRATOR_RELEASE_EVIDENCE_MAX_WORKSPACES (6) with +N overflow; the
+    // overflow marker is the `+2` (8 distinct ids − 6 listed).
+    expect(comment).toContain(
+      '30 panes in 8 workspaces (wA,wB,wC,wD,wE,wF,+2) none titled WL-…; claim age 60s (grace 60s)',
+    );
+    // The cap bounds the comment (proven by the full-phrase assertion above;
+    // the capped list is a substring of it).
+    expect(comment.length).toBeLessThanOrEqual(200);
+  });
+
+  it('dead-holder variant carries the same evidence with the deciding signal named once (parent AC8)', () => {
+    const evidence: ReleaseEvidence = {
+      paneCount: 14,
+      workspaceIds: ['w5M', 'w6B', 'w7C'],
+      claimAgeMs: 240_000,
+      graceMs: 120_000,
+      itemId: WL,
+    };
+    const comment = buildReleaseComment(
+      'released because no pane and claim holder dead',
+      'implement',
+      evidence,
+    );
+    expect(comment.startsWith(
+      'released because no pane and claim holder dead; previous assignee: implement; evidence: ',
+    )).toBe(true);
+    // Evidence present: panes, workspaces, claim age, grace.
+    expect(comment).toContain('14 panes in 3 workspaces (w5M,w6B,w7C)');
+    expect(comment).toContain('claim age 240s (grace 120s)');
+    // The no-pane fact is the deciding signal's first half — named once, so
+    // the evidence does NOT restate it as "none titled …".
+    expect(comment).not.toContain('none titled');
+  });
+
+  it('renders an unknowable claim age as unknown, not a bogus number (parent AC8)', () => {
+    const evidence: ReleaseEvidence = {
+      paneCount: 0,
+      workspaceIds: [],
+      claimAgeMs: null,
+      graceMs: 120_000,
+      itemId: WL,
+    };
+    expect(buildReleaseComment('released because no matching pane', '', evidence)).toContain(
+      'claim age unknown (grace 120s)',
+    );
+  });
+
   it('demotes with --assignee "" CAS-guarded by --if-assignee, then comments the signal and holder', async () => {
     resetWorklogDir();
     const { calls, exec } = hydratorExecRouter();
@@ -1305,6 +1379,33 @@ describe('release clears the scheduling hold', () => {
     expect(comment).toBeDefined();
     expect(comment!.args).toContain(
       'released because no matching pane; previous assignee: (none)',
+    );
+  });
+
+  it('production wiring appends the evidence to the release comment (parent AC8)', async () => {
+    resetWorklogDir();
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    const applied = await deps.applyDemotion(WL, 'open', 'intake_complete', {
+      previousAssignee: 'dispatcher',
+      reason: 'released because no matching pane',
+      evidence: {
+        paneCount: 14,
+        workspaceIds: ['w5M', 'w6B', 'w7C'],
+        claimAgeMs: 240_000,
+        graceMs: 120_000,
+        itemId: WL,
+      },
+    });
+
+    expect(applied).toBe(true);
+    const comment = calls.find((call) => call.args.includes('comment'));
+    expect(comment).toBeDefined();
+    expect(comment!.args).toContain(
+      'released because no matching pane; previous assignee: dispatcher; evidence: ' +
+        '14 panes in 3 workspaces (w5M,w6B,w7C) none titled WL-…; claim age 240s (grace 120s)',
     );
   });
 
@@ -1449,13 +1550,26 @@ describe('release clears the scheduling hold', () => {
           line.includes('past grace window'),
       ),
     ).toBe(true);
+    // Parent AC8: the same evidence lands on the log line (primary local
+    // trail) so log-only debugging sees the panes/workspaces/age/grace too.
+    expect(
+      logs.some((line) => line.includes('evidence:') && line.includes('panes in')),
+    ).toBe(true);
   });
 
-  it('passes the observed holder and the deciding signal to the demotion seam', async () => {
+  it('passes the observed holder, the deciding signal and the release evidence to the demotion seam', async () => {
     const seen: Array<{ id: string; opts?: DemotionOptions }> = [];
+    // Deterministic clock so the evidence claim age is exact (parent AC8).
+    const NOW_MS = Date.parse('2026-11-15T10:00:00.000Z');
+    const claimAgeMs = NOW_MS - Date.parse(PAST_WINDOW_ISO);
     const { deps } = makeDeps({
+      now: () => NOW_MS,
       listInProgressItems: async () => [
         { ...staleItem(), assignee: 'implement' },
+      ],
+      listAllActivePanes: async () => [
+        { pane_id: 'w5M:p1', label: 'Work Items', workspace_id: 'w5M' },
+        { pane_id: 'w6B:p3', label: 'Dispatcher pane (fallback)', workspace_id: 'w6B' },
       ],
       listActivePanes: async () => [],
       listOutboundDeps: async () => [],
@@ -1475,6 +1589,13 @@ describe('release clears the scheduling hold', () => {
         opts: {
           previousAssignee: 'implement',
           reason: 'released because no pane and claim holder dead',
+          evidence: {
+            paneCount: 2,
+            workspaceIds: ['w5M', 'w6B'],
+            claimAgeMs,
+            graceMs: HYDRATOR_CLAIM_GRACE_MS,
+            itemId: WL,
+          },
         },
       },
     ]);
