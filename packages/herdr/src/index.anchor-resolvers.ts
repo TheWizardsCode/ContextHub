@@ -42,7 +42,8 @@ type PlacementFailureDetail =
   | 'herdr-unreadable'
   | 'dispatcher-workspace-unprovisionable'
   | 'prefix-empty'
-  | 'item-tab-unavailable';
+  | 'item-tab-unavailable'
+  | 'project-workspace-mismatch';
 
 /**
  * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
@@ -82,9 +83,22 @@ export async function defaultDispatcherAnchorResolver(
  * herdr CLI. Null on any failure — dispatch falls back to the retained
  * Dispatcher anchor (AC4). Injectable for tests that build real deps without
  * a live herdr session.
+ *
+ * The optional trailing `reportNearMiss` callback (WL-0MWHCV3PR002WSQM) is
+ * forwarded to the underlying resolver: when it returns `null` and a plugin
+ * pane reported a DIFFERENT non-empty `HERDR_RESOLVED_CWD`, each near-miss
+ * record (expected vs actual root, pane/workspace ids) is reported so the
+ * placement collector can record the mismatch on the decision entry.
+ * Diagnostic-only — the exact-root matching rule is unchanged.
  */
 export async function defaultProjectWorkspaceResolver(
   cwd: string,
+  reportNearMiss?: (nearMiss: {
+    expectedRoot: string;
+    actualRoot: string;
+    paneId: string;
+    workspaceId: string;
+  }) => void,
 ): Promise<ProjectWorkspaceTarget | null> {
   try {
     const herdrBin = resolveHerdrBin();
@@ -92,6 +106,7 @@ export async function defaultProjectWorkspaceResolver(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),
       cwd,
+      reportNearMiss,
     );
   } catch {
     return null;

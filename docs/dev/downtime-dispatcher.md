@@ -2314,6 +2314,43 @@ When the workspace resolves but the item-ID tab cannot be provisioned, the
 dispatch fails closed with `anchor-unavailable` — it never places the pane in
 the `Dispatcher` workspace (WL-0MU321YK70035AYT).
 
+#### Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM)
+
+`resolveProjectWorkspace` matches the plugin pane's `HERDR_RESOLVED_CWD`
+**exactly** (trailing-slash tolerant, normalised) — never ancestor/descendant
+or prefix matching, so a pane reporting `…/packages/herdr` does NOT match the
+worklog root `…/ContextHub`, and neither does a related-but-different root.
+The matching rule is deliberately unchanged (parent AC8: broadening requires
+an unambiguous ambiguity resolution — two panes can legitimately claim
+ancestral roots). The ContextHub "Work Items" pane reports
+`HERDR_RESOLVED_CWD=/home/rgardler/projects/ContextHub/packages/herdr` (the
+plugin directory, not the worklog root), so ContextHub's own primary path
+can never resolve.
+
+To make that invisible failure visible, the resolver reports a
+**`project-workspace-mismatch` diagnostic** (diagnostic-only — never a
+wrong-workspace match): when it returns `null` because no pane matched, every
+plugin pane that reported a *different* non-empty `HERDR_RESOLVED_CWD` is
+recorded as a near-miss naming `expectedRoot` vs `actualRoot` plus the
+`paneId`/`workspaceId`. `resolveDispatchPlacement` forwards the first record
+onto the decision entry (`projectWorkspaceMismatch: { expectedRoot,
+actualRoot, paneId, workspaceId }`) — on the dispatch marker when the
+`Dispatcher` fallback then SUCCEEDS (a successful fallback placement still
+logs the mismatch), and on the `anchor-unavailable` outcome when it fails. No
+record is emitted when a match IS found, and an absent `HERDR_RESOLVED_CWD`
+is not a mismatch. The near-miss vocabulary token
+`project-workspace-mismatch` joins the placement-detail union in every copy.
+
+**Operator remedy:** start the plugin pane from the worklog root (the
+project's parent directory, e.g. `cd /home/rgardler/projects/ContextHub &&
+herdr plugin launch …`), so the pane's `HERDR_RESOLVED_CWD` equals the worklog
+root — then the primary path resolves and ContextHub panes land in the
+ContextHub workspace under the exact item-ID tab instead of the `Dispatcher`
+workspace's `WL` tab. Verify with `herdr pane process-info --pane
+<pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`.
+Broadening the matching rule (ancestor/descendant) is deliberately out of
+scope and would need its own work item with the parent's AC8 ambiguity test.
+
 #### No orphaned placeholder pane (WL-0MW5JE0SZ0057K30)
 
 **Guarantee:** a dispatch that never runs a command leaves no pane behind.
@@ -4618,6 +4655,7 @@ likewise re-read live every tick and clamped on load
 - **Pane landed in the project workspace but not under the item tab:** the item-ID tab invariant is anchor-by-ID — every automated pane must split the item tab's root pane. Check (a) `herdr tab list --workspace <workspaceId>` shows a tab labelled exactly the work-item id and `herdr pane get <tabRootPaneId>` is alive; (b) the resolved project workspace is the one whose `Work Items` plugin pane has `HERDR_RESOLVED_CWD` equal to the item's worklog root (`herdr pane process-info --pane <pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`); (c) the running plugin loads this repo's code — `herdr plugin list` must show `worklog-selection-list` → `local:/…/packages/herdr` (stale `dist/` or a dangling worktree link breaks resolution; rebuild with `npm run build` in `packages/herdr`). To reset an item tab, close it (`herdr tab close <tabId>`) — the next dispatch re-creates it under the coordination lock.
 - **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** neither the project workspace/item tab nor the Dispatcher fallback anchor could be provisioned (fail-closed, never the leader's pane). For the project path check the `pane list` / `process-info` / `/proc/<pid>/environ` reads (no `Work Items` pane for the root, missing `HERDR_RESOLVED_CWD`, or unreadable `/proc` on non-Linux); for the fallback check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock`), and the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <itemId> --no-focus` JSON parse (shape drift across herdr versions). The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty/missing anchor file or unreadable machine dir is treated as missing (never a crash).
 - **Pane landed in the wrong project's workspace:** resolution is fail-closed — it never selects another root's workspace. Check (a) the item's `cwd` (worklog root) matches exactly the plugin pane's `HERDR_RESOLVED_CWD` (trailing-slash tolerant); (b) when ≥2 `Work Items` panes resolve to the same root the focused pane wins, else the lowest pane id — close the surplus plugin pane to remove the ambiguity; (c) stale `dist/` in the running plugin (rebuild with `npm run build` in `packages/herdr`). If no plugin pane resolves, panes intentionally fall back to the `Dispatcher` workspace — that is AC4, not a misroute.
+- **`project-workspace-mismatch` on the decision entry (`projectWorkspaceMismatch: { expectedRoot, actualRoot, paneId, workspaceId }`, including on a `Dispatcher`-fallback dispatch):** the primary path could not match the item's worklog root, but the named plugin pane reported a DIFFERENT non-empty `HERDR_RESOLVED_CWD` (`actualRoot`). This is the ContextHub situation — its "Work Items" pane reports `…/ContextHub/packages/herdr`, the plugin directory, not the worklog root — and it is a diagnostic, never a wrong-workspace placement: the pane falls back to the `Dispatcher` workspace's per-prefix tab until the mismatch is fixed. **Remedy:** start/restart the plugin pane from the worklog root (`cd <worklog-root> && herdr plugin launch …` / reopen the project, so `HERDR_RESOLVED_CWD` equals `expectedRoot`), then the primary path resolves and future panes land in the project workspace's item-ID tab. Confirm with `herdr pane process-info --pane <pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`. The matching rule itself is exact-root only by design (widening is out of scope — see [primary-path near-miss diagnostic](#primary-path-near-miss-diagnostic-wl-0mwhcv3pr002wsqm)).
 - **`host-budget-corrupt` in the decision log / the worklist counter
   disappears:** the machine ledger exists but cannot be read as a valid
   document (a partial write from an older version, a hand edit, a byte-level

@@ -421,7 +421,8 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
-    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    // The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is additive.
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function));
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
     expect(getDispatcherTabAnchor).not.toHaveBeenCalled();
@@ -453,7 +454,8 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
 
     expect(outcome.dispatched).toBe(true);
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
-    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    // The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is additive.
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function));
     expect(getItemTabAnchor).not.toHaveBeenCalled();
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     // The optional trailing report callback (WL-0MWHCUZ5C000I7S6) collects
@@ -782,7 +784,8 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
-    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    // The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is additive.
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function));
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
@@ -1211,6 +1214,102 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     expect(closePane).not.toHaveBeenCalled();
+  });
+
+  // ── Project-workspace near-miss diagnostics (WL-0MWHCV3PR002WSQM) ─────
+  // AC4: `resolveDispatchPlacement` records the mismatch (expected vs actual
+  // root, pane/workspace ids) on the DECISION ENTRY. On a successful fallback
+  // the dispatch marker carries it; on an `anchor-unavailable` refusal the
+  // outcome carries it alongside the fail-closed boundary detail.
+
+  it('AC4: a primary near-miss is recorded on the dispatch marker even when the Dispatcher fallback succeeds', async () => {
+    const mismatch = {
+      expectedRoot: '/repo',
+      actualRoot: '/repo/packages/herdr',
+      paneId: 'wC:pB',
+      workspaceId: 'wC',
+    };
+    const resolveProjectWorkspace = vi.fn(
+      async (_cwd: string, report?: (m: typeof mismatch) => void) => {
+        report?.(mismatch);
+        return null;
+      },
+    );
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:pFALLBACK', workspaceId: 'wD' });
+    const deps = makeDeps({
+      resolveProjectWorkspace,
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    // The fallback succeeded, but the mismatch is STILL logged on the dispatch
+    // marker — the decision entry of a successful dispatch (AC4).
+    // Observable contract: deps.recordDispatch marker event — sole channel that
+    // the mismatch reaches the dispatches log verbatim.
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ projectWorkspaceMismatch: mismatch }),
+    );
+    // Observable contract: deps.spawnAgentPane boundary call — the fallback
+    // anchor is still the spawn anchor (placement behaviour unchanged).
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:pFALLBACK' }),
+    );
+  });
+
+  it('AC4: a primary near-miss rides the anchor-unavailable outcome when the fallback also fails', async () => {
+    const mismatch = {
+      expectedRoot: '/repo',
+      actualRoot: '/repo/packages/herdr',
+      paneId: 'wC:pB',
+      workspaceId: 'wC',
+    };
+    const resolveProjectWorkspace = vi.fn(
+      async (_cwd: string, report?: (m: typeof mismatch) => void) => {
+        report?.(mismatch);
+        return null;
+      },
+    );
+    const getDispatcherAnchor = vi.fn().mockResolvedValue(null);
+    const deps = makeDeps({
+      resolveProjectWorkspace,
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(outcome.detail).toBe('herdr-unreadable');
+    // The fallback failure names its own boundary but NEVER hides the
+    // recorded primary-path mismatch (AC4 — recorded on the decision entry).
+    expect(outcome.projectWorkspaceMismatch).toEqual(mismatch);
+    expect(deps.rollbackClaim).toHaveBeenCalled();
+  });
+
+  it('AC3: a matching project workspace records NO near-miss on the dispatch marker', async () => {
+    const getItemTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1' }),
+      getItemTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    const markerEvent = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(markerEvent).not.toHaveProperty('projectWorkspaceMismatch');
   });
 });
 

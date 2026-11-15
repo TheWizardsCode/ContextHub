@@ -461,6 +461,112 @@ describe('resolveProjectWorkspace ACs (AC1/AC3)', () => {
       paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1',
     });
   });
+
+  // ── Primary-path near-miss diagnostics (WL-0MWHCV3PR002WSQM) ────────
+  // Parent AC7 / this item AC1/AC2/AC3: when the resolver returns `null` but
+  // a plugin pane reported a DIFFERENT non-empty `HERDR_RESOLVED_CWD`, the
+  // optional trailing report callback receives the per-pane near-miss record
+  // (expected vs actual root, pane/workspace ids) — so a ContextHub-style
+  // mismatch (`…/packages/herdr` ≠ the worklog root) is visible instead of
+  // looking like "no plugin pane". Additive: every existing caller passes no
+  // callback and keeps today's behaviour byte-for-byte (the match logic is
+  // unchanged). No report on a match (AC3), no report for an absent env
+  // (AC3 — an absent env is not a mismatch).
+
+  it('AC2: a pane reporting a DIFFERENT HERDR_RESOLVED_CWD yields a near-miss record on null (expected vs actual)', async () => {
+    const report = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [machinePane()],
+      readProcEnviron: async () =>
+        procEnv({ HERDR_RESOLVED_CWD: `${ROOT}/packages/herdr`, HERDR_WORKSPACE_ID: 'wC' }),
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, report)).toBeNull();
+    expect(report).toHaveBeenCalledTimes(1);
+    expect(report).toHaveBeenCalledWith({
+      expectedRoot: ROOT,
+      actualRoot: `${ROOT}/packages/herdr`,
+      paneId: 'wC:pB',
+      workspaceId: 'wC',
+    });
+  });
+
+  it('AC2: the near-miss falls back to the pane workspaceId when HERDR_WORKSPACE_ID is absent', async () => {
+    const report = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [machinePane({ workspaceId: 'wFromPane' })],
+      readProcEnviron: async () =>
+        procEnv({ HERDR_RESOLVED_CWD: '/somewhere/else' }),
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, report)).toBeNull();
+    expect(report).toHaveBeenCalledWith({
+      expectedRoot: ROOT,
+      actualRoot: '/somewhere/else',
+      paneId: 'wC:pB',
+      workspaceId: 'wFromPane',
+    });
+  });
+
+  it('AC2: every mismatching plugin pane reports its own near-miss (one record per pane)', async () => {
+    const report = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [
+        machinePane({ paneId: 'wC:pA', tabId: 'wC:tA' }),
+        machinePane({ paneId: 'wC:pB', tabId: 'wC:tB' }),
+      ],
+      getPaneProcessInfo: async () => ({ shellPid: '1' }),
+      readProcEnviron: async () =>
+        procEnv({ HERDR_RESOLVED_CWD: `${ROOT}/packages/herdr`, HERDR_WORKSPACE_ID: 'wC' }),
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, report)).toBeNull();
+    expect(report).toHaveBeenCalledTimes(2);
+    expect(report).toHaveBeenNthCalledWith(1, {
+      expectedRoot: ROOT,
+      actualRoot: `${ROOT}/packages/herdr`,
+      paneId: 'wC:pA',
+      workspaceId: 'wC',
+    });
+    expect(report).toHaveBeenNthCalledWith(2, {
+      expectedRoot: ROOT,
+      actualRoot: `${ROOT}/packages/herdr`,
+      paneId: 'wC:pB',
+      workspaceId: 'wC',
+    });
+  });
+
+  it('AC3: a MATCHING root produces no near-miss report', async () => {
+    const report = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [machinePane()],
+      readProcEnviron: async () => procEnv({ HERDR_RESOLVED_CWD: ROOT, HERDR_WORKSPACE_ID: 'wC' }),
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, report)).toEqual({
+      paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1',
+    });
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it('AC3: an absent HERDR_RESOLVED_CWD is NOT a mismatch (no near-miss report)', async () => {
+    const report = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [machinePane()],
+      readProcEnviron: async () => procEnv({ HERDR_WORKSPACE_ID: 'wC' }),
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, report)).toBeNull();
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it('AC3: no plugin pane at all → null with no near-miss report', async () => {
+    const report = vi.fn();
+    const deps = makeResolverDeps({ listMachinePanes: async () => [] });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, report)).toBeNull();
+    expect(report).not.toHaveBeenCalled();
+  });
 });
 
 // ── getItemTabAnchor (AC2/AC5) ─────────────────────────────────────────

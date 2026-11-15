@@ -51,14 +51,33 @@ import type { DowntimeAuditBatchStatus, AuditCandidateScopeResult } from './down
  * in `dispatcher-anchor.contract.ts` and to the local union in
  * `downtime-worker.dispatch-placement.ts` — cross-referenced by comment; the
  * barrel exports neither, so this module declares its own structurally-
- * assignable copy rather than importing a non-barrelled symbol.
+ * assignable copy rather than importing a non-barrelled symbol. The sibling
+ * mismatch item extends the union with `project-workspace-mismatch`
+ * (WL-0MWHCV3PR002WSQM): the primary path near-missed — no plugin pane
+ * matched the wanted root, but a pane reported a different `HERDR_RESOLVED_CWD`.
  */
 type PlacementFailureDetail =
   | 'persisted-workspace-missing'
   | 'herdr-unreadable'
   | 'dispatcher-workspace-unprovisionable'
   | 'prefix-empty'
-  | 'item-tab-unavailable';
+  | 'item-tab-unavailable'
+  | 'project-workspace-mismatch';
+
+/**
+ * Primary-path near-miss record (WL-0MWHCV3PR002WSQM): `resolveProjectWorkspace`
+ * failed to match the item's worklog root, but a plugin pane reported a
+ * DIFFERENT non-empty `HERDR_RESOLVED_CWD`. Names the expected root, the
+ * actual `HERDR_RESOLVED_CWD` and the pane/workspace ids. Diagnostic-only —
+ * the matching rule stays exact-root. Structurally identical to the copies in
+ * `dispatcher-anchor.placement.ts` and `downtime-worker.dispatch-placement.ts`.
+ */
+export interface ProjectWorkspaceMismatch {
+  expectedRoot: string;
+  actualRoot: string;
+  paneId: string;
+  workspaceId: string;
+}
 
 /**
  * The anchor resolvers' optional trailing fail-closed boundary reporter
@@ -153,8 +172,13 @@ export interface DowntimeDispatchDeps {
   reserveLocalCapacity?(request: LocalReservationRequest): Promise<LocalReservationResult | null>;
   /** Machine-wide Dispatcher anchor (see `DowntimeWorkerDeps`). */
   getDispatcherAnchor?(cwd: string, report?: AnchorFailureReport): Promise<DispatcherAnchor | null>;
-  /** Project workspace resolution (see `DowntimeWorkerDeps`). */
-  resolveProjectWorkspace?(cwd: string): Promise<ProjectWorkspaceTarget | null>;
+  /** Project workspace resolution (see `DowntimeWorkerDeps`).
+   *  The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is
+   *  additive — `resolveDispatchPlacement` passes its collector callback. */
+  resolveProjectWorkspace?(
+    cwd: string,
+    reportNearMiss?: (nearMiss: ProjectWorkspaceMismatch) => void,
+  ): Promise<ProjectWorkspaceTarget | null>;
   /** Item-ID tab anchor (see `DowntimeWorkerDeps.getItemTabAnchor`). */
   getItemTabAnchor?(
     cwd: string,
@@ -422,6 +446,16 @@ export interface DowntimeDispatchEvent {
    * (deployment default kept). Absent on legacy entries; readers ignore it.
    */
   localPreferenceReason?: LocalPreferenceReason;
+  /**
+   * Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM AC4): recorded on
+   * the DISPATCH MARKER — the decision entry of a successful dispatch — when
+   * `resolveProjectWorkspace` failed to match the item's worklog root while a
+   * plugin pane reported a DIFFERENT `HERDR_RESOLVED_CWD` (expected vs
+   * actual, pane/workspace ids). Present even when the Dispatcher fallback
+   * then succeeded. Absent when the primary path matched or carried no
+   * near-miss.
+   */
+  projectWorkspaceMismatch?: ProjectWorkspaceMismatch;
 }
 
 /**
@@ -582,6 +616,17 @@ export interface DowntimeDispatchOutcome {
    * consumer, budget and starvation heuristic is unchanged.
    */
   detail?: string;
+  /**
+   * Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM AC4): present on
+   * an `anchor-unavailable` outcome (alongside `detail`) when
+   * `resolveProjectWorkspace` failed to match the item's worklog root while a
+   * plugin pane reported a DIFFERENT `HERDR_RESOLVED_CWD` (expected vs
+   * actual, pane/workspace ids). Forwarded onto the decision entry so the
+   * mismatch is recorded even when the Dispatcher fallback then FAILED.
+   * Absent when the primary path matched or recorded no near-miss, and on
+   * every other outcome.
+   */
+  projectWorkspaceMismatch?: ProjectWorkspaceMismatch;
   /**
    * The proxy's bounded audit-lease cooldown on a `429` refusal
    * (`audit-budget-saturated`, WL-0MWFJH3NW006F5GN AC2): the proxy's own

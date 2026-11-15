@@ -719,6 +719,14 @@ export async function performDispatch(
           // Absent on every other outcome, so existing entry shapes are
           // unchanged.
           ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+          // Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM AC4): the
+          // recorded `HERDR_RESOLVED_CWD` mismatch rides the decision entry
+          // (expected vs actual root, pane/workspace ids) when placement
+          // failed closed after a near-miss — a fallback failure never hides
+          // the primary-path diagnosis. Absent on every other outcome.
+          ...(outcome.projectWorkspaceMismatch !== undefined
+            ? { projectWorkspaceMismatch: outcome.projectWorkspaceMismatch }
+            : {}),
           // Audit-lease cooldown (WL-0MWFJH3NW006F5GN AC2): the proxy's
           // bounded `retry_after_s` on a 429 audit-lease refusal — the
           // deferral advice an operator reads to know when the tier re-checks.

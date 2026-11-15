@@ -75,13 +75,20 @@ export interface DispatcherAnchor {
  * - `prefix-empty` — no extractable work-item id prefix to route by.
  * - `item-tab-unavailable` — a resolved project workspace's item-ID tab
  *   could not be provisioned (the primary placement path).
+ * - `project-workspace-mismatch` — the primary path near-missed: no plugin
+ *   pane matched the wanted root, but at least one pane reported a DIFFERENT
+ *   `HERDR_RESOLVED_CWD` (WL-0MWHCV3PR002WSQM). The near-miss record
+ *   (expected vs actual root, pane/workspace ids) rides the placement result
+ *   / decision entry as `projectWorkspaceMismatch`; the token names the
+ *   boundary in the vocabulary.
  */
 export type PlacementFailureDetail =
   | 'persisted-workspace-missing'
   | 'herdr-unreadable'
   | 'dispatcher-workspace-unprovisionable'
   | 'prefix-empty'
-  | 'item-tab-unavailable';
+  | 'item-tab-unavailable'
+  | 'project-workspace-mismatch';
 
 /**
  * Per-prefix tab-anchors map — keyed by work-item id prefix (e.g. `WL`, `TCE`)

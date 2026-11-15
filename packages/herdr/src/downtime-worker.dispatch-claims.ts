@@ -45,6 +45,7 @@ import type {
   DowntimeDispatchDeps,
   DowntimeDispatchOutcome,
   DowntimeReservationEvidence,
+  ProjectWorkspaceMismatch,
 } from './downtime-worker.dispatch-contract.js';
 import type {
   DowntimeCandidate,
@@ -153,6 +154,7 @@ async function abortForAnchorUnavailable(
   attemptId: string | undefined,
   leaseHeld: boolean,
   detail: string | undefined,
+  projectWorkspaceMismatch?: ProjectWorkspaceMismatch,
 ): Promise<DowntimeDispatchOutcome> {
   const releasedReservation: DowntimeReservationEvidence | undefined =
     reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
@@ -170,7 +172,9 @@ async function abortForAnchorUnavailable(
     dispatched: false,
     reason: 'anchor-unavailable',
     // Diagnosable refusal (WL-0MWHCUZ5C000I7S6): the boundary rides on the outcome/decision entry; `reason` unchanged.
+    // Primary-path near-miss (WL-0MWHCV3PR002WSQM AC4) — never hidden by a fallback failure.
     ...(detail !== undefined ? { detail } : {}),
+    ...(projectWorkspaceMismatch !== undefined ? { projectWorkspaceMismatch } : {}),
     ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
     ...(rollbackOk ? {} : { error: 'claim rollback failed after anchor-unavailable' }),
   };
@@ -484,15 +488,8 @@ export async function dispatchClaimedTier(
   });
   if (!placement.ok) {
     return abortForAnchorUnavailable(
-      deps,
-      kind,
-      candidate.id,
-      expected,
-      opts.cwd,
-      reservation,
-      budgetAttemptId,
-      leaseHeld,
-      placement.detail,
+      deps, kind, candidate.id, expected, opts.cwd, reservation, budgetAttemptId,
+      leaseHeld, placement.detail, placement.projectWorkspaceMismatch,
     );
   }
   const anchorId = placement.anchorId;
@@ -549,6 +546,11 @@ export async function dispatchClaimedTier(
       // (it could never consume a ticket) and records the decision.
       ...(reservationSkippedReason !== undefined
         ? { reservationSkipped: reservationSkippedReason }
+        : {}),
+      // Primary-path near-miss (WL-0MWHCV3PR002WSQM AC4) on the dispatch
+      // marker — never hidden by a successful Dispatcher fallback.
+      ...(placement.projectWorkspaceMismatch !== undefined
+        ? { projectWorkspaceMismatch: placement.projectWorkspaceMismatch }
         : {}),
     });
   } catch {

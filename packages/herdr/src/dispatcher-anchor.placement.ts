@@ -25,6 +25,14 @@
  * primitives from `./machine-coordination.js` / `./coordination.js`. It never
  * imports the `dispatcher-anchor.js` barrel, so the barrel can re-export these
  * resolvers without creating a cycle.
+ *
+ * Matching rule (WL-0MWHCV3PR002WSQM): `resolveProjectWorkspace` matches on
+ * the plugin pane's `HERDR_RESOLVED_CWD` EXACTLY (trailing-slash tolerant,
+ * normalised) — never ancestor/descendant or prefix matching, so a pane
+ * reporting `…/packages/herdr` does NOT match the worklog root `…/ContextHub`.
+ * The near-miss reporting added by WL-0MWHCV3PR002WSQM is DIAGNOSTIC-ONLY:
+ * it makes a failed exact-root match visible (expected vs actual root) without
+ * changing the match semantics.
  */
 
 import * as path from 'node:path';
@@ -81,6 +89,13 @@ function comparePaneIds(a: string, b: string): number {
  * Matching is on the logical root ONLY — never the pane's reported `cwd`
  * (which is the plugin directory) and never the workspace label.
  *
+ * The matching rule is EXACT-ROOT only (WL-0MWHCV3PR002WSQM): a pane whose
+ * `HERDR_RESOLVED_CWD` differs from the wanted root — e.g. the plugin pane
+ * reporting `…/packages/herdr` for the worklog root `…/ContextHub` — does NOT
+ * match, never falls back to ancestor/descendant or prefix matching, and the
+ * existing ambiguity rules (focused first, then lowest pane id, AC3) still
+ * hold unchanged.
+ *
  * Ambiguity (>=2 matching panes) is deterministic: the focused matching pane
  * wins, else the lowest pane id (AC3). Never selects another root's
  * workspace.
@@ -90,11 +105,29 @@ function comparePaneIds(a: string, b: string): number {
  * unreadable/missing `/proc/<pid>/environ`; missing `HERDR_RESOLVED_CWD`; no
  * root match; or a match without a workspace id. A `null` result makes the
  * dispatcher fall back to the Dispatcher anchor (AC4).
+ *
+ * @param reportNearMiss Optional diagnostic-only reporter
+ *   (WL-0MWHCV3PR002WSQM): invoked with one per-pane near-miss record — a
+ *   plugin pane that reported a non-empty `HERDR_RESOLVED_CWD` DIFFERING from
+ *   the wanted root — ONLY when the resolver returns `null` on the no-match
+ *   path (AC2). The record names the expected root, the actual
+ *   `HERDR_RESOLVED_CWD` and the pane/workspace ids, so a primary-path
+ *   mismatch is visible on the dispatch decision instead of looking like
+ *   "no plugin pane". No report when a match IS found or when the panes carry
+ *   no `HERDR_RESOLVED_CWD` at all (an absent env is not a mismatch, AC3).
+ *   Additive: callers that pass no callback are byte-identical to today, and
+ *   the match logic itself is unchanged.
  */
 export async function resolveProjectWorkspace(
   cwd: string,
   deps: DispatcherAnchorDeps,
   root: string,
+  reportNearMiss?: (nearMiss: {
+    expectedRoot: string;
+    actualRoot: string;
+    paneId: string;
+    workspaceId: string;
+  }) => void,
 ): Promise<ProjectWorkspaceTarget | null> {
   const wanted = normalizeRoot(root);
   if (wanted === '') return null;
@@ -110,6 +143,18 @@ export async function resolveProjectWorkspace(
 
   const candidates = panes.filter((pane) => pane.label === PLUGIN_PANE_LABEL);
   const matches: Array<{ pane: MachinePaneInfo; workspaceId: string }> = [];
+  // Per-pane near-miss collector (WL-0MWHCV3PR002WSQM): a plugin pane that
+  // reports a non-empty HERDR_RESOLVED_CWD differing from the wanted root is
+  // a primary-path near-miss (expected vs actual). Collected while scanning
+  // and reported ONLY on the no-match null return below — never when a match
+  // is found and never for an absent env (AC3). Additive: the match logic
+  // itself is byte-for-byte unchanged.
+  const nearMisses: Array<{
+    expectedRoot: string;
+    actualRoot: string;
+    paneId: string;
+    workspaceId: string;
+  }> = [];
   for (const pane of candidates) {
     const getInfo = deps.getPaneProcessInfo ?? ((id: string) => getPaneProcessInfo(cwd, id));
     let info: PaneProcessInfo | null;
@@ -132,14 +177,34 @@ export async function resolveProjectWorkspace(
     const env = parseProcEnviron(rawEnv);
     const resolvedCwd = env.HERDR_RESOLVED_CWD;
     if (typeof resolvedCwd !== 'string' || resolvedCwd === '') return null;
-    if (normalizeRoot(resolvedCwd) !== wanted) continue;
+    if (normalizeRoot(resolvedCwd) !== wanted) {
+      // Near-miss: this pane claims a DIFFERENT logical root. Matching rule
+      // unchanged (exact-root only) — the record makes the mismatch visible.
+      nearMisses.push({
+        expectedRoot: wanted,
+        actualRoot: resolvedCwd,
+        paneId: pane.paneId,
+        workspaceId: env.HERDR_WORKSPACE_ID ?? pane.workspaceId,
+      });
+      continue;
+    }
 
     const workspaceId = env.HERDR_WORKSPACE_ID ?? pane.workspaceId;
     if (workspaceId === undefined || workspaceId === '') return null;
     matches.push({ pane, workspaceId });
   }
 
-  if (matches.length === 0) return null;
+  if (matches.length === 0) {
+    // Report the collected near-misses ONLY on the no-match null path — the
+    // sole case the diagnostic is about (AC2). An absent env or unreadable
+    // boundary already fails closed through its own path (AC3).
+    if (typeof reportNearMiss === 'function' && nearMisses.length > 0) {
+      for (const nearMiss of nearMisses) {
+        reportNearMiss(nearMiss);
+      }
+    }
+    return null;
+  }
   // Focused first; then lowest pane id.
   matches.sort((a, b) => {
     if (a.pane.focused !== b.pane.focused) return a.pane.focused ? -1 : 1;
