@@ -473,7 +473,9 @@ describe('startup import budget — measured regression', { timeout: 300_000 }, 
       // (each warmup is a full tsx spawn) without changing what it measures;
       // the sampled `runs` (the gate itself) are unchanged.
       warmupRuns: 2,
-      bareNodeRuns: 2,
+      // Five bare-node samples give a reliable host-load factor; two samples
+      // was too noisy under parallel full-suite load (WL-0MWI7A1N7009NLIM).
+      bareNodeRuns: 5,
     });
 
     const evaluation = evaluateStartupBudget(result, budget);
