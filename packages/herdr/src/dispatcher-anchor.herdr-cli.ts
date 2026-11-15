@@ -111,6 +111,7 @@ export function createDispatcherAnchorDeps(
     listMachinePanes: () => listMachinePanes(cwd, herdrBin),
     getPaneProcessInfo: (paneId: string) => getPaneProcessInfo(cwd, paneId, herdrBin),
     readProcEnviron: async (shellPid: string) => readProcEnvironFile(shellPid),
+    probeWorkspace: (workspaceId: string) => probeWorkspace(cwd, workspaceId, herdrBin),
   };
 }
 
@@ -235,6 +236,88 @@ export async function listTabsInWorkspace(
   } catch {
     return null;
   }
+}
+
+/**
+ * Parse `herdr workspace list` JSON into the workspace ids it reports.
+ *
+ * Tolerates log lines before the JSON envelope, the
+ * `{ result: { workspaces: [...] } }` envelope and the bare-array shape,
+ * plus the `workspace_id` / `workspaceId` / `id` key variants. Returns
+ * `null` when no workspace array can be found (unparseable/empty output) so
+ * the caller fails closed — never treat an unreadable list as "missing",
+ * which would reprovision a live workspace.
+ */
+function parseWorkspaceListOutput(raw: string): string[] | null {
+  const start = raw.indexOf('{');
+  if (start < 0) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw.slice(start));
+  } catch {
+    return null;
+  }
+  if (payload === null || typeof payload !== 'object') return null;
+  const obj = payload as Record<string, unknown>;
+  const result =
+    obj.result !== null && typeof obj.result === 'object'
+      ? (obj.result as Record<string, unknown>)
+      : obj;
+  const workspaces = Array.isArray(result.workspaces)
+    ? result.workspaces
+    : Array.isArray(obj.workspaces)
+      ? obj.workspaces
+      : null;
+  if (workspaces === null) return null;
+
+  const ids: string[] = [];
+  for (const entry of workspaces) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const rec = entry as Record<string, unknown>;
+    const id = rec.workspace_id ?? rec.workspaceId ?? rec.id;
+    if (typeof id === 'string' && id !== '') ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Classify a persisted workspace id with exactly ONE `herdr workspace list`
+ * read (WL-0MWHCUPGQ001FASL).
+ *
+ * Returns `alive` when the id is present in the list, `missing` only when
+ * the list was read and parsed successfully and the id is absent, and
+ * `unreadable` on any CLI error or unparseable/empty output — so "a vanished
+ * workspace is recoverable" stays strictly separate from "an unreadable
+ * herdr must still fail closed" (parent WL-0MWH50EN4007C6YH). Never issues
+ * a `wl` invocation and never throws.
+ */
+async function probeWorkspace(
+  cwd: string,
+  workspaceId: string,
+  herdrBin: string,
+): Promise<'alive' | 'missing' | 'unreadable'> {
+  let out: string;
+  try {
+    out = await execFileStdout(herdrBin, ['workspace', 'list'], {
+      cwd,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (err) {
+    process.stderr.write(
+      `[worklog-plugin] herdr workspace list failed (probing ${workspaceId}): ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
+    return 'unreadable';
+  }
+  const ids = parseWorkspaceListOutput(out);
+  if (ids === null) {
+    process.stderr.write(
+      `[worklog-plugin] herdr workspace list unparseable output (probing ${workspaceId}): ${out.slice(0, 400)}\n`,
+    );
+    return 'unreadable';
+  }
+  return ids.includes(workspaceId) ? 'alive' : 'missing';
 }
 
 /**

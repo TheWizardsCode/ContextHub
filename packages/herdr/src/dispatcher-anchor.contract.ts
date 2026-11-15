@@ -123,6 +123,18 @@ export interface DispatcherAnchorDeps {
    * production supplies it; absent in legacy/test callers.
    */
   moveTab?(workspaceId: string, tabId: string, insertIndex: number): Promise<boolean>;
+  /**
+   * Classify a persisted Dispatcher `workspaceId` as `alive`, positively
+   * `missing`, or `unreadable` (WL-0MWHCUPGQ001FASL, parent
+   * WL-0MWH50EN4007C6YH). `alive` when the id appears in a successfully read
+   * `herdr workspace list`; `missing` only when that list was read and parsed
+   * successfully and the id is absent from it; every CLI error, unparseable/
+   * empty output or absent dep is `unreadable` → the caller fails closed and
+   * provisions nothing. Optional; production supplies it; an absent dep is
+   * treated exactly as `unreadable`, never as `missing`. Only ever consulted
+   * on the recovery path — never on the healthy dispatch path.
+   */
+  probeWorkspace?(workspaceId: string): Promise<'alive' | 'missing' | 'unreadable'>;
 }
 
 /** One parsed `herdr tab list` record (id + label, plus agent liveness). */
