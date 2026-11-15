@@ -51,6 +51,7 @@ import {
   STALE_TAB_ANCHORS,
   STALE_TAB_ANCHORS_JSON,
 } from './__fixtures__/stale-dispatcher-anchors.js';
+import { persistPrefixTab } from './dispatcher-anchor.persistence.js';
 
 function mkTmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'da-test-'));
@@ -1465,6 +1466,117 @@ describe('stale workspace recovery — validate on read and re-provision (WL-0MW
     expect(createTab).not.toHaveBeenCalled();
     expect(isPaneAlive).toHaveBeenCalledTimes(1);
     expect(isPaneAlive).toHaveBeenCalledWith('wD:tWL:p1');
+  });
+});
+
+// ── persistPrefixTab pruning (WL-0MWHCUX6A002W8ZG) ──────────────────────
+// The persisted per-prefix map is rewritten whenever a dispatch resolves a
+// tab; entries whose ids cannot belong to the workspace being written (a
+// superseded/dead workspace, or an ill-formed hand-edited id) are pruned so
+// dead ids cannot accumulate and mask a later wedge. Herdr ids are
+// workspace-scoped (`<workspaceId>:` prefix), so membership is decided from
+// the ids alone — no CLI call.
+
+describe('persistPrefixTab pruning (WL-0MWHCUX6A002W8ZG)', () => {
+  it('AC2: a dead-workspace entry is dropped on rewrite; live siblings and the upsert survive', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({
+        workspaceId: 'w6B',
+        byPrefix: {
+          // Dead workspace: every id carries the superseded w6A prefix.
+          WL: { tabId: 'w6A:t2', paneId: 'w6A:p5' },
+          // Live sibling in the workspace being written — must survive.
+          TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' },
+        },
+      }),
+      'utf-8',
+    );
+
+    persistPrefixTab(tmpDir, 'w6B', 'WL', 'w6B:t2', 'w6B:p5');
+
+    // AC3: the map-level workspaceId is always the workspace being written.
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'w6B',
+      byPrefix: {
+        WL: { tabId: 'w6B:t2', paneId: 'w6B:p5' },
+        TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' },
+      },
+    });
+  });
+
+  it('AC4: after recovery the persisted map carries no dead w6A ids and holds the recovered entry', () => {
+    // Seed the recorded pre-fix map (workspaceId w6A owns WL) as-is.
+    seedStaleAnchorState(tmpDir);
+
+    // Simulate the first dispatch write after recovery to the new workspace.
+    persistPrefixTab(tmpDir, 'w6B', 'WL', 'w6B:t2', 'w6B:p5');
+
+    const persisted = readTabAnchorsPersisted();
+    expect(persisted?.workspaceId).toBe('w6B');
+    expect(JSON.stringify(persisted)).not.toContain('w6A');
+    expect(persisted?.byPrefix.WL).toEqual({ tabId: 'w6B:t2', paneId: 'w6B:p5' });
+  });
+
+  it('AC5: two prefixes in the same live workspace are both retained across a rewrite', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({
+        workspaceId: 'w6B',
+        byPrefix: {
+          WL: { tabId: 'w6B:t2', paneId: 'w6B:p5' },
+          TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' },
+        },
+      }),
+      'utf-8',
+    );
+
+    persistPrefixTab(tmpDir, 'w6B', 'TCE', 'w6B:t6', 'w6B:p31');
+
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'w6B',
+      byPrefix: {
+        WL: { tabId: 'w6B:t2', paneId: 'w6B:p5' },
+        TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' },
+      },
+    });
+  });
+
+  it('AC6: an ill-formed id (no `<workspaceId>:` prefix) is dropped rather than retained', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({
+        workspaceId: 'w6B',
+        byPrefix: {
+          // Hand-edited: no w6B: prefix, so it can never resolve here.
+          WL: { tabId: 't2', paneId: 'p5' },
+        },
+      }),
+      'utf-8',
+    );
+
+    persistPrefixTab(tmpDir, 'w6B', 'TCE', 'w6B:t6', 'w6B:p31');
+
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'w6B',
+      byPrefix: { TCE: { tabId: 'w6B:t6', paneId: 'w6B:p31' } },
+    });
+  });
+
+  it('AC1/AC7: an ill-formed upsert fails closed (false, nothing written, no tmp residue)', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({ workspaceId: 'w6B', byPrefix: {} }),
+      'utf-8',
+    );
+
+    expect(persistPrefixTab(tmpDir, 'w6B', 'WL', 't2', 'p5')).toBe(false);
+    expect(readTabAnchorsPersisted()).toEqual({ workspaceId: 'w6B', byPrefix: {} });
+    expect(fs.existsSync(path.join(tmpDir, `${DISPATCHER_TAB_ANCHORS_FILE}.tmp`))).toBe(false);
   });
 });
 
