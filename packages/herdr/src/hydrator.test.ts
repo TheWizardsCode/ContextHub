@@ -11,8 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetExecFileAsync, setExecFileAsync, resetWorklogDir, setWorklogDir } from './fetcher.js';
 import {
   hydratorExecRouter,
+  makeCrossWorkspacePanes,
   makeWorstCaseItems,
   makeWorstCasePanes,
+  type CrossWorkspacePaneFixture,
 } from './hydrator.fixtures.js';
 import {
   ALLOWED_STAGES_BY_STATUS,
@@ -65,6 +67,19 @@ interface ContractDeps extends HydratorDeps {
   stepTimeoutMs?: number;
   /** Maximum candidates processed per hydrate tick. */
   maxItemsPerTick?: number;
+}
+
+/**
+ * The workspace-agnostic pane read the implementation child
+ * (WL-0MWHBSWC20067SMY) adds to `HydratorDeps` (parent AC1/AC4):
+ * `herdr pane list` with NO `--workspace` scope, i.e. the panes of every
+ * workspace on the host. Declared here — like the clock and per-step budget
+ * seams above — so the red witnesses in this file compile and run before the
+ * seam exists in the production type. `listActivePanes()` called with no
+ * workspace id is the other permitted shape for the same read.
+ */
+interface CrossWorkspaceDeps extends ContractDeps {
+  listAllPanes?: () => Promise<HydratorPane[] | null>;
 }
 
 function makeDeps(overrides: Partial<ContractDeps> = {}): {
@@ -1461,6 +1476,240 @@ describe('workspace scoping at orchestration level', () => {
     // Pane in current workspace → item not demoted.
     expect(applied).toEqual([]);
   });
+});
+
+// ── Cross-workspace demotion evidence (WL-0MWHBSQUU009LKML) ───────────
+// Parent WL-0MWH56SWX004HSKQ, AC1/AC3/AC4.
+//
+// The 2026-11-15 01:11 release: the plugin reports its own workspace
+// (`HERDR_WORKSPACE_ID` → `w5M` in ContextHub) while the downtime fallback
+// placement put the dispatch pane in the Dispatcher workspace (`w6B`).
+// Demotion evidence was read with `herdr pane list --workspace w5M`, so the
+// live pane was invisible and the claim was released ~5 s after spawn.
+//
+// Frozen contract for the implementation child (WL-0MWHBSWC20067SMY):
+// demotion evidence comes from a WORKSPACE-AGNOSTIC pane read
+// (`listAllPanes()`, or `listActivePanes()` with no workspace id), while the
+// selection-list marker keeps its workspace-scoped read (pinned by the
+// sibling test child WL-0MWHBSRS4001TFNJ). "Is this item being worked on
+// anywhere?" and "does it have a pane in my workspace?" are separate
+// questions and must not share one filter.
+//
+// RED WITNESS. The three `it.fails` bodies assert POST-FIX behaviour and are
+// red against today's `hydrator.ts` (which reads panes workspace-scoped), so
+// the suite stays green while the contract is red — the repo's documented
+// TDD pattern (`downtime-worker.clamps.test.ts`,
+// `coordination-registered-root-sweep.test.ts`). The implementation child
+// flips each `it.fails` to `it` when the wider read lands. The plain `it`
+// below (AC3) already passes and is the anti-over-correction guard.
+
+describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
+  /** The item of the reported release (`Downtime triggered plan …`). */
+  const REPRODUCED = 'WL-0MWFKDH78002T2CR';
+
+  interface CrossApplied {
+    id: string;
+    status: string;
+    stage: string;
+    previousAssignee?: string;
+    reason?: string;
+  }
+
+  /**
+   * Deps for the cross-workspace cases: the injected `listActivePanes` is the
+   * scoped `herdr pane list --workspace <id>` fake, `listAllPanes` the wider
+   * read. Every call is recorded so "no release" is observable as an empty
+   * `applied` list (a release comment is written by `applyDemotion`).
+   */
+  function makeCrossDeps(
+    fixture: CrossWorkspacePaneFixture,
+    overrides: Partial<CrossWorkspaceDeps> = {},
+  ): { deps: CrossWorkspaceDeps; applied: CrossApplied[] } {
+    const applied: CrossApplied[] = [];
+    const deps: CrossWorkspaceDeps = {
+      listInProgressItems: async () => [
+        {
+          id: REPRODUCED,
+          status: 'in-progress',
+          stage: 'plan_complete',
+          assignee: 'dispatcher',
+        },
+      ],
+      listActivePanes: fixture.listActivePanes,
+      listAllPanes: fixture.listAllPanes,
+      listOutboundDeps: async () => [],
+      applyDemotion: async (id, status, stage, opts) => {
+        applied.push({
+          id,
+          status,
+          stage,
+          previousAssignee: opts?.previousAssignee,
+          reason: opts?.reason,
+        });
+        return true;
+      },
+      log: () => {},
+      ...overrides,
+    };
+    return { deps, applied };
+  }
+
+  it.fails(
+    'does not release a live dispatch claim whose pane is in the Dispatcher workspace (AC1, reported state)',
+    async () => {
+      // Pane `w6B:p3`, plugin workspace `w5M`: exactly the reported state.
+      const fixture = makeCrossWorkspacePanes(REPRODUCED, {
+        paneIn: 'dispatcher',
+        label: `Downtime triggered plan finish moves the pane - ${REPRODUCED}`,
+      });
+      const { deps, applied } = makeCrossDeps(fixture);
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      // The live pane is evidence the item is being worked, wherever it
+      // lives: no demotion, no release comment (comments ride on
+      // `applyDemotion`).
+      expect(result.considered).toBe(1);
+      expect(result.demoted).toBe(0);
+      expect(applied).toEqual([]);
+    },
+  );
+
+  it.fails(
+    'production wiring writes no release update and no release comment for that item (AC1)',
+    async () => {
+      const fixture = makeCrossWorkspacePanes(REPRODUCED);
+      const calls: Array<{ bin: string; args: string[] }> = [];
+      const panePayload = fixture.panes.map((pane) => ({
+        pane_id: pane.pane_id,
+        tab_id: `${pane.workspace_id}:t1`,
+        workspace_id: pane.workspace_id,
+        label: pane.label,
+      }));
+
+      // A herdr stand-in whose unscoped `pane list` sees BOTH workspaces and
+      // whose `--workspace`-scoped read sees only that workspace — the two
+      // read shapes the fix must distinguish.
+      setExecFileAsync((async (_bin: string, args: string[]) => {
+        calls.push({ bin: _bin, args });
+        if (args.includes('pane') && args.includes('list')) {
+          const wsIndex = args.indexOf('--workspace');
+          const scoped = wsIndex >= 0 ? args[wsIndex + 1] : undefined;
+          const panes = scoped
+            ? panePayload.filter((pane) => pane.workspace_id === scoped)
+            : panePayload;
+          return { stdout: JSON.stringify({ result: { panes } }), stderr: '' };
+        }
+        if (args.includes('dep')) return { stdout: JSON.stringify({ outbound: [] }), stderr: '' };
+        if (args.includes('update')) return { stdout: JSON.stringify({ success: true }), stderr: '' };
+        if (args.includes('comment')) return { stdout: JSON.stringify({ success: true }), stderr: '' };
+        if (args.includes('list')) {
+          return {
+            stdout: JSON.stringify({
+              workItems: [
+                {
+                  id: REPRODUCED,
+                  status: 'in-progress',
+                  stage: 'plan_complete',
+                  assignee: 'dispatcher',
+                },
+              ],
+            }),
+            stderr: '',
+          };
+        }
+        return { stdout: '{}', stderr: '' };
+      }) as never);
+
+      const deps: HydratorDeps = {
+        ...createProductionHydratorDeps({ log: () => {} }),
+        // The real claim probe touches the filesystem; pin a dead holder so
+        // the pane evidence is the only signal under test.
+        hasLiveClaimHolder: async () =>
+          new Map<string, ClaimHolderVerdict>([[REPRODUCED, { held: false, reason: 'stale' }]]),
+        listOutboundDepsBatch: async () => undefined,
+        listOutboundDeps: async () => [],
+      };
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      expect(result.demoted).toBe(0);
+      // No `wl update` (hold clear) and no `wl comment add` (release trail).
+      expect(calls.filter((call) => call.args.includes('update'))).toEqual([]);
+      expect(calls.filter((call) => call.args.includes('comment'))).toEqual([]);
+    },
+  );
+
+  it('still releases an item with no pane in any workspace and no live claim holder (AC3)', async () => {
+    // No over-correction: a genuinely pane-less claim stays releasable, with
+    // today's release-comment text (parent AC3).
+    const fixture = makeCrossWorkspacePanes(REPRODUCED, { paneIn: 'none' });
+    const { deps, applied } = makeCrossDeps(fixture, {
+      hasLiveClaimHolder: async () =>
+        new Map<string, ClaimHolderVerdict>([[REPRODUCED, { held: false, reason: 'no-lock-file' }]]),
+    });
+
+    const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({
+      id: REPRODUCED,
+      status: 'open',
+      stage: 'intake_complete',
+      previousAssignee: 'dispatcher',
+      reason: 'released because no matching pane',
+    });
+  });
+
+  it.fails(
+    'keeps the claim and reports ok:false when the wider pane read is unavailable (AC4)',
+    async () => {
+      const fixture = makeCrossWorkspacePanes(REPRODUCED);
+      const { deps, applied } = makeCrossDeps(fixture, {
+        // The scoped read works; ONLY the workspace-agnostic read is
+        // unavailable — ambiguous evidence must never become a release.
+        listActivePanes: async (workspaceId?: string) =>
+          typeof workspaceId === 'string' && workspaceId.length > 0
+            ? fixture.listActivePanes(workspaceId)
+            : null,
+        listAllPanes: async () => null,
+      });
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      expect(result.ok).toBe(false);
+      expect(result.demoted).toBe(0);
+      // No release comment either: a release only happens via applyDemotion.
+      expect(applied).toEqual([]);
+    },
+  );
+
+  it.fails(
+    'keeps the claim when the wider pane read exceeds its step budget (AC4)',
+    async () => {
+      const fixture = makeCrossWorkspacePanes(REPRODUCED);
+      // Slow but settling (no test hang): well past the 10 ms step budget.
+      const slowRead = () =>
+        new Promise<HydratorPane[]>((resolve) => setTimeout(() => resolve([...fixture.panes]), 60));
+      const { deps, applied } = makeCrossDeps(fixture, {
+        listActivePanes: async (workspaceId?: string) =>
+          typeof workspaceId === 'string' && workspaceId.length > 0
+            ? fixture.listActivePanes(workspaceId)
+            : slowRead(),
+        listAllPanes: slowRead,
+        stepTimeoutMs: 10,
+      });
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      // A timed-out wider read is indistinguishable from an unavailable one:
+      // fail open by keeping the claim.
+      expect(result.ok).toBe(false);
+      expect(result.demoted).toBe(0);
+      expect(applied).toEqual([]);
+    },
+  );
 });
 
 describe('unparseable pane list output fails open', () => {
