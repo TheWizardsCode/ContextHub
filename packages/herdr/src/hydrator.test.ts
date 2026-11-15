@@ -39,6 +39,7 @@ import {
   type HydratorItem,
   type HydratorPane,
 } from './hydrator.js';
+import * as hydratorModule from './hydrator.js';
 import type { ClaimHolderVerdict } from './claim-lock.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -963,6 +964,233 @@ describe('live claim holder probe (orchestration)', () => {
       rmSync(rootDir, { recursive: true, force: true });
     }
   });
+});
+
+// ── Claim grace window (parent AC5, test-first WL-0MWHBSSOX001RUYA) ──
+//
+// A hydrator tick that lands between a dispatch spawning its pane and the pane
+// title becoming readable sees NO pane for a just-claimed item. Parent AC5
+// bounds that spawn→visible window: an item claimed within the configured
+// grace window is never released even with no visible pane; once the window
+// passes, today's rule applies.
+//
+// Contract choices pinned here (the impl child WL-0MWHBSX81003M0EM
+// implements to these):
+//   • recency rides the EXISTING `wl list --json` fields `updatedAt` /
+//     `activityAt` (ISO 8601 strings) — no new timestamp field. The hydrator
+//     propagates them and derives claim age as
+//     `now() − max(timestamp(updatedAt), timestamp(activityAt))`;
+//   • precedence matches `held` (WL-0MVWDB3IG004NRIU): the grace branch is
+//     evaluated AFTER `in_review → completed` and `blocked`, so it suppresses
+//     ONLY the final release to `open`;
+//   • absent OR unparseable recency fails open toward KEEPING the claim —
+//     treated as a fresh claim still inside the window (the parent's "keep
+//     the claim on ambiguity" decision: a stuck claim is recoverable, a
+//     released claim under a live agent is not);
+//   • the default window is ONE exported constant `HYDRATOR_CLAIM_GRACE_MS`
+//     (documented default 120 000 ms, per the parent's open question),
+//     overridable via the `hydratorClaimGraceMs` settings key.
+//
+// RED WITNESSES — `it.fails` bodies assert the POST-fix behaviour and fail
+// against today's code for a BEHAVIOUR reason (the item is released instead
+// of kept, the constant is undefined), so the suite stays green; the impl
+// child flips each `it.fails` → `it` as the grace window lands. The plain
+// `it` bodies (boundary-past release, precedence) are green both before and
+// after the fix — they pin invariants that must never relax.
+
+/**
+ * The grace-window surface the impl child WL-0MWHBSX81003M0EM adds to
+ * `hydrator.ts`. Reached through a namespace cast so this file compiles (and
+ * the suite stays green) before the export exists — the same pattern as
+ * `downtime-worker.clamps.test.ts`. Once the constant lands, flip the
+ * `it.fails` bodies to `it` and import the real symbol instead of this cast.
+ */
+const futureHydrator = hydratorModule as unknown as {
+  HYDRATOR_CLAIM_GRACE_MS?: number;
+};
+
+/** Documented default for `HYDRATOR_CLAIM_GRACE_MS` (parent open question). */
+const GRACE_DEFAULT_MS = 120_000;
+
+describe('claim grace window (AC5)', () => {
+  /** Fixed injected clock instant (no real timers anywhere in this block). */
+  const NOW_MS = Date.parse('2026-11-15T10:00:00.000Z');
+  /** ISO timestamp for a moment `ms` before the injected clock instant. */
+  const isoBefore = (ms: number): string => new Date(NOW_MS - ms).toISOString();
+
+  /**
+   * The narrow grace-window item surface the impl child adds to `HydratorItem`.
+   * Declared here (like the `ContractDeps` clock seams above) so the red
+   * witnesses compile and run before the fields exist in the production type.
+   */
+  interface GraceWindowItem extends HydratorItem {
+    /** `wl list --json` recency fields (ISO 8601) the claim age derives from. */
+    updatedAt?: string;
+    activityAt?: string;
+  }
+
+  /** `ContractDeps` widened to carry the recency fields. */
+  interface GraceWindowDeps extends ContractDeps {
+    listInProgressItems?: () => Promise<GraceWindowItem[] | null>;
+  }
+
+  interface GraceApplied {
+    id: string;
+    status: string;
+    stage: string;
+    opts?: DemotionOptions;
+  }
+
+  /** Grace-window deps factory; records the demotion options like `makeCrossDeps`. */
+  function makeGraceDeps(overrides: Partial<GraceWindowDeps> = {}): {
+    deps: GraceWindowDeps;
+    applied: GraceApplied[];
+  } {
+    const applied: GraceApplied[] = [];
+    const deps: GraceWindowDeps = {
+      listInProgressItems: async () => [],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      applyDemotion: async (id, status, stage, opts) => {
+        applied.push({ id, status, stage, opts });
+        return true;
+      },
+      log: () => {},
+      ...overrides,
+    };
+    return { deps, applied };
+  }
+
+  /** A just-claimed item (5 s old, well inside the default 120 s window). */
+  const freshItem = (): GraceWindowItem => ({
+    id: WL,
+    status: 'in-progress',
+    stage: 'plan_complete',
+    updatedAt: isoBefore(5_000),
+    activityAt: isoBefore(5_000),
+  });
+
+  it.fails(
+    'keeps an item claimed 5 s ago with no visible pane: inside the grace window (injected clock, no real timers)',
+    async () => {
+      const { deps, applied } = makeGraceDeps({
+        now: () => NOW_MS,
+        listInProgressItems: async () => [freshItem()],
+        listActivePanes: async () => [],
+      });
+
+      const result = await runHydrationOnce(deps);
+
+      // A tick that lands in the spawn→visible gap must not release: the
+      // claim age (5 s) is below HYDRATOR_CLAIM_GRACE_MS, so the item is kept
+      // (counted skipped), never demoted.
+      expect(result).toMatchObject({ ok: true, considered: 1, demoted: 0, skipped: 1 });
+      expect(applied).toEqual([]);
+    },
+  );
+
+  it('releases the same item one millisecond past the grace window exactly as today', async () => {
+    // Boundary computation tracks the production constant once it lands;
+    // until then the documented default drives the fixture.
+    const graceMs = futureHydrator.HYDRATOR_CLAIM_GRACE_MS ?? GRACE_DEFAULT_MS;
+    const { deps, applied } = makeGraceDeps({
+      now: () => NOW_MS,
+      listInProgressItems: async () => [
+        {
+          ...freshItem(),
+          updatedAt: isoBefore(graceMs + 1),
+          activityAt: isoBefore(graceMs + 1),
+        },
+      ],
+      listActivePanes: async () => [],
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    // Once the window has passed, today's rule applies unchanged.
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({ id: WL, status: 'open', stage: 'intake_complete' });
+    // "Exactly as today": the deciding signal is unchanged — no new
+    // grace-only suppression of the no-pane release, and the same comment
+    // text rides the demotion.
+    expect(applied[0].opts?.reason).toBe('released because no matching pane');
+  });
+
+  it('never overrides the in_review → completed (audit tier) transition', async () => {
+    const { deps, applied } = makeGraceDeps({
+      now: () => NOW_MS,
+      listInProgressItems: async () => [
+        { ...freshItem(), stage: 'in_review' },
+      ],
+      listActivePanes: async () => [],
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    // Same precedence as `held`: a fresh claim never blocks the audit-tier
+    // completion — the grace branch suppresses ONLY the release to `open`.
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({ id: WL, status: 'completed', stage: 'in_review' });
+  });
+
+  it('never overrides the dependency blocked transition', async () => {
+    const { deps, applied } = makeGraceDeps({
+      now: () => NOW_MS,
+      listInProgressItems: async () => [freshItem()],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [
+        { id: 'WL-OTHER', status: 'open', stage: 'plan_complete' },
+      ],
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    // A fresh claim never hides an active dependency: the grace branch is
+    // evaluated after `blocked`, so the item still demotes to `blocked`.
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({ id: WL, status: 'blocked', stage: 'plan_complete' });
+  });
+
+  it.fails(
+    'keeps the claim when recency is absent OR unparseable (legacy payload, fail-open: treated as a fresh claim inside the window)',
+    async () => {
+      const other = 'AH-0MTVYBL2L0085G6G';
+      const { deps, applied } = makeGraceDeps({
+        now: () => NOW_MS,
+        listInProgressItems: async () => [
+          // Absent: a legacy payload with no recency fields at all.
+          { id: WL, status: 'in-progress', stage: 'plan_complete' },
+          // Unparseable: a malformed timestamp is just as ambiguous.
+          {
+            id: other,
+            status: 'in-progress',
+            stage: 'plan_complete',
+            updatedAt: 'not-a-date',
+            activityAt: 'also-not-a-date',
+          },
+        ],
+        listActivePanes: async () => [],
+      });
+
+      const result = await runHydrationOnce(deps);
+
+      // An unknowable claim age is ambiguous evidence: never released (the
+      // parent's "keep the claim on ambiguity" decision). Both items are
+      // kept and counted skipped.
+      expect(result).toMatchObject({ ok: true, considered: 2, demoted: 0, skipped: 2 });
+      expect(applied).toEqual([]);
+    },
+  );
+
+  it.fails(
+    'reads the default window from the single exported constant HYDRATOR_CLAIM_GRACE_MS (documented default 120 000 ms)',
+    () => {
+      expect(futureHydrator.HYDRATOR_CLAIM_GRACE_MS).toBe(GRACE_DEFAULT_MS);
+    },
+  );
 });
 
 // ── Release clears the scheduling hold (WL-0MVWDB7F2003SORI) ─────────
