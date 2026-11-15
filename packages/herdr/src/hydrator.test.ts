@@ -79,7 +79,7 @@ interface ContractDeps extends HydratorDeps {
  * workspace id is the other permitted shape for the same read.
  */
 interface CrossWorkspaceDeps extends ContractDeps {
-  listAllPanes?: () => Promise<HydratorPane[] | null>;
+  listAllActivePanes?: () => Promise<HydratorPane[] | null>;
 }
 
 function makeDeps(overrides: Partial<ContractDeps> = {}): {
@@ -341,7 +341,7 @@ describe('pane-based active marker (selection list)', () => {
     expect(marked[0].status).toBe('in-progress');
   });
 
-  it.fails(
+  it(
     'display = workspace-scoped, demotion = workspace-agnostic: an out-of-workspace pane never lights the marker but still suppresses release (parent AC2)',
     async () => {
       // ONE pane set, two questions. `w5M:p1` is the plugin's own worklist
@@ -361,12 +361,8 @@ describe('pane-based active marker (selection list)', () => {
       expect(items[0].agentState).toBeUndefined();
 
       // DEMOTION — workspace-agnostic (parent AC1): the SAME pane is evidence
-      // the item is being worked on, so the live dispatch claim is kept.
-      // RED WITNESS: today's `hydrator.ts` reads panes workspace-scoped, so it
-      // demotes here. `it.fails` keeps the suite green until the implementation
-      // child (WL-0MWHBSWC20067SMY) lands the wider read and flips this to
-      // `it` — the repo's documented test-first pattern
-      // (`downtime-worker.clamps.test.ts`).
+      // the item is being worked on, so the live dispatch claim is kept via
+      // the wider `listAllActivePanes` read (WL-0MWHBSWC20067SMY).
       const applied: Array<{ id: string; status: string; stage: string }> = [];
       const deps: CrossWorkspaceDeps = {
         listInProgressItems: async () => [
@@ -375,7 +371,7 @@ describe('pane-based active marker (selection list)', () => {
         // Both permitted shapes of the workspace-agnostic read, so either
         // implementation satisfies this test.
         listActivePanes: fixture.listActivePanes,
-        listAllPanes: fixture.listAllPanes,
+        listAllActivePanes: fixture.listAllActivePanes,
         listOutboundDeps: async () => [],
         // Pane evidence must be the ONLY signal: pin a dead claim holder.
         hasLiveClaimHolder: async () =>
@@ -1161,6 +1157,13 @@ describe('release clears the scheduling hold', () => {
       listActivePanes: async () => [
         { pane_id: 'wC:p1', label: `implement - ${WL}`, workspace_id: 'wCurrent' },
       ],
+      // The wider demotion read must also be served by an injected seam —
+      // production wiring would hit the exec stub (which answers `{}` for
+      // everything), and a kept-item test asserts ZERO spawns below
+      // (WL-0MWHBSWC20067SMY).
+      listAllActivePanes: async () => [
+        { pane_id: 'wC:p1', label: `implement - ${WL}`, workspace_id: 'wCurrent' },
+      ],
       listOutboundDeps: async () => [],
       hasLiveClaimHolder: async () =>
         new Map<string, ClaimHolderVerdict>([[other, { held: true, reason: 'flock-held' }]]),
@@ -1578,19 +1581,17 @@ describe('workspace scoping at orchestration level', () => {
 //
 // Frozen contract for the implementation child (WL-0MWHBSWC20067SMY):
 // demotion evidence comes from a WORKSPACE-AGNOSTIC pane read
-// (`listAllPanes()`, or `listActivePanes()` with no workspace id), while the
-// selection-list marker keeps its workspace-scoped read (pinned by the
-// sibling test child WL-0MWHBSRS4001TFNJ). "Is this item being worked on
-// anywhere?" and "does it have a pane in my workspace?" are separate
-// questions and must not share one filter.
+// (`listAllActivePanes()`, or `listActivePanes()` with no workspace id),
+// while the selection-list marker keeps its workspace-scoped read (pinned
+// by the sibling test child WL-0MWHBSRS4001TFNJ). "Is this item being
+// worked on anywhere?" and "does it have a pane in my workspace?" are
+// separate questions and must not share one filter.
 //
-// RED WITNESS. The three `it.fails` bodies assert POST-FIX behaviour and are
-// red against today's `hydrator.ts` (which reads panes workspace-scoped), so
-// the suite stays green while the contract is red — the repo's documented
-// TDD pattern (`downtime-worker.clamps.test.ts`,
-// `coordination-registered-root-sweep.test.ts`). The implementation child
-// flips each `it.fails` to `it` when the wider read lands. The plain `it`
-// below (AC3) already passes and is the anti-over-correction guard.
+// The `it` bodies below assert the POST-FIX behaviour — they were authored
+// as `it.fails` RED WITNESSES (the repo's documented test-first pattern,
+// `downtime-worker.clamps.test.ts`) and flipped to plain `it` when the
+// implementation child (WL-0MWHBSWC20067SMY) landed the wider read. The
+// plain `it` AC3 case is the anti-over-correction guard.
 
 describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
   /** The item of the reported release (`Downtime triggered plan …`). */
@@ -1606,9 +1607,9 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
 
   /**
    * Deps for the cross-workspace cases: the injected `listActivePanes` is the
-   * scoped `herdr pane list --workspace <id>` fake, `listAllPanes` the wider
-   * read. Every call is recorded so "no release" is observable as an empty
-   * `applied` list (a release comment is written by `applyDemotion`).
+   * scoped `herdr pane list --workspace <id>` fake, `listAllActivePanes` the
+   * wider read. Every call is recorded so "no release" is observable as an
+   * empty `applied` list (a release comment is written by `applyDemotion`).
    */
   function makeCrossDeps(
     fixture: CrossWorkspacePaneFixture,
@@ -1625,7 +1626,7 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
         },
       ],
       listActivePanes: fixture.listActivePanes,
-      listAllPanes: fixture.listAllPanes,
+      listAllActivePanes: fixture.listAllActivePanes,
       listOutboundDeps: async () => [],
       applyDemotion: async (id, status, stage, opts) => {
         applied.push({
@@ -1643,7 +1644,7 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
     return { deps, applied };
   }
 
-  it.fails(
+  it(
     'does not release a live dispatch claim whose pane is in the Dispatcher workspace (AC1, reported state)',
     async () => {
       // Pane `w6B:p3`, plugin workspace `w5M`: exactly the reported state.
@@ -1664,7 +1665,7 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
     },
   );
 
-  it.fails(
+  it(
     'production wiring writes no release update and no release comment for that item (AC1)',
     async () => {
       const fixture = makeCrossWorkspacePanes(REPRODUCED);
@@ -1726,6 +1727,14 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
       // No `wl update` (hold clear) and no `wl comment add` (release trail).
       expect(calls.filter((call) => call.args.includes('update'))).toEqual([]);
       expect(calls.filter((call) => call.args.includes('comment'))).toEqual([]);
+      // AC10: exactly ONE pane-list spawn per hydrate tick, and the demotion
+      // read passes NO `--workspace` filter — it is the workspace-agnostic
+      // machine-wide read (WL-0MWHBSWC20067SMY).
+      const paneListCalls = calls.filter(
+        (call) => call.args.includes('pane') && call.args.includes('list'),
+      );
+      expect(paneListCalls).toHaveLength(1);
+      expect(paneListCalls[0].args).toEqual(['pane', 'list']);
     },
   );
 
@@ -1751,7 +1760,33 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
     });
   });
 
-  it.fails(
+  it('prep-tier pane-only contract: intake/plan/audit hold no per-child lock, so pane evidence is the only busy signal (AC7)', async () => {
+    // Header contract (hydrator.ts, parent AC7): `/skill:intake`,
+    // `/skill:plan` and audit runs hold NO per-child claim lock, so for those
+    // tiers pane evidence is the ONLY busy signal — the claim-holder probe is
+    // the second signal only where a lock exists (the implement tier). A
+    // dispatcher-dispatched plan item whose pane lives in the Dispatcher
+    // workspace is therefore kept purely by pane evidence, even when the
+    // probe (wired with a no-lock-file verdict, as it would find for a
+    // prep-tier item) reports no holder.
+    const fixture = makeCrossWorkspacePanes(REPRODUCED, {
+      paneIn: 'dispatcher',
+      label: `Downtime triggered plan - ${REPRODUCED}`,
+    });
+    const { deps, applied } = makeCrossDeps(fixture, {
+      // The probe finds nothing for a prep item (no per-child lock): the
+      // pane above must be the whole decision.
+      hasLiveClaimHolder: async () =>
+        new Map<string, ClaimHolderVerdict>([[REPRODUCED, { held: false, reason: 'no-lock-file' }]]),
+    });
+
+    const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 0 });
+    expect(applied).toEqual([]);
+  });
+
+  it(
     'keeps the claim and reports ok:false when the wider pane read is unavailable (AC4)',
     async () => {
       const fixture = makeCrossWorkspacePanes(REPRODUCED);
@@ -1762,7 +1797,7 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
           typeof workspaceId === 'string' && workspaceId.length > 0
             ? fixture.listActivePanes(workspaceId)
             : null,
-        listAllPanes: async () => null,
+        listAllActivePanes: async () => null,
       });
 
       const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
@@ -1774,7 +1809,7 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
     },
   );
 
-  it.fails(
+  it(
     'keeps the claim when the wider pane read exceeds its step budget (AC4)',
     async () => {
       const fixture = makeCrossWorkspacePanes(REPRODUCED);
@@ -1786,7 +1821,7 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
           typeof workspaceId === 'string' && workspaceId.length > 0
             ? fixture.listActivePanes(workspaceId)
             : slowRead(),
-        listAllPanes: slowRead,
+        listAllActivePanes: slowRead,
         stepTimeoutMs: 10,
       });
 
@@ -1842,6 +1877,29 @@ describe('production active-detection spawns (pane list)', () => {
     );
     expect(paneCall).toBeDefined();
     expect(paneCall!.args).toEqual(['pane', 'list']);
+  });
+
+  it('runs exactly ONE machine-wide pane-list spawn per hydrate tick, with no --workspace filter (AC10)', async () => {
+    // WL-0MWHBSWC20067SMY parent AC10: the workspace-agnostic demotion read
+    // replaces the scoped read — still exactly ONE `herdr pane list` spawn
+    // per tick, and that single demotion read passes NO `--workspace` filter
+    // (a pane in the Dispatcher workspace must be evidence).
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    // A full tick against the recording router (empty in-progress list):
+    // in-progress list spawn + pane-list spawn. Count only pane-list
+    // spawns — the demotion read must be exactly one machine-wide
+    // `herdr pane list` with no `--workspace`.
+    const result = await runHydrationOnce(deps, 'wCurrent');
+
+    expect(result.ok).toBe(true);
+    const paneListCalls = calls.filter(
+      (call) => call.args.includes('pane') && call.args.includes('list'),
+    );
+    expect(paneListCalls).toHaveLength(1);
+    expect(paneListCalls[0].args).toEqual(['pane', 'list']);
   });
 });
 

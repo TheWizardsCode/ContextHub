@@ -2,7 +2,7 @@
  * packages/herdr/src/hydrator.ts — Herdr hydrator (WL-0MSOJLZD9004P8PI)
  *
  * Self-heals the work queue: periodically fetches every `in-progress` work
- * item, matches each against the panes of the current workspace (every
+ * item, matches each against the panes of every workspace on the host (every
  * dispatched item gets an agent pane whose TITLE carries its work-item ID
  * as a preserved suffix), and DEMOTES any item with no matching pane so it
  * re-enters the dispatchable pool instead of lingering in `in-progress`
@@ -25,9 +25,19 @@
  * `blocked` transition.
  *
  * Active detection (WL-0MV1BWETT005GSUJ): a single simple rule — if there
- * is a pane in the current workspace whose title contains the work-item ID
+ * is a pane whose title contains the work-item ID
  * (e.g. `Downtime triggered implement … - WL-0MSOJLZD9004P8PI`) the item is
  * actively being worked on; if there is no such pane, the item is not.
+ *
+ * Workspace-agnostic demotion evidence (WL-0MWHBSWC20067SMY, parent AC1):
+ * "is this item being worked on ANYWHERE?" reads panes from EVERY workspace
+ * (the optional `listAllActivePanes` seam — one machine-wide `herdr pane
+ * list` per tick, no `--workspace` filter — so a live dispatch pane in the
+ * Dispatcher workspace keeps the claim it proves). The selection-list
+ * marker asks the opposite question — "does it have a pane in MY
+ * workspace?" — and keeps its workspace-scoped read (`applyActivePaneMarkers`
+ * / `markItemsActiveByPane`, `collectPaneWorkItemIds(panes, workspaceId)`
+ * unchanged). The two filters never share one pane set.
  *
  * The producer rejected an earlier tab-label formulation as unreliable
  * (workspace review, 2026-10-16): "It should be simple. Look for a pane in
@@ -97,6 +107,13 @@
  * previous holder (`released because no pane and claim holder dead; previous
  * assignee: implement`). A comment failure is tolerated — the demotion stands
  * and the cycle continues.
+ *
+ * Prep-tier contract (WL-0MWHBSWC20067SMY, parent AC7): `/skill:intake`,
+ * `/skill:plan` and audit runs hold **no** per-child claim lock, so for
+ * those tiers pane evidence is the ONLY busy signal; the claim-holder probe
+ * is the second signal only where a lock exists (the implement tier).
+ * Ambiguity keeps the claim: a null/throwing/timed-out wider pane read
+ * aborts the cycle (fail-open) — never a release on uncertain evidence.
  *
  * Non-goals (deliberate): no wall-clock TTL, no heartbeat, no new protocol, no
  * change to dispatch, the worklist selection marker, the drive orchestrator or
@@ -308,6 +325,20 @@ export interface HydratorDeps {
    * panes outside it (WL-0MUY1CYV6008BQWX).
    */
   listActivePanes: (workspaceId?: string) => Promise<HydratorPane[] | null>;
+  /**
+   * Optional workspace-agnostic pane read (WL-0MWHBSWC20067SMY): `herdr pane
+   * list` with NO `--workspace` scope — the panes of EVERY workspace on the
+   * host, or null when unavailable.
+   *
+   * The demotion evidence — "is this item being worked on anywhere?" — must
+   * not be scoped to the plugin's own workspace: a live dispatch pane in the
+   * Dispatcher workspace keeps the claim it proves. Mirrors the
+   * `hasLiveClaimHolder` optional-seam pattern: optional so existing test
+   * fakes keep compiling byte-for-byte; when the seam is absent
+   * `runHydrationOnce` falls back to the workspace-scoped {@link
+   * listActivePanes} read exactly as today.
+   */
+  listAllActivePanes?: () => Promise<HydratorPane[] | null>;
   /** `wl dep list <id>` → outbound targets, or null when unavailable. */
   listOutboundDeps: (itemId: string) => Promise<HydratorDepTarget[] | null>;
   /**
@@ -779,7 +810,12 @@ export async function runHydrationOnce(
     stepTimeoutMs,
     now,
     log,
-    () => deps.listActivePanes(workspaceId),
+    // WL-0MWHBSWC20067SMY: the demotion evidence is workspace-agnostic — the
+    // wider seam (`listAllActivePanes`, machine-wide `herdr pane list`, no
+    // `--workspace`) replaces the scoped read for demotion, still exactly ONE
+    // pane spawn per tick (AC10). When the seam is absent (legacy fakes) the
+    // scoped read is used byte-for-byte.
+    () => (deps.listAllActivePanes ? deps.listAllActivePanes() : deps.listActivePanes(workspaceId)),
   );
   if (tabStep.status === 'timeout') {
     return {
@@ -803,7 +839,13 @@ export async function runHydrationOnce(
 
   // F4 (WL-0MVJV2ORY002MNFF): resolve every pane match once — the loop used
   // to recompute `collectPaneWorkItemIds` per item (O(panes) per item).
-  const paneIds = collectPaneWorkItemIds(panes, workspaceId);
+  // Workspace-agnostic demotion: with the wider seam the machine-wide pane
+  // set needs NO workspace filter (a pane in the Dispatcher workspace is
+  // evidence); with the legacy scoped read keep today's workspace filter
+  // byte-for-byte (WL-0MWHBSWC20067SMY).
+  const paneIds = deps.listAllActivePanes
+    ? collectPaneWorkItemIds(panes)
+    : collectPaneWorkItemIds(panes, workspaceId);
 
   // F4 batched dependency read: when the seam exists, ONE `dep-list` step
   // reads every candidate's outbound edges (production wiring: in-process,
@@ -1155,6 +1197,28 @@ export function createProductionHydratorDeps(
       // title), which is the hydrator's active signal. Tolerates the
       // `{ result: { panes: [...] } }` envelope and `pane_id`/`paneId` key
       // variants. Fail-open: unparseable output → null (no demotion).
+      const parsed = parseMachinePaneListOutput(stdout);
+      if (parsed === null) return null;
+      return parsed.map((pane) => ({
+        pane_id: pane.paneId,
+        label: pane.label ?? '',
+        workspace_id: pane.workspaceId,
+      }));
+    },
+
+    // WL-0MWHBSWC20067SMY: workspace-agnostic demotion evidence — `herdr
+    // pane list` with NO `--workspace` scope (one machine-wide pane spawn per
+    // tick, AC10): a live dispatch pane in the Dispatcher workspace keeps the
+    // claim it proves. Same shared machine parser as the scoped read — no
+    // second parser. The selection-list marker path keeps using {@link
+    // listActivePanes} (workspace-scoped) untouched.
+    listAllActivePanes: async () => {
+      const args = ['pane', 'list'];
+      const { stdout } = await getExecFileAsync()(
+        herdrBin(),
+        args,
+        hydratorExecOptions(8 * 1024 * 1024),
+      );
       const parsed = parseMachinePaneListOutput(stdout);
       if (parsed === null) return null;
       return parsed.map((pane) => ({

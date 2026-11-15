@@ -126,7 +126,7 @@ export function makeWorstCaseItems(count = 25): HydratorItem[] {
 // hydrator must distinguish:
 //   • `listActivePanes(workspaceId)` — `herdr pane list --workspace <id>`
 //     (the workspace-SCOPED display read, unchanged by the fix),
-//   • `listAllPanes()` / `listActivePanes()` (no workspace) — the
+//   • `listAllActivePanes()` / `listActivePanes()` (no workspace) — the
 //     workspace-AGNOSTIC demotion-evidence read the fix adds (parent AC1).
 
 /** Plugin (`HERDR_WORKSPACE_ID`) workspace of the reported release. */
@@ -160,7 +160,7 @@ export interface CrossWorkspacePaneFixture {
    */
   listActivePanes: HydratorDeps['listActivePanes'];
   /** Workspace-agnostic pane read, as its own seam. */
-  listAllPanes: () => Promise<HydratorPane[]>;
+  listAllActivePanes: () => Promise<HydratorPane[]>;
 }
 
 /**
@@ -207,6 +207,6 @@ export function makeCrossWorkspacePanes(
       typeof workspaceId === 'string' && workspaceId.length > 0
         ? panes.filter((pane) => pane.workspace_id === workspaceId)
         : [...panes],
-    listAllPanes: async () => [...panes],
+    listAllActivePanes: async () => [...panes],
   };
 }
