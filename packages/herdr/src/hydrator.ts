@@ -14,6 +14,8 @@
  *  - stage `in_review`                    → `status=completed`, stage `in_review`
  *  - an active outbound dependency blocker→ `status=blocked` (stage made compatible)
  *  - a live claim holder (lock held)      → untouched (pane-less driven session)
+ *  - a claim inside the grace window      → untouched (spawn→pane-title gap,
+ *                                            parent WL-0MWH56SWX004HSKQ AC5)
  *  - otherwise                            → `status=open`, stage `intake_complete`
  *
  * The two busy signals are independent and both are checked: the pane rule is
@@ -191,6 +193,52 @@ export const HYDRATOR_STEP_TIMEOUT_MS = 5_000;
 export const HYDRATOR_EXEC_TIMEOUT_MS = 10_000;
 
 /**
+ * Claim grace window (ms) — bounded spawn→pane-title gap budget
+ * (parent WL-0MWH56SWX004HSKQ AC5, impl WL-0MWHBSX81003M0EM).
+ *
+ * A dispatched item's pane title is set at spawn time, but a hydrator tick
+ * can land in the gap between the dispatch claim and the pane title becoming
+ * readable. An item claimed within this window is NEVER released even with
+ * NO pane visible yet; past the window, today's rule applies. The claim age
+ * rides the EXISTING recency signals (`wl list --json` returns `updatedAt`/
+ * `activityAt`; the claim write `wl update --assignee` moves `updatedAt`);
+ * claim age = `now − max(updatedAt, activityAt)` (max = fail-open toward
+ * "recently active"). Absent/unparseable recency degrades toward keeping the
+ * claim (documented fail-open, pinned by test). The grace branch behaves
+ * like `held` (WL-0MVWDB3IG004NRIU): evaluated AFTER `in_review → completed`
+ * and `blocked`, suppressing ONLY the release to `open`.
+ *
+ * Proposed default 120 s (parent open question); overridable via
+ * `HydratorDeps.claimGraceMs` / the `hydratorClaimGraceMs` plugin settings
+ * key. Kept as ONE named constant so a confirmed default is a one-line
+ * change.
+ */
+export const HYDRATOR_CLAIM_GRACE_MS = 120_000;
+
+/** Floor for the claim grace window (ms). 0 disables the window (today's
+ *  rule always applies) — the operator's explicit "no grace" choice. */
+export const HYDRATOR_CLAIM_GRACE_FLOOR_MS = 0;
+/** Ceiling for the claim grace window (ms). 10 min is far above any
+ *  realistic spawn→pane-title gap, so a runaway value can never pin items
+ *  in `in-progress` for hours. */
+export const HYDRATOR_CLAIM_GRACE_MAX_MS = 600_000;
+
+/**
+ * Clamp the claim grace window (`hydratorClaimGraceMs`) like the
+ * neighbouring window settings (`clampDowntimeMarkerStaleWindowMs`):
+ * non-finite/negative values fall back to the default, everything else is
+ * rounded and clamped to [HYDRATOR_CLAIM_GRACE_FLOOR_MS,
+ * HYDRATOR_CLAIM_GRACE_MAX_MS].
+ */
+export function clampHydratorClaimGraceMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return HYDRATOR_CLAIM_GRACE_MS;
+  return Math.min(
+    Math.max(Math.round(value), HYDRATOR_CLAIM_GRACE_FLOOR_MS),
+    HYDRATOR_CLAIM_GRACE_MAX_MS,
+  );
+}
+
+/**
  * Hard-kill bound for the best-effort release audit comment spawn (ms).
  *
  * The comment is a tolerated side effect of a demotion that has ALREADY been
@@ -248,6 +296,15 @@ export interface HydratorItem {
    * holder in the audit comment (WL-0MVWDB7F2003SORI).
    */
   assignee?: string;
+  /**
+   * Recency signals propagated from `wl list --json` (ISO 8601 strings) — no
+   * new timestamp field (parent WL-0MWH56SWX004HSKQ AC5). The claim age is
+   * `now − max(updatedAt, activityAt)`; a missing/invalid value degrades to
+   * the documented fail-open direction (treated as a fresh claim still
+   * inside the grace window, kept).
+   */
+  updatedAt?: string;
+  activityAt?: string;
 }
 
 /**
@@ -394,6 +451,14 @@ export interface HydratorDeps {
   stepTimeoutMs?: number;
   /** Max candidates per tick; defaults to `HYDRATOR_MAX_ITEMS_PER_TICK`. */
   maxItemsPerTick?: number;
+  /**
+   * Claim grace window override (ms); defaults to `HYDRATOR_CLAIM_GRACE_MS`
+   * (parent AC5). An item claimed within this window is never released even
+   * with no pane visible yet. Wired from the `hydratorClaimGraceMs` plugin
+   * settings key (worklist.ts) and overridable via `createHydratorRunner`
+   * opts.
+   */
+  claimGraceMs?: number;
 }
 
 /** Stable labels for the bounded hydrate steps (logs / diagnostics). */
@@ -644,24 +709,63 @@ export function buildReleaseComment(
 }
 
 /**
+ * Parse an ISO 8601 timestamp to epoch ms; `null` when absent/unparseable.
+ * A timestamp-less item has NO usable recency data (legacy payload).
+ */
+function parseTimestampMs(iso: string | undefined): number | null {
+  if (typeof iso !== 'string' || iso.length === 0) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * Claim age (ms) as `now − max(updatedAt, activityAt)` (parent AC5). The
+ * max fails open toward "recently active": a single readable timestamp
+ * dominates; when BOTH `updatedAt` and `activityAt` are absent/unparseable
+ * the age is unknowable and `null` is returned — the caller then treats the
+ * claim as fresh (inside the grace window), the documented fail-open
+ * direction ("keep the claim on ambiguity": a stuck claim is recoverable, a
+ * released claim under a live agent is not).
+ */
+function claimAgeMs(item: HydratorItem, nowMs: number): number | null {
+  const updated = parseTimestampMs(item.updatedAt);
+  const activity = parseTimestampMs(item.activityAt);
+  const known = [updated, activity].filter((t): t is number => t !== null);
+  if (known.length === 0) return null;
+  return Math.max(0, nowMs - Math.max(...known));
+}
+
+/**
  * Pure demotion decision. Returns `null` when the item must be left alone
  * (not `in-progress`, a matching ACTIVE pane exists — F1 — or a live claim
- * holder keeps the item busy).
+ * holder / in-window claim keeps the item busy).
  *
  * The `hasActivePane` context key is retained for source compatibility; its
  * value now comes from the pane-title check `isActivePaneMatch`.
  *
- * Branch precedence (WL-0MVWDB3IG004NRIU, AC3 of the parent): `held` is
- * evaluated AFTER the `in_review` and `blocked` branches, so a held claim
- * only suppresses the final release-to-`open` branch and never overrides the
- * audit-tier `in_review → completed` or the dependency `blocked` transition:
- * `not in-progress → null` · `hasActivePane → null` · `stage in_review →
- * completed` · `blocked → blocked` · `held → null` · `else → open/
- * intake_complete`.
+ * Branch precedence (WL-0MVWDB3IG004NRIU, AC3; parent WL-0MWH56SWX004HSKQ
+ * AC5): `held` AND the claim grace window are evaluated AFTER the
+ * `in_review` and `blocked` branches, so a held/in-window claim only
+ * suppresses the final release-to-`open` branch and never overrides the
+ * audit-tier `in_review → completed` or the dependency `blocked`
+ * transition: `not in-progress → null` · `hasActivePane → null` · `stage
+ * in_review → completed` · `blocked → blocked` · `held → null` ·
+ * `withinGraceWindow → null` · `else → open/intake_complete`.
  */
 export function decideDemotion(
   item: HydratorItem,
-  ctx: { hasActivePane: boolean; blocked: boolean; held: boolean },
+  ctx: {
+    hasActivePane: boolean;
+    blocked: boolean;
+    held: boolean;
+    /**
+     * Claim is still inside the configured grace window (or its age is
+     * unknowable — fail-open toward keeping, parent AC5). Optional so the
+     * pre-existing `decideDemotion` tests keep compiling byte-for-byte; the
+     * orchestrator always supplies it.
+     */
+    withinGraceWindow?: boolean;
+  },
 ): DemotionDecision | null {
   const status = (item.status ?? '').toLowerCase();
   if (status !== 'in-progress' && status !== 'in_progress') return null;
@@ -675,6 +779,11 @@ export function decideDemotion(
     return { status: 'blocked', stage: compatibleStage(stage, 'blocked') };
   }
   if (ctx.held) return null;
+  // Parent AC5 grace window: a claim inside the window is kept even with no
+  // pane visible yet (a tick in the spawn→pane-title gap must not release a
+  // live claim). Same precedence slot as `held` above — it suppresses ONLY
+  // the release to `open`.
+  if (ctx.withinGraceWindow) return null;
   // AC3 else-branch as written: release to `open` at `intake_complete`
   // (per WL-0MTF5WO2Q008B8US AC3; the stage is valid for `open` in
   // ALLOWED_STAGES_BY_STATUS / config.defaults.yaml).
@@ -752,11 +861,23 @@ async function runStep<T>(
  */
 export function createHydratorRunner(
   deps: HydratorDeps,
-  opts: { workspaceId?: string; isVisible: () => Promise<boolean> },
+  opts: {
+    workspaceId?: string;
+    isVisible: () => Promise<boolean>;
+    /** Claim grace window override (ms); defaults to HYDRATOR_CLAIM_GRACE_MS. */
+    claimGraceMs?: number;
+  },
 ): () => Promise<HydrationResult | null> {
+  // `claimGraceMs` rides the deps (like `now`/`stepTimeoutMs`/`maxItemsPerTick`),
+  // so the same override is visible to `runHydrationOnce` without a new
+  // parameter (parent AC5). An absent option leaves the deps untouched.
+  const runnerDeps =
+    opts.claimGraceMs !== undefined
+      ? { ...deps, claimGraceMs: opts.claimGraceMs }
+      : deps;
   return async () => {
     if (!(await opts.isVisible())) return null;
-    return runHydrationOnce(deps, opts.workspaceId);
+    return runHydrationOnce(runnerDeps, opts.workspaceId);
   };
 }
 
@@ -776,6 +897,8 @@ export async function runHydrationOnce(
   const now = deps.now ?? (() => Date.now());
   const stepTimeoutMs = deps.stepTimeoutMs ?? HYDRATOR_STEP_TIMEOUT_MS;
   const maxItemsPerTick = deps.maxItemsPerTick ?? HYDRATOR_MAX_ITEMS_PER_TICK;
+
+  const claimGraceMs = deps.claimGraceMs ?? HYDRATOR_CLAIM_GRACE_MS;
 
   const inProgressStep = await runStep(
     'in-progress-list',
@@ -986,7 +1109,20 @@ export async function runHydrationOnce(
       held = verdict === undefined || verdict.held;
     }
 
-    const decision = decideDemotion(item, { hasActivePane: hasActivePane, blocked, held });
+    // Parent AC5: claim age = now − max(updatedAt, activityAt); an item
+    // claimed inside the configured window is kept even with no pane visible
+    // yet. `claimAgeMs` returns null for absent/unparseable recency — treated
+    // as a fresh claim inside the window (documented fail-open, pinned by
+    // test).
+    const claimAge = claimAgeMs(item, now());
+    const withinGraceWindow = claimAge === null || claimAge < claimGraceMs;
+
+    const decision = decideDemotion(item, {
+      hasActivePane,
+      blocked,
+      held,
+      withinGraceWindow,
+    });
     if (decision === null) {
       skipped += 1;
       if (held) {
@@ -1031,8 +1167,14 @@ export async function runHydrationOnce(
     }
     if (applyStep.status === 'ok' && applyStep.value === true) {
       demoted += 1;
+      // Parent AC5: a release allowed past the window names the claim age and
+      // the window on the log line, so the grace decision is operator-visible.
+      const graceNote =
+        claimAge !== null
+          ? ` claim age ${claimAge}ms past grace window ${claimGraceMs}ms`
+          : '';
       log(
-        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (${deadClaimHolder ? 'no pane, claim holder dead' : 'no matching pane'})`,
+        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (${deadClaimHolder ? 'no pane, claim holder dead' : 'no matching pane'})${graceNote}`,
       );
     } else {
       skipped += 1;
@@ -1057,6 +1199,12 @@ function normaliseItem(raw: unknown): HydratorItem | null {
     status: typeof o.status === 'string' ? o.status : undefined,
     stage: typeof o.stage === 'string' ? o.stage : undefined,
     assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
+    // Parent AC5: recency rides the EXISTING `wl list --json` fields (ISO
+    // 8601 strings) — no new timestamp field. A missing/non-string value
+    // stays undefined and degrades to the documented fail-open direction
+    // (kept as a fresh claim inside the grace window).
+    updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : undefined,
+    activityAt: typeof o.activityAt === 'string' ? o.activityAt : undefined,
   };
 }
 

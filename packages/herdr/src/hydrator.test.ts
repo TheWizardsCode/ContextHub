@@ -18,6 +18,7 @@ import {
 } from './hydrator.fixtures.js';
 import {
   ALLOWED_STAGES_BY_STATUS,
+  HYDRATOR_CLAIM_GRACE_MS,
   applyActivePaneMarkers,
   buildReleaseComment,
   collectPaneWorkItemIds,
@@ -39,7 +40,6 @@ import {
   type HydratorItem,
   type HydratorPane,
 } from './hydrator.js';
-import * as hydratorModule from './hydrator.js';
 import type { ClaimHolderVerdict } from './claim-lock.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -103,6 +103,28 @@ function makeDeps(overrides: Partial<ContractDeps> = {}): {
 }
 
 const WL = 'WL-0MSOJLZD9004P8PI';
+
+// Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): an item claimed
+// within `HYDRATOR_CLAIM_GRACE_MS` is never released even with no pane
+// visible yet; past the window today's rule applies. A LEGACY payload with
+// no `updatedAt`/`activityAt` fails open toward KEEPING the claim (treated
+// as a fresh claim inside the window). Fixtures that exercise the
+// past-window release path therefore carry an explicit OLD timestamp (far
+// outside any clock used in this file) so "today's rule" applies
+// deterministically.
+const PAST_WINDOW_ISO = '2020-01-01T00:00:00.000Z';
+
+/** Build an in-progress item already past the claim grace window. */
+const staleItem = (
+  overrides: Partial<HydratorItem> = {},
+): HydratorItem => ({
+  id: WL,
+  status: 'in-progress',
+  stage: 'plan_complete',
+  updatedAt: PAST_WINDOW_ISO,
+  activityAt: PAST_WINDOW_ISO,
+  ...overrides,
+});
 
 // ── ID extraction ─────────────────────────────────────────────────────
 
@@ -567,7 +589,7 @@ describe('runHydrationOnce', () => {
 
   it('demotes a pane-less plain item to open at intake_complete (AC3 else-branch)', async () => {
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
     });
     await runHydrationOnce(deps);
@@ -647,7 +669,10 @@ describe('runHydrationOnce', () => {
 
   it('counts a failed demotion as skipped, not demoted', async () => {
     const { deps } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      // Past the grace window so the release is attempted; the failing
+      // `applyDemotion` is what must be counted as skipped (parent AC5 keeps
+      // only in-window claims, which never reach the demotion seam).
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       applyDemotion: async () => false,
     });
@@ -657,7 +682,7 @@ describe('runHydrationOnce', () => {
 
   it('treats a throwing dependency lookup as not-blocked and still releases the item', async () => {
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       listOutboundDeps: async () => {
         throw new Error('dep lookup failed');
@@ -673,7 +698,7 @@ describe('runHydrationOnce', () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
         { id: WL, status: 'in-progress', stage: 'in_review' },
-        { id: other, status: 'in-progress', stage: 'plan_complete' },
+        { id: other, status: 'in-progress', stage: 'plan_complete', updatedAt: PAST_WINDOW_ISO, activityAt: PAST_WINDOW_ISO },
       ],
       listActivePanes: async () => [],
     });
@@ -731,7 +756,7 @@ describe('live claim holder probe (orchestration)', () => {
   it('releases a pane-less item whose recorded holder is dead, logging the dead-holder signal', async () => {
     const logs: string[] = [];
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       listOutboundDeps: async () => [],
       hasLiveClaimHolder: async () =>
@@ -998,17 +1023,6 @@ describe('live claim holder probe (orchestration)', () => {
 // `it` bodies (boundary-past release, precedence) are green both before and
 // after the fix — they pin invariants that must never relax.
 
-/**
- * The grace-window surface the impl child WL-0MWHBSX81003M0EM adds to
- * `hydrator.ts`. Reached through a namespace cast so this file compiles (and
- * the suite stays green) before the export exists — the same pattern as
- * `downtime-worker.clamps.test.ts`. Once the constant lands, flip the
- * `it.fails` bodies to `it` and import the real symbol instead of this cast.
- */
-const futureHydrator = hydratorModule as unknown as {
-  HYDRATOR_CLAIM_GRACE_MS?: number;
-};
-
 /** Documented default for `HYDRATOR_CLAIM_GRACE_MS` (parent open question). */
 const GRACE_DEFAULT_MS = 120_000;
 
@@ -1070,7 +1084,7 @@ describe('claim grace window (AC5)', () => {
     activityAt: isoBefore(5_000),
   });
 
-  it.fails(
+  it(
     'keeps an item claimed 5 s ago with no visible pane: inside the grace window (injected clock, no real timers)',
     async () => {
       const { deps, applied } = makeGraceDeps({
@@ -1090,9 +1104,9 @@ describe('claim grace window (AC5)', () => {
   );
 
   it('releases the same item one millisecond past the grace window exactly as today', async () => {
-    // Boundary computation tracks the production constant once it lands;
-    // until then the documented default drives the fixture.
-    const graceMs = futureHydrator.HYDRATOR_CLAIM_GRACE_MS ?? GRACE_DEFAULT_MS;
+    // Boundary computation reads the production constant directly (the fix
+    // has landed): the documented default drives the fixture.
+    const graceMs = HYDRATOR_CLAIM_GRACE_MS;
     const { deps, applied } = makeGraceDeps({
       now: () => NOW_MS,
       listInProgressItems: async () => [
@@ -1154,7 +1168,7 @@ describe('claim grace window (AC5)', () => {
     expect(applied[0]).toMatchObject({ id: WL, status: 'blocked', stage: 'plan_complete' });
   });
 
-  it.fails(
+  it(
     'keeps the claim when recency is absent OR unparseable (legacy payload, fail-open: treated as a fresh claim inside the window)',
     async () => {
       const other = 'AH-0MTVYBL2L0085G6G';
@@ -1185,10 +1199,10 @@ describe('claim grace window (AC5)', () => {
     },
   );
 
-  it.fails(
+  it(
     'reads the default window from the single exported constant HYDRATOR_CLAIM_GRACE_MS (documented default 120 000 ms)',
     () => {
-      expect(futureHydrator.HYDRATOR_CLAIM_GRACE_MS).toBe(GRACE_DEFAULT_MS);
+      expect(HYDRATOR_CLAIM_GRACE_MS).toBe(GRACE_DEFAULT_MS);
     },
   );
 });
@@ -1339,6 +1353,8 @@ describe('release clears the scheduling hold', () => {
                 status: 'in-progress',
                 stage: 'plan_complete',
                 assignee: 'implement',
+                updatedAt: PAST_WINDOW_ISO,
+                activityAt: PAST_WINDOW_ISO,
               },
             ],
           }),
@@ -1409,7 +1425,7 @@ describe('release clears the scheduling hold', () => {
     const logs: string[] = [];
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'implement' },
+        { ...staleItem(), assignee: 'implement' },
       ],
       listActivePanes: async () => [],
       listOutboundDeps: async () => [],
@@ -1421,16 +1437,25 @@ describe('release clears the scheduling hold', () => {
     expect(applied).toEqual([
       { id: WL, status: 'open', stage: 'intake_complete' },
     ]);
-    expect(logs).toContain(
-      `[hydrator] released ${WL}: in-progress/plan_complete → open/intake_complete (no matching pane)`,
-    );
+    // The release log line keeps the deciding signal AND names the claim age
+    // and window when a release is allowed past the grace window (parent
+    // WL-0MWH56SWX004HSKQ AC5). The exact claim-age number depends on the
+    // wall clock, so assert both phrases on the same line.
+    expect(
+      logs.some(
+        (line) =>
+          line.includes(`[hydrator] released ${WL}: in-progress/plan_complete → open/intake_complete (no matching pane)`) &&
+          line.includes('claim age') &&
+          line.includes('past grace window'),
+      ),
+    ).toBe(true);
   });
 
   it('passes the observed holder and the deciding signal to the demotion seam', async () => {
     const seen: Array<{ id: string; opts?: DemotionOptions }> = [];
     const { deps } = makeDeps({
       listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'implement' },
+        { ...staleItem(), assignee: 'implement' },
       ],
       listActivePanes: async () => [],
       listOutboundDeps: async () => [],
@@ -1471,7 +1496,7 @@ describe('createHydratorRunner', () => {
 
   it('runs the hydration cycle when visible', async () => {
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
     });
     const run = createHydratorRunner(deps, { isVisible: async () => true });
@@ -1483,7 +1508,7 @@ describe('createHydratorRunner', () => {
   it('runs immediately on the hidden→visible focus-resume (no interval wait)', async () => {
     let visible = false;
     const listInProgressItems = vi.fn(async () => [
-      { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      staleItem(),
     ]);
     const { deps, applied } = makeDeps({
       listInProgressItems,
@@ -1626,9 +1651,7 @@ describe('batched dependency reads (F4)', () => {
 
   it('releases an item whose batched dep entry is missing (fail-open)', async () => {
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
-      ],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       listOutboundDepsBatch: async () => new Map(), // no entry for WL
     });
@@ -1662,9 +1685,7 @@ describe('batched dependency reads (F4)', () => {
   it('falls back to the per-item dep seam when the batched read is unavailable', async () => {
     const perItem = vi.fn(async () => []) as unknown as HydratorDeps['listOutboundDeps'];
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
-      ],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       listOutboundDeps: perItem,
       listOutboundDepsBatch: async () => undefined,
@@ -1748,7 +1769,7 @@ describe('pane-title matching (verification)', () => {
   it('demotes when no pane title carries the ID', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+        staleItem(),
       ],
       listActivePanes: async () => [
         { pane_id: 'wC:p1', label: 'A general shell session', workspace_id: 'wCurrent' },
@@ -1767,7 +1788,7 @@ describe('workspace scoping at orchestration level', () => {
   it('demotes when the only matching pane is in a different workspace', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+        staleItem(),
       ],
       listActivePanes: async () => [
         { pane_id: 'wO:p1', label: `Downtime triggered - ${WL}`, workspace_id: 'wOther' },
@@ -1851,6 +1872,11 @@ describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
           status: 'in-progress',
           stage: 'plan_complete',
           assignee: 'dispatcher',
+          // Parent AC5: recency past the claim grace window so the AC3
+          // pane-less release path exercises "today's rule" (a
+          // timestamp-less legacy item would be kept as a fresh claim).
+          updatedAt: PAST_WINDOW_ISO,
+          activityAt: PAST_WINDOW_ISO,
         },
       ],
       listActivePanes: fixture.listActivePanes,
@@ -2136,9 +2162,7 @@ describe('closed pane clears the in-progress marker (cadence re-evaluation)', ()
     let visiblePane: string | undefined = `Downtime triggered - ${WL}`;
     const applied: AppliedDemotion[] = [];
     const { deps } = makeDeps({
-      listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
-      ],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () =>
         visiblePane
           ? [{ pane_id: 'wC:p1', label: visiblePane, workspace_id: 'wCurrent' }]
@@ -2443,7 +2467,16 @@ describe('per-step timing logs (AC3)', () => {
       now: () => clock,
       listInProgressItems: async () => {
         clock += 7;
-        return [{ id: WL, status: 'in-progress', stage: 'plan_complete' }];
+        // Parent AC5: recency past the claim grace window under the injected
+        // clock so the item reaches the demotion-apply step (a fresh claim
+        // would be kept and the step would never log).
+        return [{
+          id: WL,
+          status: 'in-progress',
+          stage: 'plan_complete',
+          updatedAt: new Date(clock - 200_000).toISOString(),
+          activityAt: new Date(clock - 200_000).toISOString(),
+        }];
       },
       listActivePanes: async () => {
         clock += 3;

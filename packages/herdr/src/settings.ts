@@ -74,6 +74,13 @@ import {
   clampDowntimeCpuGatePercent,
   DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
 } from './host-cpu.js';
+// Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): the default constant
+// and clamp live in hydrator.ts next to the other HYDRATOR_* budgets, so a
+// confirmed default is a one-line change there.
+import {
+  clampHydratorClaimGraceMs,
+  HYDRATOR_CLAIM_GRACE_MS,
+} from './hydrator.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -296,6 +303,14 @@ export interface PluginSettings {
    * never dispatch into an unexpected workspace.
    */
   downtimeWorklogRoots: string[];
+  /**
+   * Claim grace window (ms) — bounded spawn→pane-title gap budget
+   * (parent WL-0MWH56SWX004HSKQ AC5): an item claimed within this window is
+   * never released by the hydrator even when no pane is visible yet; past
+   * the window today's rule applies. Default 120 s;
+   * clamped to [0, 600000] — `0` disables the window (today's rule always).
+   */
+  hydratorClaimGraceMs: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -342,6 +357,10 @@ export const defaultSettings: PluginSettings = {
   // offer-only + own-backlog candidate universe is unchanged. Never aliased
   // out of `defaultSettings` (see `freshDefaults`).
   downtimeWorklogRoots: [],
+  // Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): counted from the
+  // single exported constant in hydrator.ts so a confirmed default is a
+  // one-line change.
+  hydratorClaimGraceMs: HYDRATOR_CLAIM_GRACE_MS,
 };
 
 /** Minimum allowed maxSyncStalenessMs (1 s). */
@@ -559,6 +578,13 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeWorklogRoots: resolveDowntimeWorklogRoots(
         clampDowntimeWorklogRoots(parsed.downtimeWorklogRoots),
       ),
+      // Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): number-typed
+      // read with a clamp like the neighbouring settings (e.g.
+      // `downtimeMarkerStaleWindowMs`); a non-number value falls back to the
+      // default.
+      hydratorClaimGraceMs: typeof parsed.hydratorClaimGraceMs === 'number'
+        ? clampHydratorClaimGraceMs(parsed.hydratorClaimGraceMs)
+        : defaultSettings.hydratorClaimGraceMs,
       // NOTE (WL-0MU2EP6JL006A1U3): `downtimeMaxRunningPanes` and its legacy
       // alias `downtimeMaxConcurrentDispatches` are deliberately NOT read.
       // Dispatched panes stay open until an operator closes them, so a

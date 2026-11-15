@@ -30,6 +30,12 @@ import {
 } from './settings.js';
 import * as settingsModule from './settings.js';
 import {
+  clampHydratorClaimGraceMs,
+  HYDRATOR_CLAIM_GRACE_MS,
+  HYDRATOR_CLAIM_GRACE_FLOOR_MS,
+  HYDRATOR_CLAIM_GRACE_MAX_MS,
+} from './hydrator.js';
+import {
   DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
   DEFAULT_DOWNTIME_OFFER_ONLY,
   DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
@@ -140,6 +146,35 @@ describe('downtimeNoCandidateCooldownMs', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeNoCandidateCooldownMs: 'soon' }), 'utf-8');
     expect(loadSettings(path).downtimeNoCandidateCooldownMs).toBe(3_600_000);
+  });
+});
+
+describe('hydratorClaimGraceMs (parent WL-0MWH56SWX004HSKQ AC5)', () => {
+  it('defaults to the single exported constant (120_000 ms)', () => {
+    expect(defaultSettings.hydratorClaimGraceMs).toBe(HYDRATOR_CLAIM_GRACE_MS);
+    expect(HYDRATOR_CLAIM_GRACE_MS).toBe(120_000);
+  });
+
+  it('clamps into the [0, 600_000] range like the neighbouring windows', () => {
+    // Below the 0 floor → clamped up to 0 (window disabled — "today's rule").
+    expect(clampHydratorClaimGraceMs(-1)).toBe(HYDRATOR_CLAIM_GRACE_MS);
+    expect(HYDRATOR_CLAIM_GRACE_FLOOR_MS).toBe(0);
+    expect(clampHydratorClaimGraceMs(0)).toBe(0);
+    // Above the 10 min ceiling → clamped down.
+    expect(HYDRATOR_CLAIM_GRACE_MAX_MS).toBe(600_000);
+    expect(clampHydratorClaimGraceMs(3_600_000)).toBe(600_000);
+    // In-range preserved.
+    expect(clampHydratorClaimGraceMs(90_000)).toBe(90_000);
+    // Non-finite → default.
+    expect(clampHydratorClaimGraceMs(NaN)).toBe(HYDRATOR_CLAIM_GRACE_MS);
+  });
+
+  it('loads a persisted value and falls back to the default for non-numbers', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, hydratorClaimGraceMs: 90_000 });
+    expect(loadSettings(path).hydratorClaimGraceMs).toBe(90_000);
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, hydratorClaimGraceMs: 'soon' }), 'utf-8');
+    expect(loadSettings(path).hydratorClaimGraceMs).toBe(HYDRATOR_CLAIM_GRACE_MS);
   });
 });
 
