@@ -304,6 +304,95 @@ describe('pane-based active marker (selection list)', () => {
     await applyActivePaneMarkers(nulled, async () => null, 'wCurrent');
     expect(nulled[0].status).toBe('open');
   });
+
+  // ── Display vs demotion pane scope (WL-0MWHBSRS4001TFNJ, parent AC2) ──
+  //
+  // The demotion fix (parent AC1, implementation child WL-0MWHBSWC20067SMY)
+  // widens the pane evidence behind "is this item being worked on?" to every
+  // workspace. The selection-list marker must NOT follow: "does this item
+  // have a pane in MY workspace?" is a different question, and widening the
+  // display path would light rows for panes the producer cannot see in this
+  // workspace (WL-0MV1BWETT005GSUJ intent preserved).
+  //
+  // Contract: display = workspace-scoped, demotion = workspace-agnostic.
+
+  it('does not stamp the green circle for an item whose only matching pane is in another workspace (parent AC2)', async () => {
+    const fixture = makeCrossWorkspacePanes(WL, { paneIn: 'dispatcher' });
+    const items: Array<{
+      id: string;
+      status?: string;
+      stage?: string;
+      agentState?: string;
+    }> = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+
+    // The plugin's own (item-less) pane is visible; the item's dispatch pane
+    // lives in the Dispatcher workspace, so neither the in-progress status
+    // marker nor the green circle may be stamped.
+    await applyActivePaneMarkers(items, fixture.listActivePanes, fixture.pluginWorkspaceId);
+
+    expect(items[0].status).toBe('open');
+    expect(items[0].agentState).toBeUndefined();
+
+    // Same fixture, pane placed in the plugin's own workspace: the marker
+    // DOES light up. The discriminator is the workspace, not the pane count.
+    const inPlugin = makeCrossWorkspacePanes(WL, { paneIn: 'plugin' });
+    const marked = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    await applyActivePaneMarkers(marked, inPlugin.listActivePanes, inPlugin.pluginWorkspaceId);
+    expect(marked[0].status).toBe('in-progress');
+  });
+
+  it.fails(
+    'display = workspace-scoped, demotion = workspace-agnostic: an out-of-workspace pane never lights the marker but still suppresses release (parent AC2)',
+    async () => {
+      // ONE pane set, two questions. `w5M:p1` is the plugin's own worklist
+      // pane; `w6B:p3` is the item's dispatch pane in the Dispatcher
+      // workspace (the reported 2026-11-15 release).
+      const fixture = makeCrossWorkspacePanes(WL, { paneIn: 'dispatcher' });
+
+      // DISPLAY — workspace-scoped: the row stays unmarked.
+      const items: Array<{
+        id: string;
+        status?: string;
+        stage?: string;
+        agentState?: string;
+      }> = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+      await applyActivePaneMarkers(items, fixture.listActivePanes, fixture.pluginWorkspaceId);
+      expect(items[0].status).toBe('open');
+      expect(items[0].agentState).toBeUndefined();
+
+      // DEMOTION — workspace-agnostic (parent AC1): the SAME pane is evidence
+      // the item is being worked on, so the live dispatch claim is kept.
+      // RED WITNESS: today's `hydrator.ts` reads panes workspace-scoped, so it
+      // demotes here. `it.fails` keeps the suite green until the implementation
+      // child (WL-0MWHBSWC20067SMY) lands the wider read and flips this to
+      // `it` — the repo's documented test-first pattern
+      // (`downtime-worker.clamps.test.ts`).
+      const applied: Array<{ id: string; status: string; stage: string }> = [];
+      const deps: CrossWorkspaceDeps = {
+        listInProgressItems: async () => [
+          { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'dispatcher' },
+        ],
+        // Both permitted shapes of the workspace-agnostic read, so either
+        // implementation satisfies this test.
+        listActivePanes: fixture.listActivePanes,
+        listAllPanes: fixture.listAllPanes,
+        listOutboundDeps: async () => [],
+        // Pane evidence must be the ONLY signal: pin a dead claim holder.
+        hasLiveClaimHolder: async () =>
+          new Map<string, ClaimHolderVerdict>([[WL, { held: false, reason: 'no-lock-file' }]]),
+        applyDemotion: async (id, status, stage) => {
+          applied.push({ id, status, stage });
+          return true;
+        },
+        log: () => {},
+      };
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      expect(result.demoted).toBe(0);
+      expect(applied).toEqual([]);
+    },
+  );
 });
 
 // ── Dependency blocker ────────────────────────────────────────────────
