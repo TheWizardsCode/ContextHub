@@ -502,12 +502,17 @@ dispatches; the other herdr instances coordinate instead of polling:
   `~/.herdr/downtime/downtime-dispatch-tab-anchors.json`, shape
   `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }`; tab
   provisioning runs under the coordination lock with a double-check, and a
-  dead persisted pane is re-provisioned); when neither yields an anchor the
-  retained single `Dispatcher` anchor is used
+  dead persisted pane **or a workspace missing from `herdr workspace list`
+  is validated on read and re-provisioned exactly once** — an unreadable
+  herdr still fails closed (missing ≠ unreadable), no anchor file has a TTL
+  (recovery is on-read validation, never a reaper), and every map rewrite
+  **prunes entries belonging to a superseded workspace**); when neither
+  yields an anchor the retained single `Dispatcher` anchor is used
   (`~/.herdr/downtime/downtime-dispatch-anchor.json`). Resolution is
   fail-closed (never another project's tab, never the leader's pane): a
   null/failed resolution reports `anchor-unavailable` (no dispatch this
-  cycle) and rolls the CAS claim back. **Placement is resolved late**
+  cycle — with a machine-readable `detail` on the decision entry naming the
+  failing boundary) and rolls the CAS claim back. **Placement is resolved late**
   (WL-0MW5JE0SZ0057K30): after the CAS claim, the reservation gate and the
   host-budget admission, immediately before the marker write — provisioning
   the item tab any earlier left an orphaned empty pane whenever a gate

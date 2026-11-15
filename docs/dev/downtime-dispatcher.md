@@ -84,7 +84,7 @@ single responsibility, and no family module exceeds 1,000 lines (enforced by
 | `dispatcher-anchor.cli-parsers.ts` | Decode raw `herdr` JSON envelopes and `/proc/<pid>/environ` blobs into the contract types | `parseTabListOutput`, `parseTabCreateOutput`, `parsePaneListOutput`, `parseMachinePaneListOutput`, `parsePaneProcessInfoOutput`, `parseProcEnviron` |
 | `dispatcher-anchor.herdr-cli.ts` | Run the `herdr` binary, read pane process environments, and build the production deps object | `createDispatcherAnchorDeps`, `listMachinePanes`, `getPaneProcessInfo`, `readProcEnvironFile`, `listTabsInWorkspace`, `listPanesInWorkspace`, `createTabInWorkspace` |
 | `dispatcher-anchor.persistence.ts` | Atomic anchor and per-prefix tab-anchor file persistence (fail-closed reads) | *(internal to the family — not re-exported by the barrel)* |
-| `dispatcher-anchor.tab-anchors.ts` | Strategies 2 and 3: per-prefix tabs and the machine-wide Dispatcher anchor, including the coordination lock and stale-pane re-provision | `getDispatcherAnchor`, `getDispatcherTabAnchor` |
+| `dispatcher-anchor.tab-anchors.ts` | Strategies 2 and 3: per-prefix tabs and the machine-wide Dispatcher anchor, including the coordination lock, persisted-workspace validation with one-time recovery and stale-pane re-provision | `getDispatcherAnchor`, `getDispatcherTabAnchor` |
 | `dispatcher-anchor.placement.ts` | Strategy 1: project-workspace resolution and the item-ID tab anchor (ambiguity rules, create-vs-reuse) | `resolveProjectWorkspace`, `getItemTabAnchor` |
 
 Layering: extracted modules import concrete siblings (and the coordination
@@ -2269,6 +2269,34 @@ resolved anchor is forwarded as `--anchor <rootPaneId>` to `send-to-pi.sh`
 `workspace_id` is the project workspace (or `Dispatcher` fallback) and its
 `tab_id` equals the item-ID (or prefix) tab.
 
+**Persisted-anchor recovery semantics (WL-0MWH50EN4007C6YH).** Persisted
+anchors are **validated against live herdr state on every resolution** —
+never trusted verbatim off disk. The per-prefix fast path reuses a cached
+entry only when its pane is **positively alive** (`isPaneAlive` /
+`herdr pane get`) **and** its workspace id still agrees with the persisted
+single-anchor file (both files must name the same `Dispatcher` workspace);
+on any miss the resolver probes the persisted workspace id against `herdr
+workspace list` (`probeWorkspace`). The verdicts are strict:
+
+- **`alive`** — reuse the workspace (a healthy reuse issues no extra CLI
+  call).
+- **`missing`** — the workspace no longer exists (e.g. herdr restarted, the
+  workspace was closed): **re-provision exactly one replacement** under the
+  coordination lock, through the shared `provisionDispatcherAnchorUnderLock`
+  helper (lock → in-lock double-check → create workspace → adopt root pane →
+  write anchor — the same mechanism that heals a dead pane), then rewrite
+  **both** persisted files with the fresh id. Recovery is idempotent: the
+  recovered anchor is reused thereafter, never re-provisioned per tick.
+- **`unreadable`** — the herdr CLI could not be read/parsed (transient
+  error, unparseable output): **fails closed with nothing provisioned**
+  (`anchor-unavailable` this cycle, retried next tick). *Missing ≠
+  unreadable*: a transient herdr must never duplicate a live workspace.
+
+There is **no anchor TTL** — neither anchor file expires by age and no
+process periodically sweeps them; recovery is **on-read validation, not a
+reaper**. A stale anchor is replaced only by the resolution that reads it
+and finds it dead.
+
 #### Project workspace + item-ID tab (primary path, WL-0MU321YK70035AYT)
 
 Invariant: for a `dispatchClaimedTier` spawn of `<PREFIX>-<hash>` whose
@@ -2435,18 +2463,43 @@ the authority for reuse and has the shape:
 }
 ```
 
-- **Fast path:** a persisted entry whose pane is alive is reused directly —
-  no `herdr tab list` round-trip.
+Every persisted bit is **validated on read** (parent WL-0MWH50EN4007C6YH):
+the cache is the authority for *reuse*, never for *truth*.
+
+- **Fast path:** a persisted entry is reused directly — no `herdr tab list`
+  round-trip — only when its pane is **positively alive** (`isPaneAlive`)
+  **and** its workspace id still matches the persisted single-anchor file
+  (`downtime-dispatch-anchor.json`): both files must name the same
+  `Dispatcher` workspace. A cached entry for a different workspace belongs to
+  a superseded workspace and must never short-circuit past recovery.
 - **Stale entry:** a persisted entry whose pane is dead is ignored and
   re-provisioned on the next dispatch for that prefix.
+- **Disappeared workspace:** when the fast path misses, the persisted
+  workspace id is probed against live herdr state (`herdr workspace list` via
+  `probeWorkspace`). `missing` → **exactly one replacement workspace** is
+  provisioned under the coordination lock (shared
+  `provisionDispatcherAnchorUnderLock`, in-lock double-check) and **both**
+  persistence files are rewritten with the fresh id; `unreadable` → fail
+  closed with **nothing** provisioned (missing ≠ unreadable). Recovery is
+  on-read validation — **no anchor file has a TTL, no reaper**.
+- **Self-pruning on rewrite (WL-0MWHCUX6A002W8ZG):** rewriting the
+  tab-anchor map **prunes every `byPrefix` entry belonging to a superseded
+  workspace**. Herdr ids are workspace-scoped (`<workspaceId>:` prefix), so
+  on each write `persistPrefixTab` keeps a carried-over entry only when BOTH
+  its `tabId` and `paneId` start with the workspace being written; entries
+  pointing into the dead workspace — or holding an ill-formed id — are
+  dropped, and the recorded `workspaceId` is always the workspace being
+  written. Recovery therefore cannot leave dead-id stragglers behind to mask
+  a later wedge.
 - **Create-or-reuse:** on a cache miss the resolver lists tabs in the
   `Dispatcher` workspace and adopts a tab labelled exactly `prefix` whose root
   pane is alive.
 - **Concurrent first-dispatch:** tab creation runs under the coordination
   lock (`tryAcquireCoordLock` in `~/.herdr/downtime`) with a **double-check
-  inside the lock**, so two leaders racing on a previously unseen prefix
-  produce exactly one tab. A holder that cannot acquire the lock re-checks
-  once and otherwise fails closed (never a duplicate tab).
+  inside the lock**, so two leaders racing on a previously unseen prefix — or
+  two recovery paths racing on a missing workspace — produce exactly one
+  tab/workspace. A holder that cannot acquire the lock re-checks once and
+  otherwise fails closed (never a duplicate tab).
 - **CLI drift:** `tab list`/`tab create`/`pane list` parsers tolerate the
   `tab_id`/`tabId`/`id` and `pane_id`/`paneId`/`id` key variants and a nested
   `result` envelope; an unparseable response is **fail-closed** (`null`) and
@@ -2468,14 +2521,19 @@ fallback anchor: `packages/herdr/src/dispatcher-anchor.tab-anchors.ts`):
   which would include the anchor and suppress the close. `dispatchClaimedTier`
   consults this path first whenever both deps are wired.
 - **Per-prefix tab (fallback):** `getDispatcherTabAnchor(cwd, deps, prefix)`
-  ensures the `Dispatcher` workspace, fast-paths the persisted live anchor,
+  ensures the `Dispatcher` workspace — **validating the persisted workspace
+  id against live herdr state** (`probeWorkspace`: `alive` reuse; `missing`
+  recover exactly once under the lock and rewrite both persisted files;
+  `unreadable` fail closed with nothing provisioned, WL-0MWH50EN4007C6YH) —
+  then fast-paths the persisted live anchor whose workspace still matches,
   else lists tabs (`herdr tab list --workspace <id>`), else under the
   coordination lock (with a double-check) runs `herdr tab create --workspace
   <id> --label <prefix> --no-focus` and returns the new `tab_id` +
-  `root_pane.pane_id`. Consulted only when no project workspace resolves. Its
-  initial root pane is cleaned up after the first dispatch by the same
-  fail-safe rule as the project item tab (step 4); the fallback
-  `getDispatcherAnchor` pane is never closed.
+  `root_pane.pane_id`. Every map rewrite self-prunes entries that cannot
+  belong to the workspace being written (WL-0MWHCUX6A002W8ZG). Consulted
+  only when no project workspace resolves. Its initial root pane is cleaned
+  up after the first dispatch by the same fail-safe rule as the project item
+  tab (step 4); the fallback `getDispatcherAnchor` pane is never closed.
 - **Fallback anchor:** `getDispatcherAnchor(cwd, deps)` provisions one
   `Dispatcher` workspace + persisted anchor pane in the machine coordination
   dir (`~/.herdr/downtime/downtime-dispatch-anchor.json`, atomic tmp+rename,
@@ -2486,10 +2544,78 @@ fallback anchor: `packages/herdr/src/dispatcher-anchor.tab-anchors.ts`):
   move <id> --new-tab --tab-label Downtime --no-focus`, best-effort) so the
   workspace never shows a blank pane (WL-0MU2EOHK900425VU). `isPaneAlive`
   (`herdr pane get <id>`) detects a closed anchor and re-provisions.
+  Provisioning — pane-death re-provision here and the workspace-recovery path
+  alike — runs through the ONE shared `provisionDispatcherAnchorUnderLock`
+  helper (lock → in-lock double-check → create workspace → adopt root pane →
+  write anchor), so racing callers can never create two Dispatcher
+  workspaces (WL-0MWHCUTDM003B39Q).
 - **Wiring:** `createDowntimeDeps` wires `defaultProjectWorkspaceResolver` /
   `defaultItemTabAnchorResolver` (primary), `defaultDispatcherTabAnchorResolver`
   (per-prefix fallback), and `defaultDispatcherAnchorResolver` (final fallback
   + scheduled prompts).
+
+#### Diagnosing an `anchor-unavailable` wedge
+
+An `anchor-unavailable` refusal still means "no pane, no marker, claim rolled
+back" — but since WL-0MWHCUZ5C000I7S6 it is **diagnosable from the log
+alone**: the `no-dispatch` decision entry carries an additive `detail` token
+naming the exact fail-closed boundary. `reason` stays `anchor-unavailable`
+(every budget/starvation heuristic is unchanged); `detail` is what tells a
+vanished workspace from a broken CLI (the reported incident showed **124
+identical `anchor-unavailable` entries** with no way to tell — parent
+WL-0MWH50EN4007C6YH).
+
+```bash
+# Which boundary refused, this hour?
+grep 'anchor-unavailable' .worklog/downtime-coordination.log \
+  | tail -50 | jq -r '.detail'
+```
+
+```json
+{"kind":"decision","operation":"no-dispatch","instanceId":"herdr:4145450",
+ "reason":"anchor-unavailable","detail":"persisted-workspace-missing",
+ "at":"2026-11-15T13:40:00.000Z"}
+```
+
+| `detail` | Meaning | Operator action |
+|---|---|---|
+| `persisted-workspace-missing` | The persisted `Dispatcher` workspace is **positively absent** from the parsed `herdr workspace list`; a replacement is provisioned exactly once under the coordination lock and both anchor files are rewritten. | Normally self-healing — the next tick dispatches. If it recurs every tick, the recovery itself failed (see `dispatcher-workspace-unprovisionable`). |
+| `herdr-unreadable` | The herdr CLI / a `tab list` / `pane list` could not be read or parsed (transient error, unparseable output, throwing aliveness probe). **Nothing is provisioned.** | Fix the herdr CLI/parse issue; the next idle window retries. Missing ≠ unreadable — an unreadable herdr must not duplicate a live workspace. |
+| `dispatcher-workspace-unprovisionable` | The replacement workspace (or its persistence) could not be provisioned — including a positively-missing workspace that could not be recovered, and any per-prefix provisioning failure. | Check `~/.herdr/downtime/` writability and `downtime-coordination.lock` contention. |
+| `prefix-empty` | No work-item id prefix could be extracted to route by. | Item id malformed/empty — a data issue, not herdr. |
+| `item-tab-unavailable` | A resolved project workspace's item-ID tab could not be provisioned (primary path). | Check `herdr tab create --workspace <id> --label <itemId> --no-focus` and the tab-list parse. |
+| `project-workspace-mismatch` | Primary path near-missed: no plugin pane matched the root, but one reported a different `HERDR_RESOLVED_CWD`. Carries `projectWorkspaceMismatch: { expectedRoot, actualRoot, paneId, workspaceId }`; recorded even when the `Dispatcher` fallback then succeeds. | See the [operator remedy](#primary-path-near-miss-diagnostic-wl-0mwhcv3pr002wsqm): start the plugin pane from the worklog root (matching rule deliberately unchanged — parent AC7/AC8). |
+
+**CLI evidence used for the classification (parent WL-0MWH50EN4007C6YH).**
+Against a missing workspace, `herdr tab list --workspace <id>` does **not**
+return a tab list — it answers with an error envelope
+`{"error":{"code":"workspace_not_found",…}}`, which the fail-closed parser
+treats as `null` → resolution `unknown` → `anchor-unavailable`. That is the
+*pre-fix* wedge's signal. The **positive existence source is `herdr workspace
+list`**: `probeWorkspace` issues exactly one such read and classifies the
+persisted id as `alive` (present), `missing` (list read and parsed, id
+absent), or `unreadable` (CLI error / unparseable output) — the `detail`
+tokens above mirror that verdict.
+
+**Historical/emergency note (parent WL-0MWH50EN4007C6YH).** Before the
+on-read validation landed, the *only* unblock was the manual mitigation:
+**delete both anchor files** (`~/.herdr/downtime/downtime-dispatch-anchor.json`
+and `~/.herdr/downtime/downtime-dispatch-tab-anchors.json`) so the next
+dispatch re-provisioned a fresh Dispatcher workspace from scratch. That is
+**no longer required** — recovery now happens automatically on read; the
+manual step is retained as a historical/emergency fallback only. Recorded
+evidence of that manual step: the backup directory
+`~/.herdr/downtime/backup-anchors-20261115T011052Z/` (2026-11-15T01:10:52Z)
+preserves the pre-fix state — `downtime-dispatch-anchor.json` naming the dead
+`w6A` workspace, and `downtime-dispatch-tab-anchors.json` carrying mixed
+`w6A`/`w34`/`w3V`/`w58`/`w4Z` entries (the cross-workspace accumulation the
+self-pruning addresses). Observed recovery timeline: 124
+`anchor-unavailable` decisions ran 2026-11-13T23:33Z → 2026-11-15T00:56Z
+(workspace `w6A` gone; `herdr workspace list` at filing reported `w52, w8,
+w4F, w3G, w5M, w50, w5S, w57`), the manual backup was taken 01:10:52Z, and
+the validate-on-read fix landed 2026-11-15T13:31Z (workspace probe +
+re-provision), followed by the map self-pruning (13:51Z) and the `detail`
+vocabulary (15:48Z) — since then recovery is automatic.
 
 #### Troubleshooting: pane landed in the wrong tab/workspace
 
@@ -2508,13 +2634,24 @@ fallback anchor: `packages/herdr/src/dispatcher-anchor.tab-anchors.ts`):
 3. **Dispatcher fallback path** — when the project workspace did not resolve,
    `herdr tab list --workspace <Dispatcher-workspace-id>` must show a tab
    labelled with the item's prefix, and the pane's `tab_id` must equal it.
-   Inspect `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` — a stale
-   `paneId` (dead) is re-provisioned on the next dispatch; a malformed file is
-   treated as "no anchors yet" (tabs are rediscovered via `herdr tab list`).
+   Inspect `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` and
+   `~/.herdr/downtime/downtime-dispatch-anchor.json` — a dead `paneId`, or a
+   workspace id missing from `herdr workspace list`, is re-provisioned
+   automatically on the next dispatch (a positively-missing workspace exactly
+   once, under the coordination lock; an unreadable herdr fails closed); a
+   malformed file is treated as "no anchors yet" (tabs are rediscovered via
+   `herdr tab list`). A map rewrite prunes entries whose ids no longer belong
+   to the recorded workspace.
 4. If a dispatch reports `anchor-unavailable`, the resolved path's anchor
    could not be provisioned this cycle — the resolver deliberately does **not**
-   fall back to the leader pane or (for the project path) a wrong tab; fix the
-   herdr CLI/parse failure and the next idle window retries.
+   fall back to the leader pane or (for the project path) a wrong tab. The
+   decision entry carries a machine-readable `detail` naming the boundary
+   (`persisted-workspace-missing` / `herdr-unreadable` / …) — see
+   [Diagnosing an `anchor-unavailable` wedge](#diagnosing-an-anchor-unavailable-wedge).
+   Most misses are now self-healing (a positively-missing workspace
+   re-provisions exactly once); a persistent `herdr-unreadable` /
+   `dispatcher-workspace-unprovisionable` means fix the herdr CLI/parse
+   failure and the next idle window retries.
 
 Duplicate `Dispatcher` workspaces are harmless — the persisted anchor file is
 the authority, not the label count; close surplus idle ones one at a time
@@ -4633,8 +4770,8 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |
 | `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` and injects `HERDR_REQUEST_PRIORITY` from `--request-priority` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
-| `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher fallback anchor `{ paneId, workspaceId }` (machine dir; AC4 fallback + scheduled prompts only) |
-| ~~`~/.herdr/downtime/downtime-dispatch-tab-anchors.json`~~ | **Retired** (per-prefix map). Item tabs are discovered via `herdr tab list`; a leftover file is no longer read. |
+| `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher fallback anchor `{ paneId, workspaceId }` (machine dir; AC4 fallback + scheduled prompts only). Validated on read: a dead pane re-provisions under the coordination lock (WL-0MWH50EN4007C6YH) |
+| `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` | Persisted per-prefix tab map `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }` (machine dir, C1). Validated on read — pane liveness plus a workspace probe against `herdr workspace list`; a positively-missing workspace is recovered exactly once under the lock, and every rewrite prunes `byPrefix` entries whose `<workspaceId>:`-prefixed ids do not belong to the workspace being written (WL-0MWHCUTDM003B39Q, WL-0MWHCUX6A002W8ZG) |
 | `~/.herdr/downtime/downtime-leader.lock` | Leader lock file (machine dir, `O_CREAT\|O_EXCL`) |
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
@@ -4653,7 +4790,7 @@ likewise re-read live every tick and clamped on load
 ## Troubleshooting / operations
 
 - **Pane landed in the project workspace but not under the item tab:** the item-ID tab invariant is anchor-by-ID — every automated pane must split the item tab's root pane. Check (a) `herdr tab list --workspace <workspaceId>` shows a tab labelled exactly the work-item id and `herdr pane get <tabRootPaneId>` is alive; (b) the resolved project workspace is the one whose `Work Items` plugin pane has `HERDR_RESOLVED_CWD` equal to the item's worklog root (`herdr pane process-info --pane <pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`); (c) the running plugin loads this repo's code — `herdr plugin list` must show `worklog-selection-list` → `local:/…/packages/herdr` (stale `dist/` or a dangling worktree link breaks resolution; rebuild with `npm run build` in `packages/herdr`). To reset an item tab, close it (`herdr tab close <tabId>`) — the next dispatch re-creates it under the coordination lock.
-- **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** neither the project workspace/item tab nor the Dispatcher fallback anchor could be provisioned (fail-closed, never the leader's pane). For the project path check the `pane list` / `process-info` / `/proc/<pid>/environ` reads (no `Work Items` pane for the root, missing `HERDR_RESOLVED_CWD`, or unreadable `/proc` on non-Linux); for the fallback check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock`), and the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <itemId> --no-focus` JSON parse (shape drift across herdr versions). The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty/missing anchor file or unreadable machine dir is treated as missing (never a crash).
+- **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** neither the project workspace/item tab nor the Dispatcher fallback anchor could be provisioned (fail-closed, never the leader's pane). Read the decision entry's machine-readable `detail` first — see [Diagnosing an `anchor-unavailable` wedge](#diagnosing-an-anchor-unavailable-wedge): `persisted-workspace-missing` is self-healing (one replacement under the lock), so a repeating wedge means the recovery itself failed. For the project path check the `pane list` / `process-info` / `/proc/<pid>/environ` reads (no `Work Items` pane for the root, missing `HERDR_RESOLVED_CWD`, or unreadable `/proc` on non-Linux); for the fallback check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock`), and the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <itemId> --no-focus` JSON parse (shape drift across herdr versions). The worker degrades to “no dispatch this cycle” and retries next idle tick; a positively-`missing` workspace self-heals, while an `unreadable` herdr fails closed (never a duplicate workspace, never a crash).
 - **Pane landed in the wrong project's workspace:** resolution is fail-closed — it never selects another root's workspace. Check (a) the item's `cwd` (worklog root) matches exactly the plugin pane's `HERDR_RESOLVED_CWD` (trailing-slash tolerant); (b) when ≥2 `Work Items` panes resolve to the same root the focused pane wins, else the lowest pane id — close the surplus plugin pane to remove the ambiguity; (c) stale `dist/` in the running plugin (rebuild with `npm run build` in `packages/herdr`). If no plugin pane resolves, panes intentionally fall back to the `Dispatcher` workspace — that is AC4, not a misroute.
 - **`project-workspace-mismatch` on the decision entry (`projectWorkspaceMismatch: { expectedRoot, actualRoot, paneId, workspaceId }`, including on a `Dispatcher`-fallback dispatch):** the primary path could not match the item's worklog root, but the named plugin pane reported a DIFFERENT non-empty `HERDR_RESOLVED_CWD` (`actualRoot`). This is the ContextHub situation — its "Work Items" pane reports `…/ContextHub/packages/herdr`, the plugin directory, not the worklog root — and it is a diagnostic, never a wrong-workspace placement: the pane falls back to the `Dispatcher` workspace's per-prefix tab until the mismatch is fixed. **Remedy:** start/restart the plugin pane from the worklog root (`cd <worklog-root> && herdr plugin launch …` / reopen the project, so `HERDR_RESOLVED_CWD` equals `expectedRoot`), then the primary path resolves and future panes land in the project workspace's item-ID tab. Confirm with `herdr pane process-info --pane <pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`. The matching rule itself is exact-root only by design (widening is out of scope — see [primary-path near-miss diagnostic](#primary-path-near-miss-diagnostic-wl-0mwhcv3pr002wsqm)).
 - **`host-budget-corrupt` in the decision log / the worklist counter
