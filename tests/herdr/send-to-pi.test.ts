@@ -34,9 +34,11 @@ const SCRIPT = join(
   'send-to-pi.sh',
 );
 
-// `send-to-pi.sh` sources the shared herdr CLI resolver (WL-0MVXRZL9H001GQ7A),
-// so a copied script needs its sibling helper too.
+// `send-to-pi.sh` sources its sibling helpers: the herdr CLI resolver
+// (WL-0MVXRZL9H001GQ7A) and the canonical option parser (`pane-options.sh`,
+// WL-0MWHWGZI4007D911), so a copied script needs both siblings too.
 const HERDR_BIN_SH = join(dirname(SCRIPT), 'herdr-bin.sh');
+const PANE_OPTIONS_SH = join(dirname(SCRIPT), 'pane-options.sh');
 
 let tmpDir: string;
 let logFile: string;
@@ -229,6 +231,7 @@ describe('send-to-pi.sh --model forwarding', () => {
     const codeScript = join(codeDir, 'send-to-pi.sh');
     writeFileSync(codeScript, readFileSync(SCRIPT, 'utf-8'));
     writeFileSync(join(codeDir, 'herdr-bin.sh'), readFileSync(HERDR_BIN_SH, 'utf-8'));
+    writeFileSync(join(codeDir, 'pane-options.sh'), readFileSync(PANE_OPTIONS_SH, 'utf-8'));
 
     const { status, log } = runScript(
       ['--no-resize', '--cwd', '/tmp/project-root', '/skill:implement <id>'],

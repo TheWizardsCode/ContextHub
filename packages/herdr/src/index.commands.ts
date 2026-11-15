@@ -12,6 +12,10 @@
  */
 
 import { isAgentCommand, stripAgentPromptPrefix } from './pane-title.js';
+import {
+  buildRunInPaneArgs as buildRunInPaneArgsCanonical,
+  buildSendToPiArgs as buildSendToPiArgsCanonical,
+} from './pane-argv.js';
 import type { RequestPriority } from './request-priority.js';
 
 /**
@@ -121,28 +125,17 @@ export function buildSendToPiArgs(
   anchor?: string,
   requestPriority?: RequestPriority,
 ): string[] {
-  const agentPrompt = stripAgentPromptPrefix(command);
-  const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
-  if (paneName) {
-    args.push('--pane-name', paneName);
-  }
-  if (model) {
-    args.push('--model', model);
-  }
-  if (paneIdFile) {
-    args.push('--pane-id-file', paneIdFile);
-  }
-  if (anchor) {
-    args.push('--anchor', anchor);
-  }
-  // Request priority: placed before the command, which must stay the final
-  // argv token (send-to-pi.sh treats everything after its options as the
-  // command).
-  if (requestPriority) {
-    args.push('--request-priority', requestPriority);
-  }
-  args.push(agentPrompt);
-  return args;
+  // Thin compatibility wrapper: the canonical option assembly lives in
+  // `pane-argv.ts` (WL-0MWHWGZI4007D911), so a new pane flag is added once
+  // and applied to every spawn path.
+  return buildSendToPiArgsCanonical(command, targetCwd, {
+    model,
+    paneIdFile,
+    paneName,
+    focus,
+    anchor,
+    requestPriority,
+  });
 }
 
 /**
@@ -182,18 +175,15 @@ export function buildRunInPaneArgs(
   anchor?: string,
   paneIdFile?: string,
 ): string[] {
-  const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
-  if (paneName) {
-    args.push('--pane-name', paneName);
-  }
-  if (anchor) {
-    args.push('--anchor', anchor);
-  }
-  if (paneIdFile) {
-    args.push('--pane-id-file', paneIdFile);
-  }
-  args.push(command);
-  return args;
+  // Thin compatibility wrapper: the canonical option assembly lives in
+  // `pane-argv.ts` (WL-0MWHWGZI4007D911), so a new pane flag is added once
+  // and applied to every spawn path.
+  return buildRunInPaneArgsCanonical(command, targetCwd, {
+    paneName,
+    focus,
+    anchor,
+    paneIdFile,
+  });
 }
 
 /**

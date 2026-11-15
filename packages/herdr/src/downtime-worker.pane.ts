@@ -4,30 +4,31 @@
  *
  * Single responsibility: everything the downtime dispatcher knows about Herdr
  * panes — the downtime label prefix and record parsing, the safe-close and
- * item-scoped in-flight predicates, the `send-to-pi.sh` invocation (pane args,
- * spawn options/env) and the dispatched-pane lifecycle monitor.
+ * item-scoped in-flight predicates, the `send-to-pi.sh` invocation (spawn
+ * options/env — the pane argv itself is canonical in `pane-argv.ts`) and the
+ * dispatched-pane lifecycle monitor.
  *
  * Moved verbatim out of `downtime-worker.ts` (parent WL-0MVF3F9A7000HKP7;
  * child WL-0MVLIHZBT006B1UI). No behaviour change: the pane label prefix,
  * spawn flags (`--pane-name`, `--no-focus`, `--cwd`, `--model`, `--anchor`,
  * `--reservation-ticket`, `--local-preference`), the detached/unref'd spawn
  * semantics, the `AUDIT_PHASE2_PARALLELISM=1` audit fan-out bound and the
- * pane-close safety rules are all unchanged. Every work-item provenance
- * comment below travels with the code it documents.
+ * pane-close safety rules are all unchanged; the argv assembly itself moved
+ * to the canonical `pane-argv.ts` module (WL-0MWHWGZI4007D911). Every
+ * work-item provenance comment below travels with the code it documents.
  *
  * Layering: this module imports only concrete siblings (constants, types,
  * `downtime-log`, `pane-lifecycle`, `pane-close-herdr`, `pane-title`,
- * `request-priority`, `local-preference`), never `./downtime-worker.js` — the
- * barrel re-exports it, so an edge back would invert the layering. It also
- * performs no value import of `./stalled-work.js` (the pre-existing
- * `stalled-work ↔ downtime-worker` cycle stays type-only), so no runtime cycle
- * can form.
+ * `pane-argv`, `request-priority`, `local-preference`), never
+ * `./downtime-worker.js` — the barrel re-exports it, so an edge back would
+ * invert the layering. It also performs no value import of `./stalled-work.js`
+ * (the pre-existing `stalled-work ↔ downtime-worker` cycle stays type-only),
+ * so no runtime cycle can form.
  */
 
 import { spawn } from 'node:child_process';
 import { LOCAL_RESERVATION_TICKET_ENV } from './downtime-worker.constants.js';
 import type {
-  DowntimeSkillKind,
   HerdrPaneRecord,
   InFlightPanes,
   RunningPanesResult,
@@ -40,7 +41,6 @@ import {
 } from './downtime-log.js';
 import { LOCAL_PREFERENCE_ENV_VAR, type LocalPreference } from './local-preference.js';
 import { parseHerdrPaneCloseList } from './pane-close-herdr.js';
-import { buildDowntimePaneTitle } from './pane-title.js';
 import {
   classifyPaneLifecycle,
   collectDispatchedPanes,
@@ -251,70 +251,23 @@ export async function resolveInFlightPanes(
 // ── Pane spawn (send-to-pi.sh) ─────────────────────────────────────────
 
 /**
- * Argument vector for spawning `send-to-pi.sh`: visible pane named
- * `Downtime <kind>` (`paneName` overrides it — the scheduled-prompts tier
- * passes `Downtime <entryId>`, WL-0MSS1Q5ER007QDKX), `--no-focus` (visible but
- * never steals focus), `--cwd <wlRoot>`, `--model <downtimeModel>`, then the
- * prompt.
+ * Canonical downtime `send-to-pi.sh` argument builder — assembled in
+ * `pane-argv.ts` (WL-0MWHWGZI4007D911) so one canonical builder serves every
+ * pane-spawn path; this module re-exports it under its public name. Visible
+ * pane named `Downtime <kind>` (`paneName` overrides it — the
+ * scheduled-prompts tier passes `Downtime <entryId>`, WL-0MSS1Q5ER007QDKX),
+ * `--no-focus` (visible but never steals focus), `--cwd <wlRoot>`, `--model
+ * <downtimeModel>`, then the prompt — with the optional `--anchor`,
+ * `--reservation-ticket` and `--local-preference` flags defined by the
+ * canonical module.
  *
  * When `opts.itemTitle`/`opts.itemId` are present (dispatch tiers,
  * WL-0MSJ4E8UA005KG9Y), the pane is named in the full format
  * `Downtime triggered <kind> <title> - <id>` so downtime panes follow the
  * same descriptive convention as manually-triggered panes. Titles are
- * bounded by {@link MAX_PANE_TITLE_LENGTH}.
+ * bounded by `MAX_PANE_TITLE_LENGTH`.
  */
-export function buildDowntimePaneArgs(
-  kind: DowntimeSkillKind,
-  prompt: string,
-  opts: {
-    model: string;
-    cwd: string;
-    paneName?: string;
-    itemTitle?: string;
-    itemId?: string;
-    anchorId?: string;
-    /**
-     * Granted local-reservation ticket id (parent WL-0MVIKRFP0005JDL8 AC1,
-     * slice C2): forwarded as `--reservation-ticket <id>` so send-to-pi.sh
-     * passes `PI_LOCAL_RESERVATION_TICKET` into the pane process. Absent on
-     * a fail-open dispatch — the launch args stay byte-identical to today.
-     */
-    reservationTicketId?: string;
-    /**
-     * Per-turn locality preference (parent AC4, slice C4): forwarded as
-     * `--local-preference <local-preferred|remote-ok>` so send-to-pi.sh passes
-     * `HERDR_LOCAL_PREFERENCE` into the pane process. Absent leaves the launch
-     * args byte-identical (fail-open C4-AC3).
-     */
-    localPreference?: LocalPreference;
-  },
-): string[] {
-  const paneName =
-    opts.paneName ??
-    buildDowntimePaneTitle(kind, opts.itemTitle, opts.itemId);
-  const args = ['--pane-name', paneName, '--no-focus'];
-  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): when the caller resolved the
-  // dedicated Dispatcher anchor pane id (F1 WL-0MTR2CD4X006XI7U), forward it
-  // as `--anchor <id>` so send-to-pi.sh splits from THAT pane instead of the
-  // leader's current pane. Absent → legacy `pane current` behavior.
-  if (opts.anchorId) {
-    args.push('--anchor', opts.anchorId);
-  }
-  // Local reservation ticket (slice C2 AC1): the pane's first request must
-  // carry `X-Local-Reservation`, so the id is forwarded explicitly (an env
-  // var set on the launching script does NOT reach the herdr pane process).
-  if (opts.reservationTicketId) {
-    args.push('--reservation-ticket', opts.reservationTicketId);
-  }
-  // Per-turn locality preference (slice C4 AC1): forwarded explicitly for the
-  // same reason as the reservation ticket — an env var set on the launching
-  // script does NOT reach the herdr pane process.
-  if (opts.localPreference) {
-    args.push('--local-preference', opts.localPreference);
-  }
-  args.push('--cwd', opts.cwd, '--model', opts.model, prompt);
-  return args;
-}
+export { buildDowntimePaneArgs } from './pane-argv.js';
 
 /**
  * Minimal spawn handle: the caller unrefs so the parent can exit first, and

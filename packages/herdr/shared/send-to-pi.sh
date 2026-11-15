@@ -107,109 +107,17 @@ herdr_bin="$(resolve_herdr_bin)"
 grid_bin="${HERDR_GRID_BIN:-$script_dir/grid.py}"
 
 # ── Parse arguments ─────────────────────────────────────────────────────
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --pane-name)
-      pane_name="$2"
-      shift 2
-      ;;
-    --pane-name=*)
-      pane_name="${1#*=}"
-      shift
-      ;;
-    --focus)
-      focus=true
-      shift
-      ;;
-    --no-focus)
-      focus=false
-      shift
-      ;;
-    --resize)
-      resize=true
-      shift
-      ;;
-    --no-resize)
-      resize=false
-      shift
-      ;;
-    --check-cli)
-      check_cli=true
-      shift
-      ;;
-    --cwd)
-      cwd_arg="$2"
-      shift 2
-      ;;
-    --cwd=*)
-      cwd_arg="${1#*=}"
-      shift
-      ;;
-    --anchor)
-      anchor_arg="$2"
-      shift 2
-      ;;
-    --anchor=*)
-      anchor_arg="${1#*=}"
-      shift
-      ;;
-    --request-priority)
-      request_priority="${2:-}"
-      shift 2
-      ;;
-    --request-priority=*)
-      request_priority="${1#*=}"
-      shift
-      ;;
-    --reservation-ticket)
-      reservation_ticket="${2:-}"
-      shift 2
-      ;;
-    --reservation-ticket=*)
-      reservation_ticket="${1#*=}"
-      shift
-      ;;
-    --local-preference)
-      local_preference="${2:-}"
-      shift 2
-      ;;
-    --local-preference=*)
-      local_preference="${1#*=}"
-      shift
-      ;;
-    --model)
-      model_arg="$2"
-      shift 2
-      ;;
-    --model=*)
-      model_arg="${1#*=}"
-      shift
-      ;;
-    --pane-id-file)
-      pane_id_file="$2"
-      shift 2
-      ;;
-    --pane-id-file=*)
-      pane_id_file="${1#*=}"
-      shift
-      ;;
-    -h|--help)
-      show_help
-      ;;
-    --)
-      shift
-      break
-      ;;
-    -*)
-      echo "Error: Unknown option: $1" >&2
-      echo "Usage: $(basename "$0") [options] <command>" >&2
-      exit 1
-      ;;
-    *)
-      break
-      ;;
-  esac
-done
+# Canonical shared parser (WL-0MWHWGZI4007D911): send-to-pi.sh and
+# open-pi-agent.sh and run-in-pane.sh share ONE option-parser
+# implementation, differing only in the accepted option set; a new pane flag
+# is added once in `pane-options.sh` + the caller's accepts list.
+# shellcheck source=./pane-options.sh
+. "$script_dir/pane-options.sh"
+parse_pane_options "pane-name focus no-focus resize no-resize check-cli cwd anchor request-priority reservation-ticket local-preference model pane-id-file help -- strict" "$@"
+if [ "$PANE_OPTIONS_SHOW_HELP" = 1 ]; then
+  show_help
+fi
+set -- "${PANE_OPTIONS_REMAINDER[@]}"
 
 # ── Validate arguments ───────────────────────────────────────────────
 if [ $# -eq 0 ]; then

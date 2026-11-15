@@ -32,7 +32,8 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.poller.ts` | One `GET {proxyUrl}/llama/local/status` poll (fail-closed parse) | `parseLlamaStatus`, `fetchLocalStatus`, `createDowntimePoller` |
 | `downtime-worker.parsers.ts` | Raw `wl` CLI stdout → typed candidates/results | `parseNextCandidatesOutput`, `parseAuditCandidatesOutput`, `parseShowItemOutput`, `skillKindFromPrompt` |
 | `downtime-worker.selection.ts` | Per-tier candidate selection, rotation, critical-first, dependency frontier | `selectNextCandidate`, `selectAuditCandidate`, `selectWithRotation`, `resolveDependencyFrontier` |
-| `downtime-worker.pane.ts` | Pane identity, in-flight resolution, spawn invocation, pane-lifecycle monitor | `buildDowntimePaneArgs`, `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` |
+| `downtime-worker.pane.ts` | Pane identity, in-flight resolution, spawn invocation (pane argv canonical in `pane-argv.ts`), pane-lifecycle monitor | `buildDowntimePaneArgs` (re-export), `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` |
+| `pane-argv.ts` | Canonical pane-spawn argv builders: ONE builder per script (`send-to-pi.sh` agent panes, `run-in-pane.sh` shell panes, plus the downtime dispatcher's `send-to-pi.sh` invocation). The three public builders (`buildDowntimePaneArgs`, `buildSendToPiArgs`, `buildRunInPaneArgs`) delegate here — a new pane flag is added once and applied to every spawn path (WL-0MWHWGZI4007D911) | `buildSendToPiArgs`, `buildRunInPaneArgs`, `buildDowntimePaneArgs` |
 | `downtime-worker.gates.ts` | Every "may the worker dispatch X?" decision (holds, depth, attempt budget, classification) | `classifyItemForDispatch`, `evaluateCriticalFirstGuard`, `readReviewQueueGate`, `isAttemptBudgetExhausted` |
 | `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
 | `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
@@ -2529,7 +2530,9 @@ Lifecycle (`packages/herdr/src/index.ts`; shared anchor helper in
    never leave an empty item tab behind; the shell/command-output routes have
    no admission gate and resolve the anchor directly in their branch.
 3. **Anchor forwarding** — the item-tab anchor is resolved once per dispatch
-   and forwarded to both channels by the arg builders:
+   and forwarded to both channels by the canonical arg builders in
+   `pane-argv.ts` (WL-0MWHWGZI4007D911 — the public `buildSendToPiArgs` /
+   `buildRunInPaneArgs` / `buildDowntimePaneArgs` delegate to it):
    `buildSendToPiArgs(..., anchor)` and `buildRunInPaneArgs(..., anchor)`
    append `--anchor <paneId>` when it is a non-empty string.
    `send-to-pi.sh` already supported `--anchor`; `run-in-pane.sh` gained it —
