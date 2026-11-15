@@ -1,8 +1,9 @@
 # Worktree node_modules — end-to-end verification (WL-0MSGQ64N2006TQB2)
 
-> How a worktree resolves `@worklog/shared` (through the symlinked
-> `node_modules` into the **main checkout's** `packages/shared/dist`), and why a
-> worktree `packages/shared` edit goes unseen, is documented in
+> How a worktree resolves `@worklog/shared` (through the worktree-local link
+> farm: dependency packages via links into the main checkout's `node_modules`,
+> and the `@worklog/shared` workspace package to the **worktree's own**
+> `packages/shared/dist`) is documented in
 > [Module resolution in a worktree](./worktree-isolation.md#module-resolution-in-a-worktree).
 
 ## Problem
@@ -16,17 +17,25 @@ for worktree-based items.
 ## Fixes (both shipped before this verification)
 
 1. **implement.py auto-symlink** — SorraAgents SA-0MSGS763C006SM1B, commit
-   `03344c5c` on dev: `implement.py start` symlinks
+   `03344c5c` on dev: `implement.py start` symlinked
    `<worktree>/node_modules -> <repo-root>/node_modules` when the main
-   checkout has one and the worktree lacks one.
+   checkout has one and the worktree lacks one. **Superseded by the link
+   farm** (`SA-0MVMZBJGT00718ZO`): for path-consumed workspace packages such as
+   `@worklog/shared`, `implement.py start` now materialises a worktree-local
+   link farm whose `@worklog/shared` entry points at the worktree's own
+   `packages/shared`; a repository without such a package keeps the
+   whole-directory symlink (the degradation path).
 2. **resolveTsxBin walk-up** — ContextHub commit `613f1490`:
    `tests/test-utils.ts` `resolveTsxBin()` walks up parent directories to
    find a real `node_modules/.bin/tsx`, used by all read-cache test files.
 
 ## AC1 verification (2026-08-07, fresh worktree at dev HEAD `c6c26688`)
 
-Fresh worktree created by `implement.py start WL-0MSGQ64N2006TQB2` with the
-auto-symlink in place, then verified in multiple configurations:
+> **Pre-farm era.** This table verified the whole-directory `node_modules`
+> symlink shipped by fix 1 before `SA-0MVMZBJGT00718ZO`. With the link farm,
+> the worktree additionally resolves `@worklog/shared` from its own
+> `packages/shared/dist` (see the module-resolution section linked above); the
+> read-cache e2e and full-suite results below still hold.
 
 | Configuration | pytest | vitest (full suite) | read-cache e2e |
 |---|---|---|---|
@@ -58,7 +67,9 @@ present — unchanged behavior; suite green (verified previously, 2026-08-07).
 
 ## Conclusion
 
-The failure mode described in WL-0MSGQ64N2006TQB2 is fully resolved. The
-`resolveTsxBin` walk-up alone (fix 2) makes the suite green in a worktree
-with no node_modules at all; the implement.py auto-symlink (fix 1) remains
-as belt-and-braces and is the default state created by `implement.py start`.
+The MODULE_NOT_FOUND failure mode described in WL-0MSGQ64N2006TQB2 is fully
+resolved. The `resolveTsxBin` walk-up alone (fix 2) makes the suite green in a
+worktree with no node_modules at all; the implement.py link step (fix 1) —
+originally a whole-directory symlink, now the worktree-local link farm —
+remains as belt-and-braces and is the default state created by
+`implement.py start`.
