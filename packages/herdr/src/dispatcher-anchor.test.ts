@@ -44,6 +44,13 @@ import {
   parsePaneProcessInfoOutput,
   parseProcEnviron,
 } from './dispatcher-anchor.js';
+import {
+  seedStaleAnchorState,
+  STALE_ANCHOR,
+  STALE_ANCHOR_JSON,
+  STALE_TAB_ANCHORS,
+  STALE_TAB_ANCHORS_JSON,
+} from './__fixtures__/stale-dispatcher-anchors.js';
 
 function mkTmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'da-test-'));
@@ -1080,6 +1087,173 @@ describe('getDispatcherTabAnchor ACs (per-prefix tabs in Dispatcher workspace)',
     const deps = makeTabDeps();
 
     expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+  });
+});
+
+// ── Regression fixtures: stale anchors (WL-0MWH50EN4007C6YH) ────────────
+
+// Test-only safety net committed BEFORE the anchor self-healing fix
+// (WL-0MWH50EN4007C6YH). Each case seeds the recorded pre-fix state via the
+// shared fixture (`seedStaleAnchorState`) and pins today's behaviour with
+// injected deps only — no test reads `~/.herdr` (HERDR_COORDINATION_DIR is
+// overridden to tmpDir in the beforeEach).
+
+describe('regression fixtures: stale anchors (WL-0MWH50EN4007C6YH)', () => {
+  // AC1 — the committed fixture must reproduce the recorded pre-fix state
+  // exactly (both files, both ids `w6A`) so the sibling fix item
+  // (WL-0MWHCUTDM003B39Q) can seed it verbatim.
+  it('AC1: fixture writes the recorded w6A anchor files verbatim and they read back as anchor state', () => {
+    seedStaleAnchorState(tmpDir);
+    expect(fs.readFileSync(path.join(tmpDir, DISPATCHER_ANCHOR_FILE), 'utf-8')).toBe(STALE_ANCHOR_JSON);
+    expect(fs.readFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE), 'utf-8')).toBe(STALE_TAB_ANCHORS_JSON);
+    expect(STALE_ANCHOR).toEqual({ paneId: 'w6A:p1', workspaceId: 'w6A' });
+    expect(STALE_TAB_ANCHORS).toEqual({
+      workspaceId: 'w6A',
+      byPrefix: { WL: { tabId: 'w6A:t2', paneId: 'w6A:p5' } },
+    });
+    // The production readers accept the seeded state as-is.
+    expect(readPersisted()).toEqual(STALE_ANCHOR);
+    expect(readTabAnchorsPersisted()).toEqual(STALE_TAB_ANCHORS);
+  });
+
+  // AC2 — parent AC2: a persisted prefix entry whose pane is dead (workspace
+  // alive) still re-resolves/re-creates the tab and persists the new mapping,
+  // so the fast path cannot regress.
+  it('AC2: dead pane with the workspace alive re-provisions the tab and persists the new mapping', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => {
+      throw new Error('workspace alive — createWorkspace must never run');
+    });
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeTabDeps({
+      createWorkspace,
+      createTab,
+      isPaneAlive: async (paneId: string) => paneId !== 'w6A:p1' && paneId !== 'w6A:p5',
+    });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(createWorkspace).not.toHaveBeenCalled(); // workspace reused from the persisted anchor
+    expect(got).toEqual({ workspaceId: 'w6A', tabId: 'w6A:tWL', paneId: 'w6A:tWL:p1' });
+    expect(createTab).toHaveBeenCalledTimes(1);
+    expect(createTab).toHaveBeenCalledWith('w6A', 'WL');
+    // The new mapping supersedes the recorded stale entry (no re-lookup on the
+    // next dispatch).
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'w6A',
+      byPrefix: { WL: { tabId: 'w6A:tWL', paneId: 'w6A:tWL:p1' } },
+    });
+  });
+
+  // AC3 — parent AC3 (first half): a transient/unreadable herdr must fail
+  // closed with `anchor-unavailable` and provisions NOTHING — createWorkspace
+  // (and createTab) are never called, so an outage cannot duplicate the
+  // workspace.
+  it('AC3: unreadable tab list (null) → null, provisions nothing', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wX', paneId: 'wX:p1' }));
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      createWorkspace,
+      createTab,
+      listTabs: async () => null,
+      isPaneAlive: async (paneId: string) => paneId !== 'w6A:p1' && paneId !== 'w6A:p5',
+    });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it('AC3: tab list CLI error (throw) → null, provisions nothing', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wX', paneId: 'wX:p1' }));
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      createWorkspace,
+      createTab,
+      listTabs: async () => { throw new Error('herdr down'); },
+      isPaneAlive: async (paneId: string) => paneId !== 'w6A:p1' && paneId !== 'w6A:p5',
+    });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it('AC3: unreadable pane list (null) → null, provisions nothing', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wX', paneId: 'wX:p1' }));
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      createWorkspace,
+      createTab,
+      listTabs: async () => [{ tabId: 'w6A:t2', label: 'WL' }],
+      listPanes: async () => null,
+      isPaneAlive: async (paneId: string) => paneId !== 'w6A:p1' && paneId !== 'w6A:p5',
+    });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it('AC3: pane list CLI error (throw) → null, provisions nothing', async () => {
+    seedStaleAnchorState(tmpDir);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wX', paneId: 'wX:p1' }));
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      createWorkspace,
+      createTab,
+      listTabs: async () => [{ tabId: 'w6A:t2', label: 'WL' }],
+      listPanes: async () => { throw new Error('herdr down'); },
+      isPaneAlive: async (paneId: string) => paneId !== 'w6A:p1' && paneId !== 'w6A:p5',
+    });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  // AC4 — parent AC3 (second half): two concurrent getDispatcherAnchor
+  // callers with a stale anchor produce exactly ONE createWorkspace call
+  // (coordination lock + in-lock double-check) and both receive the same
+  // anchor. The loser's first stale-pane check is parked until the winner has
+  // persisted and released, so its lock attempt lands after — and its
+  // double-check adopts the winner's anchor instead of creating a second
+  // workspace.
+  it('AC4: concurrent stale first-dispatchers create exactly one workspace and both adopt the same anchor', async () => {
+    seedStaleAnchorState(tmpDir);
+    let releaseSlowCheck!: () => void;
+    const slowStaleCheck = new Promise<void>((r) => { releaseSlowCheck = r; });
+    let staleChecks = 0;
+    const isPaneAlive = vi.fn(async (paneId: string) => {
+      staleChecks += 1;
+      // The SECOND stale-pane check belongs to the racing caller (call order
+      // is deterministic: launch A, launch B, then A's in-lock double-check).
+      if (paneId === 'w6A:p1' && staleChecks === 2) await slowStaleCheck;
+      return paneId !== 'w6A:p1' && paneId !== 'w6A:p5';
+    });
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wB', paneId: 'wB:p1' }));
+    const deps: DispatcherAnchorDeps = { createWorkspace, isPaneAlive };
+
+    const first = getDispatcherAnchor('/repo', deps);
+    const second = getDispatcherAnchor('/repo', deps);
+
+    // The winner completes fully (provision → persist → release) while the
+    // racer is still parked on its initial stale-pane check.
+    expect(await first).toEqual({ paneId: 'wB:p1', workspaceId: 'wB' });
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
+    expect(readPersisted()).toEqual({ paneId: 'wB:p1', workspaceId: 'wB' });
+
+    // Release the racer: its lock attempt now succeeds and the in-lock
+    // double-check adopts the persisted anchor WITHOUT a second create.
+    releaseSlowCheck();
+    expect(await second).toEqual({ paneId: 'wB:p1', workspaceId: 'wB' });
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
   });
 });
 
