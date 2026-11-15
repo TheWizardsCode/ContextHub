@@ -180,10 +180,65 @@ export function parseJsonlLines(raw: string): Record<string, unknown>[] {
  * before the error is rethrown (and the target is left untouched). Throws on
  * I/O failure — callers must catch (fail-closed).
  *
+ * WRITER-SERIALISATION (WL-0MWI5ZA2D0081RDA): atomic replacement protects
+ * readers; the APPEND side is additionally serialised per `(cwd, file)` — a
+ * per-file promise chain of in-flight runs — so two concurrent writers of the
+ * same log can never interleave their read-modify-write snapshots and
+ * silently drop each other's record. The fail-closed contract is unchanged.
+ *
  * Exported for the sibling appenders only — deliberately not part of the
  * `downtime-log.js` public surface.
  */
-export async function appendRollingJsonl(
+export function appendRollingJsonl(
+  cwd: string,
+  file: string,
+  line: string,
+  rotate?: CoordinationLogPolicy,
+): Promise<void> {
+  return enqueueAppend(cwd, file, line, rotate);
+}
+
+/**
+ * Per-`(cwd, file)` chain of in-flight {@link appendRollingJsonl} runs, so
+ * concurrent appends to the SAME log file never interleave (WL-0MWI5ZA2D0081RDA).
+ * `appendRollingJsonl` is a whole-file read-modify-write (read current → plan →
+ * write full snapshot via temp-file + rename), so two overlapping appends can
+ * lose a record: the later-finishing write's `readFile` resolved against the
+ * pre-first-write snapshot and its `rename` then clobbers the other append's
+ * line. Within one leader tick the election append is fired-and-forgotten
+ * (`void appendCoordinationLogEntry`) immediately before the prune append is
+ * awaited (`logPrunedEntries`), so under parallel-vitest load the election
+ * append's earlier-issued `readFile` could resolve late and silently drop the
+ * awaited `operation: 'prune'` record the test (and the operator) relies on.
+ * The queue runs every append strictly in start order, so each read-modify-
+ * write observes the previous append's snapshot and no line is ever lost.
+ * A rejected append never blocks the next one. Per module instance (one per
+ * worker process under vitest isolation); the lock-file machinery already
+ * guards the coordination FILE — this serialises the log APPEND side.
+ */
+const appendQueues = new Map<string, Promise<void>>();
+
+function enqueueAppend(
+  cwd: string,
+  file: string,
+  line: string,
+  rotate?: CoordinationLogPolicy,
+): Promise<void> {
+  const key = `${cwd}\0${file}`;
+  const previous = appendQueues.get(key) ?? Promise.resolve();
+  const run = previous
+    .catch(() => undefined) // a failed append must not block the next one
+    .then(() => appendRollingJsonlUnlocked(cwd, file, line, rotate));
+  appendQueues.set(key, run);
+  const settle = () => {
+    if (appendQueues.get(key) === run) appendQueues.delete(key);
+  };
+  void run.then(settle, settle);
+  return run;
+}
+
+/** The read-modify-write append itself — see {@link appendRollingJsonl}. */
+async function appendRollingJsonlUnlocked(
   cwd: string,
   file: string,
   line: string,

@@ -5143,6 +5143,19 @@ removed on failure before the error is rethrown and the target is left
 untouched; trimming/rotation and the throw-on-I/O-failure (fail-closed)
 contract are unchanged, and the JSONL format stays human-readable.
 
+**Serialised appends (WL-0MWI5ZA2D0081RDA).** Atomic replacement fixes the
+reader side, but the append itself is a whole-file read-modify-write: two
+**concurrent writers** (e.g. the leader tick's fire-and-forget
+`operation: 'election'` append racing its awaited `operation: 'prune'` append)
+could interleave — the later-finishing append's `readFile` resolved against a
+pre-first-write snapshot and its `rename` silently dropped the other append's
+record (observed as "the leader tick logged no `operation: prune`
+coordination-log record", load-flaky under parallel vitest). `appendRollingJsonl`
+therefore serialises every append to the same `(cwd, file)` strictly in start
+order (a per-file promise chain), so each read-modify-write observes the
+previous append's snapshot and no record is ever lost; a failed append never
+blocks the next one, and the fail-closed contract is unchanged.
+
 **Operator summary recipe (WL-0MVKNC28B003UOLX AC3) — per-hour no-dispatch
 reason tally for a given night.** The decision log is the only forensic
 evidence of capacity-saturation starvation, so a post-mortem must be able to
