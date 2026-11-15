@@ -175,6 +175,14 @@ export interface CoordinationLogEntry {
    * `seam-absent` (no client wired), copied from the dispatch outcome so the
    * decision entry names the broken proxy contract without reading code.
    * Absent on every other entry (additive/optional schema).
+   *
+   * Since WL-0MWHCUZ5C000I7S6 it also carries the placement fail-closed
+   * boundary on an `anchor-unavailable` decision (a `PlacementFailureDetail`
+   * token such as `herdr-unreadable` / `prefix-empty` / `item-tab-unavailable`),
+   * copied from the outcome so a genuine refusal is diagnosable from the log
+   * alone — the reported incident showed 124 identical `anchor-unavailable`
+   * entries with no way to tell a vanished workspace from a broken CLI.
+   * `reason` stays `anchor-unavailable` (additive/optional schema).
    */
   detail?: string;
   /**

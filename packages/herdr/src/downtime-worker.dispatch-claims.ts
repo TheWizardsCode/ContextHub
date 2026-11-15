@@ -152,6 +152,7 @@ async function abortForAnchorUnavailable(
   reservation: DowntimeReservationEvidence | undefined,
   attemptId: string | undefined,
   leaseHeld: boolean,
+  detail: string | undefined,
 ): Promise<DowntimeDispatchOutcome> {
   const releasedReservation: DowntimeReservationEvidence | undefined =
     reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
@@ -168,6 +169,8 @@ async function abortForAnchorUnavailable(
   return {
     dispatched: false,
     reason: 'anchor-unavailable',
+    // Diagnosable refusal (WL-0MWHCUZ5C000I7S6): the boundary rides on the outcome/decision entry; `reason` unchanged.
+    ...(detail !== undefined ? { detail } : {}),
     ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
     ...(rollbackOk ? {} : { error: 'claim rollback failed after anchor-unavailable' }),
   };
@@ -489,6 +492,7 @@ export async function dispatchClaimedTier(
       reservation,
       budgetAttemptId,
       leaseHeld,
+      placement.detail,
     );
   }
   const anchorId = placement.anchorId;

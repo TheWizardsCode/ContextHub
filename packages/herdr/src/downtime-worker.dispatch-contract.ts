@@ -41,6 +41,36 @@ import type {
 } from './dispatcher-anchor.js';
 import type { DowntimeSpawnResult } from './downtime-worker.pane.js';
 import type { DowntimeAuditBatchStatus, AuditCandidateScopeResult } from './downtime-worker.gates.js';
+
+/**
+ * Placement-failure detail vocabulary (WL-0MWHCUZ5C000I7S6): naming the
+ * exact fail-closed boundary of an `anchor-unavailable` placement verdict,
+ * collected through the optional trailing report callback on
+ * `getDispatcherTabAnchor` / `getDispatcherAnchor` and forwarded onto the
+ * outcome + decision entry. Structurally identical to the family-local alias
+ * in `dispatcher-anchor.contract.ts` and to the local union in
+ * `downtime-worker.dispatch-placement.ts` — cross-referenced by comment; the
+ * barrel exports neither, so this module declares its own structurally-
+ * assignable copy rather than importing a non-barrelled symbol.
+ */
+type PlacementFailureDetail =
+  | 'persisted-workspace-missing'
+  | 'herdr-unreadable'
+  | 'dispatcher-workspace-unprovisionable'
+  | 'prefix-empty'
+  | 'item-tab-unavailable';
+
+/**
+ * The anchor resolvers' optional trailing fail-closed boundary reporter
+ * (WL-0MWHCUZ5C000I7S6): invoked with the {@link PlacementFailureDetail}
+ * naming the exact boundary before a `null` resolver return, so the
+ * placement collector can make an `anchor-unavailable` refusal diagnosable
+ * from the decision log alone. Additive — callers that pass no callback are
+ * byte-identical to today. Re-exported for the full-deps contract
+ * (`downtime-worker.worker-contract.ts`) to stay in sync without redeclaring
+ * the vocabulary (same file-family layering as every other dispatch type).
+ */
+export type AnchorFailureReport = (detail: PlacementFailureDetail) => void;
 import type { CoordinationOfferRejection } from './downtime-worker.offer-attribution.js';
 import type {
   DowntimeActiveAuditResult,
@@ -122,7 +152,7 @@ export interface DowntimeDispatchDeps {
   /** Local capacity reservation (see `DowntimeWorkerDeps`). */
   reserveLocalCapacity?(request: LocalReservationRequest): Promise<LocalReservationResult | null>;
   /** Machine-wide Dispatcher anchor (see `DowntimeWorkerDeps`). */
-  getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
+  getDispatcherAnchor?(cwd: string, report?: AnchorFailureReport): Promise<DispatcherAnchor | null>;
   /** Project workspace resolution (see `DowntimeWorkerDeps`). */
   resolveProjectWorkspace?(cwd: string): Promise<ProjectWorkspaceTarget | null>;
   /** Item-ID tab anchor (see `DowntimeWorkerDeps.getItemTabAnchor`). */
@@ -135,6 +165,7 @@ export interface DowntimeDispatchDeps {
   getDispatcherTabAnchor?(
     cwd: string,
     prefix: string,
+    report?: AnchorFailureReport,
   ): Promise<DispatcherPrefixTabAnchor | null>;
   /** Dispatch trail: marker write + item comment (see `DowntimeWorkerDeps`). */
   recordDispatch(event: DowntimeDispatchEvent): Promise<boolean>;
@@ -542,6 +573,13 @@ export interface DowntimeDispatchOutcome {
    * {@link DowntimeHostBudgetAdmission.detail} so the terminal reason and the
    * decision entry can name the broken proxy contract; absent on every other
    * outcome (WL-0MWDDHVF2004PTYX AC3).
+   *
+   * Since WL-0MWHCUZ5C000I7S6 it also carries the placement fail-closed
+   * boundary on an `anchor-unavailable` outcome (a {@link PlacementFailureDetail}
+   * token such as `herdr-unreadable` / `prefix-empty` /
+   * `item-tab-unavailable`), so a genuine refusal is diagnosable from the
+   * decision log alone. `reason` stays `anchor-unavailable` — every existing
+   * consumer, budget and starvation heuristic is unchanged.
    */
   detail?: string;
   /**

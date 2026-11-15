@@ -46,6 +46,44 @@ export interface DispatcherAnchor {
 }
 
 /**
+ * Family-local vocabulary naming the failing boundary of an
+ * `anchor-unavailable` placement refusal (WL-0MWHCUZ5C000I7S6, parent
+ * WL-0MWH50EN4007C6YH AC6): where exactly the anchor resolution failed
+ * closed, so the `no-dispatch` decision entry is diagnosable from the log
+ * alone (the reported incident showed 124 identical `anchor-unavailable`
+ * entries with no way to tell a vanished workspace from a broken CLI).
+ *
+ * Deliberately **not** re-exported by the `dispatcher-anchor.js` barrel
+ * (the split guard freezes the barrel at 38 exports) and **not** imported by
+ * consumers: the dispatch side (`downtime-worker.dispatch-placement.ts` and
+ * the deps contracts) declares a structurally identical string-literal
+ * union, and TypeScript's structural typing makes them assignable wherever
+ * they meet. Additive by design: the sibling mismatch item extends the union
+ * with `project-workspace-mismatch`.
+ *
+ * - `persisted-workspace-missing` — the persisted Dispatcher workspace id
+ *   is POSITIVELY absent from a successfully read `herdr workspace list`
+ *   (probe verdict `missing`); recoverable via the re-provision path, so a
+ *   successful recovery never leaves a detail behind.
+ * - `herdr-unreadable` — the herdr CLI could not be read (probe `unreadable`,
+ *   an unparseable/empty `tab list`/`pane list`, a throwing aliveness probe):
+ *   fail closed, nothing provisioned (missing ≠ unreadable).
+ * - `dispatcher-workspace-unprovisionable` — the replacement Dispatcher
+ *   workspace (or its persistence) could not be provisioned, including the
+ *   positively-missing-plus-unrecoverable case and any per-prefix
+ *   provisioning failure.
+ * - `prefix-empty` — no extractable work-item id prefix to route by.
+ * - `item-tab-unavailable` — a resolved project workspace's item-ID tab
+ *   could not be provisioned (the primary placement path).
+ */
+export type PlacementFailureDetail =
+  | 'persisted-workspace-missing'
+  | 'herdr-unreadable'
+  | 'dispatcher-workspace-unprovisionable'
+  | 'prefix-empty'
+  | 'item-tab-unavailable';
+
+/**
  * Per-prefix tab-anchors map — keyed by work-item id prefix (e.g. `WL`, `TCE`)
  * so every dispatch for the same prefix reuses the same tab in the Dispatcher
  * workspace (C1, parent WL-0MTRQT482001SNXC).

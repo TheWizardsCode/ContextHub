@@ -381,6 +381,56 @@ describe('dispatchFromCoordination', () => {
     expect(getEntry(testDir, 'inst-1')).not.toBe(null);
   });
 
+  it('AC5: a genuine anchor-unavailable decision records the machine-readable detail on the no-dispatch entry (WL-0MWHCUZ5C000I7S6)', async () => {
+    // Parent AC6 / this item's AC5: the incident log showed 124 identical
+    // `anchor-unavailable` entries with no way to tell a vanished workspace
+    // from a broken CLI. The entry must now carry the failing boundary.
+    // A PEER's offer drives the leader's coordination dispatch directly (an
+    // own-instance offer requires a seeded own head — the peer entry is the
+    // live recurrence used by the other coordinator decision tests).
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [makeEntry('inst-peer', 'WL-PLAN', '/repo')],
+    });
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const worker = makeCoordWorker({
+      coordinationDir: testDir,
+      instanceId: 'inst-a',
+      depsOverrides: {
+        getDispatcherAnchor: vi.fn().mockResolvedValue(null),
+        fetchItem: vi.fn().mockResolvedValue({
+          ok: true,
+          info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }),
+        }),
+        recordDecision,
+      },
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    try {
+      await worker.worker.tick(); // election + first check-in
+      await worker.worker.tick(); // idle run starts
+      vi.setSystemTime(10_000_000 + 60_001);
+      const at = await worker.worker.tick(); // idle threshold met → dispatch attempt
+
+      expect(at.dispatched).toBe(false);
+      // Tick results carry no reason — the refusal lives on the decision
+      // entries recorded below (the subject of this test).
+      const calls = recordDecision.mock.calls.map((call) => call[0] as CoordinationLogEntry);
+      const entry = calls.find(
+        (e) => e.operation === 'no-dispatch' && e.reason === 'anchor-unavailable',
+      );
+      expect(entry).toBeDefined();
+      // The failing boundary (a null anchor stub without a more specific
+      // report names the generic herdr boundary) rides on the decision entry
+      // so the log alone is diagnosable — `reason` stays `anchor-unavailable`.
+      expect(entry?.detail).toBe('herdr-unreadable');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('legacy wiring without getDispatcherAnchor spawns without an anchorId key', async () => {
     const deps = makeCoordinationDeps({
       fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }) }),

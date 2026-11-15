@@ -31,20 +31,46 @@ import {
 import { resolveHerdrBin } from './herdr-bin.js';
 
 /**
+ * Placement-failure detail vocabulary (WL-0MWHCUZ5C000I7S6): structurally
+ * identical to the family-local alias in `dispatcher-anchor.contract.ts` and
+ * the local unions in the deps contracts — the default resolvers forward the
+ * report callback untyped through to the tab-anchors resolvers' own
+ * structural type.
+ */
+type PlacementFailureDetail =
+  | 'persisted-workspace-missing'
+  | 'herdr-unreadable'
+  | 'dispatcher-workspace-unprovisionable'
+  | 'prefix-empty'
+  | 'item-tab-unavailable';
+
+/**
  * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
  * (C0 WL-0MTR01EU7005SYZG): resolves the machine-wide dedicated Dispatcher
  * anchor pane via the herdr CLI (F1 WL-0MTR2CD4X006XI7U), provisioning the
  * Dispatcher workspace idempotently on first dispatch. Null on any
  * failure — dispatch degrades to "no dispatch this cycle". Injectable for
  * tests that build real deps without a live herdr session.
+ *
+ * The optional trailing `report` callback (WL-0MWHCUZ5C000I7S6) is forwarded
+ * to the underlying resolver so a fail-closed `null` carries the boundary
+ * detail to the placement collector; the catch-all reports the generic
+ * unreadable boundary (the underlying resolver reports its own, more
+ * specific boundaries before returning `null`).
  */
 export async function defaultDispatcherAnchorResolver(
   cwd: string,
+  report?: (detail: PlacementFailureDetail) => void,
 ): Promise<DispatcherAnchor | null> {
   try {
     const herdrBin = resolveHerdrBin();
-    return await resolveDispatcherAnchor(cwd, createDispatcherAnchorDeps(cwd, herdrBin));
+    return await resolveDispatcherAnchor(
+      cwd,
+      createDispatcherAnchorDeps(cwd, herdrBin),
+      report,
+    );
   } catch {
+    report?.('herdr-unreadable');
     return null;
   }
 }
@@ -86,6 +112,7 @@ export async function defaultProjectWorkspaceResolver(
 export async function defaultDispatcherTabAnchorResolver(
   cwd: string,
   prefix: string,
+  report?: (detail: PlacementFailureDetail) => void,
 ): Promise<DispatcherPrefixTabAnchor | null> {
   try {
     const herdrBin = resolveHerdrBin();
@@ -93,8 +120,10 @@ export async function defaultDispatcherTabAnchorResolver(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),
       prefix,
+      report,
     );
   } catch {
+    report?.('herdr-unreadable');
     return null;
   }
 }

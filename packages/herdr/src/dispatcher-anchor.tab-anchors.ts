@@ -47,6 +47,7 @@ import type {
   DispatcherTabInfo,
   DispatcherPaneInfo,
   ItemTabAnchor,
+  PlacementFailureDetail,
 } from './dispatcher-anchor.contract.js';
 import {
   readAnchor,
@@ -92,9 +93,20 @@ interface EnsuredDispatcherWorkspace {
  * The probe is consulted ONLY here, on the recovery path — never on a healthy
  * fast-path resolution (AC8, parent AC10). Returns `null` on failure (the
  * caller fails closed with `anchor-unavailable`).
+ *
+ * @param report Optional trailing fail-closed boundary reporter
+ *   (WL-0MWHCUZ5C000I7S6): invoked with the {@link PlacementFailureDetail}
+ *   naming the exact boundary before every `null` return, so the placement
+ *   collector can make an `anchor-unavailable` refusal diagnosable from the
+ *   decision log alone. A positively-missing workspace reports
+ *   `persisted-workspace-missing` BEFORE the recovery attempt; a failed
+ *   recovery overwrites it with `dispatcher-workspace-unprovisionable` (last
+ *   report wins), and a successful recovery reports nothing further — the
+ *   caller's `{ok:true}` result carries no detail (parent AC3).
  */
 async function ensureDispatcherWorkspace(
   deps: DispatcherAnchorDeps,
+  report?: (detail: PlacementFailureDetail) => void,
 ): Promise<EnsuredDispatcherWorkspace | null> {
   const existing = readDispatcherWorkspaceId();
   if (existing === null) {
@@ -102,6 +114,7 @@ async function ensureDispatcherWorkspace(
       const created = await deps.createWorkspace(DISPATCHER_WORKSPACE_LABEL);
       return { workspaceId: created.workspaceId, recovered: false };
     } catch {
+      report?.('dispatcher-workspace-unprovisionable');
       return null;
     }
   }
@@ -112,13 +125,26 @@ async function ensureDispatcherWorkspace(
   } catch {
     verdict = 'unreadable';
   }
-  if (verdict === 'unreadable') return null; // fail closed — never duplicate
+  if (verdict === 'unreadable') {
+    // Fail closed — never duplicate. The persisted workspace may be perfectly
+    // fine; the herdr CLI could not be read to prove it (parent "missing ≠
+    // unreadable").
+    report?.('herdr-unreadable');
+    return null;
+  }
   if (verdict === 'alive') return { workspaceId: existing, recovered: false };
 
-  // Positively missing → exactly one replacement under the coordination lock.
+  // Positively missing → report the observed boundary, then exactly one
+  // replacement under the coordination lock. A successful recovery's
+  // `{ok:true}` result carries no detail (parent AC3); a failed recovery
+  // overwrites the report below.
+  report?.('persisted-workspace-missing');
   const dir = getMachineCoordinationDir();
-  if (dir === null) return null;
-  const recovered = await provisionDispatcherAnchorUnderLock(dir, deps);
+  if (dir === null) {
+    report?.('dispatcher-workspace-unprovisionable');
+    return null;
+  }
+  const recovered = await provisionDispatcherAnchorUnderLock(dir, deps, report);
   return recovered === null ? null : { workspaceId: recovered.workspaceId, recovered: true };
 }
 
@@ -135,6 +161,7 @@ async function ensureDispatcherWorkspace(
 async function provisionDispatcherAnchorUnderLock(
   dir: string,
   deps: DispatcherAnchorDeps,
+  report?: (detail: PlacementFailureDetail) => void,
 ): Promise<DispatcherAnchor | null> {
   const release = tryAcquireCoordLock(dir);
   if (release === null) {
@@ -144,8 +171,12 @@ async function provisionDispatcherAnchorUnderLock(
       try {
         const alive = await deps.isPaneAlive(raced.paneId);
         if (alive) return raced;
-      } catch { return null; }
+      } catch {
+        report?.('herdr-unreadable');
+        return null;
+      }
     }
+    report?.('dispatcher-workspace-unprovisionable');
     return null;
   }
 
@@ -157,7 +188,10 @@ async function provisionDispatcherAnchorUnderLock(
       try {
         const alive = await deps.isPaneAlive(inside.paneId);
         if (alive) return inside;
-      } catch { return null; }
+      } catch {
+        report?.('herdr-unreadable');
+        return null;
+      }
       // stale inside-lock → re-provision below (overwrite)
     }
 
@@ -165,13 +199,17 @@ async function provisionDispatcherAnchorUnderLock(
     try {
       created = await deps.createWorkspace(DISPATCHER_WORKSPACE_LABEL);
     } catch {
+      report?.('dispatcher-workspace-unprovisionable');
       return null;
     }
     // Adopt the freshly-provisioned root pane into its own tab so the
     // workspace never shows a blank pane (WL-0MU2EOHK900425VU).
     await adoptRootPaneIntoNewTab(deps, created.paneId);
     const anchor: DispatcherAnchor = { paneId: created.paneId, workspaceId: created.workspaceId };
-    if (!writeAnchor(dir, anchor)) return null;
+    if (!writeAnchor(dir, anchor)) {
+      report?.('dispatcher-workspace-unprovisionable');
+      return null;
+    }
     return anchor;
   } finally {
     release();
@@ -226,10 +264,17 @@ async function adoptRootPaneIntoNewTab(
 export async function getDispatcherAnchor(
   cwd: string,
   deps: DispatcherAnchorDeps,
+  report?: (detail: PlacementFailureDetail) => void,
 ): Promise<DispatcherAnchor | null> {
   const dir = getMachineCoordinationDir();
-  if (dir === null) return null;
-  if (!ensureMachineCoordinationDir(dir)) return null;
+  if (dir === null) {
+    report?.('dispatcher-workspace-unprovisionable');
+    return null;
+  }
+  if (!ensureMachineCoordinationDir(dir)) {
+    report?.('dispatcher-workspace-unprovisionable');
+    return null;
+  }
 
   const existing = readAnchor(dir);
   if (existing !== null) {
@@ -237,13 +282,14 @@ export async function getDispatcherAnchor(
       const alive = await deps.isPaneAlive(existing.paneId);
       if (alive) return existing;
     } catch {
+      report?.('herdr-unreadable');
       return null;
     }
     // Stale → re-provision under lock (fall through to provision path)
   }
 
   // Provision under the coordination lock so concurrent first-dispatches do not duplicate.
-  return provisionDispatcherAnchorUnderLock(dir, deps);
+  return provisionDispatcherAnchorUnderLock(dir, deps, report);
 }
 
 /**
@@ -379,16 +425,35 @@ async function resolvePrefixTab(
  *
  * Fail-safe: a provisioning failure degrades to `null` (caller treats as
  * 'anchor-unavailable', never falls back to a wrong workspace).
+ *
+ * @param report Optional trailing fail-closed boundary reporter
+ *   (WL-0MWHCUZ5C000I7S6): invoked with the {@link PlacementFailureDetail}
+ *   naming the exact boundary before every `null` return (additive — callers
+ *   that pass no callback behave exactly as before). The persisted-workspace
+ *   recovery path reports `persisted-workspace-missing` before the recovery
+ *   attempt; a failed recovery overwrites it with
+ *   `dispatcher-workspace-unprovisionable` (last report wins), and a
+ *   successful recovery reports nothing further.
  */
 export async function getDispatcherTabAnchor(
   cwd: string,
   deps: DispatcherAnchorDeps,
   prefix: string,
+  report?: (detail: PlacementFailureDetail) => void,
 ): Promise<DispatcherPrefixTabAnchor | null> {
-  if (prefix === '') return null;
+  if (prefix === '') {
+    report?.('prefix-empty');
+    return null;
+  }
   const dir = getMachineCoordinationDir();
-  if (dir === null) return null;
-  if (!ensureMachineCoordinationDir(dir)) return null;
+  if (dir === null) {
+    report?.('dispatcher-workspace-unprovisionable');
+    return null;
+  }
+  if (!ensureMachineCoordinationDir(dir)) {
+    report?.('dispatcher-workspace-unprovisionable');
+    return null;
+  }
 
   const listTabs = deps.listTabs ?? ((ws: string) => listTabsInWorkspace(cwd, ws));
 
@@ -425,14 +490,20 @@ export async function getDispatcherTabAnchor(
   //    id against live herdr state (probe) and recovering a positively missing
   //    workspace under the coordination lock (AC1/AC3). The probe is consulted
   //    exactly here; the recovery trigger is the stale-pane miss above, so a
-  //    healthy resolution never probes (AC8).
+  //    healthy resolution never probes (AC8). The boundary reporter names the
+  //    fail-closed verdict (`herdr-unreadable` vs `dispatcher-workspace-
+  //    unprovisionable`, WL-0MWHCUZ5C000I7S6).
   let ensured: EnsuredDispatcherWorkspace | null = null;
   try {
-    ensured = await ensureDispatcherWorkspace(deps);
+    ensured = await ensureDispatcherWorkspace(deps, report);
   } catch {
     ensured = null;
   }
-  if (ensured === null || ensured.workspaceId === '') return null;
+  if (ensured === null) return null; // detail reported inside ensure
+  if (ensured.workspaceId === '') {
+    report?.('dispatcher-workspace-unprovisionable');
+    return null;
+  }
   const workspaceId = ensured.workspaceId;
   // A recovered workspace rewrote the persisted ids, so any cached entry
   // (already rejected above) is stale by construction — the resolution below
@@ -442,7 +513,10 @@ export async function getDispatcherTabAnchor(
   // 4. Look for an existing tab labelled with the prefix (authoritative,
   //    handles an anchor file lost or written out-of-band).
   const fast = await resolvePrefixTab(cwd, deps, workspaceId, prefix, listTabs);
-  if (fast.status === 'unknown') return null; // fail-closed (never duplicate)
+  if (fast.status === 'unknown') {
+    report?.('herdr-unreadable'); // tab list unreadable — fail-closed
+    return null;
+  }
   if (fast.status === 'found') {
     persistPrefixTab(dir, workspaceId, prefix, fast.tabId, fast.paneId);
     return { workspaceId, tabId: fast.tabId, paneId: fast.paneId };
@@ -458,6 +532,7 @@ export async function getDispatcherTabAnchor(
       persistPrefixTab(dir, workspaceId, prefix, raced.tabId, raced.paneId);
       return { workspaceId, tabId: raced.tabId, paneId: raced.paneId };
     }
+    report?.('dispatcher-workspace-unprovisionable');
     return null;
   }
 
@@ -465,7 +540,10 @@ export async function getDispatcherTabAnchor(
     // Double-check inside the lock: a racing caller may have created the tab
     // between our step-4 read and acquiring the lock.
     const inside = await resolvePrefixTab(cwd, deps, workspaceId, prefix, listTabs);
-    if (inside.status === 'unknown') return null;
+    if (inside.status === 'unknown') {
+      report?.('herdr-unreadable'); // fail-closed (never duplicate)
+      return null;
+    }
     if (inside.status === 'found') {
       persistPrefixTab(dir, workspaceId, prefix, inside.tabId, inside.paneId);
       return { workspaceId, tabId: inside.tabId, paneId: inside.paneId };
@@ -478,12 +556,19 @@ export async function getDispatcherTabAnchor(
     try {
       created = await createTabFn(workspaceId, prefix);
     } catch {
+      report?.('dispatcher-workspace-unprovisionable');
       return null;
     }
-    if (created === null) return null;
+    if (created === null) {
+      report?.('dispatcher-workspace-unprovisionable');
+      return null;
+    }
 
     // Persist the new mapping (authority for subsequent reuse).
-    if (!persistPrefixTab(dir, workspaceId, prefix, created.tabId, created.paneId)) return null;
+    if (!persistPrefixTab(dir, workspaceId, prefix, created.tabId, created.paneId)) {
+      report?.('dispatcher-workspace-unprovisionable');
+      return null;
+    }
     return { workspaceId, tabId: created.tabId, paneId: created.paneId };
   } finally {
     release();

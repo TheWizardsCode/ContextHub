@@ -289,6 +289,10 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
+    // Diagnosable refusal (WL-0MWHCUZ5C000I7S6): a stub that fails closed
+    // without naming a more specific boundary reports the generic herdr
+    // unreadable boundary.
+    expect(outcome.detail).toBe('herdr-unreadable');
     // Provisioning now runs AFTER the CAS claim (WL-0MW5JE0SZ0057K30), so the
     // claim exists and must be rolled back — the item is never stranded
     // `in_progress` with no pane and no marker.
@@ -346,7 +350,9 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
 
     expect(outcome.dispatched).toBe(true);
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
-    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    // The optional trailing report callback (WL-0MWHCUZ5C000I7S6) collects
+    // the fail-closed boundary detail; a healthy resolution never calls it.
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL', expect.any(Function));
     // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
@@ -378,9 +384,11 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     await dispatchDowntimeWork(tceDeps, { model: 'plan', cwd: '/repo-tce' });
 
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
-    expect(wlDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-wl', 'WL');
+    // The optional trailing report callback (WL-0MWHCUZ5C000I7S6) is always
+    // passed so a fail-closed boundary is diagnosable from the log.
+    expect(wlDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-wl', 'WL', expect.any(Function));
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
-    expect(tceDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-tce', 'TCE');
+    expect(tceDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-tce', 'TCE', expect.any(Function));
     // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(wlDeps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
@@ -448,7 +456,9 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
     expect(getItemTabAnchor).not.toHaveBeenCalled();
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
-    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    // The optional trailing report callback (WL-0MWHCUZ5C000I7S6) collects
+    // the fail-closed boundary detail; a healthy resolution never calls it.
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL', expect.any(Function));
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
     // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
@@ -472,6 +482,10 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
+    // Diagnosable refusal (WL-0MWHCUZ5C000I7S6): a stub that fails closed
+    // without naming a more specific boundary reports the generic herdr
+    // unreadable boundary.
+    expect(outcome.detail).toBe('herdr-unreadable');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
     // Claimed before placement now → rollback keeps the item re-selectable
     // (WL-0MW5JE0SZ0057K30).
@@ -579,6 +593,127 @@ describe('stale Dispatcher anchor self-healing (WL-0MWHCUTDM003B39Q)', () => {
   });
 });
 
+// ── Diagnosable anchor-unavailable refusal (WL-0MWHCUZ5C000I7S6) ──────
+
+describe('diagnosable anchor-unavailable refusal (detail field)', () => {
+  const candidateFor = (id: string) => ({
+    id,
+    title: 'Some task',
+    stage: 'intake_complete' as const,
+    status: 'open',
+  });
+
+  /**
+   * Real per-prefix resolver deps over an in-memory herdr (describe-scope
+   * factory so each test body stays within the 5-`vi.fn()` mock budget —
+   * WL-0MV4VSNI00002WFM). Fresh mocks per call; `probeVerdict` drives the
+   * workspace probe and `createFails` forces an unprovisionable replacement.
+   */
+  function makeUnreadableOrUnprovisionableAnchorDeps(opts: {
+    probeVerdict: 'missing' | 'unreadable';
+    createFails?: boolean;
+  }) {
+    return {
+      createWorkspace: vi.fn(async () => {
+        if (opts.createFails === true) throw new Error('herdr workspace create failed');
+        return { workspaceId: 'wB', paneId: 'wB:p1' };
+      }),
+      createTab: vi.fn(async (ws: string, label: string) => ({
+        tabId: `${ws}:t${label}`,
+        paneId: `${ws}:t${label}:p1`,
+      })),
+      listTabs: vi.fn(async () => []),
+      listPanes: vi.fn(async () => []),
+      isPaneAlive: vi.fn(async () => false),
+      probeWorkspace: vi.fn(async () => opts.probeVerdict),
+    };
+  }
+
+  it('AC5: an item id with no extractable prefix fails closed with detail prefix-empty', async () => {
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue(null);
+    const deps = makeDeps({
+      resolveProjectWorkspace: async () => null,
+      getDispatcherTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: candidateFor('') }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(outcome.detail).toBe('prefix-empty');
+    // The prefix gate fails the placement BEFORE the anchor resolver is
+    // consulted — a bare/empty id can never route by prefix.
+    expect(getDispatcherTabAnchor).not.toHaveBeenCalled();
+  });
+
+  it('AC5: a stale persisted workspace with an unreadable probe fails closed with detail herdr-unreadable (nothing provisioned)', async () => {
+    const coordDir = makeTempDir('da-unreadable-');
+    const previous = process.env.HERDR_COORDINATION_DIR;
+    try {
+      process.env.HERDR_COORDINATION_DIR = coordDir;
+      seedStaleAnchorState(coordDir);
+      const anchorDeps = makeUnreadableOrUnprovisionableAnchorDeps({
+        probeVerdict: 'unreadable',
+      });
+      const deps = makeDeps({
+        resolveProjectWorkspace: async () => null,
+        // Forward the trailing report callback so the real resolver's
+        // boundary detail reaches the placement collector.
+        getDispatcherTabAnchor: (cwd, prefix, report) =>
+          resolveDispatcherTabAnchor(cwd, anchorDeps, prefix, report),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: candidateFor('WL-1') }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('anchor-unavailable');
+      expect(outcome.detail).toBe('herdr-unreadable');
+      // Missing ≠ unreadable: an unreadable probe must never provision a
+      // duplicate Dispatcher workspace (parent decision).
+      expect(anchorDeps.createWorkspace).not.toHaveBeenCalled();
+      expect(deps.rollbackClaim).toHaveBeenCalled();
+    } finally {
+      if (previous !== undefined) process.env.HERDR_COORDINATION_DIR = previous;
+      else delete process.env.HERDR_COORDINATION_DIR;
+      rmSync(coordDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3: a positively missing persisted workspace whose replacement cannot be provisioned yields detail dispatcher-workspace-unprovisionable', async () => {
+    const coordDir = makeTempDir('da-unprovisionable-');
+    const previous = process.env.HERDR_COORDINATION_DIR;
+    try {
+      process.env.HERDR_COORDINATION_DIR = coordDir;
+      seedStaleAnchorState(coordDir);
+      const anchorDeps = makeUnreadableOrUnprovisionableAnchorDeps({
+        probeVerdict: 'missing',
+        createFails: true,
+      });
+      const deps = makeDeps({
+        resolveProjectWorkspace: async () => null,
+        getDispatcherTabAnchor: (cwd, prefix, report) =>
+          resolveDispatcherTabAnchor(cwd, anchorDeps, prefix, report),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: candidateFor('WL-1') }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('anchor-unavailable');
+      // Exactly one recovery attempt is made against the positively-missing
+      // workspace; its failure names the boundary.
+      expect(outcome.detail).toBe('dispatcher-workspace-unprovisionable');
+      expect(anchorDeps.createWorkspace).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previous !== undefined) process.env.HERDR_COORDINATION_DIR = previous;
+      else delete process.env.HERDR_COORDINATION_DIR;
+      rmSync(coordDir, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── Project workspace + item-ID tab dispatch wiring (WL-0MU321YK70035AYT) ──
 
 // These tests exercise the PRIMARY project-workspace + item-ID tab path,
@@ -675,7 +810,9 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
-    expect(getDispatcherAnchor).toHaveBeenCalledWith('/repo');
+    // The optional trailing report callback (WL-0MWHCUZ5C000I7S6) collects
+    // the fail-closed boundary detail; a healthy resolution never calls it.
+    expect(getDispatcherAnchor).toHaveBeenCalledWith('/repo', expect.any(Function));
     expect(getItemTabAnchor).not.toHaveBeenCalled();
     // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
@@ -703,6 +840,9 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('anchor-unavailable');
+    // Diagnosable refusal (WL-0MWHCUZ5C000I7S6): a workspace that resolved
+    // but whose item tab could not be provisioned names that boundary.
+    expect(outcome.detail).toBe('item-tab-unavailable');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
     expect(deps.claimItem).toHaveBeenCalled();
     expect(deps.rollbackClaim).toHaveBeenCalled();

@@ -37,6 +37,8 @@ import type {
   ItemTabAnchor,
   ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
+// Anchor resolvers' optional trailing fail-closed boundary reporter (WL-0MWHCUZ5C000I7S6).
+import type { AnchorFailureReport } from './downtime-worker.dispatch-contract.js';
 import type {
   DowntimeDispatchEnrichmentEvent,
   DowntimeDispatchFailureEvent,
@@ -405,7 +407,7 @@ export interface DowntimeWorkerDeps {
    * (`createDowntimeDeps`) always provides it, so downtime dispatch is
    * always anchored.
    */
-  getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
+  getDispatcherAnchor?(cwd: string, report?: AnchorFailureReport): Promise<DispatcherAnchor | null>;
   /**
    * Resolve the project workspace hosting the worklog plugin pane for the
    * worklog root `cwd` (WL-0MU321YK70035AYT, AC1/AC3). When it resolves, the
@@ -443,12 +445,10 @@ export interface DowntimeWorkerDeps {
    * degrades to 'anchor-unavailable' — the caller NEVER falls back to the
    * legacy Dispatcher anchor or the leader's pane when this dep is wired.
    * Optional for test callers that inject mocks; production wiring provides
-   * it.
+   * it. The optional trailing `report` callback (WL-0MWHCUZ5C000I7S6)
+   * carries the fail-closed boundary detail before a `null` return; additive.
    */
-  getDispatcherTabAnchor?(
-    cwd: string,
-    prefix: string,
-  ): Promise<DispatcherPrefixTabAnchor | null>;
+  getDispatcherTabAnchor?(cwd: string, prefix: string, report?: AnchorFailureReport): Promise<DispatcherPrefixTabAnchor | null>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log

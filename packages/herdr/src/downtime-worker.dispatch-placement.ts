@@ -36,6 +36,23 @@ import type { DowntimeDispatchDeps } from './downtime-worker.dispatch-contract.j
 import { countRunningDowntimePanes } from './downtime-worker.pane.js';
 
 /**
+ * Placement-failure detail vocabulary naming the exact fail-closed boundary
+ * of an `anchor-unavailable` verdict (WL-0MWHCUZ5C000I7S6, parent
+ * WL-0MWH50EN4007C6YH AC6). Structurally identical to the family-local
+ * alias in `dispatcher-anchor.contract.ts` and to the deps contracts'
+ * local unions — cross-referenced by comment; the barrel exports neither,
+ * so no consumer imports a non-barrelled symbol (split guard, 38 exports).
+ * TypeScript's structural typing makes them assignable wherever they meet.
+ * The sibling mismatch item extends the union with `project-workspace-mismatch`.
+ */
+export type PlacementFailureDetail =
+  | 'persisted-workspace-missing'
+  | 'herdr-unreadable'
+  | 'dispatcher-workspace-unprovisionable'
+  | 'prefix-empty'
+  | 'item-tab-unavailable';
+
+/**
  * A resolved placement.
  *
  * `anchorId` absent means "no anchor": legacy/test callers that wire no
@@ -58,9 +75,12 @@ export interface DispatchPlacement {
 
 /**
  * Placement outcome: a usable anchor, or the fail-closed
- * `anchor-unavailable` verdict.
+ * `anchor-unavailable` verdict with the machine-readable `detail` naming the
+ * failing boundary (so the refusal is diagnosable from the log alone).
  */
-export type DispatchPlacementResult = ({ ok: true } & DispatchPlacement) | { ok: false };
+export type DispatchPlacementResult =
+  | ({ ok: true } & DispatchPlacement)
+  | { ok: false; detail: PlacementFailureDetail };
 
 /**
  * Resolve the anchor pane for one dispatch (precedence, WL-0MUR5FUWD00024XN):
@@ -92,6 +112,16 @@ export async function resolveDispatchPlacement(
   let anchorIsTabRoot = false;
   // Extract the work-item id prefix (e.g. `WL-0MTO…` → `WL`, `TCE-…` → `TCE`).
   const prefix = opts.itemId.split('-', 1)[0];
+  // Per-call collector (WL-0MWHCUZ5C000I7S6): the anchor resolvers report
+  // the fail-closed boundary through the optional trailing callback into
+  // this local, so no cross-dispatch state is introduced. Last report wins
+  // (a recovered workspace's `persisted-workspace-missing` observation is
+  // overwritten by a later un-recoverable boundary, and a successful
+  // resolution returns `{ok:true}` with no detail at all).
+  let placementDetail: PlacementFailureDetail | undefined;
+  const reportAnchorDetail = (detail: PlacementFailureDetail): void => {
+    placementDetail = detail;
+  };
 
   // ── Primary path: project workspace + item-ID tab ─────────────────────
   // When a project plugin pane resolves for the root, the Dispatcher workspace
@@ -118,7 +148,7 @@ export async function resolveDispatchPlacement(
         // The workspace resolved but its item tab could not be provisioned:
         // fail closed rather than place a project pane in the Dispatcher
         // workspace (never a wrong placement).
-        return { ok: false };
+        return { ok: false, detail: 'item-tab-unavailable' };
       }
       anchorId = tabAnchor.paneId;
       anchorIsTabRoot = true;
@@ -133,16 +163,22 @@ export async function resolveDispatchPlacement(
   if (anchorId === undefined && typeof deps.getDispatcherTabAnchor === 'function') {
     if (!prefix) {
       // No prefix extractable (empty/invalid id) → cannot route by prefix.
-      return { ok: false };
+      return { ok: false, detail: 'prefix-empty' };
     }
     let prefixAnchor: DispatcherPrefixTabAnchor | null = null;
     try {
-      prefixAnchor = await deps.getDispatcherTabAnchor(opts.cwd, prefix);
+      // The trailing report callback collects the fail-closed boundary the
+      // resolver names (prefix-empty / herdr-unreadable / …).
+      prefixAnchor = await deps.getDispatcherTabAnchor(
+        opts.cwd,
+        prefix,
+        reportAnchorDetail,
+      );
     } catch {
-      prefixAnchor = null; // fail-closed
+      prefixAnchor = null; // fail-closed — boundary reported by the resolver
     }
     if (prefixAnchor === null) {
-      return { ok: false };
+      return { ok: false, detail: placementDetail ?? 'herdr-unreadable' };
     }
     anchorId = prefixAnchor.paneId;
     // Per-prefix Dispatcher tabs use herdr's initial root pane as anchor.
@@ -157,12 +193,14 @@ export async function resolveDispatchPlacement(
   if (anchorId === undefined && typeof deps.getDispatcherAnchor === 'function') {
     let anchor: DispatcherAnchor | null = null;
     try {
-      anchor = await deps.getDispatcherAnchor(opts.cwd);
+      // The trailing report callback collects the fail-closed boundary the
+      // resolver names (herdr-unreadable / …).
+      anchor = await deps.getDispatcherAnchor(opts.cwd, reportAnchorDetail);
     } catch {
       anchor = null; // fail-closed on any anchor error
     }
     if (anchor === null) {
-      return { ok: false };
+      return { ok: false, detail: placementDetail ?? 'herdr-unreadable' };
     }
     anchorId = anchor.paneId;
     // The legacy Dispatcher anchor is NOT a tab root — it is the persisted
