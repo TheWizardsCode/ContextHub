@@ -2571,6 +2571,51 @@ grep 'anchor-unavailable' .worklog/downtime-coordination.log \
   | tail -50 | jq -r '.detail'
 ```
 
+### Hydrator demotion evidence is cross-workspace; display markers stay workspace-scoped
+
+Two different questions about a pane must not share one filter
+(WL-0MWH56SWX004HSKQ):
+
+- **"Is this item being worked on ANYWHERE?"** — the **demotion** question
+  answered by the hydrator's pane scan. Evidence is **workspace-agnostic**:
+  one machine-wide `herdr pane list` per hydrate tick (no `--workspace`
+  filter, the `listAllActivePanes` seam), so a live dispatch pane in the
+  `Dispatcher` workspace keeps the claim it proves. This is what closes the
+  duplicate-dispatch window: fallback placement (per-prefix tab, above) puts
+  ContextHub panes in the `Dispatcher` workspace while the worklist plugin
+  pane reports a different workspace, so a workspace-scoped scan would see
+  no pane and release a live claim seconds after its pane spawned.
+- **"Does this item have a pane in MY workspace?"** — the **display**
+  question answered by the selection-list's in-progress marker
+  (`applyActivePaneMarkers` / `markItemsActiveByPane`). It stays
+  **workspace-scoped** (`collectPaneWorkItemIds(panes, workspaceId)`): a
+  pane in another workspace never lights the marker or the green circle in
+  this workspace (WL-0MV1BWETT005GSUJ intent).
+
+Fail-open: an unavailable/unparseable wider read (null, throw or step
+budget) aborts the cycle WITHOUT releasing — ambiguity keeps the claim; only
+proven pane-absence (and no live claim holder) releases.
+
+**Claim grace window.** A freshly-claimed item gets a bounded grace window
+before today's no-pane rule applies, so a hydrate tick landing in the
+spawn→pane-title gap never releases a live claim: an item claimed within
+`hydratorClaimGraceMs` (default **120 s**, `HYDRATOR_CLAIM_GRACE_MS`
+= 120 000 ms, clamped to 0 ms – 10 min; `0` disables the window) is never
+released even with no pane visible yet. Claim age derives from the existing
+`updatedAt`/`activityAt` recency signals (`now − max(updatedAt, activityAt)`,
+max = fail-open toward "recently active"); absent/unparseable recency keeps
+the claim for the window. The grace branch is evaluated AFTER the
+`in_review → completed` and `blocked` branches and only suppresses the
+release to `open` — it never overrides the audit-tier completion or the
+dependency `blocked` transition.
+
+**Prep-tier contract (intake/plan/audit).** `/skill:intake`, `/skill:plan`
+and audit runs hold **no** per-child claim lock, so for those tiers pane
+evidence is the ONLY busy signal — the claim-holder probe is a second signal
+only where a lock exists (the implement tier). This is pinned by behaviour
+in `hydrator.test.ts` (prep-tier pane-only contract test) so nobody
+"fixes" the release by re-introducing a claim-lock for prep tiers.
+
 ```json
 {"kind":"decision","operation":"no-dispatch","instanceId":"herdr:4145450",
  "reason":"anchor-unavailable","detail":"persisted-workspace-missing",
@@ -4716,6 +4761,7 @@ status refresh unchanged at 30s.**
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.constants.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.constants.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT; the **same** window bounds the `hasPeerOffer` peer-entry liveness check, WL-0MVR8GDJ3008WY3Y AC7) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
+| Hydrator claim grace window | **120 s** (`hydratorClaimGraceMs`; clamped to 0 ms – 10 min, `0` disables; a claimed item is never released within the window even with no pane visible yet, closing the spawn→pane-title release gap, WL-0MWHBSX81003M0EM) | `HYDRATOR_CLAIM_GRACE_MS` (`hydrator.ts`), `clampHydratorClaimGraceMs` (`hydrator.ts`), wired in `settings.ts` |
 | Dead-coordination-entry staleness window | **10 min** (`downtimeCoordinationEntryStaleMs`; derived as 2 × the check-in cadence, so one missed check-in is tolerated; clamped to 1 × cadence – 24 h, so a cadence-refreshing follower can never be pruned at the floor; the leader applies it to the dead-entry prune each tick, WL-0MWFJTULD005DTQI) | `DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS` / `DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS` / `DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS` (`downtime-worker.constants.ts`), `clampDowntimeCoordinationEntryStaleMs` (`downtime-worker.clamps.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS` (`downtime-worker.constants.ts`), `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.clamps.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (`downtime-worker.constants.ts`), `clampDowntimeMaxAttempts` (`downtime-worker.clamps.ts`), `countAttempts` (`downtime-log.ts`) |
@@ -4738,7 +4784,9 @@ slot-exhaustion cooldown so that existing sessions have a chance to reclaim
 the slot before a new work item is dispatched. The success-marker staleness
 window (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped
 on load
-(`clampDowntimeMarkerStaleWindowMs`). The dead-coordination-entry staleness
+(`clampDowntimeMarkerStaleWindowMs`). The hydrator's claim grace window
+(`hydratorClaimGraceMs`) is likewise configurable and clamped on load
+(`clampHydratorClaimGraceMs`), with `0` disabling it. The dead-coordination-entry staleness
 window (`downtimeCoordinationEntryStaleMs`) is likewise configurable and
 clamped on load (`clampDowntimeCoordinationEntryStaleMs`): its clamped floor
 is exactly one full check-in interval, so an operator can never widen or

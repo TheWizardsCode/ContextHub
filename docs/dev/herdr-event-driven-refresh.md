@@ -226,6 +226,17 @@ below the 1,000-line ceiling.
   (≤ 100 ms p95) across watch-triggered refreshes.
 - `packages/herdr/src/hydrator-responsiveness.test.ts` — event-loop delay
   guard for the real watch primitive under a burst of writes.
+- **Hydrator demotion vs display pane scope.** The hydrator's demotion scan
+  ("is this item being worked on ANYWHERE?") reads panes **cross-workspace**
+  (one machine-wide `herdr pane list` per tick), while the selection-list's
+  in-progress marker / green circle ("does this item have a pane in MY
+  workspace?") stays **workspace-scoped** — two questions, two filters
+  (WL-0MWH56SWX004HSKQ, AC1/AC2). The claim **grace window**
+  (`hydratorClaimGraceMs`, default 120 s) bounds the spawn→pane-title gap so
+  a just-claimed item is never released with no pane visible yet (AC5); the
+  prep/audit tiers keep pane evidence as their only busy signal (AC7). Full
+  contract, fail-open rules and the settings row are in
+  [`docs/dev/downtime-dispatcher.md`](downtime-dispatcher.md#hydrator-demotion-evidence-is-cross-workspace-display-markers-stay-workspace-scoped).
 - `bench/herdr-refresh-perf.ts` (+ `tests/bench/herdr-refresh-perf.test.ts`) —
   repeatable warm/cold latency and `wl` spawn-count benchmark.
 
