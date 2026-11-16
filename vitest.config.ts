@@ -23,7 +23,26 @@ const MEASURED_STARTUP_SUITE = 'tests/cli/startup-import-budget.test.ts'
  * runs in the same isolated, serialised group as the startup-cost suite.
  */
 const INPROC_HARNESS_BUDGET_SUITE = 'tests/cli/inproc-harness-budget.test.ts'
-const MEASURED_SUITES = [MEASURED_STARTUP_SUITE, INPROC_HARNESS_BUDGET_SUITE]
+/**
+ * The large-DB refresh budget measured ratchet measures the pane's own RSS
+ * delta (`process.resourceUsage().maxRSS` across the refresh samples) plus the
+ * largest concurrent spawned `wl` child. Inside the parallel fork pool the ~6
+ * sibling workers starve V8's GC, so the pane RSS delta stays inflated and
+ * `paneAggregateRssMb` breached its 25 % headroom on an unchanged tree
+ * (140.7 vs a 137.9 MB limit — WL-0MWJAHK3J0026P68). It therefore joins the
+ * startup/inproc measured suites in the isolated, serialised project.
+ *
+ * Only the measured ratchet describe block needs the isolation; the policy and
+ * fixture unit tests in the same file are deterministic, but the established
+ * measured-suite convention isolates whole files (as the other two do), so this
+ * file runs in its entirety in the serialised project.
+ */
+const LARGE_DB_REFRESH_BUDGET_SUITE = 'packages/herdr/src/large-db-refresh-budget.test.ts'
+const MEASURED_SUITES = [
+  MEASURED_STARTUP_SUITE,
+  INPROC_HARNESS_BUDGET_SUITE,
+  LARGE_DB_REFRESH_BUDGET_SUITE,
+]
 
 /** Excluded from discovery — worktrees hold duplicate copies of the suite. */
 const EXCLUDE = [
@@ -92,8 +111,10 @@ export default defineConfig({
     // Two projects, both extending this config (WL-0MWIGCK0E009GGLG):
     //
     //   suite                    — everything else, maxWorkers 6, parallel.
-    //   startup-budget-measured  — the measured startup-cost suite only, one
-    //                              worker, sequenced after `suite`.
+    //   startup-budget-measured  — the measured suites only (startup cost,
+    //                              in-process harness, large-DB refresh
+    //                              ratchet), one worker, sequenced after
+    //                              `suite`.
     //
     // `sequence.groupOrder` is what makes the isolation real: vitest runs
     // groups from the lowest order to the highest, waiting for each group to

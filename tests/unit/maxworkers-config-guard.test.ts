@@ -75,6 +75,13 @@ const MEASURED_STARTUP_SUITE = 'tests/cli/startup-import-budget.test.ts'
 // failed the ratchet on an unchanged tree (WL-0MVWLBZG4003A803).
 const INPROC_HARNESS_BUDGET_SUITE = 'tests/cli/inproc-harness-budget.test.ts'
 
+// The large-DB refresh budget measured ratchet measures the pane's own RSS
+// delta plus its largest concurrent spawned `wl` child. Parallel fork workers
+// starve V8's GC and inflated that RSS delta past the 25 % headroom on an
+// unchanged tree (140.7 vs a 137.9 MB limit — WL-0MWJAHK3J0026P68), so it must
+// run in the same isolated, serialised project as the other measured suites.
+const LARGE_DB_REFRESH_BUDGET_SUITE = 'packages/herdr/src/large-db-refresh-budget.test.ts'
+
 describe('vitest measured-suite isolation (WL-0MWIGCK0E009GGLG)', () => {
   const projectIncluding = async (file: string): Promise<ProjectTestConfig> => {
     const test = await declaredTestConfig()
@@ -133,5 +140,20 @@ describe('vitest measured-suite isolation (WL-0MWIGCK0E009GGLG)', () => {
     if (!main) throw new Error('vitest.config.ts has no `suite` project')
 
     expect(main.exclude ?? []).toContain(INPROC_HARNESS_BUDGET_SUITE)
+  })
+
+  it('runs the large-DB refresh budget ratchet in the isolated measured project', async () => {
+    const project = await projectIncluding(LARGE_DB_REFRESH_BUDGET_SUITE)
+    expect(project.maxWorkers).toBe(1)
+  })
+
+  it('keeps the large-DB refresh budget ratchet out of the main parallel project', async () => {
+    const test = await declaredTestConfig()
+    const main = (test.projects ?? [])
+      .map((entry) => entry.test)
+      .find((candidate) => candidate?.name === 'suite')
+    if (!main) throw new Error('vitest.config.ts has no `suite` project')
+
+    expect(main.exclude ?? []).toContain(LARGE_DB_REFRESH_BUDGET_SUITE)
   })
 })

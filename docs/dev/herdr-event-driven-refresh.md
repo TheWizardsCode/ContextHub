@@ -297,9 +297,21 @@ between the fix items (F3–F6) could not be caught.
 real scale (~2,600 items / ~100 MB on disk) and is run on demand:
 
 ```sh
-# Default-suite ratchet (also runs inside the herdr test group)
+# Default-suite ratchet (runs in the vitest `startup-budget-measured` project)
 npx tsx packages/herdr/test/perf/large-db-harness.ts --profile default --json
 
+The measured ratchet (`large-db-refresh-budget.test.ts`) runs in the isolated,
+serialised vitest project shared with the other measured suites (`maxWorkers: 1`,
+`sequence.groupOrder: 1` — see `docs/dev/wl-startup-import-budget.md`). It
+measures the pane's own RSS delta via `process.resourceUsage().maxRSS`, which
+inside the parallel fork pool was inflated by sibling workers starving V8's GC:
+`paneAggregateRssMb` breached its 25 % headroom on an unchanged tree (140.7 vs a
+137.9 MB limit) until the ratchet joined the isolated project
+(WL-0MWJAHK3J0026P68). A standalone harness run (above) measures the same code
+on a quiet host and stays inside the recorded budget.
+```
+
+```sh
 # Full-scale run: text output, then machine-readable
 npm run test:perf:large
 npm run test:perf:large -- --json

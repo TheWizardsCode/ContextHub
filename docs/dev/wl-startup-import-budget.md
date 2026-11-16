@@ -194,8 +194,8 @@ declares two projects:
 
 | Project | Contents | Settings |
 |---|---|---|
-| `suite` | every other test file | inherits the root config (`maxWorkers: 6`, `pool: 'forks'`, `isolate: true`), excludes the measured suite |
-| `startup-budget-measured` | `tests/cli/startup-import-budget.test.ts` | `maxWorkers: 1`, `sequence.groupOrder: 1` |
+| `suite` | every other test file | inherits the root config (`maxWorkers: 6`, `pool: 'forks'`, `isolate: true`), excludes the measured suites |
+| `startup-budget-measured` | `tests/cli/startup-import-budget.test.ts`, `tests/cli/inproc-harness-budget.test.ts`, `packages/herdr/src/large-db-refresh-budget.test.ts` (the large-DB refresh ratchet joined for the same reason — WL-0MWJAHK3J0026P68: sibling fork workers starve V8's GC and inflated the pane RSS delta past its 25 % headroom on an unchanged tree) | `maxWorkers: 1`, `sequence.groupOrder: 1` |
 
 Vitest runs groups from the lowest `sequence.groupOrder` to the highest,
 waiting for one to finish before starting the next, so the benchmark runs
