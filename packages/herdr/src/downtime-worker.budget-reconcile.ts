@@ -16,6 +16,14 @@
  * Failures are SURFACED (one stderr line + one non-blocking decision entry)
  * instead of swallowed, and nothing here can change a dispatch decision: the
  * pass never gates and never throws.
+ *
+ * Test isolation (WL-0MWJPVWB6002208H): the ledger is resolved through the
+ * SAME policy as the coordination file (`resolveEffectiveDir`) — a tmp-root
+ * worker (every unit-test harness) reconciles its OWN root ledger, so the
+ * first-tick pass can never contend with the real worker or parallel vitest
+ * workers on the shared `~/.herdr/downtime` lock, and never sweeps real
+ * entries against the test mocks' pane list. Production worklog roots
+ * resolve to the machine dir exactly as before.
  */
 
 import { HOST_BUDGET_RECONCILE_INTERVAL_MS } from './host-dispatch-budget.reconcile.js';
@@ -26,6 +34,7 @@ import type {
 } from './downtime-worker.orchestrator-dispatch.js';
 import { reconcileBudgetLedger } from './host-dispatch-budget.reconcile.js';
 import type { HostBudgetLivePane } from './host-dispatch-budget.js';
+import { resolveEffectiveDir } from './coordination.js';
 
 /**
  * Cadence-gated, fire-and-forget reconciliation pass for the worker tick.
@@ -71,7 +80,17 @@ export async function reconcileHostBudgetPass(
 
   let outcome;
   try {
-    outcome = reconcileBudgetLedger(panes, { actor: `herdr:${process.pid}` });
+    // Target the SAME dir the coordination file resolves to, not the machine
+    // ledger unconditionally: a tmp-root worker (every unit-test harness) is
+    // sandboxed to its own root, so the first-tick pass can never contend
+    // with the real worker / parallel vitest workers on the shared
+    // `~/.herdr/downtime` lock and never sweeps real ledger entries against
+    // the test mocks' pane list (WL-0MWJPVWB6002208H). Production worklog
+    // roots resolve to the machine dir exactly as before.
+    outcome = reconcileBudgetLedger(panes, {
+      dir: resolveEffectiveDir(cfg.cwd),
+      actor: `herdr:${process.pid}`,
+    });
   } catch (err) {
     warn(`budget reconcile pass threw: ${err instanceof Error ? err.message : String(err)}`);
     return;

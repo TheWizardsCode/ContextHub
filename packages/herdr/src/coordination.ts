@@ -227,8 +227,14 @@ function lockFilePath(worklogDir: string): string {
  * root uses the machine file and stale legacy files are ignored (no
  * double-write, no read fallback). The F2 AC1 proof sets
  * `HERDR_COORDINATION_DIR` so sharing is still proven.
+ *
+ * Shared policy: the budget-ledger reconciliation pass
+ * (`downtime-worker.budget-reconcile.ts`) resolves its ledger through
+ * this SAME function, so a tmp-root worker's first-tick reconcile is
+ * sandboxed to its own root instead of mutating the shared machine
+ * ledger (WL-0MWJPVWB6002208H) — one policy, one source of truth.
  */
-function resolveEffectiveDir(worklogDir: string): string | null {
+export function resolveEffectiveDir(worklogDir: string): string | null {
   const envSet = typeof process.env.HERDR_COORDINATION_DIR === 'string'
     && process.env.HERDR_COORDINATION_DIR.length > 0;
   const isTmpWorklog = worklogDir.startsWith(os.tmpdir())

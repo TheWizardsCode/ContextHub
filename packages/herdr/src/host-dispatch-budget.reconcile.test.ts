@@ -15,9 +15,13 @@
  * idempotent.
  */
 
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
+
+import { getMachineCoordinationDir } from './machine-coordination.js';
 
 import {
   HOST_BUDGET_RECONCILE_INTERVAL_MS,
@@ -281,5 +285,41 @@ describe('the worker tick runs the reconciliation at a bounded cadence (AC1)', (
 
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
     });
+  });
+
+  it('a tmp worker root is sandboxed: the pass reconciles the ROOT ledger, never the machine ledger (test isolation)', async () => {
+    // A worker whose cwd is a tmp dir (every `downtime-worker*.test.ts`
+    // harness) must NOT reconcile the shared machine ledger at
+    // `~/.herdr/downtime`: the real herdr worker and parallel vitest workers
+    // contend on its lock (`O_EXCL`, no retry), so a contention/write failure
+    // wrote a `host-budget-reconcile-failed` DECISION entry into the test
+    // root's coordination log — the 'expected [decision] length 1 but got 2'
+    // paced-tick flake (WL-0MWJPVWB6002208H). The same pass also SWEEPS real
+    // confirmed ledger entries against the test mocks' empty pane list. The
+    // coordination FILE already sandboxes tmp roots (`resolveEffectiveDir`);
+    // the budget ledger must resolve through the SAME policy.
+    const root = mkdtempSync(join(tmpdir(), 'reconcile-root-sandbox-'));
+    try {
+      writeBudgetLedger(root, [makeBudgetEntry({ itemId: 'WL-ROOT', paneId: 'p:root' })]);
+      const ctx = makeContext(async () => ({
+        ok: true,
+        count: 1,
+        records: [{ paneId: 'p:other', label: implementPane('WL-EXTRA') }],
+      }));
+      const tmpCfg = { cwd: root, paneClose: undefined } as unknown as OrchestratorConfig;
+
+      runPaneMaintenance(ctx, tmpCfg, HOST_BUDGET_RECONCILE_INTERVAL_MS);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // The ROOT ledger was reconciled — the confirmed entry's pane `p:root`
+      // is not in the live list, so it was swept from the ROOT ledger.
+      expect(readBudgetLedger(root)?.entries.some((e) => e.itemId === 'WL-ROOT')).toBe(false);
+      // The machine ledger carries no trace of the root entry (and was never
+      // the reconciliation target).
+      const machine = readBudgetLedger(getMachineCoordinationDir());
+      expect((machine?.entries ?? []).some((e) => e.itemId === 'WL-ROOT')).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

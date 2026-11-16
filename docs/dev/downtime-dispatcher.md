@@ -4813,6 +4813,17 @@ as fallback — they are orphaned and ignored. Guarantees:
   `downtime-coordination.log`) remain per worklog root (retained location)
   for per-project observability; they are not migrated — stale per-worklog
   coordination files do not imply log migration.
+- **Test isolation** — the budget-ledger tick reconciliation
+  (`downtime-worker.budget-reconcile.ts`) resolves its ledger through the
+  SAME policy as the coordination file (`resolveEffectiveDir` in
+  `coordination.ts`): a tmp-root worker (every unit-test harness) reconciles
+  its OWN root ledger, never the shared machine ledger, so parallel vitest
+  workers and the real worker can neither contend on the machine-dir lock
+  (a contention failure wrote a `host-budget-reconcile-failed` decision
+  entry and flaked the paced-tick decision-count assertions —
+  WL-0MWJPVWB6002208H) nor have real confirmed ledger entries swept against
+  the test mocks' pane list. Production worklog roots still resolve to the
+  machine dir (WL-0MWJPVWB6002208H).
 
 ## Timing defaults (canonical)
 
