@@ -11,7 +11,19 @@ import { defineConfig } from 'vitest/config'
  * sequenced **after** every other project, so a plain `vitest run` isolates it
  * without any extra flags (the agent-side test runner is not modifiable here).
  */
+/** Measured suites: serialised, sequenced after everything else. */
 const MEASURED_STARTUP_SUITE = 'tests/cli/startup-import-budget.test.ts'
+/**
+ * The in-process harness cost budget re-measures four/five short in-process
+ * calls and compares the medians with a checked-in baseline
+ * (`tests/cli/inproc-harness-budget.test.ts`). It is a *measured* guard: with
+ * six sibling fork workers a ~2–4 ms call loses up to a few milliseconds to
+ * scheduling, which inflated the cold-open median to 3.9x its baseline and
+ * failed the ratchet on an unchanged tree (WL-0MVWLBZG4003A803). It therefore
+ * runs in the same isolated, serialised group as the startup-cost suite.
+ */
+const INPROC_HARNESS_BUDGET_SUITE = 'tests/cli/inproc-harness-budget.test.ts'
+const MEASURED_SUITES = [MEASURED_STARTUP_SUITE, INPROC_HARNESS_BUDGET_SUITE]
 
 /** Excluded from discovery — worktrees hold duplicate copies of the suite. */
 const EXCLUDE = [
@@ -93,14 +105,14 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'suite',
-          exclude: [...EXCLUDE, MEASURED_STARTUP_SUITE],
+          exclude: [...EXCLUDE, ...MEASURED_SUITES],
         },
       },
       {
         extends: true,
         test: {
           name: 'startup-budget-measured',
-          include: [MEASURED_STARTUP_SUITE],
+          include: MEASURED_SUITES,
           maxWorkers: 1,
           sequence: { groupOrder: 1 },
         },

@@ -8,14 +8,14 @@
  *
  *   1. CONTRACT — `bench/inproc-harness-budget.json` exists, parses, carries
  *      provenance (host, load average, run count, capture date) and a baseline
- *      for each of the four profiled scenarios. A missing, unparseable or
+ *      for each of the five profiled scenarios. A missing, unparseable or
  *      schema-drifted artefact FAILS: in the recorded re-scope branch (child 3,
  *      WL-0MVVXG4B200968BF, decided the dominant cost is production startup,
  *      not harness work) this structural contract plus the measured
  *      order-of-magnitude check IS the guard.
  *   2. POLICY — the limit maths and the clamped host-load factor are exercised
  *      against synthetic budgets/measurements, so they are deterministic.
- *   3. MEASURED — a real, bounded re-measurement of the four scenarios stays
+ *   3. MEASURED — a real, bounded re-measurement of the five scenarios stays
  *      inside `baseline * (1 + headroom) * clampedLoadFactor`. A shared host
  *      can inflate a single short measurement, so the re-measurement is
  *      retried up to a small bounded number of attempts with the capture's
@@ -274,7 +274,7 @@ describe('in-process harness budget: limit policy', () => {
 });
 
 describe('in-process harness budget: measured guard', () => {
-  it('re-measures the four scenarios inside the budget (bounded, read-only)', async () => {
+  it('re-measures the profiled scenarios inside the budget (bounded, read-only)', async () => {
     const budget = readInprocHarnessBudget(artefactPath);
     const startedAt = Date.now();
 

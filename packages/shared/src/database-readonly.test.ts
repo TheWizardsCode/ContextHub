@@ -16,8 +16,9 @@
  *
  *   1. a read-only open of an initialised store runs NO schema-changing DDL
  *      (asserted via SQLite's own `PRAGMA schema_version`, which any
- *      create/drop bumps — the old FTS probe bumped it on every writable
- *      open; a writable control open proves the assertion is non-vacuous);
+ *      create/drop bumps — a writable open of a *drifted* store runs the
+ *      additive repair and proves the assertion is non-vacuous; a healthy
+ *      store takes the DDL-free fast path from WL-0MVWLBZG4003A803);
  *   2. a read-only open still reads items, comments, audit results and
  *      dependency edges through the public API (the fetcher's read surface);
  *   3. a read-only handle cannot mutate the store (a write throws
@@ -104,13 +105,25 @@ describe('WorklogDatabase read-only open mode (F6 — WL-0MVJV2PX4005JH8D)', () 
     expect(schemaVersion(dbPath)).toBe(before);
   });
 
-  it('the schema_version guard is non-vacuous: a writable open bumps it (FTS probe)', () => {
+  it('the schema_version guard is non-vacuous: a writable open repairs drift and bumps it', () => {
     seedStore();
+
+    // Drift the store outside the tool's control so the writable open must run
+    // DDL (the additive required-column repair). A *healthy* current-version
+    // store now takes the DDL-free fast path (WL-0MVWLBZG4003A803), so the
+    // drift is what makes this positive control meaningful: without it the
+    // assertion below would be vacuous in the other direction.
+    const drift = new Database(dbPath);
+    try {
+      drift.exec('ALTER TABLE audit_results DROP COLUMN fingerprint');
+    } finally {
+      drift.close();
+    }
     const before = schemaVersion(dbPath);
 
-    // Writable open (the pre-F6 path): the FTS5 probe creates then drops a
-    // virtual table, so the schema counter MUST move — proving the read-only
-    // assertion above would catch a DDL regression.
+    // Writable open (the pre-F6 path): the connect-time repair adds the column
+    // back, so the schema counter MUST move — proving the read-only assertion
+    // above would catch a DDL regression.
     const writable = new WorklogDatabase('TEST', dbPath, jsonlPath, true, false);
     try {
       expect(writable.list({}).length).toBeGreaterThanOrEqual(2);

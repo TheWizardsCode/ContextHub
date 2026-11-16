@@ -69,6 +69,12 @@ describe('vitest declared parallelism config', () => {
 // guard pins it against a future edit that silently removes it.
 const MEASURED_STARTUP_SUITE = 'tests/cli/startup-import-budget.test.ts'
 
+// The in-process harness cost guard re-measures ~2–4 ms in-process calls against
+// a checked-in baseline, so it is a *measured* test for the same reason: six
+// sibling fork workers inflated its cold-open median to 3.9x the baseline and
+// failed the ratchet on an unchanged tree (WL-0MVWLBZG4003A803).
+const INPROC_HARNESS_BUDGET_SUITE = 'tests/cli/inproc-harness-budget.test.ts'
+
 describe('vitest measured-suite isolation (WL-0MWIGCK0E009GGLG)', () => {
   const projectIncluding = async (file: string): Promise<ProjectTestConfig> => {
     const test = await declaredTestConfig()
@@ -112,5 +118,20 @@ describe('vitest measured-suite isolation (WL-0MWIGCK0E009GGLG)', () => {
     // Else it would also run inside the contended group, defeating the isolation
     // while still passing if the isolated run is the one that reports.
     expect(main.exclude ?? []).toContain(MEASURED_STARTUP_SUITE)
+  })
+
+  it('runs the in-process harness cost guard in the isolated measured project', async () => {
+    const project = await projectIncluding(INPROC_HARNESS_BUDGET_SUITE)
+    expect(project.maxWorkers).toBe(1)
+  })
+
+  it('keeps the in-process harness cost guard out of the main parallel project', async () => {
+    const test = await declaredTestConfig()
+    const main = (test.projects ?? [])
+      .map((entry) => entry.test)
+      .find((candidate) => candidate?.name === 'suite')
+    if (!main) throw new Error('vitest.config.ts has no `suite` project')
+
+    expect(main.exclude ?? []).toContain(INPROC_HARNESS_BUDGET_SUITE)
   })
 })

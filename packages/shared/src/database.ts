@@ -255,8 +255,14 @@ export class WorklogDatabase {
     // JSONL only exists transiently during sync operations.
     // A read-only handle must NEVER write, so the JSONL refresh (an import
     // into SQLite) is skipped for it (F6): the store is opened as-is.
-    const itemCount = this.store.countWorkItems();
-    if (itemCount === 0 && options.readOnly !== true) {
+    // The file existence check comes first: with no JSONL present the refresh is
+    // a guaranteed no-op, so a warm open does not pay a COUNT query just to
+    // discover that (WL-0MVWLBZG4003A803).
+    if (
+      options.readOnly !== true &&
+      fs.existsSync(this.jsonlPath) &&
+      this.store.countWorkItems() === 0
+    ) {
       this.refreshFromJsonlIfNewer();
     }
   }
