@@ -55,7 +55,7 @@ describe('AC5 — resolveDispatchPlacement precedence', () => {
     // The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is
     // additive — the resolver is called with the placement collector's
     // callback; a healthy resolution never invokes it.
-    expect(deps.resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function));
+    expect(deps.resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function), expect.any(Function));
     expect(deps.getItemTabAnchor).toHaveBeenCalledWith('/repo', 'ws1', 'WL-0ABC');
   });
 
@@ -85,7 +85,7 @@ describe('AC5 — resolveDispatchPlacement precedence', () => {
 
     expect(result).toEqual({ ok: true, anchorId: 'w9:p7', anchorIsTabRoot: true });
     // The additive near-miss reporter callback travels as the 2nd arg.
-    expect(deps.resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function));
+    expect(deps.resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function), expect.any(Function));
     // The trailing report callback (WL-0MWHCUZ5C000I7S6) collects the
     // fail-closed boundary detail; a healthy fallback never calls it.
     expect(deps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL', expect.any(Function));
@@ -322,5 +322,103 @@ describe('AC5 — resolveDispatchPlacement precedence', () => {
       ok: false,
       detail: 'herdr-unreadable',
     });
+  });
+
+  // ── Fallback attribution (WL-0MWHW3PKX0048ZYL AC3) ────────────────────
+  // A SUCCESSFUL Dispatcher-workspace fallback placement — after the primary
+  // project-workspace path returned null — records WHY the primary failed on
+  // the placement result (`placementFallbackReason`), so the dispatch marker
+  // makes every "separate dispatch worktree" placement observable and
+  // attributable. Absent when the primary resolves (live match or durable
+  // hit) and absent when the primary resolver is not wired.
+
+  it('AC3: per-prefix fallback records the primary null reason (no-project-workspace)', async () => {
+    const deps = depsOf();
+    deps.resolveProjectWorkspace = vi.fn(
+      async (_cwd: string, _report?: unknown, reason?: (r: string) => void) => {
+        reason?.('no-project-workspace');
+        return null;
+      },
+    );
+    deps.getDispatcherTabAnchor = vi.fn().mockResolvedValue({ workspaceId: 'dw', tabId: 'dt', paneId: 'w9:p7' });
+
+    const result = await resolveDispatchPlacement(deps, { cwd: '/repo', itemId: 'WL-0ABC' });
+
+    expect(result).toEqual({
+      ok: true,
+      anchorId: 'w9:p7',
+      anchorIsTabRoot: true,
+      placementFallbackReason: 'no-project-workspace',
+    });
+  });
+
+  it('AC3: mismatch fallback records BOTH the near-miss and project-workspace-mismatch', async () => {
+    const deps = depsOf();
+    const mismatch = {
+      expectedRoot: '/repo',
+      actualRoot: '/repo/packages/herdr',
+      paneId: 'wC:pB',
+      workspaceId: 'wC',
+    };
+    deps.resolveProjectWorkspace = vi.fn(
+      async (_cwd: string, report?: (m: typeof mismatch) => void, reason?: (r: string) => void) => {
+        report?.(mismatch);
+        reason?.('project-workspace-mismatch');
+        return null;
+      },
+    );
+    deps.getDispatcherTabAnchor = vi.fn().mockResolvedValue({ workspaceId: 'dw', tabId: 'dt', paneId: 'w9:p7' });
+
+    const result = await resolveDispatchPlacement(deps, { cwd: '/repo', itemId: 'WL-0ABC' });
+
+    expect(result).toEqual({
+      ok: true,
+      anchorId: 'w9:p7',
+      anchorIsTabRoot: true,
+      placementFallbackReason: 'project-workspace-mismatch',
+      projectWorkspaceMismatch: mismatch,
+    });
+  });
+
+  it('AC3: legacy Dispatcher-anchor fallback records the primary null reason', async () => {
+    const deps = depsOf();
+    deps.resolveProjectWorkspace = vi.fn(
+      async (_cwd: string, _report?: unknown, reason?: (r: string) => void) => {
+        reason?.('herdr-unreadable');
+        return null;
+      },
+    );
+    deps.getDispatcherAnchor = vi.fn().mockResolvedValue({ paneId: 'w9:pA', workspaceId: 'dw' });
+
+    const result = await resolveDispatchPlacement(deps, { cwd: '/repo', itemId: 'WL-0ABC' });
+
+    expect(result).toEqual({
+      ok: true,
+      anchorId: 'w9:pA',
+      anchorIsTabRoot: false,
+      placementFallbackReason: 'herdr-unreadable',
+    });
+  });
+
+  it('AC3: a primary SUCCESS (live or durable) records NO fallback reason', async () => {
+    const deps = depsOf();
+    deps.resolveProjectWorkspace = vi.fn().mockResolvedValue({ workspaceId: 'ws1' });
+    deps.getItemTabAnchor = vi.fn().mockResolvedValue({ tabId: 't1', paneId: 'w1:p11' });
+
+    const result = await resolveDispatchPlacement(deps, { cwd: '/repo', itemId: 'WL-0ABC' });
+
+    expect(result).toEqual({ ok: true, anchorId: 'w1:p11', anchorIsTabRoot: true });
+    expect('placementFallbackReason' in result).toBe(false);
+  });
+
+  it('AC3: a primary resolver that returns null WITHOUT reporting a reason still fails closed (no fake attribution)', async () => {
+    const deps = depsOf();
+    deps.resolveProjectWorkspace = vi.fn().mockResolvedValue(null);
+    deps.getDispatcherTabAnchor = vi.fn().mockResolvedValue({ workspaceId: 'dw', tabId: 'dt', paneId: 'w9:p7' });
+
+    const result = await resolveDispatchPlacement(deps, { cwd: '/repo', itemId: 'WL-0ABC' });
+
+    expect(result).toEqual({ ok: true, anchorId: 'w9:p7', anchorIsTabRoot: true });
+    expect('placementFallbackReason' in result).toBe(false);
   });
 });

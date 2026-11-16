@@ -39,6 +39,7 @@ import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { DispatcherAnchor } from './dispatcher-anchor.js';
 import {
   closePlaceholderRootPaneBestEffort,
+  placementAttribution,
   resolveDispatchPlacement,
 } from './downtime-worker.dispatch-placement.js';
 import type {
@@ -547,11 +548,10 @@ export async function dispatchClaimedTier(
       ...(reservationSkippedReason !== undefined
         ? { reservationSkipped: reservationSkippedReason }
         : {}),
-      // Primary-path near-miss (WL-0MWHCV3PR002WSQM AC4) on the dispatch
-      // marker — never hidden by a successful Dispatcher fallback.
-      ...(placement.projectWorkspaceMismatch !== undefined
-        ? { projectWorkspaceMismatch: placement.projectWorkspaceMismatch }
-        : {}),
+      // Placement attribution (WL-0MWHW3PKX0048ZYL AC3 fallback reason +
+      // WL-0MWHCV3PR002WSQM AC4 near-miss): a successful Dispatcher fallback
+      // names why the primary path was not used, never hiding a mismatch.
+      ...placementAttribution(placement),
     });
   } catch {
     // Fail-closed: a throwing recordDispatch (stub or regression) is a marker

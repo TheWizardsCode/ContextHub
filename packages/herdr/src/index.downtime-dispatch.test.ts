@@ -619,7 +619,7 @@ describe('createDowntimeDeps', () => {
     // to send-to-pi.sh as --anchor: the pane lands in the project workspace's
     // `WL-ONCE` tab. The per-prefix Dispatcher tab and the legacy single anchor
     // are NOT used (WL-0MUR5FUWD00024XN AC2/AC4).
-    expect(projectWorkspaceResolver).toHaveBeenCalledWith(cwd, expect.any(Function));
+    expect(projectWorkspaceResolver).toHaveBeenCalledWith(cwd, expect.any(Function), expect.any(Function));
     expect(itemTabAnchorResolver).toHaveBeenCalledWith(cwd, 'wC', 'WL-ONCE');
     expect(dispatcherTabAnchorResolver).not.toHaveBeenCalled();
     expect(anchorResolver).not.toHaveBeenCalled();

@@ -10,6 +10,17 @@
  * pane first, then lowest pane id) and the fail-closed `null` outcome at every
  * unreadable boundary live here unchanged.
  *
+ * Since WL-0MWHW3PKX0048ZYL the resolver is NO LONGER solely dependent on a
+ * live plugin pane: a successful live match is persisted write-through into
+ * the durable per-root project-workspace map
+ * (`DISPATCHER_PROJECT_WORKSPACES_FILE` in the machine coordination dir), and
+ * a root whose live scan yields no match (plugin pane down, or a
+ * `downtimeWorklogRoots` sweep with no running instance) resolves from that
+ * durable map — validated on read against live herdr state via
+ * `deps.probeWorkspace` when the seam is wired (AC1/AC2). The live-pane `/proc`
+ * advertisement is the fast-path hint, never the only path; the per-prefix
+ * `Dispatcher` fallback becomes a rare, logged last resort (AC3).
+ *
  * Moved verbatim out of `dispatcher-anchor.ts` (parent WL-0MVGKHCP9005SJPZ;
  * child WL-0MW0JHD2N004XAOS). No logic, signature or doc-comment change.
  * `resolveProjectWorkspace` and `getItemTabAnchor` are re-exported from the
@@ -50,8 +61,14 @@ import type {
   ItemTabAnchor,
   ProjectWorkspaceTarget,
   PlacementMode,
+  ProjectWorkspaceFallbackReason,
 } from './dispatcher-anchor.contract.js';
 import { parseProcEnviron } from './dispatcher-anchor.cli-parsers.js';
+import {
+  readProjectWorkspaces,
+  removeProjectWorkspace,
+  upsertProjectWorkspace,
+} from './dispatcher-anchor.persistence.js';
 import {
   createTabInWorkspace,
   getPaneProcessInfo,
@@ -81,13 +98,29 @@ function comparePaneIds(a: string, b: string): number {
 
 /**
  * Resolve the herdr project workspace that hosts the worklog plugin pane for
- * worklog root `root` (AC1/AC3).
+ * worklog root `root` (AC1/AC3), with a durable-source fallback
+ * (WL-0MWHW3PKX0048ZYL AC1/AC2).
  *
- * Enumerates the machine-wide `herdr pane list`, keeps only plugin panes
- * (`label == PLUGIN_PANE_LABEL`), and reads each candidate's logical project
- * root from `HERDR_RESOLVED_CWD` (via `pane process-info` + `/proc` environ).
- * Matching is on the logical root ONLY — never the pane's reported `cwd`
- * (which is the plugin directory) and never the workspace label.
+ * Precedence, deterministic:
+ *
+ *  1. **Live scan (fast-path hint).** Enumerates the machine-wide `herdr pane
+ *     list`, keeps only plugin panes (`label == PLUGIN_PANE_LABEL`), and reads
+ *     each candidate's logical project root from `HERDR_RESOLVED_CWD` (via
+ *     `pane process-info` + `/proc` environ). Matching is on the logical root
+ *     ONLY — never the pane's reported `cwd` (which is the plugin directory)
+ *     and never the workspace label. On the first match the mapping is
+ *     persisted write-through into the durable per-root map, so the root
+ *     stays resolvable while its plugin pane is down.
+ *  2. **Durable map (AC1/AC2).** When the live scan yields no match (no
+ *     plugin pane for the root, an unreadable boundary, or a
+ *     `downtimeWorklogRoots` sweep root with no running instance), read the
+ *     persisted per-root project-workspace map. The entry is validated on
+ *     read against live herdr state (`deps.probeWorkspace`) when the seam is
+ *     wired: `alive` → resolve from it; positively `missing` → the entry is
+ *     dropped (self-healed) and the resolver fails closed; `unreadable` →
+ *     fail closed (missing ≠ unreadable — a transient herdr must never
+ *     wrongly drop a durable entry). An absent probe seam trusts the entry
+ *     (legacy/test callers).
  *
  * The matching rule is EXACT-ROOT only (WL-0MWHCV3PR002WSQM): a pane whose
  * `HERDR_RESOLVED_CWD` differs from the wanted root — e.g. the plugin pane
@@ -101,22 +134,30 @@ function comparePaneIds(a: string, b: string): number {
  * workspace.
  *
  * Fail-closed `null` on: empty root; `pane list` CLI error / unparseable
- * output; a plugin pane's `process-info` failure or missing `shell_pid`;
- * unreadable/missing `/proc/<pid>/environ`; missing `HERDR_RESOLVED_CWD`; no
- * root match; or a match without a workspace id. A `null` result makes the
- * dispatcher fall back to the Dispatcher anchor (AC4).
+ * output with no usable durable entry; a plugin pane's `process-info` failure
+ * or missing `shell_pid`; unreadable/missing `/proc/<pid>/environ`; missing
+ * `HERDR_RESOLVED_CWD`; no root match anywhere (live or durable); a durable
+ * entry probed missing/unreadable; or a match without a workspace id. A
+ * `null` result makes the dispatcher fall back to the `Dispatcher` anchor
+ * (AC3, rare + logged).
  *
  * @param reportNearMiss Optional diagnostic-only reporter
  *   (WL-0MWHCV3PR002WSQM): invoked with one per-pane near-miss record — a
  *   plugin pane that reported a non-empty `HERDR_RESOLVED_CWD` DIFFERING from
  *   the wanted root — ONLY when the resolver returns `null` on the no-match
- *   path (AC2). The record names the expected root, the actual
- *   `HERDR_RESOLVED_CWD` and the pane/workspace ids, so a primary-path
- *   mismatch is visible on the dispatch decision instead of looking like
- *   "no plugin pane". No report when a match IS found or when the panes carry
- *   no `HERDR_RESOLVED_CWD` at all (an absent env is not a mismatch, AC3).
- *   Additive: callers that pass no callback are byte-identical to today, and
- *   the match logic itself is unchanged.
+ *   path AND no durable entry rescued the resolution (a durable hit IS a
+ *   match — no report). No report when a match IS found or when the panes
+ *   carry no `HERDR_RESOLVED_CWD` at all (an absent env is not a mismatch,
+ *   AC3). Additive: callers that pass no callback are byte-identical to
+ *   today, and the match logic itself is unchanged.
+ * @param reportFallbackReason Optional attribution reporter
+ *   (WL-0MWHW3PKX0048ZYL AC3): invoked exactly once with the reason the
+ *   primary path returned `null` (`no-project-workspace` /
+ *   `project-workspace-mismatch` / `project-workspace-missing` /
+ *   `herdr-unreadable`) so a `Dispatcher`-workspace fallback placement is
+ *   attributable from the dispatch log. Never invoked when the resolver
+ *   succeeds (live match or durable hit). Additive — callers that pass no
+ *   callback are byte-identical to today.
  */
 export async function resolveProjectWorkspace(
   cwd: string,
@@ -128,6 +169,7 @@ export async function resolveProjectWorkspace(
     paneId: string;
     workspaceId: string;
   }) => void,
+  reportFallbackReason?: (reason: ProjectWorkspaceFallbackReason) => void,
 ): Promise<ProjectWorkspaceTarget | null> {
   const wanted = normalizeRoot(root);
   if (wanted === '') return null;
@@ -137,46 +179,70 @@ export async function resolveProjectWorkspace(
   try {
     panes = await listAllPanes();
   } catch {
+    panes = null;
+  }
+  if (panes === null) {
+    // `pane list` unreadable → the durable source is still consulted (AC2:
+    // the live advertisement is a hint, never the only path).
+    const durable = await resolveDurableProjectWorkspace(deps, wanted);
+    if (durable !== null && 'target' in durable) return durable.target;
+    reportFallbackReason?.(durable !== null ? durable.reason : 'herdr-unreadable');
     return null;
   }
-  if (panes === null) return null;
 
   const candidates = panes.filter((pane) => pane.label === PLUGIN_PANE_LABEL);
   const matches: Array<{ pane: MachinePaneInfo; workspaceId: string }> = [];
   // Per-pane near-miss collector (WL-0MWHCV3PR002WSQM): a plugin pane that
   // reports a non-empty HERDR_RESOLVED_CWD differing from the wanted root is
   // a primary-path near-miss (expected vs actual). Collected while scanning
-  // and reported ONLY on the no-match null return below — never when a match
-  // is found and never for an absent env (AC3). Additive: the match logic
-  // itself is byte-for-byte unchanged.
+  // and reported ONLY on the null return below — never when a match is found
+  // and never for an absent env (AC3). Additive: the match logic itself is
+  // byte-for-byte unchanged.
   const nearMisses: Array<{
     expectedRoot: string;
     actualRoot: string;
     paneId: string;
     workspaceId: string;
   }> = [];
+  // Records that at least one candidate hit an unreadable boundary
+  // (process-info failure, missing shell_pid, unreadable /proc, absent env,
+  // missing workspace id). The scan CONTINUES past a bad candidate — a
+  // buildable candidate later in the list still matches — and the flag feeds
+  // the fallback-reason attribution when nothing matched.
+  let scanUnreadable = false;
   for (const pane of candidates) {
     const getInfo = deps.getPaneProcessInfo ?? ((id: string) => getPaneProcessInfo(cwd, id));
     let info: PaneProcessInfo | null;
     try {
       info = await getInfo(pane.paneId);
     } catch {
-      return null;
+      scanUnreadable = true;
+      continue;
     }
-    if (info === null || info.shellPid === '') return null;
+    if (info === null || info.shellPid === '') {
+      scanUnreadable = true;
+      continue;
+    }
 
     const readEnv = deps.readProcEnviron ?? ((pid: string) => readProcEnvironFile(pid));
     let rawEnv: string | null;
     try {
       rawEnv = await readEnv(info.shellPid);
     } catch {
-      return null;
+      scanUnreadable = true;
+      continue;
     }
-    if (rawEnv === null) return null;
+    if (rawEnv === null) {
+      scanUnreadable = true;
+      continue;
+    }
 
     const env = parseProcEnviron(rawEnv);
     const resolvedCwd = env.HERDR_RESOLVED_CWD;
-    if (typeof resolvedCwd !== 'string' || resolvedCwd === '') return null;
+    if (typeof resolvedCwd !== 'string' || resolvedCwd === '') {
+      scanUnreadable = true;
+      continue;
+    }
     if (normalizeRoot(resolvedCwd) !== wanted) {
       // Near-miss: this pane claims a DIFFERENT logical root. Matching rule
       // unchanged (exact-root only) — the record makes the mismatch visible.
@@ -190,28 +256,130 @@ export async function resolveProjectWorkspace(
     }
 
     const workspaceId = env.HERDR_WORKSPACE_ID ?? pane.workspaceId;
-    if (workspaceId === undefined || workspaceId === '') return null;
+    if (workspaceId === undefined || workspaceId === '') {
+      scanUnreadable = true;
+      continue;
+    }
     matches.push({ pane, workspaceId });
   }
 
-  if (matches.length === 0) {
-    // Report the collected near-misses ONLY on the no-match null path — the
-    // sole case the diagnostic is about (AC2). An absent env or unreadable
-    // boundary already fails closed through its own path (AC3).
-    if (typeof reportNearMiss === 'function' && nearMisses.length > 0) {
-      for (const nearMiss of nearMisses) {
-        reportNearMiss(nearMiss);
-      }
-    }
-    return null;
+  if (matches.length > 0) {
+    // Focused first; then lowest pane id.
+    matches.sort((a, b) => {
+      if (a.pane.focused !== b.pane.focused) return a.pane.focused ? -1 : 1;
+      return comparePaneIds(a.pane.paneId, b.pane.paneId);
+    });
+    const chosen = matches[0];
+    // Write-through (AC2): learn the durable mapping from the live match so
+    // the root stays resolvable while its plugin pane is down. Best-effort,
+    // fail-open — a persistence failure never changes the resolution.
+    persistProjectWorkspaceFromMatch(wanted, chosen);
+    return { paneId: chosen.pane.paneId, workspaceId: chosen.workspaceId, tabId: chosen.pane.tabId };
   }
-  // Focused first; then lowest pane id.
-  matches.sort((a, b) => {
-    if (a.pane.focused !== b.pane.focused) return a.pane.focused ? -1 : 1;
-    return comparePaneIds(a.pane.paneId, b.pane.paneId);
-  });
-  const chosen = matches[0];
-  return { paneId: chosen.pane.paneId, workspaceId: chosen.workspaceId, tabId: chosen.pane.tabId };
+
+  // No live match → durable source rescue (AC1/AC2): the item's project
+  // workspace resolves even when no live plugin pane advertises the root.
+  const durable = await resolveDurableProjectWorkspace(deps, wanted);
+  if (durable !== null && 'target' in durable) {
+    return durable.target; // a durable hit is a match — no near-miss report
+  }
+
+  // Report the collected near-misses ONLY on the null return — the sole case
+  // the diagnostic is about (AC2). An absent env or unreadable boundary
+  // already fails closed through its own path (AC3).
+  if (typeof reportNearMiss === 'function' && nearMisses.length > 0) {
+    for (const nearMiss of nearMisses) {
+      reportNearMiss(nearMiss);
+    }
+  }
+  // Attribution (AC3): name why the primary path failed, so a fallback
+  // placement is observable and attributable. Prefers the more specific
+  // durable-probe verdict, then a recorded mismatch, then an unreadable
+  // boundary, then a plain miss.
+  const reason: ProjectWorkspaceFallbackReason =
+    durable !== null
+      ? durable.reason
+      : nearMisses.length > 0
+        ? 'project-workspace-mismatch'
+        : scanUnreadable
+          ? 'herdr-unreadable'
+          : 'no-project-workspace';
+  reportFallbackReason?.(reason);
+  return null;
+}
+
+/**
+ * A durable-map verdict: a usable target, a dropped-entry reason, or `null`
+ * when the root has no durable entry at all.
+ */
+type DurableResolution =
+  | { target: ProjectWorkspaceTarget }
+  | { reason: ProjectWorkspaceFallbackReason }
+  | null;
+
+/**
+ * Resolve the durable per-root project-workspace map for `wanted`
+ * (WL-0MWHW3PKX0048ZYL AC1/AC2).
+ *
+ * Returns `{ target }` when the root HAS a durable entry and it validates
+ * (`probeWorkspace` seam absent → trusted; probed `alive` → used); `{ reason }`
+ * when the entry exists but fails closed (`project-workspace-missing` — the
+ * entry was positively probed MISSING and is dropped; `herdr-unreadable` —
+ * the probe could not be read); `null` when the root has no durable entry.
+ * The caller attributes the reason on its own null return when this returns
+ * `{ reason }`; a `null` (no entry) falls through to the plain-miss reason.
+ */
+async function resolveDurableProjectWorkspace(
+  deps: DispatcherAnchorDeps,
+  wanted: string,
+): Promise<DurableResolution> {
+  const dir = getMachineCoordinationDir();
+  if (dir === null) return null;
+  const map = readProjectWorkspaces(dir);
+  const record = map?.byRoot[wanted];
+  if (record === undefined || record.workspaceId === '') return null;
+  if (typeof deps.probeWorkspace === 'function') {
+    let verdict: 'alive' | 'missing' | 'unreadable';
+    try {
+      verdict = await deps.probeWorkspace(record.workspaceId);
+    } catch {
+      verdict = 'unreadable';
+    }
+    if (verdict === 'missing') {
+      // Self-heal: never route into a dead workspace again.
+      removeProjectWorkspace(dir, wanted);
+      return { reason: 'project-workspace-missing' };
+    }
+    if (verdict === 'unreadable') return { reason: 'herdr-unreadable' };
+    // verdict === 'alive' → fall through to the trusted hit.
+  }
+  return {
+    target: {
+      workspaceId: record.workspaceId,
+      ...(record.paneId !== undefined ? { paneId: record.paneId } : {}),
+      ...(record.tabId !== undefined ? { tabId: record.tabId } : {}),
+    },
+  };
+}
+
+/** Learn the durable mapping from a live match (best-effort, fail-open). */
+function persistProjectWorkspaceFromMatch(
+  wanted: string,
+  chosen: { pane: MachinePaneInfo; workspaceId: string },
+): void {
+  try {
+    const dir = getMachineCoordinationDir();
+    if (dir === null) return;
+    if (!ensureMachineCoordinationDir(dir)) return;
+    upsertProjectWorkspace(dir, wanted, {
+      workspaceId: chosen.workspaceId,
+      ...(chosen.pane.paneId !== '' ? { paneId: chosen.pane.paneId } : {}),
+      ...(chosen.pane.tabId !== '' ? { tabId: chosen.pane.tabId } : {}),
+      updatedAt: new Date().toISOString(),
+    });
+  } catch {
+    // fail-open: the durable map is a hint, never a hard dependency
+  }
 }
 
 // ── Item-ID tab anchor in a resolved project workspace (AC2/AC5) ────────

@@ -46,6 +46,18 @@ type PlacementFailureDetail =
   | 'project-workspace-mismatch';
 
 /**
+ * Why the project-workspace resolver returned `null` (WL-0MWHW3PKX0048ZYL
+ * AC3) — structurally identical to the contract's
+ * `ProjectWorkspaceFallbackReason`; the barrel exports neither, so each
+ * module declares its own copy.
+ */
+type ProjectWorkspaceFallbackReason =
+  | 'project-workspace-mismatch'
+  | 'project-workspace-missing'
+  | 'no-project-workspace'
+  | 'herdr-unreadable';
+
+/**
  * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
  * (C0 WL-0MTR01EU7005SYZG): resolves the machine-wide dedicated Dispatcher
  * anchor pane via the herdr CLI (F1 WL-0MTR2CD4X006XI7U), provisioning the
@@ -80,9 +92,11 @@ export async function defaultDispatcherAnchorResolver(
  * Default project-workspace resolver used by {@link createDowntimeDeps}
  * (WL-0MU321YK70035AYT): resolves the herdr plugin pane/workspace whose
  * logical root (`HERDR_RESOLVED_CWD`) equals the worklog root `cwd`, via the
- * herdr CLI. Null on any failure — dispatch falls back to the retained
- * Dispatcher anchor (AC4). Injectable for tests that build real deps without
- * a live herdr session.
+ * herdr CLI — falling back to the DURABLE per-root project-workspace map when
+ * no live plugin pane advertises the root (WL-0MWHW3PKX0048ZYL AC1/AC2). Null
+ * on any failure — dispatch falls back to the retained Dispatcher anchor
+ * (AC3, rare + logged). Injectable for tests that build real deps without a
+ * live herdr session.
  *
  * The optional trailing `reportNearMiss` callback (WL-0MWHCV3PR002WSQM) is
  * forwarded to the underlying resolver: when it returns `null` and a plugin
@@ -90,6 +104,14 @@ export async function defaultDispatcherAnchorResolver(
  * record (expected vs actual root, pane/workspace ids) is reported so the
  * placement collector can record the mismatch on the decision entry.
  * Diagnostic-only — the exact-root matching rule is unchanged.
+ *
+ * The optional trailing `reportFallbackReason` callback
+ * (WL-0MWHW3PKX0048ZYL AC3) is forwarded to the underlying resolver: when it
+ * returns `null`, the reason the primary path failed
+ * (`no-project-workspace` / `project-workspace-mismatch` /
+ * `project-workspace-missing` / `herdr-unreadable`) is reported so a
+ * `Dispatcher`-workspace fallback placement is attributable from the dispatch
+ * log. Never invoked when the primary path resolves.
  */
 export async function defaultProjectWorkspaceResolver(
   cwd: string,
@@ -99,6 +121,7 @@ export async function defaultProjectWorkspaceResolver(
     paneId: string;
     workspaceId: string;
   }) => void,
+  reportFallbackReason?: (reason: ProjectWorkspaceFallbackReason) => void,
 ): Promise<ProjectWorkspaceTarget | null> {
   try {
     const herdrBin = resolveHerdrBin();
@@ -107,8 +130,10 @@ export async function defaultProjectWorkspaceResolver(
       createDispatcherAnchorDeps(cwd, herdrBin),
       cwd,
       reportNearMiss,
+      reportFallbackReason,
     );
   } catch {
+    reportFallbackReason?.('herdr-unreadable');
     return null;
   }
 }

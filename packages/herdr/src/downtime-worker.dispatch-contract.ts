@@ -80,6 +80,19 @@ export interface ProjectWorkspaceMismatch {
 }
 
 /**
+ * Why the primary project-workspace path returned null (WL-0MWHW3PKX0048ZYL
+ * AC3), carried on the dispatch marker as `placementFallbackReason`.
+ * Structurally identical to the copies in
+ * `dispatcher-anchor.contract.ts` / `dispatcher-anchor.placement.ts` and
+ * `downtime-worker.dispatch-placement.ts` — the barrel exports neither.
+ */
+export type ProjectWorkspaceFallbackReason =
+  | 'project-workspace-mismatch'
+  | 'project-workspace-missing'
+  | 'no-project-workspace'
+  | 'herdr-unreadable';
+
+/**
  * The anchor resolvers' optional trailing fail-closed boundary reporter
  * (WL-0MWHCUZ5C000I7S6): invoked with the {@link PlacementFailureDetail}
  * naming the exact boundary before a `null` resolver return, so the
@@ -178,6 +191,7 @@ export interface DowntimeDispatchDeps {
   resolveProjectWorkspace?(
     cwd: string,
     reportNearMiss?: (nearMiss: ProjectWorkspaceMismatch) => void,
+    reportFallbackReason?: (reason: ProjectWorkspaceFallbackReason) => void,
   ): Promise<ProjectWorkspaceTarget | null>;
   /** Item-ID tab anchor (see `DowntimeWorkerDeps.getItemTabAnchor`). */
   getItemTabAnchor?(
@@ -446,6 +460,18 @@ export interface DowntimeDispatchEvent {
    * (deployment default kept). Absent on legacy entries; readers ignore it.
    */
   localPreferenceReason?: LocalPreferenceReason;
+  /**
+   * Why the primary project-workspace path was NOT used, recorded when a
+   * `Dispatcher`-workspace FALLBACK placement succeeded (WL-0MWHW3PKX0048ZYL
+   * AC3): `project-workspace-mismatch` / `project-workspace-missing` /
+   * `no-project-workspace` / `herdr-unreadable`. Present ONLY on a success
+   * marker whose pane was fallback-placed (per-prefix `Dispatcher` tab or the
+   * legacy anchor) after `resolveProjectWorkspace` returned null — so every
+   * "separate dispatch worktree" placement is observable, rare and
+   * attributable from the dispatch log. Absent when the primary resolved or
+   * no primary resolver is wired. Backward compatible — readers ignore it.
+   */
+  placementFallbackReason?: ProjectWorkspaceFallbackReason;
   /**
    * Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM AC4): recorded on
    * the DISPATCH MARKER — the decision entry of a successful dispatch — when

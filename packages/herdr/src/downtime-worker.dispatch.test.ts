@@ -422,7 +422,7 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
 
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     // The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is additive.
-    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function));
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function), expect.any(Function));
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
     expect(getDispatcherTabAnchor).not.toHaveBeenCalled();
@@ -455,7 +455,7 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     expect(outcome.dispatched).toBe(true);
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     // The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is additive.
-    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function));
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function), expect.any(Function));
     expect(getItemTabAnchor).not.toHaveBeenCalled();
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     // The optional trailing report callback (WL-0MWHCUZ5C000I7S6) collects
@@ -785,7 +785,7 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     expect(outcome.dispatched).toBe(true);
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     // The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is additive.
-    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function));
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo', expect.any(Function), expect.any(Function));
     // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
@@ -1259,6 +1259,59 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wD:pFALLBACK' }),
+    );
+  });
+
+  it('AC3: a successful Dispatcher fallback records placementFallbackReason on the dispatch marker', async () => {
+    const resolveProjectWorkspace = vi.fn(
+      async (_cwd: string, _report?: unknown, reason?: (r: string) => void) => {
+        reason?.('project-workspace-missing');
+        return null;
+      },
+    );
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:pFALLBACK', workspaceId: 'wD' });
+    const deps = makeDeps({
+      resolveProjectWorkspace,
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    // AC3: every "separate dispatch worktree" placement is attributable — the
+    // primary-failure reason rides the dispatch marker verbatim.
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ placementFallbackReason: 'project-workspace-missing' }),
+    );
+  });
+
+  it('AC3: a PROJECT-workspace placement (durable hit) records NO fallback reason on the marker', async () => {
+    // Primary SUCCESS via the durable source (workspaceId only — no live pane).
+    const resolveProjectWorkspace = vi
+      .fn()
+      .mockResolvedValue({ workspaceId: 'w77' });
+    const getItemTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ tabId: 'w77:tWL-ABC', paneId: 'w77:tWL-ABC:p1' });
+    const deps = makeDeps({
+      resolveProjectWorkspace,
+      getItemTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    const markerEvent = deps.recordDispatch.mock.calls[0][0];
+    expect(markerEvent.placementFallbackReason).toBeUndefined();
+    // The item tab is provisioned in the item's project workspace (AC1) — the
+    // pane lands in the project workspace even with no live plugin pane.
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'w77:tWL-ABC:p1' }),
     );
   });
 

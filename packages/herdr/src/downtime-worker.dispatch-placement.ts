@@ -74,6 +74,20 @@ export interface ProjectWorkspaceMismatch {
 }
 
 /**
+ * Why `resolveProjectWorkspace` returned `null` (WL-0MWHW3PKX0048ZYL AC3),
+ * collected through the optional trailing `reportFallbackReason` callback and
+ * forwarded onto the placement result / dispatch marker so a `Dispatcher`
+ * fallback placement is observable and attributable. Structurally identical
+ * to the contract's `ProjectWorkspaceFallbackReason` — the barrel exports
+ * neither, so each module declares its own copy.
+ */
+export type ProjectWorkspaceFallbackReason =
+  | 'project-workspace-mismatch'
+  | 'project-workspace-missing'
+  | 'no-project-workspace'
+  | 'herdr-unreadable';
+
+/**
  * A resolved placement.
  *
  * `anchorId` absent means "no anchor": legacy/test callers that wire no
@@ -103,6 +117,19 @@ export interface DispatchPlacement {
    * mismatch is fixed, and the fallback must not hide that.
    */
   projectWorkspaceMismatch?: ProjectWorkspaceMismatch;
+  /**
+   * Why the primary project-workspace path was NOT used
+   * (WL-0MWHW3PKX0048ZYL AC3): the reason `resolveProjectWorkspace` reported
+   * through its trailing callback (`project-workspace-mismatch` /
+   * `project-workspace-missing` / `no-project-workspace` /
+   * `herdr-unreadable`). Present ONLY on a SUCCESSFUL fallback placement (the
+   * per-prefix `Dispatcher` tab or the legacy anchor) after the primary
+   * returned null, so every "separate dispatch worktree" placement is
+   * observable and attributable from the dispatch log. Absent when the
+   * primary resolved (live match or durable hit) or when no primary resolver
+   * is wired.
+   */
+  placementFallbackReason?: ProjectWorkspaceFallbackReason;
 }
 
 /**
@@ -147,6 +174,9 @@ export async function resolveDispatchPlacement(
 ): Promise<DispatchPlacementResult> {
   let anchorId: string | undefined;
   let anchorIsTabRoot = false;
+  // Fallback attribution (WL-0MWHW3PKX0048ZYL AC3): set when a success
+  // fallback placement follows a primary-path null.
+  let placementFallbackReason: ProjectWorkspaceFallbackReason | undefined;
   // Extract the work-item id prefix (e.g. `WL-0MTO…` → `WL`, `TCE-…` → `TCE`).
   const prefix = opts.itemId.split('-', 1)[0];
   // Per-call collector (WL-0MWHCUZ5C000I7S6): the anchor resolvers report
@@ -169,6 +199,15 @@ export async function resolveDispatchPlacement(
   const reportNearMiss = (nearMiss: ProjectWorkspaceMismatch): void => {
     projectWorkspaceMismatch ??= nearMiss;
   };
+  // Per-call fallback-reason collector (WL-0MWHW3PKX0048ZYL AC3): the
+  // project-workspace resolver reports WHY it returned null through its
+  // optional trailing callback into this local; FIRST report wins. Only ever
+  // set when the primary path returned null, so a successful project-workspace
+  // resolution records nothing (and no fallback placement happens).
+  let projectFallbackReason: ProjectWorkspaceFallbackReason | undefined;
+  const reportFallbackReason = (reason: ProjectWorkspaceFallbackReason): void => {
+    projectFallbackReason ??= reason;
+  };
 
   // ── Primary path: project workspace + item-ID tab ─────────────────────
   // When a project plugin pane resolves for the root, the Dispatcher workspace
@@ -176,7 +215,11 @@ export async function resolveDispatchPlacement(
   if (typeof deps.resolveProjectWorkspace === 'function') {
     let projectTarget: ProjectWorkspaceTarget | null = null;
     try {
-      projectTarget = await deps.resolveProjectWorkspace(opts.cwd, reportNearMiss);
+      projectTarget = await deps.resolveProjectWorkspace(
+        opts.cwd,
+        reportNearMiss,
+        reportFallbackReason,
+      );
     } catch {
       projectTarget = null; // fail-closed on any resolver error
     }
@@ -238,6 +281,11 @@ export async function resolveDispatchPlacement(
     anchorId = prefixAnchor.paneId;
     // Per-prefix Dispatcher tabs use herdr's initial root pane as anchor.
     anchorIsTabRoot = true;
+    // Fallback attribution (AC3): the primary failed — name why on the
+    // successful fallback placement.
+    if (projectFallbackReason !== undefined) {
+      placementFallbackReason = projectFallbackReason;
+    }
   }
 
   // ── Fallback: legacy Dispatcher single anchor (AC4) ───────────────────
@@ -268,17 +316,51 @@ export async function resolveDispatchPlacement(
     // The legacy Dispatcher anchor is NOT a tab root — it is the persisted
     // dispatch pane and must never be closed.
     anchorIsTabRoot = false;
+    // Fallback attribution (AC3): the primary failed — name why on the
+    // successful fallback placement.
+    if (projectFallbackReason !== undefined) {
+      placementFallbackReason = projectFallbackReason;
+    }
   }
 
   return {
     ok: true,
     anchorId,
     anchorIsTabRoot,
-    // Recorded on the placement result (and forwarded onto the dispatch
-    // decision entry) even when the Dispatcher fallback subsequently succeeds
-    // (WL-0MWHCV3PR002WSQM AC4) — the fallback success must not hide that the
-    // primary path near-missed.
+    // The primary-path near-miss rides the placement result (and is forwarded
+    // onto the dispatch decision entry) even when the Dispatcher fallback
+    // subsequently succeeds (WL-0MWHCV3PR002WSQM AC4) — the fallback success
+    // must not hide that the primary path near-missed.
     ...(projectWorkspaceMismatch !== undefined ? { projectWorkspaceMismatch } : {}),
+    // Fallback attribution (WL-0MWHW3PKX0048ZYL AC3): present ONLY when a
+    // Dispatcher-fallback placement succeeded after the primary path returned
+    // null — the reason makes the "separate dispatch worktree" placement
+    // observable and attributable from the dispatch log.
+    ...(placementFallbackReason !== undefined ? { placementFallbackReason } : {}),
+  };
+}
+
+/**
+ * The marker attribution fields for a placement — the near-miss diagnostic
+ * (WL-0MWHCV3PR002WSQM AC4) plus the fallback reason
+ * (WL-0MWHW3PKX0048ZYL AC3) — as the additive keys a decision entry carries
+ * so a successful `Dispatcher` fallback placement is observable and
+ * attributable. Pure and tiny; lives here so `dispatch-claims.ts` (which
+ * spreads the marker) stays inside the split-guard line ceiling.
+ */
+export function placementAttribution(
+  placement: DispatchPlacement,
+): {
+  projectWorkspaceMismatch?: ProjectWorkspaceMismatch;
+  placementFallbackReason?: ProjectWorkspaceFallbackReason;
+} {
+  return {
+    ...(placement.projectWorkspaceMismatch !== undefined
+      ? { projectWorkspaceMismatch: placement.projectWorkspaceMismatch }
+      : {}),
+    ...(placement.placementFallbackReason !== undefined
+      ? { placementFallbackReason: placement.placementFallbackReason }
+      : {}),
   };
 }
 

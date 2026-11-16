@@ -51,7 +51,7 @@ import {
   STALE_TAB_ANCHORS,
   STALE_TAB_ANCHORS_JSON,
 } from './__fixtures__/stale-dispatcher-anchors.js';
-import { persistPrefixTab } from './dispatcher-anchor.persistence.js';
+import { persistPrefixTab, readProjectWorkspaces, upsertProjectWorkspace } from './dispatcher-anchor.persistence.js';
 
 function mkTmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'da-test-'));
@@ -310,6 +310,7 @@ interface ResolverOverrides {
   listMachinePanes?: DispatcherAnchorDeps['listMachinePanes'];
   getPaneProcessInfo?: DispatcherAnchorDeps['getPaneProcessInfo'];
   readProcEnviron?: DispatcherAnchorDeps['readProcEnviron'];
+  probeWorkspace?: DispatcherAnchorDeps['probeWorkspace'];
 }
 
 function makeResolverDeps(over: ResolverOverrides = {}): DispatcherAnchorDeps {
@@ -321,6 +322,7 @@ function makeResolverDeps(over: ResolverOverrides = {}): DispatcherAnchorDeps {
     readProcEnviron:
       over.readProcEnviron ??
       (async () => procEnv({ HERDR_RESOLVED_CWD: ROOT, HERDR_WORKSPACE_ID: 'wC' })),
+    ...(over.probeWorkspace !== undefined ? { probeWorkspace: over.probeWorkspace } : {}),
   };
 }
 
@@ -566,6 +568,192 @@ describe('resolveProjectWorkspace ACs (AC1/AC3)', () => {
 
     expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, report)).toBeNull();
     expect(report).not.toHaveBeenCalled();
+  });
+
+  // ── Durable root→workspace map (WL-0MWHW3PKX0048ZYL, AC1/AC2) ────────
+  // The durable per-root project-workspace map
+  // (`downtime-project-workspaces.json` in the machine coordination dir)
+  // makes placement independent of a live `Work Items` plugin pane: a live
+  // match is persisted write-through, and a root whose live scan yields no
+  // match resolves from the map, validated on read against live herdr state
+  // via `probeWorkspace` when the seam is wired. `HERDR_COORDINATION_DIR` is
+  // the tmp dir per beforeEach, so the map lives in the test sandbox.
+
+  it('AC1/AC2: a live match persists the root→workspace mapping (write-through)', async () => {
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [machinePane()],
+      readProcEnviron: async () => procEnv({ HERDR_RESOLVED_CWD: ROOT, HERDR_WORKSPACE_ID: 'wC' }),
+    });
+
+    const got = await resolveProjectWorkspace('/anywhere', deps, ROOT);
+    expect(got).toEqual({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1' });
+    // The mapping was learned into the durable map (normalised key).
+    expect(readProjectWorkspaces(tmpDir)?.byRoot[ROOT]).toEqual({
+      workspaceId: 'wC',
+      paneId: 'wC:pB',
+      tabId: 'wC:t1',
+      updatedAt: expect.any(String),
+    });
+  });
+
+  it('AC1/AC2: trailing-slash roots share ONE durable key (normalised)', async () => {
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [machinePane()],
+      readProcEnviron: async () => procEnv({ HERDR_RESOLVED_CWD: ROOT, HERDR_WORKSPACE_ID: 'wC' }),
+    });
+    await resolveProjectWorkspace('/anywhere', deps, `${ROOT}/`);
+    const map = readProjectWorkspaces(tmpDir);
+    expect(map?.byRoot[ROOT]).toBeDefined();
+    expect(map?.byRoot[`${ROOT}/`]).toBeUndefined();
+  });
+
+  it('AC1: no plugin pane but a durable entry resolves the SAME workspace (no live-pane dependency)', async () => {
+    expect(upsertProjectWorkspace(tmpDir, ROOT, { workspaceId: 'w77' })).toBe(true);
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [], // no plugin pane at dispatch time
+      probeWorkspace: async () => 'alive',
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT)).toEqual({
+      workspaceId: 'w77',
+    });
+  });
+
+  it('AC1: swept-root placement — no panes at all, durable entry alive (downtimeWorklogRoots sweep)', async () => {
+    expect(upsertProjectWorkspace(tmpDir, ROOT, { workspaceId: 'wR', paneId: 'wR:p2', tabId: 'wR:t1' })).toBe(true);
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [],
+      probeWorkspace: async () => 'alive',
+    });
+
+    // The swept root's project workspace resolves durably (pane/tab carried
+    // through as diagnostic provenance) — no herdr instance is running.
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT)).toEqual({
+      workspaceId: 'wR',
+      paneId: 'wR:p2',
+      tabId: 'wR:t1',
+    });
+  });
+
+  it('AC2: durable entry probed MISSING is dropped and fails closed (project-workspace-missing)', async () => {
+    expect(upsertProjectWorkspace(tmpDir, ROOT, { workspaceId: 'wGONE' })).toBe(true);
+    const reason = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [],
+      probeWorkspace: async () => 'missing',
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, undefined, reason)).toBeNull();
+    expect(reason).toHaveBeenCalledWith('project-workspace-missing');
+    // Self-healed: the entry can never route into the dead workspace again.
+    expect(readProjectWorkspaces(tmpDir)?.byRoot[ROOT]).toBeUndefined();
+  });
+
+  it('AC2: durable entry probed UNREADABLE fails closed but the entry is KEPT', async () => {
+    expect(upsertProjectWorkspace(tmpDir, ROOT, { workspaceId: 'wT' })).toBe(true);
+    const reason = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [],
+      probeWorkspace: async () => 'unreadable',
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, undefined, reason)).toBeNull();
+    expect(reason).toHaveBeenCalledWith('herdr-unreadable');
+    // Missing ≠ unreadable: a transient herdr must not wrongly drop the entry.
+    expect(readProjectWorkspaces(tmpDir)?.byRoot[ROOT]).toEqual({ workspaceId: 'wT' });
+  });
+
+  it('AC2: an absent probeWorkspace seam trusts a durable entry (legacy/test callers)', async () => {
+    expect(upsertProjectWorkspace(tmpDir, ROOT, { workspaceId: 'wT' })).toBe(true);
+    const deps = makeResolverDeps({ listMachinePanes: async () => [] });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT)).toEqual({
+      workspaceId: 'wT',
+    });
+  });
+
+  it('AC2: pane list unreadable still resolves from the durable map (source independence)', async () => {
+    expect(upsertProjectWorkspace(tmpDir, ROOT, { workspaceId: 'wT' })).toBe(true);
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => null, // herdr pane list unreadable
+      probeWorkspace: async () => 'alive',
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT)).toEqual({
+      workspaceId: 'wT',
+    });
+  });
+
+  it('AC3: plain miss (no live match, no durable entry) reports no-project-workspace', async () => {
+    const reason = vi.fn();
+    const deps = makeResolverDeps({ listMachinePanes: async () => [] });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, undefined, reason)).toBeNull();
+    expect(reason).toHaveBeenCalledWith('no-project-workspace');
+  });
+
+  it('AC3: a near-miss with no durable entry reports project-workspace-mismatch', async () => {
+    const nearMiss = vi.fn();
+    const reason = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [machinePane()],
+      readProcEnviron: async () =>
+        procEnv({ HERDR_RESOLVED_CWD: `${ROOT}/packages/herdr`, HERDR_WORKSPACE_ID: 'wC' }),
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, nearMiss, reason)).toBeNull();
+    expect(nearMiss).toHaveBeenCalledTimes(1);
+    expect(reason).toHaveBeenCalledWith('project-workspace-mismatch');
+  });
+
+  it('AC2: a durable hit is a match — no near-miss report, no fallback reason', async () => {
+    expect(upsertProjectWorkspace(tmpDir, ROOT, { workspaceId: 'w77' })).toBe(true);
+    const nearMiss = vi.fn();
+    const reason = vi.fn();
+    const deps = makeResolverDeps({
+      // A mismatching plugin pane exists, but the durable entry rescues the
+      // resolution — the mismatch is not a fallback, so it is not reported.
+      listMachinePanes: async () => [machinePane()],
+      readProcEnviron: async () =>
+        procEnv({ HERDR_RESOLVED_CWD: `${ROOT}/packages/herdr`, HERDR_WORKSPACE_ID: 'wC' }),
+      probeWorkspace: async () => 'alive',
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, nearMiss, reason)).toEqual({
+      workspaceId: 'w77',
+    });
+    expect(nearMiss).not.toHaveBeenCalled();
+    expect(reason).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a scan failure with no durable entry reports herdr-unreadable and still scans on', async () => {
+    const reason = vi.fn();
+    const deps = makeResolverDeps({
+      // One unreadable candidate followed by a buildable one that matches.
+      listMachinePanes: async () => [
+        machinePane({ paneId: 'wC:pBAD' }),
+        machinePane({ paneId: 'wC:pOK' }),
+      ],
+      getPaneProcessInfo: async (id) => (id === 'wC:pBAD' ? null : { shellPid: '1' }),
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, undefined, reason)).toEqual({
+      paneId: 'wC:pOK',
+      workspaceId: 'wC',
+      tabId: 'wC:t1',
+    });
+    expect(reason).not.toHaveBeenCalled(); // a match wins; no reason
+  });
+
+  it('AC2: an unreadable scan boundary with NO match reports herdr-unreadable', async () => {
+    const reason = vi.fn();
+    const deps = makeResolverDeps({
+      listMachinePanes: async () => [machinePane()],
+      getPaneProcessInfo: async () => null,
+    });
+
+    expect(await resolveProjectWorkspace('/anywhere', deps, ROOT, undefined, reason)).toBeNull();
+    expect(reason).toHaveBeenCalledWith('herdr-unreadable');
   });
 });
 

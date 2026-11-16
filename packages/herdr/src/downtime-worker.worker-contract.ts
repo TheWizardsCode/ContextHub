@@ -37,8 +37,8 @@ import type {
   ItemTabAnchor,
   ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
-// Anchor-resolver fail-closed boundary reporter (WL-0MWHCUZ5C000I7S6) + primary-path near-miss record (WL-0MWHCV3PR002WSQM; structural copies).
-import type { AnchorFailureReport, ProjectWorkspaceMismatch } from './downtime-worker.dispatch-contract.js';
+// Anchor-resolver fail-closed boundary reporter (WL-0MWHCUZ5C000I7S6) + primary-path near-miss record (WL-0MWHCV3PR002WSQM; structural copies) + fallback-reason token (WL-0MWHW3PKX0048ZYL AC3).
+import type { AnchorFailureReport, ProjectWorkspaceFallbackReason, ProjectWorkspaceMismatch } from './downtime-worker.dispatch-contract.js';
 import type {
   DowntimeDispatchEnrichmentEvent,
   DowntimeDispatchFailureEvent,
@@ -420,7 +420,7 @@ export interface DowntimeWorkerDeps {
    * compatibility with pre-change callers/tests; production wiring
    * (`createDowntimeDeps`) always provides it.
    */
-  resolveProjectWorkspace?(cwd: string, reportNearMiss?: (nearMiss: ProjectWorkspaceMismatch) => void): Promise<ProjectWorkspaceTarget | null>;
+  resolveProjectWorkspace?(cwd: string, reportNearMiss?: (nearMiss: ProjectWorkspaceMismatch) => void, reportFallbackReason?: (reason: ProjectWorkspaceFallbackReason) => void): Promise<ProjectWorkspaceTarget | null>;
   /**
    * Ensure/reuse the tab labelled with the exact work-item id `itemId` inside
    * the resolved project `workspaceId`, returning its anchor (root) pane

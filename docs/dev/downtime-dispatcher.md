@@ -2310,15 +2310,39 @@ and the host-budget admission, immediately before the marker write —
 WL-0MW5JE0SZ0057K30):
 
 1. **Project-workspace resolution** — `resolveProjectWorkspace(cwd, deps, R)`
-   enumerates the machine-wide `herdr pane list`, keeps only plugin panes
-   (`label == "Work Items"`), and reads each candidate's logical project root
-   from `HERDR_RESOLVED_CWD` (via `herdr pane process-info --pane <id>` →
-   `shell_pid` → `/proc/<pid>/environ`). Matching is on the logical root
-   ONLY — never the pane's reported `cwd`, never the workspace label.
-   Ambiguity (≥2 matching panes) is deterministic: the focused pane wins, else
-   the lowest pane id. Fail-closed `null` on any unreadable boundary
+   resolves the project workspace for the root from TWO sources, in
+   precedence (WL-0MWHW3PKX0048ZYL AC1/AC2):
+
+   a. **Live scan (fast-path hint).** Enumerates the machine-wide `herdr
+      pane list`, keeps only plugin panes (`label == "Work Items"`), and
+      reads each candidate's logical project root from `HERDR_RESOLVED_CWD`
+      (via `herdr pane process-info --pane <id>` → `shell_pid` →
+      `/proc/<pid>/environ`). Matching is on the logical root ONLY — never
+      the pane's reported `cwd`, never the workspace label. Ambiguity (≥2
+      matching panes) is deterministic: the focused pane wins, else the
+      lowest pane id. On the first live match the root→workspace mapping is
+      persisted **write-through** into the durable per-root map
+      (`~/.herdr/downtime/downtime-project-workspaces.json`, atomic
+      tmp+rename), so the root stays resolvable while its plugin pane is
+      down.
+   b. **Durable map (AC1/AC2).** When the live scan yields no match (plugin
+      pane down, an unreadable boundary, or a `downtimeWorklogRoots` sweep
+      with no running instance), the resolver reads the persisted per-root
+      project-workspace map and validates the entry on read against live
+      herdr state (`probeWorkspace`, one `herdr workspace list`): `alive` →
+      resolve from it; positively `missing` → the entry is **dropped**
+      (self-healed — it can never route into the dead workspace again) and
+      the path fails closed; `unreadable` → fail closed (missing ≠
+      unreadable — a transient herdr must never wrongly drop a durable
+      entry). An absent probe seam (legacy/test callers) trusts the entry.
+      A durable hit is a match: no near-miss report, no fallback.
+
+   Fail-closed `null` on every boundary with **no** usable durable entry
    (`pane list`/`process-info` failure, missing `shell_pid`, unreadable
-   `/proc`, missing `HERDR_RESOLVED_CWD`, no match).
+   `/proc`, missing `HERDR_RESOLVED_CWD`, no match, a durable entry probed
+   missing/unreadable). The null reason is reported through the resolver's
+   trailing `reportFallbackReason` callback so a fallback placement is
+   attributable (see the fallback-attribution section below).
 2. **Item-ID tab resolution** — `getItemTabAnchor(cwd, deps, workspaceId,
    itemId)` fast-paths an existing tab labelled exactly the work-item id
    whose root pane is alive, else creates it under the coordination lock with
@@ -2373,6 +2397,42 @@ logs the mismatch), and on the `anchor-unavailable` outcome when it fails. No
 record is emitted when a match IS found, and an absent `HERDR_RESOLVED_CWD`
 is not a mismatch. The near-miss vocabulary token
 `project-workspace-mismatch` joins the placement-detail union in every copy.
+
+> **Durable-map note (WL-0MWHW3PKX0048ZYL).** The mismatch and the near-miss
+> report only surface when the resolution returns `null`. A root whose plugin
+> pane advertises the WRONG root can still resolve via the durable map when
+> an entry was learned earlier (a pane that previously advertised the root,
+> or the write-through of a later correct launch) — and a durable hit is a
+> match, so no mismatch is reported and no fallback happens. Once the operator
+> remedy below is applied, the durable map keeps the corrected root→workspace
+> mapping even while that pane is down (AC1/AC2).
+
+#### Fallback attribution (WL-0MWHW3PKX0048ZYL AC3)
+
+Every **successful** `Dispatcher`-workspace fallback placement — the per-prefix
+tab or the legacy anchor reached after `resolveProjectWorkspace` returned `null`
+— is recorded on the dispatch marker with the reason the primary path was not
+used (`placementFallbackReason`), so "separate dispatch worktree" placements
+become observable, rare and attributable from
+`.worklog/downtime-dispatches.log` alone:
+
+```json
+{"kind":"decision","operation":"dispatched","itemId":"WL-…",
+ "placementFallbackReason":"project-workspace-missing", …}
+```
+
+| `placementFallbackReason` | Meaning |
+|---|---|
+| `project-workspace-mismatch` | The primary near-missed: no plugin pane matched the root, but one advertised a DIFFERENT non-empty root. Carries `projectWorkspaceMismatch` too. |
+| `project-workspace-missing` | The durable workspace entry was positively probed MISSING from `herdr workspace list` and was dropped (self-healed) before the fallback. |
+| `no-project-workspace` | Plain miss: no live match, no durable entry, no near-miss — the root has never resolved a project workspace (first-ever dispatch, or a swept root that never ran herdr). |
+| `herdr-unreadable` | The live scan or the durability probe could not be read (CLI error, unparseable output, unreadable `/proc`); nothing was provisioned. |
+
+The reason is reported by `resolveProjectWorkspace` through its trailing
+`reportFallbackReason` callback and forwarded onto the placement result by
+`resolveDispatchPlacement` — absent when the primary path resolved (live match
+or durable hit) and absent when no primary resolver is wired (legacy/test
+callers).
 
 **Operator remedy:** start the plugin pane from the worklog root (the
 project's parent directory, e.g. `cd /home/rgardler/projects/ContextHub &&
@@ -2673,9 +2733,14 @@ vocabulary (15:48Z) — since then recovery is automatic.
    list` must include a pane labelled `Work Items` whose process environ has
    `HERDR_RESOLVED_CWD` equal to the item's worklog root (`herdr pane
    process-info --pane <id>` → `shell_pid` → `grep HERDR_RESOLVED_CWD
-   /proc/<pid>/environ`). If it does not, the dispatch intentionally falls
-   back to the `Dispatcher` workspace (per-prefix tab) — run the plugin from
-   the project root so the plugin pane reports the right `HERDR_RESOLVED_CWD`.
+   /proc/<pid>/environ`). If it does not, the root may still resolve from the
+   DURABLE per-root map (`~/.herdr/downtime/downtime-project-workspaces.json`
+   — validate the entry with `herdr workspace list`); only when neither the
+   live scan nor the durable map resolves does the dispatch intentionally
+   fall back to the `Dispatcher` workspace (per-prefix tab, recorded with
+   `placementFallbackReason`). To make the live path resolve directly, run
+   the plugin from the project root so the plugin pane reports the right
+   `HERDR_RESOLVED_CWD` — and the durable map then self-learns the mapping.
 2. **Project path** — `herdr tab list --workspace <project-workspace-id>` must
    show a tab labelled exactly the work-item id, and the `Downtime triggered …`
    pane's `tab_id` must equal that tab's `tab_id` (`herdr pane list --workspace
@@ -4830,6 +4895,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
 | `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher fallback anchor `{ paneId, workspaceId }` (machine dir; AC4 fallback + scheduled prompts only). Validated on read: a dead pane re-provisions under the coordination lock (WL-0MWH50EN4007C6YH) |
 | `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` | Persisted per-prefix tab map `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }` (machine dir, C1). Validated on read — pane liveness plus a workspace probe against `herdr workspace list`; a positively-missing workspace is recovered exactly once under the lock, and every rewrite prunes `byPrefix` entries whose `<workspaceId>:`-prefixed ids do not belong to the workspace being written (WL-0MWHCUTDM003B39Q, WL-0MWHCUX6A002W8ZG) |
+| `~/.herdr/downtime/downtime-project-workspaces.json` | Persisted per-root project-workspace map `{ byRoot: { "<normalised root>": { workspaceId, paneId?, tabId?, updatedAt? } } }` (machine dir, WL-0MWHW3PKX0048ZYL AC2). Learned write-through on every live plugin-pane match; consulted when the live scan yields no match (plugin pane down or a `downtimeWorklogRoots` sweep with no running instance), so every dispatched pane lands in the item's project workspace deterministically. Validated on read via `probeWorkspace` (one `herdr workspace list`): `alive` → used; positively `missing` → the entry is dropped (self-healed); `unreadable` → fail closed, entry kept |
 | `~/.herdr/downtime/downtime-leader.lock` | Leader lock file (machine dir, `O_CREAT\|O_EXCL`) |
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
