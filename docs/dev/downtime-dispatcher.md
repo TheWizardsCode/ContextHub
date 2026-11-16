@@ -4127,7 +4127,12 @@ read and the full fail-closed matrix under ON.
 
 Every dispatch path excludes soft-deleted items — those with a non-empty
 `deletedBy` (set by `wl delete`, which may leave the item's `status`
-untouched). `isSoftDeleted()` (trim-aware) is applied in
+untouched). `wl delete --deleted-by <identity>` sets that attribution
+explicitly (matching the REST API's `deletedBy` query parameter); when the
+flag is omitted — or blank — the CLI falls back to the configured git
+identity, and a blank value is never written (a whitespace-only `deletedBy`
+would satisfy `isAttributedDelete()` while `isSoftDeleted()` trims it away).
+`isSoftDeleted()` (trim-aware) is applied in
 `classifyItemForDispatch` (the Herdr-head and coordination paths) and in every
 `select*` helper (audit, implement, plan/intake, critical). The parse helpers
 (`parseNextCandidatesOutput`, `parseImplementCandidatesOutput`,

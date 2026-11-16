@@ -340,3 +340,110 @@ it('AC4: --no-recursive leaves descendants untouched and unattributed', async ()
   expect(childShown.status).not.toBe('deleted');
   expect(childShown.deleteReason).toBe('');
 });
+
+/**
+ * Tests for `--deleted-by` attribution (WL-0MVZ5Y0VR0065TPJ).
+ *
+ * The CLI previously hardcoded `deletedBy` to the configured git identity,
+ * diverging from the REST API which accepts an explicit `deletedBy`. These
+ * tests pin the flag's verbatim store (AC-1), recursive propagation (AC-2),
+ * unchanged defaults (AC-3) and the never-blank guard (AC-4).
+ */
+
+/** Seed the configured git identity (served by the mock `git` binary). */
+function seedGitIdentity(email: string): void {
+  fs.writeFileSync(path.join(tempDir, '.git', 'user-email'), `${email}\n`, 'utf8');
+}
+
+it('AC1 (deleted-by): --deleted-by is stored verbatim, echoed in --json, and persists', async () => {
+  // A seeded identity that must LOSE to the explicit flag.
+  seedGitIdentity('deleter@example.com');
+  const item = await createItem('Deleted-by verbatim');
+
+  const result = await deleteItems([item.workItem.id], '--deleted-by "agent-x@example.com" --no-sync');
+  expect(result.exitCode).toBe(0);
+
+  const parsed = JSON.parse(result.stdout);
+  expect(parsed.results[0].deletedBy).toBe('agent-x@example.com');
+  expect(parsed.deletedBy).toBe('agent-x@example.com');
+
+  const shown = await showItem(item.workItem.id);
+  expect(shown.status).toBe('deleted');
+  expect(shown.deletedBy).toBe('agent-x@example.com');
+  expect(shown.deletedBy).not.toBe('deleter@example.com');
+});
+
+it('AC2 (deleted-by): recursive delete propagates the supplied identity to every descendant', async () => {
+  // Seed a distinguishable identity so a propagation failure is visible: a
+  // descendant that fell back would show 'deleter@example.com'.
+  seedGitIdentity('deleter@example.com');
+  const parent = await createItem('Deleted-by cascade parent');
+  const child = await createItem('Deleted-by cascade child', `--parent ${parent.workItem.id}`);
+  const grandchild = await createItem('Deleted-by cascade grandchild', `--parent ${child.workItem.id}`);
+
+  const result = await deleteItems([parent.workItem.id], '--deleted-by "agent-x@example.com" --no-sync');
+  expect(result.exitCode).toBe(0);
+
+  for (const id of [parent.workItem.id, child.workItem.id, grandchild.workItem.id]) {
+    const shown = await showItem(id);
+    expect(shown.status).toBe('deleted');
+    expect(shown.deletedBy).toBe('agent-x@example.com');
+    expect(shown.deletedBy).not.toBe('deleter@example.com');
+  }
+});
+
+it('AC3 (deleted-by): omitting --deleted-by keeps the configured git identity default', async () => {
+  seedGitIdentity('deleter@example.com');
+  const item = await createItem('Deleted-by default');
+
+  const result = await deleteItems([item.workItem.id], '--no-sync');
+  expect(result.exitCode).toBe(0);
+
+  const parsed = JSON.parse(result.stdout);
+  expect(parsed.deletedBy).toBe('deleter@example.com');
+
+  const shown = await showItem(item.workItem.id);
+  expect(shown.deletedBy).toBe('deleter@example.com');
+  // The reason is untouched by this change: an unreasoned delete stays empty.
+  expect(shown.deleteReason).toBe('');
+});
+
+it('AC4 (deleted-by): an empty --deleted-by falls back to the git identity, never blank', async () => {
+  seedGitIdentity('deleter@example.com');
+  const item = await createItem('Deleted-by empty flag');
+
+  const result = await deleteItems([item.workItem.id], '--deleted-by "" --no-sync');
+  expect(result.exitCode).toBe(0);
+
+  const shown = await showItem(item.workItem.id);
+  expect(shown.deletedBy).toBe('deleter@example.com');
+  // Attribution exists, so the merge gate still sees a deliberate delete.
+  expect(isAttributedDelete(shown)).toBe(true);
+});
+
+it('AC4 (deleted-by): a whitespace-only --deleted-by falls back, never whitespace', async () => {
+  seedGitIdentity('deleter@example.com');
+  const item = await createItem('Deleted-by whitespace flag');
+
+  const result = await deleteItems([item.workItem.id], '--deleted-by "   " --no-sync');
+  expect(result.exitCode).toBe(0);
+
+  const shown = await showItem(item.workItem.id);
+  expect(shown.deletedBy).toBe('deleter@example.com');
+  expect(shown.deletedBy.trim()).not.toBe('');
+});
+
+it('AC4 (deleted-by): a blank --deleted-by with no configured identity stores empty, not whitespace', async () => {
+  // No `.git/user-email` seed: the fallback has nothing to fall back to, but
+  // the stored value must still never be whitespace-only.
+  const item = await createItem('Deleted-by no identity');
+
+  const result = await deleteItems([item.workItem.id], '--deleted-by "   " --no-sync');
+  expect(result.exitCode).toBe(0);
+
+  const shown = await showItem(item.workItem.id);
+  expect(shown.deletedBy).toBe('');
+  expect(shown.deletedBy.trim()).toBe('');
+  // With no reason either, the delete is unattributed — correctly so.
+  expect(isAttributedDelete(shown)).toBe(false);
+});
