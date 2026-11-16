@@ -501,6 +501,43 @@ describe('startup import budget — robust statistic (WL-0MWIGCK0E009GGLG)', () 
     expect(evaluation.violations.join('\n')).toContain('104');
   });
 
+  it('normalises the RSS budget by the host slowdown the bare-node control measured', () => {
+    // A loaded host inflates BOTH the bare-node control and the measured CLI
+    // peak RSS on unchanged code (the WL-0MWIGNGP3001O7HP failure: p95RssMb
+    // 132.4 vs a 132.4 limit on a tree that recorded 105.9 MiB at baseline,
+    // with byte-identical node/node_modules — memory pressure, not a code
+    // regression). The wall budget already scales with the bare-node
+    // host-load factor; RSS must use the SAME factor, or a memory-pressured
+    // host flakes the memory ratchet on green code.
+    //
+    // 130 MiB measured vs the un-normalised 80 MiB x 1.25 = 100 MiB limit
+    // would fail; with the host measured 3x slower at the bare-node floor the
+    // normalised limit is 80 x 3 x 1.25 = 300 MiB, so it passes.
+    const loaded = syntheticResult(
+      { p50RssMb: 130, p95RssMb: 130 }, // beyond the un-normalised 100 MiB limit
+      'src',
+      { bareNodeP95WallMs: 1350 } // host measured 3x slower
+    );
+    const evaluation = evaluateStartupBudget(loaded, syntheticBudget());
+
+    expect(evaluation.hostLoadFactor).toBeCloseTo(3, 5);
+    expect(evaluation.violations).toEqual([]);
+    expect(evaluation.ok).toBe(true);
+  });
+
+  it('still fails an RSS regression on an idle host (normalisation is upward-only)', () => {
+    // An idle host (bare-node control matching the recorded floor, factor 1)
+    // must keep the tight 25 % RSS headroom intact — the same 104 MiB sample
+    // that was masked by the 3x load factor above fails here.
+    const idle = syntheticResult({ p50RssMb: 104, p95RssMb: 104 });
+
+    const evaluation = evaluateStartupBudget(idle, syntheticBudget());
+    expect(evaluation.hostLoadFactor).toBe(1);
+    expect(evaluation.ok).toBe(false);
+    expect(evaluation.violations.join('\n')).toContain('p50RssMb');
+    expect(evaluation.violations.join('\n')).toContain('104');
+  });
+
   it('still fails a uniform wall-time regression under the median (AC4)', () => {
     // Limit is 1200 ms x 3 + 250 ms = 3850 ms; every sample moved past it.
     const regressed = syntheticResult({ p50WallMs: 4000, p95WallMs: 4000 });

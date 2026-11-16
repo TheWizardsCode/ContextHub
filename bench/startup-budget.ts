@@ -40,8 +40,11 @@
  * N times, so a saturated host cannot flake the ratchet (the
  * WL-0MVS9Z965006MC4R failure). A faster host never tightens the budget
  * (factor clamped at 1) and a wild control sample never masks a real wall
- * regression (`maxHostLoadFactor` clamp, default 8). Peak RSS keeps its own
- * headroom; every measurement must also be a genuine fast-path invocation.
+ * regression (`maxHostLoadFactor` clamp, default 8). Peak RSS uses the SAME
+ * normalisation (WL-0MWIGNGP3001O7HP: a memory-pressured host inflates peak
+ * RSS on unchanged code too, so the recorded RSS budget scales with the
+ * bare-node host factor as well), on top of its own headroom; every
+ * measurement must also be a genuine fast-path invocation.
  *
  * ## Sample statistic (WL-0MWIGCK0E009GGLG)
  *
@@ -235,7 +238,9 @@ export function defaultStartupBudget(): StartupBudget {
         'load-independent regression gate: a shared/loaded host inflates wall time but not ' +
         'the process CPU consumed. Wall and peak RSS get wider documented headroom; the wall ' +
         'budget is also normalised by the host-load factor measured by that run\'s bare-node ' +
-        'control (clamped to maxHostLoadFactor).',
+        'control (clamped to maxHostLoadFactor), and peak RSS is normalised by the SAME factor ' +
+        '(WL-0MWIGNGP3001O7HP: memory pressure inflates peak RSS on unchanged code, so RSS ' +
+        'scales with the host like wall time does; upward-only, pinned by test).',
     },
     baselines: {},
   };
@@ -480,7 +485,10 @@ function hostLoadFactor(
  *   4. wall time — same statistic — must stay within `wallHeadroomPct` +
  *      `wallFloorMs` slack, after normalising the recorded wall budget by the
  *      host-load factor the same run's bare-node control measured;
- *   5. peak RSS — same statistic — must stay within `rssHeadroomPct` headroom;
+ *   5. peak RSS — same statistic — must stay within `rssHeadroomPct` headroom,
+ *      with the recorded RSS budget normalised by the same bare-node host-load
+ *      factor as wall time (WL-0MWIGNGP3001O7HP: a memory-pressured host
+ *      inflates both on unchanged code, so RSS must scale with the host too);
  *   6. when `ac1Targets.enforced` and the measured target is the recorded
  *      `measuredTarget`, the parent AC1 numbers are asserted too.
  */
@@ -575,8 +583,19 @@ export function evaluateStartupBudget(
     });
 
     const rssHeadroomPct = policy.rssHeadroomPct ?? policy.cpuHeadroomPct;
+    // WL-0MWIGNGP3001O7HP: normalise peak RSS by the SAME bare-node host-load
+    // factor wall time uses. A memory-pressured host inflates both the
+    // bare-node control and the measured CLI peak RSS on unchanged code
+    // (132.4 MiB vs a 132.4 MiB limit recorded from 105.9 MiB on 2026-10-20,
+    // byte-identical node/node_modules) — so RSS must scale with the host
+    // like wall time does, or a contended host flakes the memory ratchet on
+    // green code. Upward-only (factor clamped at 1 on an idle/faster host),
+    // so the tight 25 % headroom still fails a genuine RSS regression when
+    // the host is quiet (pinned by test).
     const rssLimit =
-      recorded.p95RssMb === null ? null : recorded.p95RssMb * (1 + rssHeadroomPct / 100);
+      recorded.p95RssMb === null
+        ? null
+        : recorded.p95RssMb * loadFactor * (1 + rssHeadroomPct / 100);
     const rssSample = pickStatistic(statistic, scenario.p50RssMb, scenario.p95RssMb);
     if (rssLimit !== null && rssSample.value !== null) {
       push({
@@ -587,7 +606,11 @@ export function evaluateStartupBudget(
         ok: rssSample.value <= rssLimit,
         detail:
           `${rssSample.statistic} of ${scenario.runs} samples vs the recorded p95 ` +
-          `${recorded.p95RssMb} MiB + ${rssHeadroomPct}% RSS headroom`,
+          `${recorded.p95RssMb} MiB × host-load factor ` +
+          `${loadFactor.toFixed(2)} (bare-node control ${String(
+            result.bareNode?.p95WallMs ?? '-')} / ${String(
+            baseline.bareNode?.p95WallMs ?? '-')} ms) + ` +
+          `${rssHeadroomPct}% RSS headroom`,
       });
     }
 
