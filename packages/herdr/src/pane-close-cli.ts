@@ -39,6 +39,7 @@ import {
   parsePaneProcessInfo,
 } from './pane-close-herdr.js';
 import { resolveHerdrBin } from './herdr-bin.js';
+import { spawnCliStdout, DEFAULT_CLI_TIMEOUT_MS } from './cli-spawn.js';
 import { releaseHostDispatch } from './host-dispatch-budget.admission.js';
 import {
   decodeBudgetPaneLabel,
@@ -51,8 +52,9 @@ import { runReaperCli } from './pane-close-reaper.js';
 
 const execFileAsync = promisify(execFile);
 
-/** Default per-command timeout for herdr / wl calls (60 s). */
-export const CLI_COMMAND_TIMEOUT_MS = 60 * 1000;
+/** Default per-command timeout for herdr / wl calls (60 s — the shared
+ * canonical CLI spawn timeout, `cli-spawn.ts`, WL-0MWHWHB3X004H9VG AC1). */
+export const CLI_COMMAND_TIMEOUT_MS = DEFAULT_CLI_TIMEOUT_MS;
 
 /** Injectable I/O, so tests can exercise the CLI without real processes. */
 export interface PaneCloseCliIo {
@@ -129,20 +131,16 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
   }
 
   return createHerdrReaperDeps({
-    listPanesRaw: async () => {
-      const { stdout } = await io.execFileAsync(herdrBin, ['pane', 'list'], {
-        encoding: 'utf8',
-        timeout: CLI_COMMAND_TIMEOUT_MS,
+    listPanesRaw: async () =>
+      spawnCliStdout(io.execFileAsync, [herdrBin], ['pane', 'list'], {
+        timeoutMs: CLI_COMMAND_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
         cwd: io.cwd,
-      });
-      return stdout;
-    },
+      }),
     closePane: async (paneId: string) => {
       try {
-        await io.execFileAsync(herdrBin, ['pane', 'close', paneId], {
-          encoding: 'utf8',
-          timeout: CLI_COMMAND_TIMEOUT_MS,
+        await spawnCliStdout(io.execFileAsync, [herdrBin], ['pane', 'close', paneId], {
+          timeoutMs: CLI_COMMAND_TIMEOUT_MS,
           cwd: io.cwd,
         });
         return true;
@@ -170,12 +168,16 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
     invokingPaneId,
     // Item lookup (parent AC2/AC6): producer-review flag + work-item stage.
     getItemInfo: async (itemId: string) => {
-      const { stdout } = await io.execFileAsync('wl', ['show', itemId, '--json'], {
-        encoding: 'utf8',
-        timeout: CLI_COMMAND_TIMEOUT_MS,
-        maxBuffer: 4 * 1024 * 1024,
-        cwd: io.cwd,
-      });
+      const stdout = await spawnCliStdout(
+        io.execFileAsync,
+        ['wl'],
+        ['show', itemId, '--json'],
+        {
+          timeoutMs: CLI_COMMAND_TIMEOUT_MS,
+          maxBuffer: 4 * 1024 * 1024,
+          cwd: io.cwd,
+        },
+      );
       const parsed = extractJsonValue(stdout) as {
         workItem?: { needsProducerReview?: boolean; stage?: string };
       };
@@ -189,12 +191,12 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
     // than the agent itself. Fail-closed to 0.
     childProcessCount: async (pane) => {
       try {
-        const { stdout } = await io.execFileAsync(
-          herdrBin,
+        const stdout = await spawnCliStdout(
+          io.execFileAsync,
+          [herdrBin],
           ['pane', 'process-info', '--pane', pane.paneId],
           {
-            encoding: 'utf8',
-            timeout: CLI_COMMAND_TIMEOUT_MS,
+            timeoutMs: CLI_COMMAND_TIMEOUT_MS,
             maxBuffer: 4 * 1024 * 1024,
             cwd: io.cwd,
           },
@@ -231,13 +233,11 @@ export async function runBudgetLedgerRepair(
     raw = fixtureRaw;
   } else {
     try {
-      const { stdout } = await io.execFileAsync(herdrBin, ['pane', 'list'], {
-        encoding: 'utf8',
-        timeout: CLI_COMMAND_TIMEOUT_MS,
+      raw = await spawnCliStdout(io.execFileAsync, [herdrBin], ['pane', 'list'], {
+        timeoutMs: CLI_COMMAND_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
         cwd: io.cwd,
       });
-      raw = stdout;
     } catch (err) {
       process.stderr.write(
         `[worklog-plugin] budget-ledger repair refused: "herdr pane list" failed ` +

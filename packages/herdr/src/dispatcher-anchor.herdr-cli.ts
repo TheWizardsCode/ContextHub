@@ -3,31 +3,35 @@
  * helpers and the production dispatcher-anchor deps factory.
  *
  * Single responsibility: run the `herdr` binary and read a pane's process
- * environment — `execFileStdout` (module-local normaliser),
- * `listMachinePanes`, `getPaneProcessInfo`, `readProcEnvironFile`,
+ * environment — `listMachinePanes`, `getPaneProcessInfo`, `readProcEnvironFile`,
  * `listTabsInWorkspace`, `listPanesInWorkspace`, `createTabInWorkspace` — and
  * build the production deps object over them
  * (`createDispatcherAnchorDeps`).
  *
  * Moved verbatim out of `dispatcher-anchor.ts` (parent WL-0MVGKHCP9005SJPZ;
- * child WL-0MW0JHALU00928SX). No behaviour change: the same signatures, the
- * same exported names and the same fail-closed `null` semantics.
+ * child WL-0MW0JHALU00928SX). The herdr spawn plumbing now delegates to the
+ * shared `cli-spawn.ts` primitive (WL-0MWHWHB3X004H9VG AC1): every spawn goes
+ * through `spawnCliStdout` over the shared injectable exec seam
+ * (`fetcher.args.ts::getExecFileAsync`). No behaviour change: the same
+ * commands, the same stdout-shape normalisation (the former module-local
+ * `execFileStdout` contract lives in `cli-spawn.ts::spawnCliStdout` now) and
+ * the same fail-closed `null` semantics.
  *
  * Layering: imports the output parsers from
  * `dispatcher-anchor.cli-parsers.js` and types from
  * `dispatcher-anchor.contract.js`; `resolveHerdrBin` still comes from
- * `./herdr-bin.js`. It never imports the `dispatcher-anchor.js` barrel, so the
+ * `./herdr-bin.js`; the spawn seam comes from `./fetcher.args.js` and
+ * `./cli-spawn.js`. It never imports the `dispatcher-anchor.js` barrel, so the
  * barrel can re-export these symbols without creating a cycle.
- * `execFileStdout` stays module-local.
  */
 
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFile as _execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { resolveHerdrBin } from './herdr-bin.js';
+import { getExecFileAsync } from './fetcher.args.js';
+import { spawnCliStdout } from './cli-spawn.js';
 import type {
   DispatcherAnchorDeps,
   DispatcherTabInfo,
@@ -44,9 +48,7 @@ import {
   parsePaneProcessInfoOutput,
 } from './dispatcher-anchor.cli-parsers.js';
 
-const execFile = promisify(_execFile);
-
-// ── herdr CLI helpers and production deps factory ──────────────────────
+// ── herdr CLI helpers and production deps factory ────────────────────
 
 /** Build real deps exec'd against the herdr CLI (used in production). */
 export function createDispatcherAnchorDeps(
@@ -55,8 +57,9 @@ export function createDispatcherAnchorDeps(
 ): DispatcherAnchorDeps {
   return {
     async createWorkspace(label: string) {
-      const out = await execFileStdout(
-        herdrBin,
+      const out = await spawnCliStdout(
+        getExecFileAsync(),
+        [herdrBin],
         ['workspace', 'create', '--label', label, '--no-focus'],
         { cwd, maxBuffer: 1024 * 1024 },
       );
@@ -76,8 +79,9 @@ export function createDispatcherAnchorDeps(
     },
     async movePaneToNewTab(paneId: string, label: string) {
       try {
-        await execFile(
-          herdrBin,
+        await spawnCliStdout(
+          getExecFileAsync(),
+          [herdrBin],
           ['pane', 'move', paneId, '--new-tab', '--tab-label', label, '--no-focus'],
           { cwd, maxBuffer: 1024 * 1024 },
         );
@@ -93,7 +97,12 @@ export function createDispatcherAnchorDeps(
     },
     async isPaneAlive(paneId: string) {
       try {
-        await execFile(herdrBin, ['pane', 'get', paneId], { cwd, maxBuffer: 1024 * 1024 });
+        await spawnCliStdout(
+          getExecFileAsync(),
+          [herdrBin],
+          ['pane', 'get', paneId],
+          { cwd, maxBuffer: 1024 * 1024 },
+        );
         return true;
       } catch {
         return false;
@@ -132,27 +141,6 @@ export {
   parseProcEnviron,
 } from './dispatcher-anchor.cli-parsers.js';
 
-/**
- * Run a herdr CLI command and resolve its stdout as a string.
- *
- * Node's `util.promisify(execFile)` resolves `{ stdout, stderr }` in
- * production, but the test harness's global `child_process` wrapper loses the
- * `promisify.custom` symbol so the generic callback shape resolves to the raw
- * stdout value instead. Normalise both shapes so behaviour is identical in
- * tests and production.
- */
-async function execFileStdout(
-  herdrBin: string,
-  args: string[],
-  opts: { cwd: string; maxBuffer: number },
-): Promise<string> {
-  const res = (await execFile(herdrBin, args, opts)) as unknown;
-  if (typeof res === 'string') return res;
-  if (Buffer.isBuffer(res)) return res.toString();
-  const out = (res as { stdout?: unknown } | null | undefined)?.stdout;
-  return out === undefined || out === null ? '' : out.toString();
-}
-
 /** List machine-wide panes via `herdr pane list` (null on CLI/parse failure). */
 export async function listMachinePanes(
   cwd: string,
@@ -160,10 +148,12 @@ export async function listMachinePanes(
 ): Promise<MachinePaneInfo[] | null> {
   let out: string;
   try {
-    out = await execFileStdout(herdrBin, ['pane', 'list'], {
-      cwd,
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    out = await spawnCliStdout(
+      getExecFileAsync(),
+      [herdrBin],
+      ['pane', 'list'],
+      { cwd, maxBuffer: 4 * 1024 * 1024 },
+    );
   } catch {
     return null;
   }
@@ -187,8 +177,9 @@ export async function getPaneProcessInfo(
 ): Promise<PaneProcessInfo | null> {
   let out: string;
   try {
-    out = await execFileStdout(
-      herdrBin,
+    out = await spawnCliStdout(
+      getExecFileAsync(),
+      [herdrBin],
       ['pane', 'process-info', '--pane', paneId],
       { cwd, maxBuffer: 1024 * 1024 },
     );
@@ -227,8 +218,9 @@ export async function listTabsInWorkspace(
   herdrBin: string = resolveHerdrBin(),
 ): Promise<DispatcherTabInfo[] | null> {
   try {
-    const out = await execFileStdout(
-      herdrBin,
+    const out = await spawnCliStdout(
+      getExecFileAsync(),
+      [herdrBin],
       ['tab', 'list', '--workspace', workspaceId],
       { cwd, maxBuffer: 1024 * 1024 },
     );
@@ -298,10 +290,12 @@ async function probeWorkspace(
 ): Promise<'alive' | 'missing' | 'unreadable'> {
   let out: string;
   try {
-    out = await execFileStdout(herdrBin, ['workspace', 'list'], {
-      cwd,
-      maxBuffer: 1024 * 1024,
-    });
+    out = await spawnCliStdout(
+      getExecFileAsync(),
+      [herdrBin],
+      ['workspace', 'list'],
+      { cwd, maxBuffer: 1024 * 1024 },
+    );
   } catch (err) {
     process.stderr.write(
       `[worklog-plugin] herdr workspace list failed (probing ${workspaceId}): ${
@@ -330,8 +324,9 @@ export async function listPanesInWorkspace(
   herdrBin: string = resolveHerdrBin(),
 ): Promise<DispatcherPaneInfo[] | null> {
   try {
-    const out = await execFileStdout(
-      herdrBin,
+    const out = await spawnCliStdout(
+      getExecFileAsync(),
+      [herdrBin],
       ['pane', 'list', '--workspace', workspaceId],
       { cwd, maxBuffer: 1024 * 1024 },
     );
@@ -357,8 +352,9 @@ export async function createTabInWorkspace(
 ): Promise<ItemTabAnchor | null> {
   let out: string;
   try {
-    out = await execFileStdout(
-      herdrBin,
+    out = await spawnCliStdout(
+      getExecFileAsync(),
+      [herdrBin],
       ['tab', 'create', '--workspace', workspaceId, '--label', label, '--no-focus'],
       { cwd, maxBuffer: 1024 * 1024 },
     );
