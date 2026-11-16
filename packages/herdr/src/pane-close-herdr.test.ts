@@ -628,6 +628,28 @@ describe('createHerdrReaperDeps — budget release and dead-pane sweep', () => {
     expect(releasePaneBudget).toHaveBeenCalledWith(pane);
   });
 
+  it('forwards releaseAuditLease to the injected io seam (WL-0MWJ7QONS0052HXX)', async () => {
+    const releaseAuditLease = vi.fn().mockResolvedValue(undefined);
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(rawOnePane),
+      closePane: vi.fn().mockResolvedValue(true),
+      releaseAuditLease,
+    });
+    const [pane] = await deps.listPanes();
+    await deps.releaseAuditLease?.(pane);
+    expect(releaseAuditLease).toHaveBeenCalledWith(pane);
+  });
+
+  it('an unwired releaseAuditLease seam is a no-op (legacy reaper callers unchanged)', async () => {
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(rawOnePane),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+    const [pane] = await deps.listPanes();
+    // Absent seam: calling the forwarded method must be a non-event, never throw.
+    await expect(deps.releaseAuditLease?.(pane)).resolves.toBeUndefined();
+  });
+
   it('forwards the RAW parsed panes to the sweep after a trusted read', async () => {
     const sweepBudgetLedger = vi.fn().mockResolvedValue(undefined);
     const raw = JSON.stringify({

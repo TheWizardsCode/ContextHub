@@ -1338,10 +1338,14 @@ Token mappings, pinned in captured payloads:
 admission until a terminal path. Refusal paths never acquire (a refused
 availability/lease reads nothing to release). Marker-write failure, spawn
 failure and anchor-unavailable release through the claim pipeline
-(`releaseDispatchSlotForFailure`); an audit pane closing releases through
-`recordPaneClose`. Releases are idempotent and best-effort — an unheld
-session is a no-op, and a leaked lease is bounded by the proxy's own expiry
-(reported as `reclaimed` on the availability read).
+(`releaseDispatchSlotForFailure`); an audit pane closing releases through the
+pane-close REAPER seam (`ReaperDeps.releaseAuditLease`) — the only active
+auto-close path (the `recordPaneClose` release behind the DISABLED
+pane-lifecycle monitor is retained for a possible future re-enable, but never
+runs in production, WL-0MWJ7QONS0052HXX). AC3's "release guaranteed on every
+terminal path" therefore holds for the reaper path. Releases are idempotent
+and best-effort — an unheld session is a no-op, and a leaked lease is bounded
+by the proxy's own expiry (reported as `reclaimed` on the availability read).
 
 **The client** (`packages/herdr/src/downtime-worker.audit-availability.ts`,
 child `WL-0MWAMSCOP003R837`) is the counterpart of `createLocalReserver` and

@@ -13,7 +13,10 @@
  * so decisions cannot diverge (parent AC6). The dispatch monitor itself is
  * currently DISABLED (WL-0MUMEKDK0008LKH8), so the reaper is the only active
  * auto-close path; the `alreadyClosedPaneIds` guard remains for historical
- * monitor entries and a possible future re-enable.
+ * monitor entries and a possible future re-enable. Because the reaper is the
+ * only ACTIVE close path, it is also where a closed audit pane must release
+ * its proxy audit lease (the `recordPaneClose` release behind the disabled
+ * monitor never runs in production — WL-0MWJ7QONS0052HXX).
  */
 
 import { classifySession, extractFinalAssistantText } from './pane-close.js';
@@ -52,6 +55,19 @@ export interface ReaperDeps {
    * close outcome. Absent → legacy callers skip the release entirely.
    */
   releasePaneBudget?(pane: PaneStatus): Promise<void>;
+  /**
+   * Proxy audit-lease release (WL-0MWJ7QONS0052HXX): called once per closed
+   * AUDIT pane AFTER a successful close so the shared GPU lease a completed
+   * audit still holds is returned immediately. The success-path release wired
+   * to the disabled pane-lifecycle monitor (`recordPaneClose`) never runs in
+   * production, so the reaper — the only active auto-close path — is where
+   * the audit tier gets its slot back. Idempotent and best-effort: the
+   * caller wraps it fail-open, so a release failure never changes the close
+   * outcome and the proxy's own lease expiry remains the backstop. Absent →
+   * legacy callers skip the release entirely (the leak is bounded by the
+   * lease TTL).
+   */
+  releaseAuditLease?(pane: PaneStatus): Promise<void>;
   /**
    * Dead-pane ledger sweep (WL-0MW5KC8J300942EA): called ONCE per reaper run
    * with the panes it listed, so CONFIRMED ledger entries whose pane is absent
@@ -396,6 +412,22 @@ export async function runReaper(
         console.error(
           `reaper: budget release failed for ${pane.id}: ${err instanceof Error ? err.message : String(err)}`,
         );
+      }
+      // Proxy audit lease (WL-0MWJ7QONS0052HXX): a closed AUDIT pane returns
+      // the shared GPU lease a completed audit still holds. This is the ONLY
+      // active release in production — the `recordPaneClose` release sits
+      // behind the DISABLED pane-lifecycle monitor and never runs. Best-effort
+      // and fail-open: a release failure never blocks, crashes or un-closes a
+      // pane, and the proxy's own lease expiry remains the backstop. Only
+      // audit panes hold a lease, so other kinds never touch the seam.
+      if (pane.kind === 'audit') {
+        try {
+          await deps.releaseAuditLease?.(pane);
+        } catch (err) {
+          console.error(
+            `reaper: audit lease release failed for ${pane.id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
     }
 

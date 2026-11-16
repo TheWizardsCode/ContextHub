@@ -1336,7 +1336,11 @@ export function createDowntimeDeps(
       // Proxy audit lease (WL-0MWFJH3NW006F5GN AC3): the pane-close terminal
       // path of an AUDIT pane gives the shared GPU back. Idempotent and
       // best-effort — this must never block the pane-close record, and the
-      // proxy's own lease expiry remains the backstop.
+      // proxy's own lease expiry remains the backstop. NOTE: this method is
+      // reachable only from the DISABLED pane-lifecycle monitor
+      // (`PANE_LIFECYCLE_MONITOR_ENABLED = false`); the reaper — the only
+      // active auto-close path — releases through its own seam wired in
+      // `runPaneCloseReaper` (WL-0MWJ7QONS0052HXX).
       if (entry.kind === 'audit' && typeof this.releaseAuditLease === 'function') {
         try {
           await this.releaseAuditLease(entry.itemId, cwd, { reason: 'pane-close' });
@@ -1456,6 +1460,24 @@ export function createDowntimeDeps(
             );
           }
         },
+        // Proxy audit lease (WL-0MWJ7QONS0052HXX): the reaper is the ONLY
+        // active auto-close path — the `recordPaneClose` release above sits
+        // behind the DISABLED pane-lifecycle monitor and never runs in
+        // production — so a closed audit pane returns its shared GPU lease
+        // here, re-deriving the session id from the item id
+        // (`auditLeaseSessionId`) exactly as `recordPaneClose` does. Wired
+        // only when the worker has the release method; a worker without it
+        // keeps the seam absent (legacy callers unchanged, the lease expires
+        // on the proxy's own TTL). Best-effort: the reaper wraps it fail-open.
+        ...(typeof this.releaseAuditLease === 'function'
+          ? {
+              releaseAuditLease: async (pane) => {
+                if (pane.itemId !== '') {
+                  await this.releaseAuditLease!(pane.itemId, cwd, { reason: 'pane-close' });
+                }
+              },
+            }
+          : {}),
         sweepBudgetLedger: async (panes) => {
           sweepClosedPanes(panes.map((pane) => ({ paneId: pane.paneId })), {
             actor: `herdr:${process.pid}`,

@@ -372,6 +372,16 @@ export interface HerdrReaperIo {
    */
   releasePaneBudget?(pane: PaneStatus): Promise<void>;
   /**
+   * Proxy audit-lease release (WL-0MWJ7QONS0052HXX): called once per closed
+   * AUDIT pane after a successful close so the shared GPU lease a completed
+   * audit still holds is returned immediately. Wired by `index.ts` to the
+   * worker's existing `releaseAuditLease` (item-id-derived session id) — the
+   * release `recordPaneClose` performs lives behind the disabled
+   * pane-lifecycle monitor and never runs in production. Idempotent and
+   * best-effort. Absent → legacy callers skip the release.
+   */
+  releaseAuditLease?(pane: PaneStatus): Promise<void>;
+  /**
    * Dead-pane ledger sweep (WL-0MW5KC8J300942EA): called once per reaper run
    * with the RAW parsed pane list of that run. Receives `ParsedHerdrPane[]`
    * (not the session-filtered `PaneStatus[]`) so a dispatch pane whose session
@@ -514,6 +524,11 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
     async releasePaneBudget(pane: PaneStatus): Promise<void> {
       if (typeof io.releasePaneBudget !== 'function') return;
       await io.releasePaneBudget(pane);
+    },
+
+    async releaseAuditLease(pane: PaneStatus): Promise<void> {
+      if (typeof io.releaseAuditLease !== 'function') return;
+      await io.releaseAuditLease(pane);
     },
 
     async sweepBudgetLedger(): Promise<void> {

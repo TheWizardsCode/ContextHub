@@ -1504,7 +1504,14 @@ row carries the decision's `reasonSnapshot` alongside the decision and
 timestamp. I/O is injected via `ReaperDeps` (`listPanes`, `closePane`,
 `terminateProcessGroup`) so the orchestration is fully testable.
 `runReaperCli(deps, argv)` is the CLI entrypoint and accepts `--dry-run`,
-`--threshold-minutes <n>` and `--ledger <path>`.
+`--threshold-minutes <n>` and `--ledger <path>`. After a successful close
+the reaper releases the pane's machine-wide dispatch-budget entry
+(`releasePaneBudget`) and — for a closed **audit** pane — the proxy audit
+lease (`releaseAuditLease`, WL-0MWJ7QONS0052HXX): the reaper is the only
+ACTIVE auto-close path, so the audit tier gets its shared GPU slot back the
+moment a completed audit's pane closes instead of after the proxy's ~1 h
+lease TTL. Both releases are idempotent and best-effort (fail-open, the
+proxy/host expiry remains the backstop).
 
 **Scheduling (`pane-close-scheduler.ts`).** The downtime worker runs the
 reaper on its tick at most once per `PANE_CLOSE_REAPER_INTERVAL_MS`
