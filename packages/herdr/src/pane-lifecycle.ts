@@ -1,6 +1,9 @@
 /**
  * packages/herdr/src/pane-lifecycle.ts — Pane-lifecycle monitor (pure logic)
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * DISABLED (WL-0MUMEKDK0008LKH8). Mechanism B — the dispatch-monitor pane
  * auto-close driven by this classifier — is switched off in the downtime
  * worker (`PANE_LIFECYCLE_MONITOR_ENABLED` in `downtime-worker.ts`). It was

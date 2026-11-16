@@ -2,6 +2,9 @@
  * packages/herdr/src/pane-argv.ts — canonical pane-spawn argv builders
  * (WL-0MWHWGZI4007D911)
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * ONE canonical argument-vector builder per pane-spawn script — 
  * `send-to-pi.sh` (agent panes) and `run-in-pane.sh` (shell-output panes),
  * plus the downtime dispatcher's `send-to-pi.sh` invocation — mirroring the

@@ -2,6 +2,9 @@
  * packages/herdr/src/dispatcher-anchor.placement.ts — project-workspace
  * resolution and the item-ID tab anchor (the primary placement path).
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Single responsibility: strategy 1 of `dispatchClaimedTier` — map a worklog
  * root to the herdr plugin pane whose logical project root matches it
  * (`resolveProjectWorkspace`, AC1/AC3), then find-or-create the tab labelled

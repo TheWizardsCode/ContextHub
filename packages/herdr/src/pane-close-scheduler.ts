@@ -1,6 +1,9 @@
 /**
  * packages/herdr/src/pane-close-scheduler.ts — Periodic reaper scheduling
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Wires the closure reaper into the downtime worker's periodic tick
  * (WL-0MUJW9FFW009008M / WL-0MUJL1NAH0042GOS). The reaper runs only when the
  * `paneCloseEnabled` setting is on, on a bounded cadence, and any failure is

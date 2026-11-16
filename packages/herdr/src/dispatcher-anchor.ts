@@ -2,6 +2,9 @@
  * packages/herdr/src/dispatcher-anchor.ts — Dispatcher anchors and
  * project-workspace resolution (re-export barrel).
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * The three placement strategies, in `dispatchClaimedTier` precedence order
  * (WL-0MUR5FUWD00024XN), each implemented by a sibling module:
  *

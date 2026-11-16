@@ -522,7 +522,10 @@ dispatches; the other herdr instances coordinate instead of polling:
   so a dispatch that never runs a command leaves no pane behind. Scheduled
   prompts (no work-item id) keep the `Dispatcher` anchor.
   See
-  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn).
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn),
+  and the [single pane-creation architecture map + naming
+  contract](../../docs/dev/downtime-dispatcher.md#pane-creation-architecture-wl-0mwhwhbsw005kg13)
+  (one workspace per project, item-ID tabs, create-or-reuse).
 - **Stalled-work scan and resume (WL-0MUYMBSA90092QV2)** — before selecting a
   new item on an idle cycle, the dispatcher scans the machine-wide
   `herdr pane list` and resumes a stalled pane **in place** (reusing its
@@ -1383,6 +1386,11 @@ lockstep — other machines get a fair chance to win the dispatch race. The
 jitter factor is clamped to `[0.5×, 1.5×]` of the configured interval.
 
 ### Interactive pane placement (work-item-ID tabs)
+
+(Cross-reference: the single [pane-creation architecture map + naming
+contract](../../docs/dev/downtime-dispatcher.md#pane-creation-architecture-wl-0mwhwhbsw005kg13)
+— one workspace per project, tabs labelled by the full work-item id,
+create-or-reuse.)
 
 Interactive dispatch from the worklist — an agent command (`/skill:*`,
 `/intake`, `/plan`, `/prompt:`) or a shell/command-output command (`!!`/`!`

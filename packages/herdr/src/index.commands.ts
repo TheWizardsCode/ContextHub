@@ -2,6 +2,9 @@
  * packages/herdr/src/index.commands.ts — command routing, routing-prefix
  * stripping and pane-argument builders for the Herdr Worklog plugin.
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Classifies a resolved shortcut command into its execution channel
  * (`routeCommand`), strips the `!!`/`!` and `/prompt:` routing prefixes
  * (`stripCommandPrefix` / `stripAgentPromptPrefix`), builds the argv vectors

@@ -2,6 +2,9 @@
  * packages/herdr/src/downtime-worker.pane.ts — Herdr pane identity, in-flight
  * resolution, spawn invocation and the pane-lifecycle monitor.
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Single responsibility: everything the downtime dispatcher knows about Herdr
  * panes — the deps-wiring in-flight resolution, the `send-to-pi.sh` invocation
  * (spawn options/env — the pane argv itself is canonical in `pane-argv.ts`)

@@ -1,6 +1,9 @@
 /**
  * packages/herdr/src/pane-close-herdr.ts — Production reaper deps wiring
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Bridges the injectable `ReaperDeps` interface to real herdr CLI + pi
  * session-log I/O (WL-0MUJW9FFW009008M / WL-0MUJL1NAH0042GOS).
  *

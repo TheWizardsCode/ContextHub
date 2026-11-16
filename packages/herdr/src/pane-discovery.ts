@@ -2,6 +2,9 @@
  * packages/herdr/src/pane-discovery.ts — canonical dispatched-pane discovery
  * (WL-0MWHWH6XL0025YX2)
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * The single shared discovery module for dispatched-pane "list panes → filter
  * label → classify agent status" pipelines. Prior to this module the same
  * pipeline existed in four partial copies: `downtime-worker.pane.ts` (parse +

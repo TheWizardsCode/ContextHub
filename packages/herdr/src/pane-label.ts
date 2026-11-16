@@ -2,6 +2,10 @@
  * packages/herdr/src/pane-label.ts — canonical pane-label parsing
  * (WL-0MWHWH1HV009C46C)
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * (cross-referenced here) live in `docs/dev/downtime-dispatcher.md` → *Pane
+ * creation architecture*.
+ *
  * The single canonical module for pane-label parsing, mirroring
  * `pane-title.ts` as the single canonical module for pane-title
  * construction. Every consumer — the downtime dispatcher

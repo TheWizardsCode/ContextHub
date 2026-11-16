@@ -2,6 +2,9 @@
  * packages/herdr/src/dispatcher-anchor.tab-anchors.ts — Dispatcher workspace
  * provisioning and the machine-wide / per-prefix tab-anchor resolvers.
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Single responsibility: the C0/C1 placement policy — resolve or provision the
  * machine-wide Dispatcher workspace anchor pane (`getDispatcherAnchor`) and the
  * per-work-item-prefix tab anchor inside it (`getDispatcherTabAnchor`), plus

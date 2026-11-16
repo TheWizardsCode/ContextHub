@@ -2,6 +2,11 @@
  * packages/herdr/src/fetcher.split-guard.test.ts — automated gate for the
  * `packages/herdr/src/fetcher.ts` split invariants.
  *
+ * Map pointer (WL-0MWHWHBSW005KG13): the single pane-creation architecture
+ * map + naming contract lives in `docs/dev/downtime-dispatcher.md` →
+ * *Pane creation architecture*; the shared `cli-spawn.ts` this family uses
+ * is the map's *fetcher wl spawns* row.
+ *
  * Parent: WL-0MVGKH47T007GKN1 (decompose the `fetcher.ts` god class).
  * Work item: WL-0MW08VST6005NDME (test-first guard, lands before any code
  * moves).

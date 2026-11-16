@@ -1,6 +1,9 @@
 /**
  * packages/herdr/src/pane-close-reaper.ts — Closure reaper orchestration
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Scans herdr panes, classifies each via the shared `classifySession`
  * classifier, closes eligible panes, and writes a per-run ledger.
  *

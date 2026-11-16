@@ -2,6 +2,10 @@
  * packages/herdr/src/fetcher.cli.ts — `wl` CLI execution: spawn, timeout,
  * retry and the in-flight read memo.
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*
+ * (fetcher spawns are the "no pane" row of the map).
+ *
  * Single responsibility: every `wl` process spawn the fetcher family issues —
  * the CLI binary probe order, the bounded per-call timeout (including the
  * queue-time budget inherited by a capped read), the read-command in-flight

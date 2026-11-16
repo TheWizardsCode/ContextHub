@@ -2,6 +2,9 @@
  * packages/herdr/src/index.pane-capture.ts — pane-ID capture and work-item
  * extraction for the Herdr Worklog plugin.
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Polls the pane-ID file written by send-to-pi.sh/run-in-pane.sh after a
  * split and records the work-item ↔ pane association
  * (`capturePaneIdFromFile`), and extracts the work-item ID from an agent

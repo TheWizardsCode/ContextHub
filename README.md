@@ -170,7 +170,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [docs/SKILL_AUTHORING.md](docs/SKILL_AUTHORING.md) | Skill authoring guide with script best practices |
 | [docs/dev/wl-process-healthcheck.md](docs/dev/wl-process-healthcheck.md) | wl process healthcheck watchdog usage (cron/systemd, thresholds) |
 | [docs/dev/audit-debug-log-retention.md](docs/dev/audit-debug-log-retention.md) | Audit debug log retention policy + runbook: sweep locations/thresholds, dry-run/`--apply`/`--check`, cron install/removal, safety guarantees |
-| [docs/dev/downtime-dispatcher.md](docs/dev/downtime-dispatcher.md) | Leader-election + shared-coordination downtime dispatcher architecture (herdr); critical-first dispatch tier + freeze split-by-skill; automated per-project tabs (one tab per work-item prefix) and interactive item-ID-tab placement (invoking workspace, fail-open) |
+| [docs/dev/downtime-dispatcher.md](docs/dev/downtime-dispatcher.md) | Leader-election + shared-coordination downtime dispatcher architecture (herdr); critical-first dispatch tier + freeze split-by-skill; **single pane-creation architecture map + workspace/tab/pane naming contract** (one workspace per project, item-ID tabs, create-or-reuse) |
 | [docs/dev/test-suite-baseline.md](docs/dev/test-suite-baseline.md) | **Test gates** reference (which suites each gate runs, canonical full suite, and the separate opt-in `herdr` profile: `run_tests.py --type herdr` / `--group herdr`), plus test file-count and suite runtime baselines (reproducible commands + metrics) |
 | [docs/pane-triage-skill.md](docs/pane-triage-skill.md) | Approval-gated pane-triage skill and the cross-language pane-close bridge that exposes the shared classifier to Python skills |
 

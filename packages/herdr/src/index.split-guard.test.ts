@@ -2,6 +2,12 @@
  * packages/herdr/src/index.split-guard.test.ts — automated gate for the
  * `packages/herdr/src/index.ts` split invariants.
  *
+ * Map pointer (WL-0MWHWHBSW005KG13): the single pane-creation architecture
+ * map + naming contract lives in `docs/dev/downtime-dispatcher.md` →
+ * *Pane creation architecture*; `index.commands.ts`'s agent/shell argv
+ * builders delegate to the canonical `pane-argv.ts`, and
+ * `index.pane-capture.ts` is the map's *pane-capture* path.
+ *
  * Parent: WL-0MVGKGFFN009UCM6 (decompose the `index.ts` god module).
  * Work item: WL-0MVOA0FN3000ND4J (test-first guard, lands before any code
  * moves).

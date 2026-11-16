@@ -118,6 +118,137 @@ Layering: `downtime-log-storage.ts` and `downtime-log-budget.ts` are leaves;
 `downtime-log.js` barrel, so the import graph is acyclic (asserted by
 `downtime-log.split-guard.test.ts`).
 
+## Pane creation architecture (WL-0MWHWHBSW005KG13)
+
+The **single map** of every pane spawn/management path — spawn path → argv
+builder → shell script → placement strategy → lifecycle/close path — plus the
+workspace/tab/pane **naming contract**. It reflects the post-refactor
+structure landed by the *Refactor dispatched pane creation* epic
+(WL-0MWHUMOHJ006ZMBQ) children: one canonical argv builder (`pane-argv.ts`),
+one unified discovery module (`pane-discovery.ts`), one label parser
+(`pane-label.ts`), one title builder (`pane-title.ts`), one close classifier
+and reaper (`pane-close*.ts`) and deterministic placement
+(`dispatcher-anchor.placement.ts`). The README and module-header doc comments
+point here instead of retriplicating path descriptions (epic AC5), and the
+refactoring child per opportunity is cross-referenced in
+[the map table](#the-map) below (epic AC7). This section is the index;
+landing children update it in lockstep with each structural change.
+
+### The map
+
+| Spawn path | Argv builder | Shell script | Placement strategy | Lifecycle / close path |
+|---|---|---|---|---|
+| **Downtime dispatch (automated)** — `downtime-worker.dispatch-claims.ts::dispatchClaimedTier` → `downtime-worker.pane.ts::spawnDowntimePane` | `pane-argv.ts::buildDowntimePaneArgs` | `packages/herdr/scripts/send-to-pi.sh` (→ `shared/send-to-pi.sh`) | `downtime-worker.dispatch-placement.ts::resolveDispatchPlacement` → primary **project workspace + item-ID tab** (`dispatcher-anchor.placement.ts`), fallback **per-prefix tab** in the `Dispatcher` workspace (`dispatcher-anchor.tab-anchors.ts`), legacy single anchor — see [Pane placement](#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn) | reaper (`pane-close-scheduler.ts` → `pane-close-reaper.ts` → `pane-close.ts` classifier + `pane-close-herdr.ts` deps); dispatched-pane monitor (`pane-lifecycle.ts`) DISABLED — see [Pane-closure reaper](#pane-closure-reaper-wl-0mujl1nah0042gos) |
+| **Interactive agent dispatch** — `index.ts` command routing → `index.commands.ts::buildSendToPiArgs` | `pane-argv.ts::buildSendToPiArgs` | `packages/herdr/scripts/send-to-pi.sh` | invoking workspace + item-ID tab via the shared `dispatcher-anchor.placement.ts::getItemTabAnchor` (fail-open) — see [Interactive dispatch pane placement](#interactive-dispatch-pane-placement-wl-0muyi3jao002btnl) | reaper; pane-capture (`index.pane-capture.ts`, `--pane-id-file`) |
+| **Interactive shell dispatch (`!!`/`!`)** — `index.ts` command routing → `index.commands.ts::buildRunInPaneArgs` | `pane-argv.ts::buildRunInPaneArgs` | `packages/herdr/scripts/run-in-pane.sh` | same item-ID tab (fail-open) | reaper; pane-capture |
+| **Scheduled prompts** — downtime scheduled-prompt tier → `spawnDowntimePane` | `pane-argv.ts::buildDowntimePaneArgs` | send-to-pi.sh | `Dispatcher` anchor (`getDispatcherAnchor`) — no work-item id | reaper |
+| **Ship release (`S`)** — worklist `S` shortcut → `/skill:ship release` via the agent route | `pane-argv.ts::buildSendToPiArgs` | send-to-pi.sh | current-tab split today; own **`Ship` tab** planned (WL-0MW6FIZYI0003QEU) | reaper; ship guard (`ship-guard.ts`) |
+| **Fetcher `wl` spawns** — `fetcher.cli.ts::runWl` → `cli-spawn.ts::spawnCliStdout` | n/a (execFile with bounded spawn slots — not a herdr pane) | n/a | n/a | n/a (timeout/retry, never the reaper) |
+
+### Refactoring opportunities → children (epic AC2/AC7)
+
+| Drift closed (opportunity) | Unified module | Child work item | Type / priority |
+|---|---|---|---|
+| Two `send-to-pi.sh` argv builders (downtime vs interactive) diverged | `pane-argv.ts` | WL-0MWHWGZI4007D911 | task / high |
+| Pane-label item-ID/kind parsing duplicated across consumers | `pane-label.ts` | WL-0MWHWH1HV009C46C | task / high |
+| Discovery/close pipeline existed in four partial copies | `pane-discovery.ts`, `pane-close*.ts` | WL-0MWHWH6XL0025YX2 | task / high |
+| Three placement strategies + CLI helpers alongside each other | `dispatcher-anchor.placement.ts` / `.tab-anchors.ts` | WL-0MWHWH68L007L7IO | task / high |
+| Project-workspace placement depended on a live pane | deterministic resolver + durable map (WL-0MWHW3PKX0048ZYL) | WL-0MWHW3PKX0048ZYL | task / high |
+| Forked spawn/env wiring and pane-close herdr CLI seams | `cli-spawn.ts` | WL-0MWHWHB3X004H9VG | task / **critical** (fetch/wl spawn management touches every CLI boundary) |
+| Spawn argv/env/placement behaviour unpinned | `dispatched-pane-spawn.pin.test.ts` | WL-0MWHWGN23001KMQW | task / high |
+
+### Naming contract (AC2; WL-0MWHTT2XY005XX3B)
+
+Pinned by the producer decision folded in from WL-0MWHTT2XY005XX3B
+(2026-11-15). The canonical implementation lives in
+`packages/herdr/src/pane-title.ts` (`MAX_PANE_TITLE_LENGTH`,
+`truncatePaneTitle`, `truncatePaneTitlePreservingSuffix`,
+`buildDowntimePaneTitle`, `buildManuallyTriggeredPaneTitle`,
+`buildShellPaneTitle`) and `packages/herdr/src/pane-label.ts`:
+
+- **"Project ID"** = the work-item id prefix (`WL`, `TCE`, `AH`, `SA`, …) —
+  the value that used to name the per-prefix `Dispatcher` tabs.
+- **One workspace per project** — the project's herdr workspace, identified
+  by its project id. Dispatch creates or reuses it; the machine-wide
+  `Dispatcher` workspace is the fail-closed fallback only.
+- **Tabs labelled by the full work-item id** — exact `WL-0MWH…` labels,
+  create-or-reuse, never a duplicate.
+- **Applies to dispatch-created workspaces/tabs only** — existing project
+  workspace labels (e.g. `ContextHub`) remain under operator control.
+- **Per-prefix `Dispatcher` tabs are retired** (the `WL`/`TCE` tab
+  convention).
+
+**Workspace labels:**
+
+| Label | Created by | Notes |
+|---|---|---|
+| `Dispatcher` | automated fallback | machine-wide, one workspace; per-prefix tabs inside it are retired |
+| project workspace | the project's herdr workspace | identified by project id; label under operator control (e.g. `ContextHub`) |
+
+**Tab labels:**
+
+| Label | Used for | Notes |
+|---|---|---|
+| full work-item id (`WL-0MWH…`) | any dispatched pane carrying an item id | primary automated + interactive placement; create-or-reuse |
+| per-prefix (`WL`, `TCE`) | automated fallback | retired by this contract |
+| `Downtime` | fallback anchor root tab | best-effort adoption of the fallback anchor's placeholder root pane |
+| `Ship` | ship release pane | planned (WL-0MW6FIZYI0003QEU) |
+| `Worklog` | plugin's own tab (`prefix+l`) | operator-opened |
+
+**Pane title formats (`pane-title.ts`):**
+
+| Builder | Format |
+|---|---|
+| `buildDowntimePaneTitle` | `Downtime triggered <kind> <title> - <id>` (no item context: `Downtime <kind>`) |
+| `buildManuallyTriggeredPaneTitle` | `Manually triggered <skill> [<title>] - <id>`; free-form prompt: `Manually triggered prompt <first words> - <id>` |
+| `buildShellPaneTitle` | `Shell: <cmd> [(<title>)] <id>` |
+
+**Truncation / suffix rules (`pane-title.ts`):**
+
+- `MAX_PANE_TITLE_LENGTH = 60` — every pane title is bounded to fit the herdr
+  UI.
+- `truncatePaneTitle` — plain truncation, appending `…` when over the bound.
+- `truncatePaneTitlePreservingSuffix` — truncates the prefix but keeps the
+  trailing ` - <work-item-id>` suffix, so the ID survives long titles. This is
+  load-bearing for the hydrator's active-pane detection and the selection
+  list's green-circle icon (WL-0MV1BWETT005GSUJ): both match an `in_progress`
+  item to a live pane by extracting the work-item ID from the title.
+
+### Open in-flight naming needs (AC4)
+
+These open items carry naming/placement needs that land against this map;
+each names its interface with the map:
+
+- **WL-0MW6FIZYI0003QEU** *Ship opens in own pane* — a dedicated tab labelled
+  `Ship` in the invoking workspace (create-on-first-use, reuse, placed left of
+  the extensions tab; reject a second Ship while one is active).
+- **WL-0MWHD0V41007ESWR** *Adopt-or-clean orphaned Dispatcher workspaces* —
+  recovery should prefer adopting a dormant `Dispatcher` workspace instead of
+  provisioning a fresh one per herdr restart, with a documented safe cleanup
+  of the accumulated orphans.
+- **WL-0MWH56SWX004HSKQ** *Hydrator demotion evidence is workspace-scoped* —
+  landed (`in_review`): the demotion scan is machine-wide so a fallback-placed
+  pane in the `Dispatcher` workspace keeps its claim; display markers stay
+  workspace-scoped.
+- **WL-0MWHBSTM1004KQ49** *Prep-tier busy contract* — landed: intake/plan/audit
+  hold no per-child claim lock, so pane evidence is the only busy signal for
+  those tiers (documents why the hydrator must see every pane).
+- **WL-0MWAM5N75004ROSW** *Host-wide release barrier* — closed at intake: a
+  dispatch **pause**, not a pane-placement change; recorded here so the map is
+  not silently re-scoped.
+
+### Review coverage & child quality bar (AC6/AC8)
+
+The epic review covers ALL pane spawn/management paths (epic AC1): downtime
+dispatcher (`downtime-worker.pane.ts`), interactive dispatch
+(`index.commands.ts` → `send-to-pi.sh` / `run-in-pane.sh`), scheduled prompts,
+ship-in-own-pane, fetcher spawns, anchor/placement (`dispatcher-anchor*.ts`),
+lifecycle/close (`pane-lifecycle.ts`, `pane-close*.ts`) and pane-capture
+(`index.pane-capture.ts`). Every refactoring child has a clear goal, testable
+ACs and predicted key files referencing the specific code locations
+duplicated/drifted (epic AC4); no child changes runtime behaviour and the full
+project test suite must pass with the changes (epic AC6).
+
 ## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
 
 The downtime dispatcher does **not** maintain its own ranking. The Herdr selection list
@@ -5465,4 +5596,13 @@ trace.
 - Work item: **WL-0MST3OJ8S0001ROL** *Refactor Downtime Dispatcher: leader
   election with shared coordination file* — the coordination/offer
   architecture the registered-root sweep composes with
-- Docs work item: **WL-0MT76H3Z900908TV** (this page)
+- Epic: **WL-0MWHUMOHJ006ZMBQ** *Refactor dispatched pane creation* (+ its
+  unification children WL-0MWHWGZI4007D911 / WL-0MWHWH1HV009C46C /
+  WL-0MWHWH6XL0025YX2 / WL-0MWHWH68L007L7IO / WL-0MWHW3PKX0048ZYL /
+  WL-0MWHWHB3X004H9VG / WL-0MWHWGN23001KMQW — documented in *Pane creation
+  architecture* above; each child references the docs child
+  WL-0MWHWHBSW005KG13 so the map updates once per structural change)
+- Docs work item: **WL-0MT76H3Z900908TV** (this page); docs child
+  **WL-0MWHWHBSW005KG13** *single pane-creation architecture map + naming
+  contract* (added *Pane creation architecture*, *Naming contract* and the
+  refactoring-opportunity cross-reference above)
