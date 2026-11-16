@@ -287,6 +287,17 @@ between the fix items (F3–F6) could not be caught.
 - **peak RSS per spawn / aggregate per pane** — per-spawn peaks come from the
   spawn records; the pane aggregate is the refresh's own RSS delta plus its
   largest concurrent `wl` child.
+
+  **Host contention (WL-0MWJNQ6S6006H5HH):** the RSS checks carry a tight 25 %
+  headroom so memory regressions fail promptly, but this host is shared and
+  sibling agents' suites starve V8's GC, inflating peak RSS on **unchanged**
+  code (pristine dev read pane aggregate 138.2–144.1 MiB vs a 137.9 MiB limit
+  under load, passing on rerun when load eases). The harness therefore measures
+  the host **in-window** — per-core load, `/proc/stat` CPU utilisation and an
+  idle-loop canary — and on a host measured contended the absolute RSS checks
+  are **reported not gated** (CPU time stays the load-independent gate; the
+  same policy documented for the auto-sync event-loop bound below). On a quiet
+  host the tight 25 % headroom is enforced exactly as before.
 - **write → reflect** — the state counter is bumped exactly as a `wl` write
   does while the REAL `watchDbChanges` handle is armed; detection (debounced
   watch callback) and reflection (watch + refresh data path) are both reported.

@@ -32,7 +32,7 @@
     "rssHeadroomPct": 25,
     "eventLoopHeadroomPct": 200,
     "eventLoopFloorMs": 100,
-    "note": "CPU time (process.resourceUsage for the harness plus the per-spawn CPU from the WL_SPAWN_COUNT_FILE instrumentation) is the load-independent regression gate, with 100 % headroom because the tsx `src` target varies ~50 % run-to-run on a shared host. Wall time and event-loop blocking get 200 % + a 500 ms / 100 ms floor; peak and aggregate RSS keep a tighter 25 % headroom so memory regressions still fail promptly."
+    "note": "CPU time (process.resourceUsage for the harness plus the per-spawn CPU from the WL_SPAWN_COUNT_FILE instrumentation) is the load-independent regression gate, with 100 % headroom because the tsx `src` target varies ~50 % run-to-run on a shared host. Wall time and event-loop blocking get 200 % + a 500 ms / 100 ms floor; peak and aggregate RSS keep a tighter 25 % headroom so memory regressions still fail promptly. The RSS checks are REPORTED NOT GATED when the host was measured contended in-window (load/core, /proc/stat CPU or the idle-loop canary — WL-0MWJNQ6S6006H5HH): shared-host contention starves V8's GC and inflates peak RSS on unchanged code, so the absolute RSS reading describes the host, not the plugin; CPU time remains the gate that always applies, and the tight 25 % headroom is still enforced on a quiet host."
   },
   "profiles": {
     "default": {

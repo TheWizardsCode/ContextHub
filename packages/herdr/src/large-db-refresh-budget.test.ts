@@ -36,12 +36,14 @@ import {
   defaultLargeDbBudget,
   evaluateLargeDbBudget,
   generateLargeWorklog,
+  hostContendedForAbsoluteTiming,
   parseCliArgs,
   percentile,
   readLargeDbBudget,
   runExpandReadProfile,
   runLargeDbHarness,
   withinAcTargets,
+  type HostConditions,
   type LargeDbBaseline,
   type LargeDbBudget,
   type LargeDbEvaluationInput,
@@ -50,6 +52,26 @@ import {
 } from '../test/perf/large-db-harness.js';
 
 const repoRoot = REPO_ROOT;
+
+/** A quiet in-window host record (the RSS gate is enforced). */
+function quietHost(): HostConditions {
+  return {
+    loadPerCore: { start: 0.2, max: 0.3, end: 0.2, samples: 5 },
+    cpuPercent: 10,
+    cpuSource: 'proc-stat',
+    idleNoise: { durationMs: 250, blockedMs: 1, maxBlockedMs: 1 },
+  };
+}
+
+/** A contended in-window host record (RSS is reported-not-gated). */
+function contendedHost(): HostConditions {
+  return {
+    loadPerCore: { start: 1.4, max: 1.6, end: 1.4, samples: 5 },
+    cpuPercent: 95,
+    cpuSource: 'proc-stat',
+    idleNoise: { durationMs: 250, blockedMs: 30, maxBlockedMs: 12 },
+  };
+}
 
 /** A complete synthetic report for policy tests (independent of the harness). */
 function syntheticInput(
@@ -60,6 +82,7 @@ function syntheticInput(
     writeToReflect?: Partial<LargeDbEvaluationInput['writeToReflect']>;
     profile?: string;
     target?: string;
+    hostConditions?: HostConditions;
   } = {},
 ): LargeDbEvaluationInput {
   return {
@@ -79,6 +102,7 @@ function syntheticInput(
     pane: { peakRssMb: 150, aggregateRssMb: 150, ...overrides.pane },
     idle: { changed: false, spawns: 0, ...overrides.idle },
     writeToReflect: { p95ReflectMs: 700, ...overrides.writeToReflect },
+    hostConditions: overrides.hostConditions,
   };
 }
 
@@ -397,6 +421,58 @@ describe('large-DB budget policy', () => {
     expect(aggregate.violations.join('\n')).toContain('paneAggregateRssMb');
   });
 
+  it('reports-but-does-not-gate RSS on a host measured contended (CPU stays the gate)', () => {
+    // WL-0MWJNQ6S6006H5HH: in-window HOST contention starves V8's GC and
+    // inflates peak RSS on unchanged code (pristine dev read pane aggregate
+    // 138.2-144.1 MiB vs a 137.9 MiB limit under load, passing on rerun when
+    // load eases). The absolute RSS reading therefore describes the host, not
+    // the plugin; the tight headroom is recorded but NOT gated, while CPU time
+    // (the load-independent gate) still is.
+    const contended = evaluateLargeDbBudget(
+      syntheticInput({
+        refresh: { peakRssPerSpawnMb: 130, aggregateSpawnRssMb: 130 },
+        pane: { aggregateRssMb: 200 },
+        hostConditions: contendedHost(),
+      }),
+      syntheticBudget(),
+    );
+    // No RSS violations on a contended host, and every RSS check still passes
+    // (reported, with the limit visible).
+    expect(contended.ok).toBe(true);
+    expect(contended.violations).toEqual([]);
+    for (const metric of ['peakRssPerSpawnMb', 'aggregateSpawnRssMb', 'paneAggregateRssMb']) {
+      const check = contended.checks.find((entry) => entry.metric === metric);
+      expect(check?.ok).toBe(true);
+      expect(check?.detail).toContain('reported not gated');
+    }
+
+    // The load-independent CPU gate is NOT relaxed by contention — a real CPU
+    // regression still fails on a contended host.
+    const cpuRegression = evaluateLargeDbBudget(
+      syntheticInput({
+        refresh: { p95CpuMs: 3000 },
+        hostConditions: contendedHost(),
+      }),
+      syntheticBudget(),
+    );
+    expect(cpuRegression.ok).toBe(false);
+    expect(cpuRegression.violations.join('\n')).toContain('refreshP95CpuMs');
+
+    // A QUIET host keeps the tight RSS gate: the same 130 MiB per-spawn reading
+    // is a violation when the host was measured quiet.
+    const quiet = evaluateLargeDbBudget(
+      syntheticInput({
+        refresh: { peakRssPerSpawnMb: 130, aggregateSpawnRssMb: 130 },
+        pane: { aggregateRssMb: 200 },
+        hostConditions: quietHost(),
+      }),
+      syntheticBudget(),
+    );
+    expect(quiet.ok).toBe(false);
+    expect(quiet.violations.join('\n')).toContain('paneAggregateRssMb');
+    expect(quiet.violations.join('\n')).toContain('peakRssPerSpawnMb');
+  });
+
   it('flags a write → reflect regression beyond the documented headroom', () => {
     const evaluation = evaluateLargeDbBudget(
       syntheticInput({ writeToReflect: { p95ReflectMs: 4000 } }),
@@ -556,6 +632,22 @@ describe('large-DB refresh budget — measured ratchet', { timeout: 300_000 }, (
     expect(report.samplesDetail.length).toBe(report.samples);
 
     const evaluation = evaluateLargeDbBudget(report, budget);
+    // WL-0MWJNQ6S6006H5HH: on a host measured CONTENDED in-window, the
+    // absolute RSS checks are reported-but-not-gated (CPU stays the gate), so
+    // a warning keeps the relaxation visible in the run log instead of
+    // silently passing.
+    if (report.hostConditions && hostContendedForAbsoluteTiming(report.hostConditions)) {
+      const load = report.hostConditions.loadPerCore;
+      const cpu =
+        typeof report.hostConditions.cpuPercent === 'number'
+          ? `${Math.round(report.hostConditions.cpuPercent)}% cpu`
+          : 'cpu n/a';
+      console.warn(
+        `[large-db] host contended (load/core ${load.start.toFixed(2)} -> ` +
+          `${load.max.toFixed(2)} max, ${cpu}) — RSS checks reported not gated ` +
+          `(pane aggregate ${report.pane.aggregateRssMb} MB); CPU time remains the gate`,
+      );
+    }
     expect(evaluation.violations, evaluation.violations.join('\n')).toEqual([]);
     expect(evaluation.ok).toBe(true);
   });
