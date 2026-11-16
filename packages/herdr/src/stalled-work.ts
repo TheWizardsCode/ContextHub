@@ -51,8 +51,12 @@ import {
 } from './downtime-worker.js';
 // Canonical pane-label parsing (WL-0MWHWH1HV009C46C): item-id extraction
 // lives in `pane-label.ts`, not the dispatcher's pane module — one parse
-// for the reaper, the dispatcher and the stalled-work classifier.
+// for the reaper, the dispatcher and the stalled-work classifier. The
+// agent-presence discovery check is the shared `hasPaneAgent` predicate
+// (WL-0MWHWH6XL0025YX2 AC1) — one "pane hosts an agent" test across every
+// discovery consumer.
 import { paneItemIdFromLabel } from './pane-label.js';
+import { hasPaneAgent } from './pane-discovery.js';
 
 // Re-exported so `stalled-work.ts` keeps its public surface for every existing
 // consumer (WL-0MVLII0NO007JJBA moved the declarations to the shared types
@@ -256,7 +260,7 @@ export function classifyStalledPane(
   thresholdMs: number = DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
 ): StalledPaneDecision {
   // 1. A live pi agent must be present (an `agent` value is set).
-  if (typeof pane.agent !== 'string' || pane.agent === '') {
+  if (!hasPaneAgent(pane)) {
     return { stalled: false, reason: 'no-agent' };
   }
 
@@ -750,7 +754,7 @@ export async function scanStalledPanes(
   const cooldownCandidates: StalledPaneCandidate[] = [];
   for (const pane of panes) {
     // Cheap pre-checks before any per-pane I/O (mirrors the classifier).
-    if (typeof pane.agent !== 'string' || pane.agent === '') continue;
+    if (!hasPaneAgent(pane)) continue;
     const itemId = paneItemIdFromLabel(pane.label);
     if (itemId === '') continue;
     const kind = stalledPaneKindFromLabel(pane.label);

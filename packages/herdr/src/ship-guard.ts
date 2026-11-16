@@ -21,30 +21,15 @@
  */
 
 import {
+  findBlockingPanes,
   parseHerdrPaneListOutput,
-  type HerdrPaneRecord,
-} from './downtime-worker.js';
-// Canonical pane-label parsing (WL-0MWHWH1HV009C46C AC4): the ship guard's
-// blocking-pane scan uses the shared extract-every-ID parser directly from
-// the canonical module rather than through the hydrator's re-export.
-import { extractWorkItemIdsFromText } from './pane-label.js';
-
-// ── Constants ─────────────────────────────────────────────────────────────
-
-/** Terminal agent statuses that do NOT block ship mode. */
-const TERMINAL_AGENT_STATUSES = new Set(['done', 'exited']);
+  type BlockingPane,
+} from './pane-discovery.js';
+// The blocking-pane record type is canonical in `pane-discovery.ts`; kept
+// importable from here so ship-guard consumers/tests keep one import.
+export type { BlockingPane } from './pane-discovery.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────
-
-/** One blocking pane discovered by the guard. */
-export interface BlockingPane {
-  /** The pane's unique identifier. */
-  paneId: string;
-  /** The pane's label (may be undefined). */
-  label?: string;
-  /** The work-item ID from this pane's label that matches the project. */
-  workItemId: string;
-}
 
 /** The result of a guard check. */
 export interface ShipGuardResult {
@@ -103,16 +88,20 @@ export function parseWorklogWorkItemIds(wlListOutput: string): Set<string> | nul
  * Collect the set of panes whose label carries a project work-item ID and
  * whose agent is live (agent present, status not `done` / `exited`).
  *
- * This is the core blocking-pane filter:
- *   1. Extract work-item IDs from the pane label via `extractWorkItemIdsFromText`.
+ * This is the core blocking-pane filter — delegated to
+ * `pane-discovery.ts::findBlockingPanes` (WL-0MWHWH6XL0025YX2 AC1):
+ *   1. Extract work-item IDs from the pane label via the canonical
+ *      `extractWorkItemIdsFromText` scan (in `pane-label.ts`).
  *   2. Check whether each ID is in the `projectIds` set.
- *   3. Check whether the pane's agent is live.
+ *   3. Check whether the pane's agent is live (shared `isPaneAgentLive`).
  *
  * A pane blocks ship mode when:
  *   - Its label carries a project work-item ID, AND
  *   - Its agent is present AND its agentStatus is not `done` / `exited`.
  *
- * Panes with no agent, or a terminal agent status, do NOT block.
+ * Panes with no agent, or a terminal agent status, do NOT block. An
+ * unparseable pane list yields `[]` — the caller checks the `ok` flag of
+ * `runShipGuard` and fails safe (no dialog is opened) when it cannot verify.
  *
  * @param projectIds   Set of work-item IDs from the current project's worklog.
  * @param paneListOutput Raw stdout from `herdr pane list`.
@@ -124,30 +113,10 @@ export function listBlockingPanes(
 ): BlockingPane[] {
   const records = parseHerdrPaneListOutput(paneListOutput);
   if (records === null) {
-    // Query failure → return all panes as blocking (caller must fail-safe).
-    // We return null to signal the caller that the guard could not verify.
-    return []; // Caller checks ok flag.
+    // Query failure → the caller checks the ok flag and fails safe.
+    return [];
   }
-
-  const blocking: BlockingPane[] = [];
-  for (const rec of records) {
-    // Check for a project work-item ID in the pane label.
-    const labelIds = extractWorkItemIdsFromText(rec.label ?? '');
-    const matchingId = labelIds.find((id) => projectIds.has(id));
-    if (matchingId === undefined) continue; // No project ID in this pane.
-
-    // Check agent liveness: the agent must be present and not terminal.
-    if (typeof rec.agent !== 'string' || rec.agent.length === 0) continue;
-    const agentStatus = (rec.agentStatus ?? '').toLowerCase();
-    if (TERMINAL_AGENT_STATUSES.has(agentStatus)) continue;
-
-    blocking.push({
-      paneId: rec.paneId,
-      label: rec.label,
-      workItemId: matchingId,
-    });
-  }
-  return blocking;
+  return findBlockingPanes(records, projectIds);
 }
 
 /**
@@ -236,20 +205,18 @@ export function runShipGuard(
     };
   }
 
-  const blocking = listBlockingPanes(projectIds, paneListOutput);
   const records = parseHerdrPaneListOutput(paneListOutput);
-
   if (records === null) {
     // Pane query failed — fail safe: treat all panes as blocking.
     return {
       ok: false,
       reason: 'pane list unavailable — cannot verify pane state',
-      blockingPanes: blocking,
+      blockingPanes: [],
     };
   }
 
   return {
     ok: true,
-    blockingPanes: blocking,
+    blockingPanes: findBlockingPanes(records, projectIds),
   };
 }

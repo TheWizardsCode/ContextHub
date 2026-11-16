@@ -15,7 +15,13 @@
 
 import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 import type { EmptyOfferAttribution } from './downtime-worker.offer-attribution.js';
-import type { HerdrAgentSession } from './pane-close-herdr.js';
+// Canonical homes (WL-0MWHWH6XL0025YX2): the discovery-facing pane record
+// and the raw `agent_session` shape live in `pane-discovery.ts` (one
+// discovery module — parse, predicates, in-flight set, safe-close,
+// blocking filter). Imported for local use and re-exported so every existing
+// consumer keeps resolving them from the types module.
+import type { HerdrPaneRecord, HerdrAgentSession } from './pane-discovery.js';
+export type { HerdrPaneRecord, HerdrAgentSession } from './pane-discovery.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -807,17 +813,6 @@ export type DowntimeActiveAuditResult =
 export type RunningPanesResult =
   | { ok: true; count: number; paneIds?: string[]; records?: HerdrPaneRecord[] }
   | { ok: false; error?: string };
-/** One parsed `herdr pane list` record (only the fields liveness needs). */
-export interface HerdrPaneRecord {
-  paneId: string;
-  label?: string;
-  agent?: string;
-  agentStatus?: string;
-  /** Pane working directory (worklog-root hint for cross-root resume). */
-  cwd?: string;
-  /** Raw `agent_session` field (session log path + agent metadata). */
-  agentSession?: HerdrAgentSession;
-}
 /**
  * Item-scoped in-flight state, resolved ONCE per idle cycle and threaded into
  * the dispatch loops (WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO).

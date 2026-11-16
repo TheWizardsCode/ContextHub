@@ -38,6 +38,11 @@ import {
   parseHerdrPaneListOutput,
   type HerdrPaneRecord,
 } from './downtime-worker.js';
+// Canonical discovery (WL-0MWHWH6XL0025YX2 AC3): the agent-liveness half of
+// the interactive tracked-pane check is the SHARED `isPaneAgentLive`
+// predicate — one liveness definition across the in-flight resolution, the
+// reaper, the ship guard and the interactive live-pane resolver.
+import { isPaneAgentLive } from './pane-discovery.js';
 
 /**
  * Resolve the workspace that should host an interactive item-ID tab
@@ -268,14 +273,14 @@ export async function defaultInteractiveLiveTrackedPanesResolver(
  * True when a parsed `herdr pane list` record is a live tracked pi/shell
  * pane (see {@link defaultInteractiveLiveTrackedPanesResolver}). A bare
  * placeholder root pane (no agent, no shell-command label) is NOT tracked.
+ *
+ * The agent-liveness half delegates to the shared discovery predicate
+ * `isPaneAgentLive` (WL-0MWHWH6XL0025YX2 AC3); a `Shell: ` label counts as
+ * live even without a pi agent (the panes the interactive close guard must
+ * not kill).
  */
 function isLiveTrackedPane(rec: HerdrPaneRecord): boolean {
-  const status = (rec.agentStatus ?? '').toLowerCase();
-  const agentLive =
-    typeof rec.agent === 'string' &&
-    rec.agent !== '' &&
-    status !== 'done' &&
-    status !== 'exited';
+  const agentLive = isPaneAgentLive(rec);
   const shellLive = typeof rec.label === 'string' && rec.label.startsWith('Shell: ');
   return agentLive || shellLive;
 }
