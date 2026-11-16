@@ -55,6 +55,8 @@ export interface HerdrPaneCloseRecord {
   pane_id?: string;
   paneId?: string;
   label?: string;
+  /** `title` is accepted as a label fallback (camelCase herdr variant). */
+  title?: string;
   agent?: string;
   agent_status?: string;
   agentStatus?: string;
@@ -67,6 +69,10 @@ export interface HerdrPaneCloseRecord {
   cwd?: string;
   foreground_cwd?: string;
   foregroundCwd?: string;
+  /** Focused flag (ambiguity signal for the anchor family). */
+  focused?: boolean;
+  is_focused?: boolean;
+  isFocused?: boolean;
 }
 
 /** A parsed pane record normalised for the reaper and discovery consumers. */
@@ -85,6 +91,8 @@ export interface ParsedHerdrPane {
   cwd?: string;
   /** Foreground process working directory, when reported. */
   foregroundCwd?: string;
+  /** True when the pane is focused (ambiguity signal for the anchor family). */
+  focused?: boolean;
 }
 
 /**
@@ -177,7 +185,12 @@ export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
         : undefined;
     parsed.push({
       paneId,
-      label: typeof rec.label === 'string' ? rec.label : '',
+      label:
+        typeof rec.label === 'string'
+          ? rec.label
+          : typeof rec.title === 'string'
+            ? rec.title
+            : '',
       agent: typeof rec.agent === 'string' ? rec.agent : undefined,
       agentStatus,
       sessionPath,
@@ -201,6 +214,8 @@ export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
           : typeof rec.foregroundCwd === 'string'
             ? rec.foregroundCwd
             : undefined,
+      focused:
+        rec.focused === true || rec.is_focused === true || rec.isFocused === true,
     });
   }
   return parsed;

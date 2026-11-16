@@ -26,6 +26,7 @@ import type {
   MachinePaneInfo,
   PaneProcessInfo,
 } from './dispatcher-anchor.contract.js';
+import { parseHerdrPaneCloseList } from './pane-discovery.js';
 
 // ── herdr tab/pane CLI output parsers ──────────────────────────────────
 
@@ -110,34 +111,21 @@ export function parseTabCreateOutput(raw: string): ItemTabAnchor | null {
   return { tabId, paneId };
 }
 
-/** Parse `herdr pane list` records down to `{ paneId, tabId }` (tab routing). */
+/**
+ * Parse `herdr pane list` records down to `{ paneId, tabId }` (tab routing).
+ *
+ * Thin adapter over the canonical shared parse contract
+ * (`parseHerdrPaneCloseList` in `pane-discovery.ts`, AC2): this family must
+ * never drift into a second pane-list parser. Records without a `tabId` are
+ * dropped (the shared parse only requires `paneId`).
+ */
 export function parsePaneListOutput(raw: string): DispatcherPaneInfo[] | null {
-  const start = raw.indexOf('{');
-  if (start < 0) return null;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw.slice(start));
-  } catch {
-    return null;
-  }
-  if (payload === null || typeof payload !== 'object') return null;
-  const obj = payload as Record<string, unknown>;
-  const result =
-    obj.result !== null && typeof obj.result === 'object'
-      ? (obj.result as Record<string, unknown>)
-      : obj;
-  const panes = Array.isArray(result.panes) ? result.panes : Array.isArray(obj.panes) ? obj.panes : null;
+  const panes = parseHerdrPaneCloseList(raw);
   if (panes === null) return null;
-
   const out: DispatcherPaneInfo[] = [];
-  for (const entry of panes) {
-    if (entry === null || typeof entry !== 'object') continue;
-    const rec = entry as Record<string, unknown>;
-    const paneId = rec.pane_id ?? rec.paneId;
-    const tabId = rec.tab_id ?? rec.tabId;
-    if (typeof paneId === 'string' && paneId !== '' && typeof tabId === 'string' && tabId !== '') {
-      out.push({ paneId, tabId });
-    }
+  for (const pane of panes) {
+    if (pane.tabId === undefined || pane.tabId === '') continue;
+    out.push({ paneId: pane.paneId, tabId: pane.tabId });
   }
   return out;
 }
@@ -146,50 +134,28 @@ export function parsePaneListOutput(raw: string): DispatcherPaneInfo[] | null {
  * Parse machine-wide `herdr pane list` JSON into records used for
  * project-workspace resolution.
  *
- * Tolerates log lines before the JSON envelope, the
- * `{ result: { panes: [...] } }` envelope and the bare-array shape, plus
- * `pane_id`/`paneId`, `workspace_id`/`workspaceId`, `tab_id`/`tabId`.
- * `label`/`title` supply the plugin-pane label and `focused`/`is_focused` the
- * ambiguity signal. Returns `null` when no pane array can be found (caller
- * fails closed).
+ * Thin adapter over the canonical shared parse contract
+ * (`parseHerdrPaneCloseList` in `pane-discovery.ts`, AC2) — the single
+ * pane-list entry point for anchor resolution, the reaper and the in-flight
+ * guard. Records lacking a usable `workspaceId`/`tabId` are dropped (the
+ * shared parse only requires `paneId`); each kept record always carries a
+ * `focused` boolean (defaulting to `false`).
  */
 export function parseMachinePaneListOutput(raw: string): MachinePaneInfo[] | null {
-  const start = raw.indexOf('{');
-  if (start < 0) return null;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw.slice(start));
-  } catch {
-    return null;
-  }
-  if (payload === null || typeof payload !== 'object') return null;
-  const obj = payload as Record<string, unknown>;
-  const result =
-    obj.result !== null && typeof obj.result === 'object'
-      ? (obj.result as Record<string, unknown>)
-      : obj;
-  const panes = Array.isArray(result.panes) ? result.panes : Array.isArray(obj.panes) ? obj.panes : null;
+  const panes = parseHerdrPaneCloseList(raw);
   if (panes === null) return null;
 
   const out: MachinePaneInfo[] = [];
-  for (const entry of panes) {
-    if (entry === null || typeof entry !== 'object') continue;
-    const rec = entry as Record<string, unknown>;
-    const paneId = rec.pane_id ?? rec.paneId;
-    const workspaceId = rec.workspace_id ?? rec.workspaceId;
-    const tabId = rec.tab_id ?? rec.tabId;
-    if (typeof paneId !== 'string' || paneId === '') continue;
-    if (typeof workspaceId !== 'string' || workspaceId === '') continue;
-    if (typeof tabId !== 'string' || tabId === '') continue;
-    const label =
-      typeof rec.label === 'string'
-        ? rec.label
-        : typeof rec.title === 'string'
-          ? rec.title
-          : undefined;
-    const focused =
-      rec.focused === true || rec.is_focused === true || rec.isFocused === true;
-    out.push({ paneId, workspaceId, tabId, ...(label !== undefined ? { label } : {}), focused });
+  for (const pane of panes) {
+    if (pane.workspaceId === undefined || pane.workspaceId === '') continue;
+    if (pane.tabId === undefined || pane.tabId === '') continue;
+    out.push({
+      paneId: pane.paneId,
+      workspaceId: pane.workspaceId,
+      tabId: pane.tabId,
+      ...(pane.label !== '' ? { label: pane.label } : {}),
+      focused: pane.focused === true,
+    });
   }
   return out;
 }

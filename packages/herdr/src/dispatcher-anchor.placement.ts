@@ -25,15 +25,17 @@
  * child WL-0MW0JHD2N004XAOS). No logic, signature or doc-comment change.
  * `resolveProjectWorkspace` and `getItemTabAnchor` are re-exported from the
  * `dispatcher-anchor.js` barrel; `normalizeRoot`, `comparePaneIds`,
- * `ItemTabResolution` and `resolveItemTab` are module-local and deliberately
- * stay out of the barrel, so the public surface is unchanged.
+ * `resolveItemTab` and the shared `findOrProvisionUnderLock` usage are
+ * module-local and deliberately stay out of the barrel, so the public
+ * surface is unchanged.
  *
  * Layering: imports the contract labels/types from
  * `dispatcher-anchor.contract.js`, the output parser from
  * `dispatcher-anchor.cli-parsers.js`, the subprocess helpers from
- * `dispatcher-anchor.herdr-cli.js`, `resolveLivePaneInTab` from
- * `dispatcher-anchor.tab-anchors.js` and the machine coordination/lock
- * primitives from `./machine-coordination.js` / `./coordination.js`. It never
+ * `dispatcher-anchor.herdr-cli.js`, the shared find-or-provision-under-lock
+ * helper from `dispatcher-anchor.provision.js`, `resolveLivePaneInTab` from
+ * `dispatcher-anchor.tab-anchors.js` and the machine coordination/primitives
+ * from `./machine-coordination.js`. It never
  * imports the `dispatcher-anchor.js` barrel, so the barrel can re-export these
  * resolvers without creating a cycle.
  *
@@ -51,7 +53,7 @@ import {
   getMachineCoordinationDir,
   ensureMachineCoordinationDir,
 } from './machine-coordination.js';
-import { tryAcquireCoordLock } from './coordination.js';
+
 import { PLUGIN_PANE_LABEL } from './dispatcher-anchor.contract.js';
 import type {
   DispatcherAnchorDeps,
@@ -77,6 +79,10 @@ import {
   readProcEnvironFile,
 } from './dispatcher-anchor.herdr-cli.js';
 import { resolveLivePaneInTab } from './dispatcher-anchor.tab-anchors.js';
+import {
+  findOrProvisionUnderLock,
+  type ProvisionFind,
+} from './dispatcher-anchor.provision.js';
 
 // ── Project workspace resolution (AC1/AC3) ─────────────────────────────
 
@@ -403,7 +409,11 @@ function persistProjectWorkspaceFromMatch(
  * Returns `null` on any failure (missing machine dir, empty inputs,
  * unparseable `tab list`/`tab create`/`pane list`, or a matching tab whose
  * anchor pane cannot be resolved) — the caller fails closed (never a
- * wrong-project placement).
+ * wrong-project placement). The coordination-lock + double-check + create
+ * sequence itself is the family's shared `findOrProvisionUnderLock`
+ * (`dispatcher-anchor.provision.ts`, AC1); `getItemTabAnchor` supplies the
+ * item-ID resolver and creator hooks (the tab label IS the key — no
+ * persistence file).
  *
  * @param onCreate Optional callback invoked with the freshly-provisioned
  *   anchor when this call CREATED the tab (as opposed to adopting an existing
@@ -428,62 +438,48 @@ export async function getItemTabAnchor(
 
   const listTabs = deps.listTabs ?? ((ws: string) => listTabsInWorkspace(cwd, ws));
 
-  // 1. Fast path: an existing tab with this exact label hosting a live pane.
-  const fast = await resolveItemTab(cwd, deps, workspaceId, itemId, listTabs);
-  if (fast.status === 'unknown') return null;
-  if (fast.status === 'found') return { tabId: fast.tabId, paneId: fast.paneId };
-
-  // 2. Provision under the coordination lock with a double-check.
-  const release = tryAcquireCoordLock(dir);
-  if (release === null) {
-    // Another holder may be creating the same tab; re-check once, else fail.
-    const raced = await resolveItemTab(cwd, deps, workspaceId, itemId, listTabs);
-    if (raced.status === 'found') return { tabId: raced.tabId, paneId: raced.paneId };
-    return null;
-  }
-  try {
-    const inside = await resolveItemTab(cwd, deps, workspaceId, itemId, listTabs);
-    if (inside.status === 'unknown') return null;
-    if (inside.status === 'found') return { tabId: inside.tabId, paneId: inside.paneId };
-    // inside.status === 'none' → create the tab (never focus-stealing).
-    const createTab =
-      deps.createTab ?? ((ws: string, label: string) => createTabInWorkspace(cwd, ws, label));
-    let created: ItemTabAnchor | null;
-    try {
-      created = await createTab(workspaceId, itemId);
-    } catch {
-      return null;
-    }
-    if (created === null) return null;
-    const anchor: ItemTabAnchor = { tabId: created.tabId, paneId: created.paneId };
-    // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF): only the provisioning
-    // branch invokes the observer, so the interactive path can close the
-    // placeholder root pane after the first dispatch. Best-effort: a throwing
-    // observer must never fail provisioning.
-    if (typeof onCreate === 'function') {
-      try {
-        onCreate(anchor);
-      } catch {
-        // fail-open: an observer error never breaks tab provisioning
+  // Shared find-or-provision-under-lock sequence (AC1): fast path outside
+  // the lock, raced single re-check when the lock is held, in-lock
+  // double-check, then create. All three fail-closed boundaries are silent on
+  // this strategy (getItemTabAnchor carries no PlacementFailureDetail
+  // channel — the dispatch side reports `item-tab-unavailable` itself).
+  return findOrProvisionUnderLock<ItemTabAnchor>({
+    dir,
+    find: () => resolveItemTab(cwd, deps, workspaceId, itemId, listTabs),
+    create: async () => {
+      const createTab =
+        deps.createTab ?? ((ws: string, label: string) => createTabInWorkspace(cwd, ws, label));
+      return createTab(workspaceId, itemId);
+    },
+    // The item-ID tab adopts without persistence (the tab label IS the key).
+    adoptCreated: async (anchor) => {
+      // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF): only the provisioning
+      // branch invokes the observer, so the interactive path can close the
+      // placeholder root pane after the first dispatch. Best-effort: a
+      // throwing observer must never fail provisioning.
+      if (typeof onCreate === 'function') {
+        try {
+          onCreate(anchor);
+        } catch {
+          // fail-open: an observer error never breaks tab provisioning
+        }
       }
-    }
-    // Placement: move freshly created tab per placementMode (fail-open).
-    // Only applies to fresh creates — adopted tabs are never moved.
-    await applyPlacementMode(cwd, deps, workspaceId, placementMode, anchor.tabId);
-    return anchor;
-  } finally {
-    release();
-  }
+      // Placement: move freshly created tab per placementMode (fail-open).
+      // Only applies to fresh creates — adopted tabs are never moved.
+      await applyPlacementMode(cwd, deps, workspaceId, placementMode, anchor.tabId);
+      return true;
+    },
+    fastUnknownDetail: 'item-tab-unavailable',
+    racedUnknownDetail: 'item-tab-unavailable',
+    racedMissDetail: 'item-tab-unavailable',
+    inLockUnknownDetail: 'item-tab-unavailable',
+    createFailDetail: 'item-tab-unavailable',
+  });
 }
 
-/** Result of resolving the item-ID tab: found + live pane, absent, or unreadable. */
-type ItemTabResolution =
-  | { status: 'found'; tabId: string; paneId: string }
-  | { status: 'none' }
-  | { status: 'unknown' };
-
 /**
- * Resolve the live anchor pane for the tab labelled exactly `itemId`.
+ * Resolve the live anchor pane for the tab labelled exactly `itemId`
+ * (shared ProvisionFind contract, AC1).
  *
  *  - `found` — the tab exists and hosts a live pane (adopt it).
  *  - `none` — `tab list` was read but no matching tab matches, or the
@@ -496,7 +492,7 @@ async function resolveItemTab(
   workspaceId: string,
   itemId: string,
   listTabs: (workspaceId: string) => Promise<DispatcherTabInfo[] | null>,
-): Promise<ItemTabResolution> {
+): Promise<ProvisionFind<ItemTabAnchor>> {
   let tabs: DispatcherTabInfo[] | null;
   try {
     tabs = await listTabs(workspaceId);
@@ -509,7 +505,7 @@ async function resolveItemTab(
   const resolution = await resolveLivePaneInTab(cwd, deps, workspaceId, match.tabId);
   if (resolution.status === 'unknown') return { status: 'unknown' };
   if (resolution.status === 'found') {
-    return { status: 'found', tabId: match.tabId, paneId: resolution.paneId };
+    return { status: 'found', value: { tabId: match.tabId, paneId: resolution.paneId } };
   }
   return { status: 'none' };
 }
