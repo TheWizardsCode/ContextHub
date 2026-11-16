@@ -24,10 +24,18 @@ import { describe, expect, it } from 'vitest'
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const CONFIG_PATH = path.join(REPO_ROOT, 'vitest.config.ts')
 
+interface ProjectTestConfig extends ParallelismConfig {
+  name?: string
+  include?: string[]
+  exclude?: string[]
+  sequence?: { groupOrder?: number }
+}
+
 interface ParallelismConfig {
   maxWorkers?: number | string
   pool?: string
   isolate?: boolean
+  projects?: Array<{ test?: ProjectTestConfig }>
 }
 
 async function declaredTestConfig(): Promise<ParallelismConfig> {
@@ -50,5 +58,59 @@ describe('vitest declared parallelism config', () => {
     // Per-file isolation prevents module-cache/mock leakage across files
     // (github-*.test.ts mock `child_process` with differing factories).
     expect(test.isolate).toBe(true)
+  })
+})
+
+// The measured startup-cost suite spawns real `wl` processes and compares their
+// peak RSS against a 25 % budget, so it must not share the host with the rest of
+// the parallel run: in-suite fork contention inflated that child RSS by ~25 % and
+// failed the dev-push gate on an unchanged tree (WL-0MWIF616V008380O,
+// WL-0MWIGCK0E009GGLG). The isolation is declared in `vitest.config.ts`, so this
+// guard pins it against a future edit that silently removes it.
+const MEASURED_STARTUP_SUITE = 'tests/cli/startup-import-budget.test.ts'
+
+describe('vitest measured-suite isolation (WL-0MWIGCK0E009GGLG)', () => {
+  const projectIncluding = async (file: string): Promise<ProjectTestConfig> => {
+    const test = await declaredTestConfig()
+    const project = (test.projects ?? [])
+      .map((entry) => entry.test)
+      .find((candidate) => candidate?.include?.includes(file))
+    if (!project) {
+      throw new Error(
+        `vitest.config.ts has no project whose include lists ${file} — the measured ` +
+          'startup suite must run in its own serialised project'
+      )
+    }
+    return project
+  }
+
+  it('runs the measured startup suite in its own single-worker project', async () => {
+    const root = await declaredTestConfig()
+    const project = await projectIncluding(MEASURED_STARTUP_SUITE)
+
+    expect(project.name).toBe('startup-budget-measured')
+    expect(project.maxWorkers).toBe(1)
+    // The project extends the root config, which keeps `isolate: true`; either
+    // source is fine, a missing value on both would not be.
+    expect(project.isolate ?? root.isolate).toBe(true)
+  })
+
+  it('runs the measured project after every other project has finished', async () => {
+    const project = await projectIncluding(MEASURED_STARTUP_SUITE)
+
+    // Groups run lowest → highest; the main suite stays on the default 0.
+    expect(project.sequence?.groupOrder ?? 0).toBeGreaterThanOrEqual(1)
+  })
+
+  it('keeps the measured suite out of the main parallel project', async () => {
+    const test = await declaredTestConfig()
+    const main = (test.projects ?? [])
+      .map((entry) => entry.test)
+      .find((candidate) => candidate?.name === 'suite')
+    if (!main) throw new Error('vitest.config.ts has no `suite` project')
+
+    // Else it would also run inside the contended group, defeating the isolation
+    // while still passing if the isolated run is the one that reports.
+    expect(main.exclude ?? []).toContain(MEASURED_STARTUP_SUITE)
   })
 })

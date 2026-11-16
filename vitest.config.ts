@@ -1,5 +1,26 @@
 import { defineConfig } from 'vitest/config'
 
+/**
+ * The measured startup-cost suite.
+ *
+ * It spawns real `wl` processes and compares their peak RSS with a 25 % budget,
+ * so it must not share the host with the rest of the run: the ~6 concurrent fork
+ * workers inflated that child RSS by ~25 % (starved V8 collects less often) and
+ * failed the dev-push gate on an unchanged tree (WL-0MWIF616V008380O →
+ * WL-0MWIGCK0E009GGLG). It therefore runs in its own serialised project that is
+ * sequenced **after** every other project, so a plain `vitest run` isolates it
+ * without any extra flags (the agent-side test runner is not modifiable here).
+ */
+const MEASURED_STARTUP_SUITE = 'tests/cli/startup-import-budget.test.ts'
+
+/** Excluded from discovery — worktrees hold duplicate copies of the suite. */
+const EXCLUDE = [
+  '**/node_modules/**',
+  '**/__snapshots__/**',
+  '**/{dist,build,.cache}/**',
+  '**/.worklog/worktrees/**',
+]
+
 export default defineConfig({
   test: {
     // Increase default timeout to reduce intermittent test timeouts in CI.
@@ -55,11 +76,35 @@ export default defineConfig({
     // Exclude worktree test files from discovery — worktrees share the
     // same git objects but have separate working directories, so vitest
     // would otherwise pick up duplicate copies of test files.
-    exclude: [
-      '**/node_modules/**',
-      '**/__snapshots__/**',
-      '**/{dist,build,.cache}/**',
-      '**/.worklog/worktrees/**',
+    exclude: EXCLUDE,
+    // Two projects, both extending this config (WL-0MWIGCK0E009GGLG):
+    //
+    //   suite                    — everything else, maxWorkers 6, parallel.
+    //   startup-budget-measured  — the measured startup-cost suite only, one
+    //                              worker, sequenced after `suite`.
+    //
+    // `sequence.groupOrder` is what makes the isolation real: vitest runs
+    // groups from the lowest order to the highest, waiting for each group to
+    // finish, so the benchmark never competes with a sibling fork worker for
+    // the host. Plain `vitest run` needs no flags for this — a requirement,
+    // because the agent-side test runner invokes vitest verbatim.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'suite',
+          exclude: [...EXCLUDE, MEASURED_STARTUP_SUITE],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'startup-budget-measured',
+          include: [MEASURED_STARTUP_SUITE],
+          maxWorkers: 1,
+          sequence: { groupOrder: 1 },
+        },
+      },
     ],
   },
 })

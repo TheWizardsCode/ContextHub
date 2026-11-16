@@ -20,10 +20,10 @@ only tighten it — no regression can slip through between items.
 | File | Purpose |
 |---|---|
 | `bench/startup-import-graph.ts` | AST walker for the transitive **static, runtime** import graph of `src/cli.ts` (type-only and dynamic imports excluded; unresolved relative imports are a hard error). |
-| `bench/startup-budget.ts` | Budget schema/read/write, the import ratchet, and the host-load–tolerant regression policy. |
-| `bench/wl-startup-perf.ts` | Benchmark: ≥ 10 warm runs per scenario, p95 wall/CPU/RSS, bare-node floor, `--json`, `--target src\|dist\|auto`, `--update-budget`. |
+| `bench/startup-budget.ts` | Budget schema/read/write, the import ratchet, and the host-load–tolerant regression policy (statistic selection included). |
+| `bench/wl-startup-perf.ts` | Benchmark: warm runs per scenario, p50/p95 wall/CPU/RSS, bare-node floor, `--json`, `--target src\|dist\|auto`, `--update-budget`. |
 | `bench/startup-import-budget.json` | The checked-in budget: import graph, per-target baselines, AC1 targets and headroom policy. |
-| `tests/cli/startup-import-budget.test.ts` | Ratchet (fails on an added module), budget integrity, policy unit tests, and a measured regression test in the default suite. |
+| `tests/cli/startup-import-budget.test.ts` | Ratchet (fails on an added module), budget integrity, policy unit tests, and a measured regression test — run in its own isolated vitest project (see [Isolation](#isolation-from-the-rest-of-the-suite-wl-0mwigck0e009gglg)). |
 
 ## What the budget records
 
@@ -132,14 +132,88 @@ Shared hosts (a Raspberry Pi, the herdr server) inflate wall-clock time under
 contention, so the pass/fail gate is **CPU time** — `user + system` from the
 F1 spawn instrumentation, which is load independent:
 
-- **p95 CPU** ≤ recorded p95 + `cpuHeadroomPct` (default 50 %) — the gate;
-- **p95 wall** ≤ recorded p95 × **host-load factor** + `wallHeadroomPct`
+- **CPU** ≤ recorded p95 + `cpuHeadroomPct` (default 50 %) — the gate;
+- **wall** ≤ recorded p95 × **host-load factor** + `wallHeadroomPct`
   (default 200 %) + 250 ms — catches gross regressions while tolerating a
   loaded host;
-- **p95 peak RSS** ≤ recorded p95 + `cpuHeadroomPct`;
+- **peak RSS** ≤ recorded p95 + `rssHeadroomPct` (default 25 %);
 - every sample must be a genuine fast-path invocation (expected spawn kind);
 - parent AC1's 700 ms / 68 MB is asserted for the `measuredTarget` only once
   `ac1Targets.enforced` is true.
+
+Each of those comparisons uses the **sample statistic** `regression.statistic`
+declares (`p50` — the median — in the checked-in budget; `p95` is the default
+for older budget files).
+
+### Sample statistic: a median, not a p95 over four samples
+
+`regression.runs` is **7** and the asserted sample is the **median**. The
+previous policy derived a `p95` from four samples, which is simply the maximum
+of four — the jumpiest estimator available — so one sample taken while a
+sibling vitest worker starved the host decided the verdict on an unchanged
+tree (`WL-0MWIF616V008380O`). A median over an odd count is a real sample: an
+outlier cannot decide it, while a genuine regression moves *every* sample and
+still fails. That sensitivity is pinned by the AC4 anti-blunting tests in
+`tests/cli/startup-import-budget.test.ts` (uniform +30 % RSS, out-of-budget
+wall and CPU all still fail; a single spiked sample does not).
+
+No threshold was loosened to buy this: `cpuHeadroomPct`, `rssHeadroomPct` and
+`maxHostLoadFactor` are unchanged, and the recorded baselines stay p95 values
+(re-recording them belongs with per-host-class baselines, which this
+repository does not own). On the measured spread the median and the p95 sit
+within a few percent of each other, so the headroom percentages remain the
+effective margin.
+
+### The measured child's environment is pinned, not inherited
+
+The RSS flake's root cause was environmental, and it was not contention: `tsx`
+loads a per-user cache from `$TMPDIR/tsx-<uid>` at startup, so when the caller's
+`TMPDIR` points at a long-lived scratch tree, every measured `wl` invocation
+starts with that cache's working set. Measured on this host
+(`WL-0MWIGCK0E009GGLG`): the same `wl --version` reported **~96 MiB** with an
+empty temp directory and **129–133 MiB** with `TMPDIR` pointing at the test
+harness's shared scratch tree (4.3 GB, of which the `tsx-1000/` cache alone is
+32k entries / 354 MB) — a 35 % artefact that failed the unchanged 25 % budget.
+With that variable controlled, the same measurement inside a full `vitest run`
+reports 93–96 MiB.
+
+`buildBenchmarkChildEnv` (`bench/wl-startup-perf.ts`) therefore pins
+`TMPDIR`/`TMP`/`TEMP` (and `WL_CACHE_DIR`) to fresh directories the benchmark
+owns, and the bare-node control runs with the same pinned environment so the
+host-load factor compares like with like. The alternative — raising
+`rssHeadroomPct` — was rejected: it would have hidden a real regression behind
+an artefact and is exactly the loosening AC5 forbids.
+
+### Isolation from the rest of the suite (`WL-0MWIGCK0E009GGLG`)
+
+The measured suites spawn real `wl` processes and compare their peak RSS with a
+25 % budget, so they must not share the host with the rest of the run. In a
+shared fork pool the ~6 concurrent workers also inflated in-suite measurements,
+which is what made the gate look load-flaky. `vitest.config.ts` therefore
+declares two projects:
+
+| Project | Contents | Settings |
+|---|---|---|
+| `suite` | every other test file | inherits the root config (`maxWorkers: 6`, `pool: 'forks'`, `isolate: true`), excludes the measured suite |
+| `startup-budget-measured` | `tests/cli/startup-import-budget.test.ts` | `maxWorkers: 1`, `sequence.groupOrder: 1` |
+
+Vitest runs groups from the lowest `sequence.groupOrder` to the highest,
+waiting for one to finish before starting the next, so the benchmark runs
+**after** the parallel suite has drained — with plain `vitest run` and no extra
+flags (a hard requirement: the agent-side test runner is not modifiable from
+this repository, so the isolation has to live in repo configuration).
+`tests/unit/maxworkers-config-guard.test.ts` pins all of it — the project's
+single worker, its group order, and the exclusion from `suite` — so a future
+edit cannot silently un-isolate the measurement.
+
+Isolation removes *in-suite* contention only: a host saturated by other
+repositories' suites can still inflate wall time (absorbed by the host-load
+factor). It does not, and cannot, control the caller's environment — which is
+why the pinned child environment above matters as much as the sequencing.
+
+`tests/cli/startup-import-budget.test.ts` applies this policy to a real measured
+`src` run (`regression.runs`, 7 samples, in the isolated project) and the
+ratchet check is pure AST/filesystem work (well under a second).
 
 ### Host-load normalisation of the wall budget
 

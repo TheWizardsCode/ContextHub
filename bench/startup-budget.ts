@@ -42,6 +42,27 @@
  * (factor clamped at 1) and a wild control sample never masks a real wall
  * regression (`maxHostLoadFactor` clamp, default 8). Peak RSS keeps its own
  * headroom; every measurement must also be a genuine fast-path invocation.
+ *
+ * ## Sample statistic (WL-0MWIGCK0E009GGLG)
+ *
+ * The measured sample is summarised by the statistic `regression.statistic`
+ * declares (default `p95` for budget files recorded before it existed):
+ *
+ *   - `p50` (median) — the checked-in policy. A median over an odd sample
+ *     count is a real sample, so one contended-host outlier cannot decide the
+ *     verdict, while a genuine regression (which moves *every* sample) still
+ *     fails. The previous `p95` over four samples was the maximum of four, the
+ *     jumpiest possible estimator, and it failed the gate on unchanged code
+ *     (WL-0MWIF616V008380O) and spawned a duplicate triage item.
+ *   - `p95` — retained so an older budget file keeps its recorded semantics
+ *     and so the policy tests can pin the estimator difference.
+ *
+ * The recorded baselines stay p95 values (re-recording them belongs with
+ * per-host-class baselines, which this repository does not own): on this
+ * suite's measured spread the median and the p95 sit within a few percent of
+ * each other, so the headroom percentages — unchanged by the estimator switch
+ * — remain the effective margin. See the `regression.note` in
+ * `bench/startup-import-budget.json`.
  */
 
 import * as fs from 'fs';
@@ -112,11 +133,26 @@ export interface StartupAc1Targets {
 export const MAX_HOST_LOAD_FACTOR = 8;
 
 /**
+ * Sample statistic the measured checks are evaluated with.
+ *
+ * `p50` (median) over an odd sample count is the checked-in policy: a single
+ * contended-host sample cannot decide the verdict (WL-0MWIGCK0E009GGLG).
+ * `p95` is retained for budget files recorded before the option existed and so
+ * the estimator difference can be pinned by tests. See the module header.
+ */
+export type StartupStatistic = 'p50' | 'p95';
+
+/**
  * Host-load tolerance policy for the measured regression test.
  */
 export interface StartupRegressionPolicy {
   /** Sample count the measured regression test uses. */
   runs: number;
+  /**
+   * Statistic the measured assertions compare with the recorded budget.
+   * Defaults to `p95` when absent (older budget files).
+   */
+  statistic?: StartupStatistic;
   /** Allowed CPU-time growth over the recorded p95 before failing (%). */
   cpuHeadroomPct: number;
   /** Allowed wall-time growth over the recorded p95 before failing (%). */
@@ -325,7 +361,16 @@ export function evaluateImportRatchet(
 /** One policy check (measured value vs. its limit). */
 export interface BudgetCheck {
   scenario: string;
-  metric: 'p95WallMs' | 'p95CpuMs' | 'p95RssMb' | 'sampleKind' | 'AC1 p95WallMs' | 'AC1 peakRssMb';
+  metric:
+    | 'p50WallMs'
+    | 'p95WallMs'
+    | 'p50CpuMs'
+    | 'p95CpuMs'
+    | 'p50RssMb'
+    | 'p95RssMb'
+    | 'sampleKind'
+    | 'AC1 p95WallMs'
+    | 'AC1 peakRssMb';
   measured: number;
   limit: number;
   ok: boolean;
@@ -354,8 +399,11 @@ export interface BudgetEvaluationInput {
     expectedKind: string;
     runs: number;
     kinds: Record<string, number>;
+    p50WallMs?: number;
     p95WallMs: number;
+    p50CpuMs?: number | null;
     p95CpuMs: number | null;
+    p50RssMb?: number | null;
     p95RssMb: number | null;
   }>;
   /** Same-run bare-node control (the host-load reference for wall time). */
@@ -368,6 +416,30 @@ function violationText(check: BudgetCheck): string {
     `${check.scenario}: ${check.metric} ${check.measured} exceeds limit ${check.limit} ` +
     `(${check.detail})`
   );
+}
+
+/** One metric's selected sample statistic. */
+interface StatisticSample {
+  /** Statistic actually used — `p95` when the median was not measured. */
+  statistic: StartupStatistic;
+  value: number | null;
+}
+
+/**
+ * Select the sample statistic a check compares with the recorded budget.
+ *
+ * Falls back to the p95 sample when the median is absent, so a measurement
+ * recorded before the estimator change is still gated rather than skipped.
+ */
+function pickStatistic(
+  statistic: StartupStatistic,
+  median: number | null | undefined,
+  p95: number | null | undefined
+): StatisticSample {
+  if (statistic === 'p50' && median !== undefined && median !== null) {
+    return { statistic: 'p50', value: median };
+  }
+  return { statistic: 'p95', value: p95 ?? null };
 }
 
 /**
@@ -403,11 +475,12 @@ function hostLoadFactor(
  * Rules (in order):
  *   1. every scenario must have a recorded baseline for the measured target;
  *   2. every sample must be a genuine fast-path invocation (expected spawn kind);
- *   3. p95 CPU time must stay within `cpuHeadroomPct` (the host-load-tolerant gate);
- *   4. p95 wall time must stay within `wallHeadroomPct` + `wallFloorMs` slack,
- *      after normalising the recorded wall budget by the host-load factor the
- *      same run's bare-node control measured;
- *   5. p95 peak RSS must stay within `cpuHeadroomPct` headroom;
+ *   3. CPU time — summarised by `regression.statistic` — must stay within
+ *      `cpuHeadroomPct` (the host-load-tolerant gate);
+ *   4. wall time — same statistic — must stay within `wallHeadroomPct` +
+ *      `wallFloorMs` slack, after normalising the recorded wall budget by the
+ *      host-load factor the same run's bare-node control measured;
+ *   5. peak RSS — same statistic — must stay within `rssHeadroomPct` headroom;
  *   6. when `ac1Targets.enforced` and the measured target is the recorded
  *      `measuredTarget`, the parent AC1 numbers are asserted too.
  */
@@ -418,6 +491,7 @@ export function evaluateStartupBudget(
   const checks: BudgetCheck[] = [];
   const violations: string[] = [];
   const policy = budget.regression;
+  const statistic = policy.statistic ?? 'p95';
   const baseline = budget.baselines[result.target];
   const loadFactor = hostLoadFactor(
     result,
@@ -463,15 +537,17 @@ export function evaluateStartupBudget(
 
     const cpuLimit =
       recorded.p95CpuMs === null ? null : recorded.p95CpuMs * (1 + policy.cpuHeadroomPct / 100);
-    if (cpuLimit !== null && scenario.p95CpuMs !== null) {
+    const cpuSample = pickStatistic(statistic, scenario.p50CpuMs, scenario.p95CpuMs);
+    if (cpuLimit !== null && cpuSample.value !== null) {
       push({
         scenario: scenario.name,
-        metric: 'p95CpuMs',
-        measured: scenario.p95CpuMs,
+        metric: `${cpuSample.statistic}CpuMs`,
+        measured: cpuSample.value,
         limit: Math.round(cpuLimit),
-        ok: scenario.p95CpuMs <= cpuLimit,
+        ok: cpuSample.value <= cpuLimit,
         detail:
-          `recorded p95 ${recorded.p95CpuMs} ms + ${policy.cpuHeadroomPct}% CPU headroom ` +
+          `${cpuSample.statistic} of ${scenario.runs} samples vs the recorded p95 ` +
+          `${recorded.p95CpuMs} ms + ${policy.cpuHeadroomPct}% CPU headroom ` +
           '(CPU time is the load-independent gate)',
       });
     }
@@ -481,14 +557,17 @@ export function evaluateStartupBudget(
         loadFactor *
         (1 + policy.wallHeadroomPct / 100) +
       policy.wallFloorMs;
+    const wallSample = pickStatistic(statistic, scenario.p50WallMs, scenario.p95WallMs);
+    const wallMeasured = wallSample.value ?? 0;
     push({
       scenario: scenario.name,
-      metric: 'p95WallMs',
-      measured: scenario.p95WallMs,
+      metric: `${wallSample.statistic}WallMs`,
+      measured: wallMeasured,
       limit: Math.round(wallLimit),
-      ok: scenario.p95WallMs <= wallLimit,
+      ok: wallMeasured <= wallLimit,
       detail:
-        `recorded p95 ${recorded.p95WallMs} ms × host-load factor ` +
+        `${wallSample.statistic} of ${scenario.runs} samples vs the recorded p95 ` +
+        `${recorded.p95WallMs} ms × host-load factor ` +
         `${loadFactor.toFixed(2)} (bare-node control ${String(
           result.bareNode?.p95WallMs ?? '-')
         } / ${String(baseline.bareNode?.p95WallMs ?? '-')} ms) + ` +
@@ -498,14 +577,17 @@ export function evaluateStartupBudget(
     const rssHeadroomPct = policy.rssHeadroomPct ?? policy.cpuHeadroomPct;
     const rssLimit =
       recorded.p95RssMb === null ? null : recorded.p95RssMb * (1 + rssHeadroomPct / 100);
-    if (rssLimit !== null && scenario.p95RssMb !== null) {
+    const rssSample = pickStatistic(statistic, scenario.p50RssMb, scenario.p95RssMb);
+    if (rssLimit !== null && rssSample.value !== null) {
       push({
         scenario: scenario.name,
-        metric: 'p95RssMb',
-        measured: scenario.p95RssMb,
+        metric: `${rssSample.statistic}RssMb`,
+        measured: rssSample.value,
         limit: Math.round(rssLimit * 10) / 10,
-        ok: scenario.p95RssMb <= rssLimit,
-        detail: `recorded p95 ${recorded.p95RssMb} MiB + ${rssHeadroomPct}% RSS headroom`,
+        ok: rssSample.value <= rssLimit,
+        detail:
+          `${rssSample.statistic} of ${scenario.runs} samples vs the recorded p95 ` +
+          `${recorded.p95RssMb} MiB + ${rssHeadroomPct}% RSS headroom`,
       });
     }
 

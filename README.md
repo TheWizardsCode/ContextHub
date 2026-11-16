@@ -232,6 +232,7 @@ The project uses [Vitest](https://vitest.dev/) with the following settings in `v
 - **Pool:** `'forks'` (child processes) — supports tests that use `process.chdir()` for temp directory setup
 - **maxWorkers:** `6` — measured parallelism cap for the canonical suite on the 16-core shared dev host (median wall-clock ~230 s → ~130–142 s vs the old 4, aggregate test time also drops; see [docs/dev/test-suite-baseline.md](docs/dev/test-suite-baseline.md#test-suite-parallelism-maxworkers-4--6-wl-0mvhvztya003tnn0) for the 4/6/8 evidence — WL-0MVHVZTYA003TNN0)
 - **Exclusions:** Worktree directories (`.worklog/worktrees/**`) are excluded to prevent duplicate test file discovery
+- **Projects:** two, both extending the base config — `suite` (everything else) and `startup-budget-measured` (`tests/cli/startup-import-budget.test.ts` alone, `maxWorkers: 1`, `sequence.groupOrder: 1`, so a plain `vitest run` benchmarks the CLI *after* the parallel suite drains; see [docs/dev/wl-startup-import-budget.md](docs/dev/wl-startup-import-budget.md#isolation-from-the-rest-of-the-suite-wl-0mwigck0e009gglg) — WL-0MWIGCK0E009GGLG)
 
 See [tests/README.md](tests/README.md) for detailed testing documentation.
 
