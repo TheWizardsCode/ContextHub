@@ -41,6 +41,68 @@ import type {
 } from './dispatcher-anchor.js';
 import type { DowntimeSpawnResult } from './downtime-worker.pane.js';
 import type { DowntimeAuditBatchStatus, AuditCandidateScopeResult } from './downtime-worker.gates.js';
+
+/**
+ * Placement-failure detail vocabulary (WL-0MWHCUZ5C000I7S6): naming the
+ * exact fail-closed boundary of an `anchor-unavailable` placement verdict,
+ * collected through the optional trailing report callback on
+ * `getDispatcherTabAnchor` / `getDispatcherAnchor` and forwarded onto the
+ * outcome + decision entry. Structurally identical to the family-local alias
+ * in `dispatcher-anchor.contract.ts` and to the local union in
+ * `downtime-worker.dispatch-placement.ts` — cross-referenced by comment; the
+ * barrel exports neither, so this module declares its own structurally-
+ * assignable copy rather than importing a non-barrelled symbol. The sibling
+ * mismatch item extends the union with `project-workspace-mismatch`
+ * (WL-0MWHCV3PR002WSQM): the primary path near-missed — no plugin pane
+ * matched the wanted root, but a pane reported a different `HERDR_RESOLVED_CWD`.
+ */
+type PlacementFailureDetail =
+  | 'persisted-workspace-missing'
+  | 'herdr-unreadable'
+  | 'dispatcher-workspace-unprovisionable'
+  | 'prefix-empty'
+  | 'item-tab-unavailable'
+  | 'project-workspace-mismatch';
+
+/**
+ * Primary-path near-miss record (WL-0MWHCV3PR002WSQM): `resolveProjectWorkspace`
+ * failed to match the item's worklog root, but a plugin pane reported a
+ * DIFFERENT non-empty `HERDR_RESOLVED_CWD`. Names the expected root, the
+ * actual `HERDR_RESOLVED_CWD` and the pane/workspace ids. Diagnostic-only —
+ * the matching rule stays exact-root. Structurally identical to the copies in
+ * `dispatcher-anchor.placement.ts` and `downtime-worker.dispatch-placement.ts`.
+ */
+export interface ProjectWorkspaceMismatch {
+  expectedRoot: string;
+  actualRoot: string;
+  paneId: string;
+  workspaceId: string;
+}
+
+/**
+ * Why the primary project-workspace path returned null (WL-0MWHW3PKX0048ZYL
+ * AC3), carried on the dispatch marker as `placementFallbackReason`.
+ * Structurally identical to the copies in
+ * `dispatcher-anchor.contract.ts` / `dispatcher-anchor.placement.ts` and
+ * `downtime-worker.dispatch-placement.ts` — the barrel exports neither.
+ */
+export type ProjectWorkspaceFallbackReason =
+  | 'project-workspace-mismatch'
+  | 'project-workspace-missing'
+  | 'no-project-workspace'
+  | 'herdr-unreadable';
+
+/**
+ * The anchor resolvers' optional trailing fail-closed boundary reporter
+ * (WL-0MWHCUZ5C000I7S6): invoked with the {@link PlacementFailureDetail}
+ * naming the exact boundary before a `null` resolver return, so the
+ * placement collector can make an `anchor-unavailable` refusal diagnosable
+ * from the decision log alone. Additive — callers that pass no callback are
+ * byte-identical to today. Re-exported for the full-deps contract
+ * (`downtime-worker.worker-contract.ts`) to stay in sync without redeclaring
+ * the vocabulary (same file-family layering as every other dispatch type).
+ */
+export type AnchorFailureReport = (detail: PlacementFailureDetail) => void;
 import type { CoordinationOfferRejection } from './downtime-worker.offer-attribution.js';
 import type {
   DowntimeActiveAuditResult,
@@ -122,9 +184,15 @@ export interface DowntimeDispatchDeps {
   /** Local capacity reservation (see `DowntimeWorkerDeps`). */
   reserveLocalCapacity?(request: LocalReservationRequest): Promise<LocalReservationResult | null>;
   /** Machine-wide Dispatcher anchor (see `DowntimeWorkerDeps`). */
-  getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
-  /** Project workspace resolution (see `DowntimeWorkerDeps`). */
-  resolveProjectWorkspace?(cwd: string): Promise<ProjectWorkspaceTarget | null>;
+  getDispatcherAnchor?(cwd: string, report?: AnchorFailureReport): Promise<DispatcherAnchor | null>;
+  /** Project workspace resolution (see `DowntimeWorkerDeps`).
+   *  The optional trailing near-miss reporter (WL-0MWHCV3PR002WSQM) is
+   *  additive — `resolveDispatchPlacement` passes its collector callback. */
+  resolveProjectWorkspace?(
+    cwd: string,
+    reportNearMiss?: (nearMiss: ProjectWorkspaceMismatch) => void,
+    reportFallbackReason?: (reason: ProjectWorkspaceFallbackReason) => void,
+  ): Promise<ProjectWorkspaceTarget | null>;
   /** Item-ID tab anchor (see `DowntimeWorkerDeps.getItemTabAnchor`). */
   getItemTabAnchor?(
     cwd: string,
@@ -135,6 +203,7 @@ export interface DowntimeDispatchDeps {
   getDispatcherTabAnchor?(
     cwd: string,
     prefix: string,
+    report?: AnchorFailureReport,
   ): Promise<DispatcherPrefixTabAnchor | null>;
   /** Dispatch trail: marker write + item comment (see `DowntimeWorkerDeps`). */
   recordDispatch(event: DowntimeDispatchEvent): Promise<boolean>;
@@ -181,8 +250,35 @@ export interface DowntimeDispatchDeps {
   /**
    * Release a host-budget reservation (AC3): every abort path in the claim
    * pipeline, and the pane-close handler. Idempotent, never throws.
+   *
+   * `release` carries the identity the caller owns
+   * (WL-0MWFJD5T4003OM91) — `kind` + the admission `attemptId` (or the closed
+   * `paneId`) — and its `reason` lands in the ledger's audit trail
+   * (WL-0MWFJDGXQ001OXP8). Releasing by item id alone could delete a
+   * still-running dispatch's entry, which is the defect this replaces.
    */
-  releaseHostDispatch?(itemId: string, cwd: string): Promise<void>;
+  releaseHostDispatch?(
+    itemId: string,
+    cwd: string,
+    release?: DowntimeHostBudgetRelease,
+  ): Promise<void>;
+  /**
+   * Release a dispatched audit's PROXY LEASE (WL-0MWFJH3NW006F5GN AC3):
+   * called on every terminal path after an audit ADMITTED with a held lease
+   * (marker-write failure, spawn failure, anchor-unavailable, pane close) so
+   * a released audit never holds the shared GPU past its own run. The session
+   * id is derived from the item id (`auditLeaseSessionId(itemId)`), so no
+   * state is threaded. Must be idempotent and never throw — an unheld session
+   * is a successful no-op and a leaked lease is bounded by the proxy's own
+   * expiry (the availability read reports `reclaimed`). OPTIONAL — absent for
+   * legacy/test callers means the release is skipped (the dispatch outcome is
+   * never changed by a release failure).
+   */
+  releaseAuditLease?(
+    itemId: string,
+    cwd: string,
+    release?: { reason?: string },
+  ): Promise<void>;
   /** Machine-wide stalled-work scan (see `DowntimeWorkerDeps`). */
   scanStalledPanes?(cwd: string, opts: StalledScanOptions): Promise<StalledPaneCandidate[]>;
   /**
@@ -230,8 +326,59 @@ export interface DowntimeHostBudgetAdmission {
    * `host-budget-audit` / `audit-host-saturated` / `host-budget-unknown`.
    */
   reason?: string;
+  /**
+   * The failing exchange on a fail-closed audit-budget refusal
+   * (`audit-budget-unknown`): the name the proxy read failed with
+   * (`http-404`, `timeout`, `network`, `http-<status>`, `bad-body`,
+   * `seam-absent`) — see {@link AuditAvailabilityOutcome}. Absent on an
+   * implement refusal and on a `saturated` (proxy answered) audit refusal,
+   * where there is no failing exchange. Carried through to the decision entry
+   * so the log names the broken contract without reading code
+   * (WL-0MWDDHVF2004PTYX AC3).
+   */
+  detail?: string;
   /** True when an unreadable ledger was rewritten from live panes (AC6). */
   repaired?: boolean;
+  /**
+   * The reservation's attempt token (WL-0MWFJD5T4003OM91). Carried on the
+   * verdict so every abort path of THIS attempt releases by identity — it can
+   * only ever remove this dispatch's own entry.
+   */
+  attemptId?: string;
+  /**
+   * The PROXY AUDIT LEASE this admission holds (WL-0MWFJH3NW006F5GN AC1):
+   * present on an AUDIT admission whose acquire answered `200`. The release
+   * discipline re-derives the session id from the item id
+   * (`auditLeaseSessionId(itemId)`), so this is evidence for the decision log
+   * and the TTL-bound assertion, not a threaded handle.
+   */
+  lease?: { sessionId: string; expiresAt?: number };
+  /**
+   * The proxy's bounded `retry_after_s` cooldown on a `429` lease refusal
+   * (WL-0MWFJH3NW006F5GN AC2): carried on the `audit-budget-saturated`
+   * refusal so the dispatcher honours the proxy's deferral advice. Absent
+   * when the proxy did not serve one or the refusal was not a 429.
+   */
+  retryAfterS?: number;
+}
+
+/**
+ * What a release must prove it owns (WL-0MWFJD5T4003OM91).
+ *
+ * The ledger entry key is `itemId` + `kind`; ownership is proven by the
+ * `attemptId` the admission verdict carries, or by the confirmed `paneId` on a
+ * pane-close path. A release that proves neither is refused by the ledger
+ * rather than deleting whichever entry happens to share the item id.
+ */
+export interface DowntimeHostBudgetRelease {
+  /** Entry kind (`implement`/`audit`); omitted by the pane-close path. */
+  kind?: DowntimeDispatchKind;
+  /** The confirmed pane this release owns. */
+  paneId?: string;
+  /** The attempt token from {@link DowntimeHostBudgetAdmission.attemptId}. */
+  attemptId?: string;
+  /** Why the release happened — recorded in the ledger's audit trail. */
+  reason?: string;
 }
 
 /** Audit event recorded for every successful downtime dispatch. */
@@ -313,6 +460,28 @@ export interface DowntimeDispatchEvent {
    * (deployment default kept). Absent on legacy entries; readers ignore it.
    */
   localPreferenceReason?: LocalPreferenceReason;
+  /**
+   * Why the primary project-workspace path was NOT used, recorded when a
+   * `Dispatcher`-workspace FALLBACK placement succeeded (WL-0MWHW3PKX0048ZYL
+   * AC3): `project-workspace-mismatch` / `project-workspace-missing` /
+   * `no-project-workspace` / `herdr-unreadable`. Present ONLY on a success
+   * marker whose pane was fallback-placed (per-prefix `Dispatcher` tab or the
+   * legacy anchor) after `resolveProjectWorkspace` returned null — so every
+   * "separate dispatch worktree" placement is observable, rare and
+   * attributable from the dispatch log. Absent when the primary resolved or
+   * no primary resolver is wired. Backward compatible — readers ignore it.
+   */
+  placementFallbackReason?: ProjectWorkspaceFallbackReason;
+  /**
+   * Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM AC4): recorded on
+   * the DISPATCH MARKER — the decision entry of a successful dispatch — when
+   * `resolveProjectWorkspace` failed to match the item's worklog root while a
+   * plugin pane reported a DIFFERENT `HERDR_RESOLVED_CWD` (expected vs
+   * actual, pane/workspace ids). Present even when the Dispatcher fallback
+   * then succeeded. Absent when the primary path matched or carried no
+   * near-miss.
+   */
+  projectWorkspaceMismatch?: ProjectWorkspaceMismatch;
 }
 
 /**
@@ -441,6 +610,12 @@ export interface DowntimeDispatchOutcome {
    * and logs are unchanged. All of these are NEUTRAL skips — no strike, no
    * attempt budget, no no-candidate cooldown — so the next idle tick re-checks
    * as soon as a slot frees. `budget` carries the `live`/`max` evidence.
+   *
+   * Proxy audit lease (WL-0MWFJH3NW006F5GN): the AUDIT admission is decided
+   * by the lease acquire, not the availability read. `audit-budget-saturated`
+   * is here a 429 lease refusal too (the same shared token), and
+   * `audit-budget-unavailable` names a 503 proxy registry failure;
+   * `retryAfterS` carries the proxy's bounded deferral advice on the 429.
    */
   reason?: string;
   /**
@@ -450,6 +625,41 @@ export interface DowntimeDispatchOutcome {
    * outcome the admission seam annotated); absent everywhere else.
    */
   budget?: { live: number; max: number };
+  /**
+   * Failing exchange on a fail-closed AUDIT-budget refusal
+   * (`audit-budget-unknown`): `http-404` (endpoint-absent), `timeout` /
+   * `network` / `http-<status>` (unreachable), `bad-body` (unparsable) or
+   * `seam-absent` (no client wired). Copied from the admission seam's
+   * {@link DowntimeHostBudgetAdmission.detail} so the terminal reason and the
+   * decision entry can name the broken proxy contract; absent on every other
+   * outcome (WL-0MWDDHVF2004PTYX AC3).
+   *
+   * Since WL-0MWHCUZ5C000I7S6 it also carries the placement fail-closed
+   * boundary on an `anchor-unavailable` outcome (a {@link PlacementFailureDetail}
+   * token such as `herdr-unreadable` / `prefix-empty` /
+   * `item-tab-unavailable`), so a genuine refusal is diagnosable from the
+   * decision log alone. `reason` stays `anchor-unavailable` — every existing
+   * consumer, budget and starvation heuristic is unchanged.
+   */
+  detail?: string;
+  /**
+   * Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM AC4): present on
+   * an `anchor-unavailable` outcome (alongside `detail`) when
+   * `resolveProjectWorkspace` failed to match the item's worklog root while a
+   * plugin pane reported a DIFFERENT `HERDR_RESOLVED_CWD` (expected vs
+   * actual, pane/workspace ids). Forwarded onto the decision entry so the
+   * mismatch is recorded even when the Dispatcher fallback then FAILED.
+   * Absent when the primary path matched or recorded no near-miss, and on
+   * every other outcome.
+   */
+  projectWorkspaceMismatch?: ProjectWorkspaceMismatch;
+  /**
+   * The proxy's bounded audit-lease cooldown on a `429` refusal
+   * (`audit-budget-saturated`, WL-0MWFJH3NW006F5GN AC2): the proxy's own
+   * `retry_after_s`, honoured as the deferral advice carried on the decision
+   * entry. Absent on every other outcome.
+   */
+  retryAfterS?: number;
   /**
    * Spawn-level error message ('spawn-failed' trace, e.g. ENOENT on
    * send-to-pi.sh — WL-0MSLWJ3I70031Z8U AC2).
@@ -575,6 +785,12 @@ export const LOST_CLAIM_REASONS: ReadonlySet<string> = new Set([
  *  - `audit-budget-saturated` / `audit-budget-unknown` (the proxy-owned
  *    availability verdict) plus the one-release legacy `audit-host-saturated`.
  *
+ * This set is the UNION allow-list that keeps every budget refusal a
+ * continuable hold; the terminal-reason precedence further splits it into
+ * the AUDIT rung ({@link AUDIT_BUDGET_HOLD_REASONS} — "this host's audit
+ * tier was refused") and the implement/host rung below it
+ * (WL-0MWDDHVF2004PTYX AC2).
+ *
  * Prep work (`plan` / `intake` / `risk-effort`) is never budget-gated, which
  * is exactly why a refusal must not end the scan: the prep candidate ranked
  * behind the refused budgeted candidate is still dispatchable.
@@ -588,9 +804,54 @@ export const HOST_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
   'audit-host-saturated',
 ]);
 
+/**
+ * The AUDIT tier's budget-refusal tokens — the subset of
+ * {@link HOST_BUDGET_HOLD_REASONS} that names a refusal of the audit tier
+ * (proxy-derived `audit-budget-*`, plus the one-release legacy
+ * `host-budget-audit` / `audit-host-saturated`). A refusal quoted with one of
+ * these is a statement about the AUDIT tier and therefore OUTRANKS an
+ * implement-tier refusal in the terminal-reason precedence
+ * (WL-0MWDDHVF2004PTYX AC2): an audit refusal with `detail: 'http-404'` is a
+ * broken proxy contract, not an ambient implement-cap statement.
+ *
+ * `host-budget-unknown` is DELIBERATELY absent: both tiers quote it when the
+ * ledger cannot be trusted, so the refusing tier is decided from the
+ * outcome's `kind` by {@link isAuditBudgetHoldOutcome}.
+ */
+export const AUDIT_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
+  'audit-budget-saturated',
+  'audit-budget-unknown',
+  'host-budget-audit',
+  'audit-host-saturated',
+]);
+
 /** True when `reason` is one of the host-budget refusal tokens. */
 export function isHostBudgetHoldReason(reason: string | undefined): boolean {
   return reason !== undefined && HOST_BUDGET_HOLD_REASONS.has(reason);
+}
+
+/** True when `reason` is one of the AUDIT tier's budget-refusal tokens. */
+export function isAuditBudgetHoldReason(reason: string | undefined): boolean {
+  return reason !== undefined && AUDIT_BUDGET_HOLD_REASONS.has(reason);
+}
+
+/**
+ * True when a budget-refusal OUTCOME refused the AUDIT tier.
+ *
+ * Unambiguous tokens are decided by {@link AUDIT_BUDGET_HOLD_REASONS}; the one
+ * tier-ambiguous token (`host-budget-unknown` — both tiers fail closed to it
+ * when the ledger cannot be trusted) is decided by the outcome's `kind`
+ * (carried on the refusal by `dispatchClaimedTier`, WL-0MWDDHVF2004PTYX),
+ * falling back to the implement/host rung when no kind was recorded.
+ */
+export function isAuditBudgetHoldOutcome(outcome: {
+  reason?: string;
+  kind?: string;
+}): boolean {
+  if (!isHostBudgetHoldReason(outcome.reason)) return false;
+  if (isAuditBudgetHoldReason(outcome.reason)) return true;
+  // `host-budget-unknown` — the refusing tier decides (fallback: host rung).
+  return outcome.kind === 'audit';
 }
 
 /** True when `reason` is one of the lost-claim tokens. */

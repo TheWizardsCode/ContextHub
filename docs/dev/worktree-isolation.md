@@ -31,10 +31,15 @@ Rules (enforced by the `implement` skill, not advisory):
 - **`wl` reads the main checkout's store.** Run it worktree-safely as
   `wl --worklog-dir <main-checkout>/.worklog …`; never `cd` to the main
   checkout to edit.
-- **`node_modules` is symlinked, not installed.** `implement.py start` links
-  the main checkout's `node_modules` (and nested workspace ones) into the
-  worktree. Do not run `npm install` in a worktree — writes pass through the
-  symlink and corrupt the shared tree.
+- **`node_modules` is a managed link farm, not an install.** `implement.py
+  start` materialises a worktree-local `node_modules` — one symlink per
+  main-checkout entry, real scope directories (`@types`, `@worklog`, …) holding
+  per-package symlinks, and every workspace package consumed by path
+  (`@worklog/shared`) overridden to the **worktree's own** `packages/*`. Do not
+  run `npm install` in a worktree — an install replaces the farm with a
+  divergent real dependency tree. The sanctioned refresh path is re-running
+  `implement.py start <work-item-id>` (idempotent reconciliation; there is no
+  separate refresh subcommand).
 - **The worktree is disposable.** After a successful push it is removed
   (`git worktree remove … && git worktree prune`); the commits live on `dev`.
 
@@ -101,11 +106,12 @@ suite ran"). Two layers keep this from happening:
 
 ## Module resolution in a worktree
 
-A worktree has no dependency tree of its own: `implement.py start` symlinks the
-**main checkout's** `node_modules` into it (and the nested workspace ones).
-Everything a worktree test resolves therefore comes from the main checkout's
-tree — including `@worklog/shared`, a workspace package whose entry points are
-*gitignored build output* rather than source.
+A worktree has no dependency tree of its own: `implement.py start` materialises
+a worktree-local `node_modules` **link farm** (see below), so a worktree test
+resolves dependency packages through the main checkout's tree but resolves
+path-consumed workspace packages (`@worklog/shared`, whose entry points are
+*gitignored build output* rather than source) against the **worktree's own**
+`packages/*`.
 
 ### Resolution order
 
@@ -114,71 +120,108 @@ in this order:
 
 | # | Step | Resolves into |
 |---|---|---|
-| 1 | `node_modules` lookup — `<worktree>/node_modules`, a symlink to `<main>/node_modules` | **main checkout** |
-| 2 | `node_modules/@worklog/shared` — the workspace link `-> ../../packages/shared` (a plain symlink today; the link farm in `SA-0MVMZBJGT00718ZO` will replace it) | **main checkout** |
-| 3 | `packages/shared` — the package directory that link points at | **main checkout** |
-| 4 | `packages/shared/package.json` `main` / `exports` (`./dist/*.js`) | **main checkout** |
-| 5 | `packages/shared/dist/<entry>.js` — the `tsc` build output | **main checkout** |
+| 1 | `node_modules` lookup — `<worktree>/node_modules`, a real directory (the link farm) | **worktree** (dependency packages via farm links into `<main>/node_modules`) |
+| 2 | `node_modules/@worklog/shared` — a farm link to the **worktree's own** `packages/shared` | **worktree** |
+| 3 | `packages/shared` — the package directory that link points at | **worktree** |
+| 4 | `packages/shared/package.json` `main` / `exports` (`./dist/*.js`) | **worktree** |
+| 5 | `packages/shared/dist/<entry>.js` — the `tsc` build output | **worktree** |
 
-Not one step resolves into the worktree. A worktree's `packages/shared` source
-is only read by tests that import it by relative path
-(`../../packages/shared/src/…`).
+Every step resolves into the worktree: a `packages/shared` edit — and the
+build run in the worktree, which writes `<worktree>/packages/shared/dist` — **is**
+what the worktree's own build/test gate consumes. Only the farm's
+non-workspace links (dependency packages) resolve into the main checkout's
+`node_modules`; the workspace source never does.
 
 Confirm which tree a resolution lands in, from inside the worktree:
 
 ```bash
 readlink -f node_modules/@worklog/shared
-# → /home/…/ContextHub/packages/shared            (the main checkout)
+# → /home/…/ContextHub/.worklog/worktrees/wl-<id>-<slug>/packages/shared  (the worktree)
 node --input-type=module -e \
   "console.log(import.meta.resolve('@worklog/shared/worklog-paths'))"
-# → file:///home/…/ContextHub/packages/shared/dist/worklog-paths.js
+# → file:///home/…/ContextHub/.worklog/worktrees/wl-<id>-<slug>/packages/shared/dist/worklog-paths.js
 ```
+
+### The link farm (shipped)
+
+`implement.py start` materialises the worktree-local `node_modules` link farm
+(`_materialise_link_farm` / `_reconcile_link_farm`, shipped by `SA-0MVMZBJGT00718ZO`):
+
+- `<worktree>/node_modules` is a **real directory**, not a symlink. Each of the
+  main checkout's entries is linked in individually — `.bin` as a whole
+  directory, and every other package as its own symlink.
+- Each scope (`@types`, `@worklog`, …) is a real directory holding one symlink
+  per scoped package.
+- For every workspace package the main checkout consumes by path
+  (`@worklog/shared` here), the farm link points at the **worktree's own**
+  package directory instead of the main checkout's.
+- The farm never descends into a dependency tree, never installs anything and
+  never writes through the farm. Migration from the old whole-directory symlink
+  is automatic; a real `node_modules` the helper did not create is preserved.
+
+**Refresh path.** `implement.py start <work-item-id>` is the sanctioned refresh:
+reconciliation is idempotent and there is no separate refresh subcommand. It is
+the only sanctioned alternative to `npm install` in a worktree, and the fix when
+the main checkout's dependency set changes.
+
+**Degradation.** A repository with no workspace package consumed by path keeps
+the previous whole-directory `node_modules` symlink.
+
+**Verification.** `implement.py start`'s JSON report carries
+`shared_resolution_ok: true` with a `shared_resolution` block (`expected_root`
+and `resolved_root` both equal `<worktree>/packages/shared`); `readlink -f
+node_modules/@worklog/shared` confirms the same from the shell.
 
 ### The stale-`dist` failure signature
 
-A `packages/shared` edit in the worktree — and a build run in the worktree,
-which writes `<worktree>/packages/shared/dist` — is **invisible** to every
-consumer of `@worklog/shared`: steps 2–5 above resolve the main checkout's
-package and the main checkout's build. The test therefore exercises code that
-does not contain the change, and goes red in a way that looks like a behaviour
-regression but is a resolution artefact. The canonical instance is the persist
-write-detection tests (`tests/unit/persist-write-detection.test.ts`,
-WL-0MVK6S4HM005GBCO): the change-detection spies are "never called" because
+**Before the farm shipped** (`SA-0MVMZBJGT00718ZO`), a `packages/shared` edit in
+the worktree — and a build run in the worktree, which wrote
+`<worktree>/packages/shared/dist` — was **invisible** to every consumer of
+`@worklog/shared`: the whole-directory `node_modules` symlink resolved the main
+checkout's package and the main checkout's build. The canonical instance is the
+persist write-detection tests (`tests/unit/persist-write-detection.test.ts`,
+WL-0MVK6S4HM005GBCO): the change-detection spies were "never called" because
 the CLI wrapper resolved a `dist/` built before the differential-persist change
 (WL-0MVM9E3SV003III0).
 
-- **Correct diagnosis:** the resolved `dist` is the main checkout's build.
-  Confirm it with the two commands above, then import the worktree source by
-  relative path in the test (what the persist tests do), or treat the red as
-  unattributable to your change rather than as a code regression.
+**Post-farm, the same symptom means a broken or stale farm.** "Worktree shared
+edits invisible to the gate" now only happens when the farm is missing, wrong
+or stale — visible as a `shared_resolution_ok: false` / `shared_resolution`
+report whose `resolved_root` is the main checkout (or `null`), or a
+`readlink -f node_modules/@worklog/shared` that lands outside the worktree. The
+fix is the **refresh step**: re-run `implement.py start <work-item-id>` to
+reconcile the farm, then rebuild (`npm run build`). `implement.py finish`
+hard-fails the shared-resolution check when the change set touches the shared
+source and the farm does not resolve it locally.
+
+- **Correct diagnosis:** check `shared_resolution_ok` / `readlink` first; a
+  broken or stale farm is fixed by the refresh step, never by weakening the
+  test. Once the farm resolves correctly, a red is a genuine behaviour finding.
 - **Wrong diagnosis:** weakening, skipping or "fixing" the test. A red caused
-  by stale build output says nothing about the assertion, so editing the test
-  removes the signal without the change ever being verified.
+  by a resolution artefact says nothing about the assertion, so editing the
+  test removes the signal without the change ever being verified.
 
 See [`wl-shared-dist-diagnostic.md`](./wl-shared-dist-diagnostic.md) for the
 `wl` startup preflight that names the same missing-`dist` state, and
 [`implement-worktree-node-modules-verification.md`](./implement-worktree-node-modules-verification.md)
-for the end-to-end verification of the `node_modules` symlink.
-
-### Current vs pending: there is no link farm yet
-
-Today a worktree resolves the **main checkout's** `packages/shared/dist`; no
-mechanism makes the worktree's own `packages/shared` the resolution target. The
-link-farm setup that will do so is tracked in SorraAgents
-`SA-0MVMZBJGT00718ZO` and has not shipped — do not look for a link-farm command,
-and do not hand-roll one. Until it lands, a `packages/shared` change is only
-testable by importing the worktree source directly.
+for the end-to-end verification of the worktree `node_modules` (pre-farm and
+farm eras).
 
 ### Constraints
 
 - **Never run `npm install` in a worktree.** `<worktree>/node_modules` is a
-  symlink to the main checkout's tree, so an install writes the dependency tree
-  every other tree on the host resolves. The live statement of the rule is in
+  fully managed link farm: an install would replace the farm with a divergent
+  real dependency tree (and, through the farm's main-checkout links, could
+  write the dependency tree every other tree on the host resolves). The
+  sanctioned refresh is `implement.py start <work-item-id>`. The live statement
+  of the rule is in
   [§1 Implementation worktrees](#1-implementation-worktrees-agent-side).
-- **Never write through `node_modules`.** `node_modules/@worklog/shared` is a
-  symlink into the main checkout's `packages/shared`, so a write through that
-  path edits the main checkout — not your worktree — and corrupts the package
-  every other session builds against. Same live statement:
+- **Never write through `node_modules`.** Non-workspace farm links point into
+  the main checkout's `node_modules`, so a write through them edits the main
+  checkout — not your worktree — and corrupts the dependency tree every other
+  session builds against. The `@worklog/shared` link points at the worktree's
+  own `packages/shared`, but edits still belong in the tracked source
+  (`packages/shared/src/…`), never through the farm. Same live statement:
   [§1 Implementation worktrees](#1-implementation-worktrees-agent-side).
 
 ## Guards that depend on isolation

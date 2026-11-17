@@ -180,10 +180,65 @@ export function parseJsonlLines(raw: string): Record<string, unknown>[] {
  * before the error is rethrown (and the target is left untouched). Throws on
  * I/O failure — callers must catch (fail-closed).
  *
+ * WRITER-SERIALISATION (WL-0MWI5ZA2D0081RDA): atomic replacement protects
+ * readers; the APPEND side is additionally serialised per `(cwd, file)` — a
+ * per-file promise chain of in-flight runs — so two concurrent writers of the
+ * same log can never interleave their read-modify-write snapshots and
+ * silently drop each other's record. The fail-closed contract is unchanged.
+ *
  * Exported for the sibling appenders only — deliberately not part of the
  * `downtime-log.js` public surface.
  */
-export async function appendRollingJsonl(
+export function appendRollingJsonl(
+  cwd: string,
+  file: string,
+  line: string,
+  rotate?: CoordinationLogPolicy,
+): Promise<void> {
+  return enqueueAppend(cwd, file, line, rotate);
+}
+
+/**
+ * Per-`(cwd, file)` chain of in-flight {@link appendRollingJsonl} runs, so
+ * concurrent appends to the SAME log file never interleave (WL-0MWI5ZA2D0081RDA).
+ * `appendRollingJsonl` is a whole-file read-modify-write (read current → plan →
+ * write full snapshot via temp-file + rename), so two overlapping appends can
+ * lose a record: the later-finishing write's `readFile` resolved against the
+ * pre-first-write snapshot and its `rename` then clobbers the other append's
+ * line. Within one leader tick the election append is fired-and-forgotten
+ * (`void appendCoordinationLogEntry`) immediately before the prune append is
+ * awaited (`logPrunedEntries`), so under parallel-vitest load the election
+ * append's earlier-issued `readFile` could resolve late and silently drop the
+ * awaited `operation: 'prune'` record the test (and the operator) relies on.
+ * The queue runs every append strictly in start order, so each read-modify-
+ * write observes the previous append's snapshot and no line is ever lost.
+ * A rejected append never blocks the next one. Per module instance (one per
+ * worker process under vitest isolation); the lock-file machinery already
+ * guards the coordination FILE — this serialises the log APPEND side.
+ */
+const appendQueues = new Map<string, Promise<void>>();
+
+function enqueueAppend(
+  cwd: string,
+  file: string,
+  line: string,
+  rotate?: CoordinationLogPolicy,
+): Promise<void> {
+  const key = `${cwd}\0${file}`;
+  const previous = appendQueues.get(key) ?? Promise.resolve();
+  const run = previous
+    .catch(() => undefined) // a failed append must not block the next one
+    .then(() => appendRollingJsonlUnlocked(cwd, file, line, rotate));
+  appendQueues.set(key, run);
+  const settle = () => {
+    if (appendQueues.get(key) === run) appendQueues.delete(key);
+  };
+  void run.then(settle, settle);
+  return run;
+}
+
+/** The read-modify-write append itself — see {@link appendRollingJsonl}. */
+async function appendRollingJsonlUnlocked(
   cwd: string,
   file: string,
   line: string,
@@ -201,64 +256,113 @@ export async function appendRollingJsonl(
     lines = []; // first entry or unreadable file → start fresh
   }
 
+  const plan = planRollingJsonl(lines, line, rotate);
+  await applyRollingPlan(dir, file, plan, async (target, contents) => {
+    await atomicWriteJsonl(dir, target, contents);
+  });
+}
+
+/** One file a rolling append writes, in application order. */
+export interface RollingJsonlWrite {
+  /** Suffix appended to the base file name (``'.1'`` for the newest sibling). */
+  suffix: string;
+  /** Complete replacement content for that file. */
+  lines: string[];
+}
+
+/**
+ * The abstract plan for one bounded rolling JSONL append — **pure**, no I/O.
+ *
+ * Splitting the policy decision (which sibling rotates where, which lines
+ * survive) from the write itself is what lets one policy serve two storage
+ * back-ends: the async `.worklog` appender below and the budget ledger's
+ * synchronous machine-dir appender
+ * (`host-dispatch-budget.audit.ts`, WL-0MWFJDGXQ001OXP8), so the retention
+ * bound can never drift between them.
+ *
+ * `shifts` lists the sibling renames to apply **first**, newest-index-last so
+ * `.1` ends up holding the previous current content; `writes` then lists the
+ * files to replace, rotated sibling before the current file, so the current
+ * path always ends up with a complete snapshot (never empty, never partial).
+ *
+ * The three regimes are exactly {@link appendRollingJsonl}'s documented ones:
+ *  - no policy ⇒ the legacy dispatch-log single-file bound
+ *    ({@link DOWNTIME_LOG_MAX_ENTRIES});
+ *  - `maxRotatedFiles === 0` ⇒ single-file trim at `maxEntries`;
+ *  - otherwise ⇒ size-based rotation with N kept. A pre-existing oversized
+ *    current file rotates wholesale on the next append, so nothing is
+ *    discarded.
+ *
+ * Pure and total: never throws, never touches the filesystem.
+ */
+export function planRollingJsonl(
+  lines: readonly string[],
+  line: string,
+  rotate?: CoordinationLogPolicy,
+): { shifts: number[]; writes: RollingJsonlWrite[] } {
+  const current = [...lines];
   if (rotate === undefined) {
     // Dispatch log: legacy single-file rolling bound (unchanged).
-    lines.push(line);
-    if (lines.length > DOWNTIME_LOG_MAX_ENTRIES) {
-      lines = lines.slice(lines.length - DOWNTIME_LOG_MAX_ENTRIES);
-    }
-    await atomicWriteJsonl(dir, file, lines);
-    return;
+    current.push(line);
+    const trimmed =
+      current.length > DOWNTIME_LOG_MAX_ENTRIES
+        ? current.slice(current.length - DOWNTIME_LOG_MAX_ENTRIES)
+        : current;
+    return { shifts: [], writes: [{ suffix: '', lines: trimmed }] };
   }
 
   if (rotate.maxRotatedFiles === 0) {
     // Rotation disabled: single-file trim at the configured per-file cap.
-    lines.push(line);
-    if (lines.length > rotate.maxEntries) {
-      lines = lines.slice(lines.length - rotate.maxEntries);
-    }
-    await atomicWriteJsonl(dir, file, lines);
-    return;
+    current.push(line);
+    const trimmed =
+      current.length > rotate.maxEntries
+        ? current.slice(current.length - rotate.maxEntries)
+        : current;
+    return { shifts: [], writes: [{ suffix: '', lines: trimmed }] };
   }
 
-  if (lines.length >= rotate.maxEntries) {
+  if (current.length >= rotate.maxEntries) {
     // Current file is full: rotate it aside BEFORE appending, so the entry
     // that triggers the rotation is never lost (AC4).
-    await rotateCoordinationFile(dir, file, rotate, lines);
-    await atomicWriteJsonl(dir, file, [line]);
-  } else {
-    lines.push(line);
-    await atomicWriteJsonl(dir, file, lines);
+    const shifts: number[] = [];
+    for (let k = rotate.maxRotatedFiles - 1; k >= 1; k--) shifts.push(k);
+    return {
+      shifts,
+      writes: [
+        { suffix: '.1', lines: current },
+        { suffix: '', lines: [line] },
+      ],
+    };
   }
+
+  current.push(line);
+  return { shifts: [], writes: [{ suffix: '', lines: current }] };
 }
 
 /**
- * Rotate the full current coordination-log content to `.1`, shifting the
- * existing siblings down so `.1` is always the NEWEST rotated file and the
- * oldest beyond `policy.maxRotatedFiles` is dropped. Every shift uses
- * `rename(2)` (atomic, overwrites the destination); `.1` is written with an
- * atomic tmp+rename so the current file is only ever replaced afterwards by
- * the caller (no empty/partial current snapshot). Best-effort: a missing
- * sibling at a level is simply skipped. Throws on I/O failure — callers must
- * catch (fail-closed).
+ * Apply a {@link planRollingJsonl} plan through a caller-supplied writer.
+ *
+ * The shifts run first (skipping a missing sibling at a level — the early
+ * rotation case), then the writes in plan order. Exported so a synchronous
+ * back-end (the budget audit trail) reuses the identical write ORDER; only
+ * the write primitive differs.
  */
-async function rotateCoordinationFile(
+export async function applyRollingPlan(
   dir: string,
   file: string,
-  policy: CoordinationLogPolicy,
-  currentLines: string[],
+  plan: { shifts: number[]; writes: RollingJsonlWrite[] },
+  write: (target: string, lines: string[]) => Promise<void>,
 ): Promise<void> {
-  // Shift `.k` → `.k+1` for the retained siblings, oldest first: the last
-  // shift overwrites (drops) the sibling beyond `maxRotatedFiles`.
-  for (let k = policy.maxRotatedFiles - 1; k >= 1; k--) {
+  for (const k of plan.shifts) {
     try {
       await rename(join(dir, `${file}.${k}`), join(dir, `${file}.${k + 1}`));
     } catch {
       // ENOENT: no sibling at this level yet (early rotations) — nothing to shift.
     }
   }
-  // The full old current content lands in `.1` (newest rotated file).
-  await atomicWriteJsonl(dir, `${file}.1`, currentLines);
+  for (const writePlan of plan.writes) {
+    await write(`${file}${writePlan.suffix}`, writePlan.lines);
+  }
 }
 
 /**

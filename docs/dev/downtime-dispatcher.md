@@ -42,11 +42,13 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.dispatch-contract.ts` | The dispatch pipeline's dependency boundary + event/outcome types | `DowntimeDispatchEvent`, `DowntimeErrorEvent`, … |
 | `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
 | `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
-| `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (provisional path, sibling proxy item `LP-0MW95FYMH006XYNK`) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON`, `AUDIT_BUDGET_UNKNOWN_REASON` |
+| `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (shipped path + numeric `0`/`1` verdict, sibling proxy item `LP-0MW95FYMH006XYNK`) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON`, `AUDIT_BUDGET_UNKNOWN_REASON` |
 | `downtime-worker.audit-availability.ts` | The fail-closed audit-availability `GET` client — one bounded call, one typed outcome; consumed by the audit pre-check and admission (WL-0MWAMSDNW000SL0E) | `createAuditAvailabilityClient` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
-| `downtime-worker.coordination.ts` | The coordination OFFER computation (one item per instance per check-in) | `computeMostImportantItem`, `coordinationTierRank` |
-| `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
+| `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
+| `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch (per-offer iteration), own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
+| `downtime-worker.offer-selection.ts` | The leader's drain-aware tie-break over one entry's ADMISSIBLE offers (pure ordering arithmetic — never a gate, never a cross-root ranking) | `entryOffers`, `drainAwareRank`, `orderAdmissibleOffers` |
+| `downtime-worker.terminal-reason.ts` | The neutral terminal-reason precedence chain for a tick that dispatched nothing | `resolveTerminalOutcome` |
 | `downtime-worker.head-scan.ts` | Bounded head/extension candidate scan over ONE root, plus the registered-root sweep that applies it per root in round-robin order | `dispatchFromOwnHead`, `dispatchFromRegisteredRoots` |
 | `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
 | `downtime-worker.launch-fence.ts` | One-per-idle-window launch fence (closes the stale-status launch window) | `createIdleWindowLaunchFence` |
@@ -135,6 +137,128 @@ No `wl next`/database scoring change is required; the observable contract is
 `browseItemCount`** limit (clamped 1–50) as its *initial* window — see
 *Whole-backlog dispatch window* below.
 
+### Per-bucket nominees from one head read (parent WL-0MWDDHQON0015T3P AC2/AC3)
+
+A root that offers only ONE item can hide its whole backlog behind a single
+refused offer (observed 2026-11-12: ContextHub offered an implement head while
+the machine-wide implement cap was full, and its 5 `idea` / 4 `intake_complete`
+/ 5 `plan_complete` candidates were never visible to any leader).
+`computeMostImportantItem` therefore returns the single offer **and** a
+`nominees` array — at most one nominee per dispatch bucket:
+
+| bucket | classifier kinds |
+|---|---|
+| `implement` | `implement` |
+| `audit` | `audit` |
+| `prep` | `plan`, `intake`, `risk-effort` |
+
+Contract:
+
+- **Buckets, not a second ranking.** Each nominee is the canonical FIRST
+  offerable item of its bucket in the same window order the single-offer path
+  uses; no priority/age/scoring logic is added and `classifyItemForDispatch`
+  stays the single classifier (no bucket logic lives in it).
+- **One head read.** All three nominees are partitioned from the SAME single
+  `getHerdrListHead(cwd, sprintWindow)` read — no per-bucket `wl` list spawn.
+- **Filters preserved per bucket.** The same sequential filter chain the
+  single-offer path applies (classifier gates, dispatched marker, attempt
+  budget, non-terminal cooldown, code-freeze split, in-flight guard,
+  review-queue hold) decides each bucket's nominee, in one pass over the
+  window. The pass stops as soon as both the single offer and every bucket are
+  resolved, so filter side effects never extend past the window-first offerable
+  item.
+- **Nothing is widened to fill a bucket.** A bucket with no offerable item in
+  the window nominates nothing (the window is never extended per bucket), and
+  the stall-scan short-circuit plus the `{ok:false}` fail-open contract are
+  unchanged.
+- **Escalation and extension paths keep the single offer.** A critical item
+  escalated ahead of the window walk, and an offer found only by the
+  whole-backlog extension (see *Whole-backlog dispatch window* below), return
+  `nominees: []`; the check-in then writes a single-offer `offers` payload,
+  exactly the pre-tier-aware entry.
+
+The check-in writes the nominees as the v2 `offers` array (canonical bucket
+order `implement` → `audit` → `prep`) with `workItemId` mirroring the first
+offer, so a v1-era leader keeps reading exactly one offer.
+
+### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
+
+The leader keeps ONE entry per instance and iterates the offers **inside** it:
+
+- **The filter chain is unchanged, applied per offer.** `fetchItem` re-fetch →
+  `classifyItemForDispatch` → attempt budget → non-terminal cooldown →
+  per-root code freeze → host-CPU gate → audit slot minimum/pin →
+  review-queue hold → in-flight (critical) → host-budget admission → CAS
+  claim. No gate is duplicated, relaxed or reordered; a gate that refuses one
+  offer never refuses its siblings (`classifyItemForDispatch` remains the
+  single classifier — the offer's declared bucket is never a gate verdict).
+  Rejection attribution (`offerRejections`) is per **offer**, not per
+  instance.
+- **Drain-aware tie-break among the admissible offers of one entry.**
+  `audit` while that root's completed/in_review queue is at/over
+  `browseItemCount` (drain it) → `prep` (plan/intake/risk-effort — keep
+  implement fed) → `implement`. A fixed implement-first ladder is explicitly
+  **not** implemented: it is the same starvation pattern
+  (`WL-0MW9X7EJ6009EL6E`) the review-queue gate exists to prevent. The
+  tie-break is a dispatch ORDER, never a gate, and it never crosses roots —
+  `selectLeastRecentlyServed` still owns root order, so offering more buckets
+  gains no root-level share.
+- **Remove only what dispatched.** A successful dispatch removes just that
+  offer (`removeOffer`): the entry keeps its remaining nominees and its
+  `lastUpdated`, so the next tick can dispatch the next tier without waiting
+  for the owner's check-in. An entry whose last offer dispatched is removed
+  exactly as before. A v1 entry (no `offers` payload) is its single
+  `workItemId` offer — dispatched unchanged, and dropped whole when it is
+  stale or dispatched.
+- **Rejections ride with the decision they explain.** A dispatched outcome
+  carries the rejections of offers from THAT entry only; a peer entry's
+  refusal never pollutes it (`WL-0MWDDHVF2004PTYX` AC7).
+
+The motivating regression: with the machine-wide implement budget at 2/2 and
+an implement head offered, the entry's `prep` nominee now dispatches on the
+same tick, and the tick never ends `no-candidate`.
+
+#### Cost of validating every offer (parent AC10)
+
+The v2 protocol adds **one `fetchItem` per offered item per tick** — up to
+**3× the pre-v2 single-offer cost** per instance (one per bucket, at most three
+buckets). The fetch is the *only* added per-tick cost: refusals are cheap
+(classify only) and no bucket adds a list spawn. The fetch walk is bounded by
+the entry's offer count, so a tick validates at most `instances × 3` offers
+rather than `instances × 1`.
+
+**Measured at 7 instances** (`bench/leader-tick-cost.ts`, child
+WL-0MWDVN3N1004MBA9): 21 `fetchItem` calls per tick (baseline 7 → **3.0×**),
+with the per-fetch latency taken from a live `wl show` median (190–275 ms on
+the reference host, depending on load):
+
+| Scenario | `fetchItem` calls | Tick duration |
+|---|---|---|
+| Baseline (1 offer/instance) | 7 | ≈ 1.3–1.9 s |
+| Full v2 (3 offers/instance), simulated fetch latency | 21 | ≈ 4.0–5.8 s |
+| Full v2, logic only (0 ms fetch) | 21 | ≈ 4–5 ms |
+
+The tick scales linearly with the per-fetch latency, so the dispatcher
+poll-interval **floor of 10 s** (`DOWNTIME_POLL_INTERVAL_FLOOR_MS`) is reached at
+≈ **476 ms per `fetchItem`** (10 s / 21). The measured per-fetch median
+(190–275 ms) is **1.7–2.5× below that break-even**, leaving ≈ 4–6 s (40–60 %)
+of headroom. The tick therefore stays **within the poll interval** at 7
+instances, and no revision of the bucket count or validation order is needed
+**at this fleet size**. AC10's merge gate (a tick that exceeds the poll
+interval forces a bucket/order revision before merge) is not triggered; re-run
+the benchmark on a larger fleet or a slower host before raising the bucket
+bound. Re-run with:
+
+```bash
+npm run benchmark:leader-tick-cost -- --instances 7 --offers 3 --json
+```
+
+The benchmark drives the production `dispatchFromCoordination` entry point
+with a stub `fetchItem` (so it never touches a live coordination file or
+ledger), pins latency from a measured `wl show`, and reports `fetchCalls`,
+`fetchMultiplier`, `logicOnly.tickMs`, `full.tickMs`, `headroomMs`,
+`breakEvenFetchLatencyMs` and `withinPollInterval` as JSON for the AC10 record.
+
 ### Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH)
 
 > **Supersedes the sprint-view-only restriction of WL-0MUNS8X97007C9H9.** That
@@ -180,7 +304,7 @@ annexed extension is the same ranking with more items included.
 
 **Every budget and safety gate still applies** to out-of-window candidates,
 unchanged and as sequential filters: the host dispatch budget (the
-proxy-owned audit budget / `GET {proxyUrl}/llama/local/audit/status` for the
+proxy-owned audit budget / `GET {proxyUrl}/llama/local/audit/availability` for the
 audit tier; `maxImplement` / the legacy `maxAudit` for the implement/legacy
 paths), the per-item/per-kind attempt budget, free-slot minimums, the
 code-freeze split-by-skill, the host-CPU gate, the review-queue depth hold,
@@ -302,12 +426,15 @@ cross-root fairness is owned by the `selectLeastRecentlyServed` round-robin
 cursor. The fallback and both of its step-downs stay wired and tested for the
 no-dispatchable-offer case.
 
-**Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
-entry per instance — an **offer** of that instance's own Herdr list head (computed at the
-owner's check-in by `computeMostImportantItem`, which walks the same Herdr sequence with the
-same filters). The leader dispatches offers in **file order** and re-validates each offer at
-dispatch time (`fetchItem` + `classifyItemForDispatch` as sequential filters, no wall-clock
-prune). The cross-root **tier priority** (audit → critical → implement → plan → intake), the
+**Coordination leader (F3, WL-0MTK1ILM2009QYB2; per-offer iteration by F3+,
+WL-0MWDVN2HN004CQ1O):** the shared coordination file holds ONE entry per
+instance — each entry advertises that instance's own Herdr list head at its
+check-in (`computeMostImportantItem`, which walks the same Herdr sequence with
+the same filters) as up to one nominee per dispatch bucket. The leader
+dispatches ENTRIES in **file order**, iterating the offers inside each entry
+(see *Leader: iterating an entry's offers* above), and re-validates each offer
+at dispatch time (`fetchItem` + `classifyItemForDispatch` as sequential
+filters, no wall-clock prune). The cross-root **tier priority** (audit → critical → implement → plan → intake), the
 **global critical override** and the per-`worklogRoot` **round-robin cursor ordering** are
 **retired** from the leader dispatch path — they were a second ranking and are removed by
 WL-0MTK1ILM2009QYB2 AC1–2. Per-root "critical first" is preserved *by construction*: the
@@ -315,6 +442,18 @@ Herdr list (smart-selection) orders critical items first, so a root's critical h
 its check-in offers. The retired cursor helpers (`sortEntriesByRoundRobin`,
 `advanceRoundRobinCursor`, `COORDINATION_TIER_ORDER`, `coordinationTierRank`) remain
 exported for the module tests only — nothing on the dispatch path calls them.
+
+**This is a deliberate, scoped reversal of WL-0MTK1ILM2009QYB2's single-offer
+contract (parent WL-0MWDDHQON0015T3P).** The tier-aware offers change **what**
+an entry advertises (up to one nominee per bucket instead of one head) and
+**how** the leader walks it (per-offer instead of per-entry). They do **not**
+reintroduce the retired cross-root tier priority: the
+`COORDINATION_TIER_ORDER` retirement stands, the bucket of an offer is a
+*labelling* of the canonical first item of that bucket (never a new ranking),
+and every gate is still the unmodified sequential filter chain applied per
+offer. The drain-aware tie-break among one entry's *admissible* offers (see
+*Leader: iterating an entry's offers*) is a dispatch **order inside an entry**,
+not a re-ranking of roots — `selectLeastRecentlyServed` still owns root order.
 
 **Agreement sampling (F2):** `npm run sample:downtime-agreement [<worklog-root>]`
 (`scripts/downtime-agreement-sample.ts`) proves the contract on a live worklog root: it
@@ -418,14 +557,15 @@ its own backlog, so it must not step down (stepping down on every sweep would
 flap the machine-wide election). The own-backlog hand-off and the empty-leader
 step-down are unchanged.
 
-**Composition summary.**
-
-| Order | Source | Scope |
-|---|---|---|
-| 1 | Scheduled prompts | a due prompt dispatches immediately |
-| 2 | Offer list (`downtime-coordination.json`) | live peer offers, file order |
-| 3 | **Registered roots (`downtimeWorklogRoots`)** | **round-robin sweep, per-root gates** |
-| 4 | Own backlog (`opts.cwd`) | bounded extension, own root only, then hand off |
+**Composition.** The full candidate-universe order and the per-rung scope are
+stated once, in the canonical composition block under
+[*Which cross-root mechanism applies when*](#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots)
+— this section owns the sweep rung only. What matters for the registry: the
+sweep runs only when the offer list yielded nothing dispatchable, it runs
+*before* the leader's own out-of-view backlog (AC4), and the v2 offer change
+never moves it (the offer-list rung is the only changed rung — still between
+scheduled prompts and the sweep, still walking entries in file order, with the
+change *within* an entry).
 
 **Liveness-aware peer predicate (AC7).** Independent of the registry, the
 `no-candidate` pause-arm/cancel predicate `hasPeerOffer`
@@ -446,6 +586,136 @@ that is precisely the bug it fixes. Note that the whole-backlog window
 (WL-0MW9XS0XR007K1TH) now lets any path reach deep work; the sweep's distinctive
 job is *cross-root reach* into roots that have no running instance to offer
 work.
+
+## Which cross-root mechanism applies when: offers, passive instances, or downtimeWorklogRoots
+
+Three mechanisms make work in another worklog root reachable to the fleet
+leader, and their boundaries are easy to blur: per-tier **offers** written by
+participating instances, **passive (offer-only)** instances that check in but
+never dispatch, and the operator-maintained **`downtimeWorklogRoots`
+registry**. This section is the operator's single entry point: which mechanism
+fits which situation, what each one costs, and what each one **cannot** do.
+
+### The candidate universe (canonical composition order)
+
+> **Single canonical block.** The composition order below is stated **exactly
+> once**, here. *Whole-backlog dispatch window*, *Registered-root discovery*,
+> *Leader-only dispatch* (step 3) and the herdr README link here instead of
+> restating it. The feature subsections above still own the per-rung
+> mechanics — this block only fixes the order and the boundaries between rungs.
+
+Every dispatch tick walks one candidate universe, in this order, and stops at
+the first candidate that dispatches:
+
+| Order | Source | Scope |
+|---|---|---|
+| 1 | Scheduled prompts | a due prompt dispatches immediately |
+| 2 | Offer list (`downtime-coordination.json`) | live peer entries in file order, **offers iterated inside each entry** (v2: up to one nominee per bucket, drain-aware tie-break among admissible offers, remove only the dispatched offer) |
+| 3 | **Registered roots (`downtimeWorklogRoots`)** | **round-robin sweep, per-root gates** — only when the offer list yielded nothing dispatchable |
+| 4 | Own backlog (`opts.cwd`) | bounded extension, own root only, then hand off |
+
+The offer-list rung is the only changed rung under v2: it still runs after
+scheduled prompts and before the registered-root sweep, and it still walks
+entries in file order — the change is *within* an entry (per-offer validation
+and dispatch instead of one offer per entry), so the outer composition order,
+the root-level round-robin and every downstream gate are untouched. The sweep
+runs only when the offer rung yielded nothing dispatchable, and it runs
+*before* the leader's own out-of-view backlog, so a busy leader root can never
+starve a registered root (parent WL-0MVR8GDJ3008WY3Y AC4).
+
+### Choosing a mechanism: the three-situation decision table
+
+| Your situation | Recommended | Why |
+|---|---|---|
+| The root has an **active dispatching instance** | **Offer — do nothing** | The instance already advertises its own whole ranked backlog at every check-in (up to one nominee per bucket under v2). Registering it in `downtimeWorklogRoots` would be a redundant second path into the same root, and `downtimeOfferOnly` is meaningless for an instance whose dispatch is enabled. |
+| The root has an instance with **dispatch disabled** (`downtimeEnabled: false` or a live `d` disable marker) | **Enable `downtimeOfferOnly`** (recommended), or register the root | A dispatch-disabled instance offers **nothing** unless `downtimeOfferOnly` is on — the enabled/disable gate returns before the check-in, so its backlog is invisible to the fleet. `downtimeOfferOnly` lets the instance publish that backlog by doing the check-in only, at zero registry maintenance cost. The registry is the fallback when the instance's settings cannot be changed (see [Offer-only mode](#offer-only-mode-downtimeofferonly---wl-0mwddhok6009gjcc)). |
+| The root has **no herdr instance at all** | **Register it in `downtimeWorklogRoots`** — the only option | A root with no running instance writes no coordination entry, so only the leader's sweep can reach it. Neither offers nor `downtimeOfferOnly` can help — there is no instance to check in. |
+
+### What each mechanism cannot do
+
+- **A passive instance still cannot dispatch, claim, reserve or lead.**
+  `downtimeOfferOnly` routes the tick through the check-in only
+  (`runOfferOnlyCheckIn`); the instance never polls the llama proxy, takes the
+  leader lease, runs a CAS claim, writes a dispatch marker, reserves capacity
+  or spawns a pane — the gate routes these ticks before the election/poll/
+  dispatch phases are reachable (fail closed in code, WL-0MWDDHOK6009GJCC
+  AC3). It also never renews the lease it may already hold — the transient
+  quiescence after a mode switch is inherent to "must not lead".
+- **A registry entry does not make a root's instance participate or lead.**
+  The sweep is leader-side only: registering a root makes the *leader* read
+  that root's ranked head through `dispatchFromOwnHead`; it never starts an
+  instance in the root, never lets that root's (absent) instance offer, claim,
+  reserve or lead, and a swept dispatch deliberately never hands off
+  leadership.
+- **Neither can admit work past a host budget, code freeze or review-queue
+  hold.** Offers, offer-only check-ins and swept candidates all pass the same
+  full sequential filter chain (classify → dispatched marker → attempt budget
+  → non-terminal cooldown → per-root code freeze → host-CPU gate → audit slot
+  minimum → in-flight guard → review-queue hold → CAS claim), evaluated
+  against the candidate's **own root's** state. A mechanism only changes *how a
+  root enters the candidate universe* — never what happens to a candidate
+  once it is there.
+
+### How each path fails
+
+- **Offers — stale peer.** An entry whose owner stopped checking in is no
+  longer treated as a live peer after **24 h** (`hasPeerOffer`, with
+  `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` in `packages/herdr/src/coordination.ts`).
+  The entry file is never pruned (expiry is a deliberate no-op), but the
+  no-candidate pause/arm predicate ignores stale entries, making the leader
+  *more* willing to sweep/probe, never less.
+- **Offers — undispatchable or refused.** A v2 offer that fails dispatch-time
+  re-validation is **removed eagerly without a pane or dispatched marker** and
+  the walk continues to the next offer (v1 entries were dropped whole). A
+  refused per-tier nominee no longer hides the rest of that root's backlog:
+  the entry keeps its remaining nominees and its `lastUpdated`, so the next
+  tick can dispatch the next tier without waiting for the owner's check-in
+  (parent WL-0MWDDHQON0015T3P AC4–AC8).
+- **Registry — bad entry.** An invalid/unreadable registry entry is dropped
+  **on its own** — it never invalidates a good neighbour, never crashes
+  settings load, and never ends the sweep (the next root is tried).
+- **Registry — empty.** An absent, empty or wholly unresolvable registry is a
+  **byte-for-byte no-op**: the candidate universe stays `offers ∪
+  ownBacklog(opts.cwd)` and `dispatchFromRegisteredRoots` returns immediately
+  with no cursor read/write and no extra `wl` spawn.
+
+### Registry operations (`downtimeWorklogRoots`)
+
+- **Value shape.** Each entry is a worklog **root** — the parent of
+  `.worklog/`, matching `worklogRoot`/`opts.cwd` semantics — and must be an
+  **absolute path** that realpath-resolves to a directory containing
+  `.worklog/worklog.db`; the stored value is that realpath, so a symlinked
+  root can never dispatch into an unexpected workspace
+  (`resolveDowntimeWorklogRoots`). A relative, non-string, blank or duplicated
+  entry is dropped; duplicates collapse first-seen.
+- **Cap.** The list is bounded by `MAX_DOWNTIME_WORKLOG_ROOTS = 32`
+  (`packages/herdr/src/downtime-worker.clamps.ts`), applied **after**
+  filtering so junk never consumes a slot.
+- **Refresh.** The registry is re-read **every tick** (`loadSettings`),
+  so edits apply without a plugin restart.
+- **Per-entry fail-open.** Validation is per entry: an invalid/unreadable
+  root is dropped on its own and never invalidates a good neighbour, and never
+  crashes settings load.
+- **Empty registry is a no-op.** See *How each path fails* above.
+
+The validator (`resolveDowntimeWorklogRoots`) and the sweep
+(`dispatchFromRegisteredRoots`) are the two reference points for this contract.
+
+### Why this exists: the 2026-11-12 head-of-line blocking
+
+The dispatcher gained this section because *which* mechanism applies to a root
+was not just a documentation question — choosing wrong had a concrete failure
+signature. On 2026-11-12, ContextHub offered its implement head from a v1
+single-offer entry while the machine-wide implement budget was at its **2/2
+cap**: the offered head was budget-refused, and because a v1 entry carried
+only ONE item, the rest of that root's backlog stayed invisible — **9
+prep-tier (`idea`/`intake_complete`) and 5 `plan_complete` candidates were
+unreachable** to any leader, across multiple ticks. A refused offer head
+hid the rest of a root's backlog. The v2 per-bucket nominees
+(WL-0MWDDHQON0015T3P) fix exactly that: one nominee per bucket, so a
+budget-refused implement head no longer hides the root's prep-tier candidates.
+If a future change ever reintroduces head-of-line blocking — a single refused
+offer hiding a whole root — this is the regression signature to recognise.
 
 ## Architecture
 
@@ -494,18 +764,42 @@ work.
 ### Shared coordination file (machine-wide)
 
 `~/.herdr/downtime/downtime-coordination.json` (or `HERDR_COORDINATION_DIR`,
-WL-0MTF0KLO10043YAN) stores one offer per herdr instance — `directory` + `worklogRoot`
-(the worklog root the item belongs to, so the single leader dispatches across roots),
-and no offer at all for an instance whose window is empty:
+WL-0MTF0KLO10043YAN) stores one entry per herdr instance — `directory` +
+`worklogRoot` (the worklog root the items belong to, so the single leader
+dispatches across roots) plus a bounded `offers` array — and no entry at all for
+an instance whose window is empty. Since **schema v2** (parent
+WL-0MWDDHQON0015T3P AC1) each entry advertises at most one nominee per dispatch
+bucket (`implement` / `audit` / `prep`), so at most three offers per entry;
+`workItemId` mirrors the FIRST offer for backward compatibility:
 
 ```json
-{"version":1,"entries":[
+{"version":2,"entries":[
   {"instanceId":"<uuid>","workItemId":"<wl-id>","directory":"<worklog-root>","worklogRoot":"<worklog-root>",
-   "assignedAt":"<iso>","lastUpdated":"<iso>"}
+   "assignedAt":"<iso>","lastUpdated":"<iso>",
+   "offers":[
+     {"kind":"implement","workItemId":"<wl-id>"},
+     {"kind":"audit",     "workItemId":"<wl-id>"},
+     {"kind":"prep",      "workItemId":"<wl-id>"}
+   ]}
 ],
  "leader":{"instanceId":"<uuid>","worklogRoot":"<worklog-root>",
            "lastDecisionReason":"slots-unavailable","lastDecisionAt":"<iso>","lastUpdated":"<iso>"}}
 ```
+
+- **Bounded by bucket, not by count.** At most one nominee per bucket and at
+  most three total; a duplicate `(kind, workItemId)` pair collapses. `prep`
+  is the union of the classifier's `plan`, `intake` and `risk-effort` kinds —
+  the bucket of a nominee never changes which gate applies (the classifier
+  remains the single gate verdict).
+- **Migration note (v1 → v2).** A v1 file (single top-level `workItemId`, no
+  `offers`) is **read** as a one-offer entry, with its kind derived by the
+  classifier at dispatch time, and is **rewritten as v2 on the next
+  check-in**. No v1 file is ever dropped by the upgrade; an old leader reading
+  a v2 entry sees the first `workItemId` offer and ignores the rest (parent
+  AC9, both directions compatible).
+- **No schema-level change elsewhere.** The file still holds ONE entry per
+  instance, one lock and one atomic tmp+rename write (the v2 payload is
+  nested, so `instanceId`-keyed lease/liveness logic is untouched).
 
 **The leader block (WL-0MW1VINII003IL7R).** The `entries` array is an OFFER list,
 and a check-in removes the instance's own entry whenever its window is empty
@@ -545,9 +839,12 @@ files are orphaned and ignored, so the leader never double-dispatches from legac
 data and a stale legacy file can never resurrect an offer.
 
 The machine file does **not** carry "exactly one entry per instance": `entries`
-is an OFFER list, so an `instanceId` holds **at most one** offer (upsert, never a
-duplicate) and **no** entry at all while its window is empty or its offer was just
-dispatched — the top-level `leader` block, not an entry, is what records the lease
+is an OFFER list, so an `instanceId` holds **at most one entry** (upsert, never a
+duplicate) — and that entry carries a bounded `offers` array (at most one
+nominee per bucket, at most three) — or **no** entry at all while its window is
+empty. Since v2 a dispatched offer no longer drops the whole entry: the entry
+keeps its remaining nominees until every offer is consumed, and only then is it
+removed, so the top-level `leader` block, not an entry, is what records the lease
 holder's liveness. Unreadable/missing machine files degrade to "no dispatch this
 cycle" (fail-safe).
 
@@ -556,10 +853,12 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
 1. **Check-in** — every instance reads the file on startup; leaders re-offer every ~4 minutes
    (`DEFAULT_LEADER_CHECK_IN_MS = 4 min`) and followers every 5 minutes
    (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H — was 30 min, clamped ≥ 60 s),
-   recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
+   recomputing their worklog's **most-important item** and its **per-bucket nominees**
+   (see *Per-bucket nominees from one head read*) and upserting the v2 `offers` payload
+   (or removing their own entry via `removeEntry` on a genuinely empty backlog / `wl` error fail-open — entry retained). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
    also checks in on the follower cadence (WL-0MWDDHOK6009GJCC — see *Offer-only mode*
-   below), so a passive root still contributes an offer to the leader. When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
-2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**. A non-dispatchable entry (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via `removeEntry` **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the tier loop **continues to the next entry**. Entries do **not** expire by wall-clock age.
+   below), so a passive root still contributes an offer to the leader. When the leader removes an entry's last offer on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
+2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**, for **each offer** of an entry. A non-dispatchable offer (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via **`removeOffer`** — only that offer, never its entry's siblings — **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the offer loop **continues to the next offer**. An entry whose last offer is removed is dropped whole, exactly as before. Entries do **not** expire by wall-clock age.
 3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
 ### Leader-only dispatch
@@ -578,15 +877,18 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    Each entry is eligibility re-checked at dispatch time; stale entries are
    dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
    opens the first passing offer dispatches in the entry's `worklogRoot`. If
-   **no** offer passes, the leader first sweeps the registered worklog roots
-   (`downtimeWorklogRoots`) in round-robin order through the same ranking and
-   the same sequential gates (see *Registered-root discovery* above). If that
-   sweep finds nothing dispatchable, it then performs one bounded own-backlog
-   fallback against its **own** root (`opts.cwd`) and, on a successful fallback
-   dispatch, voluntarily steps down via `releaseLeadership()` so another
-   instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog fallback &
-   leadership hand-off* above).
-4. The dispatched entry is **removed** from the coordination file. The
+   **no** offer passes, the leader continues down the remaining rungs of the
+   canonical candidate universe in the single order stated in
+   [*Which cross-root mechanism applies when*](#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots).
+   The sweep runs in round-robin order through the same ranking and the same
+   sequential gates (see *Registered-root discovery* above); a successful
+   own-backlog fallback dispatches against the leader's **own** root
+   (`opts.cwd`) and voluntarily steps down via `releaseLeadership()` so
+   another instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog
+   fallback & leadership hand-off* above).
+4. The dispatched **offer** is **removed** from the coordination file
+   (`removeOffer`); its entry stays while it still has nominees, and is removed
+   once the last offer has dispatched. The
    existing dispatched-marker exclusion and CAS claim mechanisms are
    preserved unchanged.
 5. **Non-leaders** skip proxy polling and dispatch entirely — they only
@@ -879,7 +1181,7 @@ unchanged) and the pane-arg/env forwarding;
 `tests/herdr/send-to-pi.test.ts` pins `--reservation-ticket` →
 `PI_LOCAL_RESERVATION_TICKET` in the pane process.
 
-### Proxy audit availability (provisional wire contract, parent WL-0MW95GBEG005ERHS, child WL-0MWAMS1PW000O3OS)
+### Proxy audit availability (shipped wire contract, parent WL-0MW95GBEG005ERHS, child WL-0MWAMS1PW000O3OS)
 
 **Why.** The audit tier used to assert a **per-host** `budget.json` cap
 (`maxAudit`, default `1`). The resource an audit actually contends for is the
@@ -892,30 +1194,39 @@ contract, exactly as the reserve-handshake slice C1 pinned its shape
 (`downtime-worker.local-reservation.ts`); the admission mapping built on it is
 in *Proxy-derived audit admission* below.
 
-**The proxy side is sibling llm item `LP-0MW95FYMH006XYNK` and has not
-shipped.** Probed **2026-11-10** against the live proxy
-(`http://192.168.0.199:8000`): `/openapi.json` lists only
-`/llama/local/status` and `/llama/local/reserve`, and `/llama/local/audit`,
-`/llama/local/budget` and `/llama/local/audit/status` all answer **`404`**.
-The contract is therefore **provisional**; the final path is one constant
-(`AUDIT_AVAILABILITY_PATH`) and a field rename on either side is a one-line
-change because the parser reads documented aliases.
+**The proxy side is sibling llm item `LP-0MW95FYMH006XYNK` and has
+SHIPPED.** Validated **2026-11-13** against the live proxy
+(`http://192.168.0.199:8000`): `/openapi.json` lists exactly
+`/llama/local/audit/availability`, `/llama/local/audit/lease`,
+`/llama/local/audit/lease/renew` and `/llama/local/audit/lease/{session_id}`.
+`GET /llama/local/audit/availability` answers `200`; there is **no**
+`/llama/local/audit/status` (it answers `404`). The path is one constant
+(`AUDIT_AVAILABILITY_PATH`, default `/llama/local/audit/availability`) with a
+documented `HERDR_AUDIT_AVAILABILITY_PATH` override, and a field rename on
+either side is a one-line change because the parser reads documented aliases.
+**Availability-only admission is a pre-check, not a reservation** — see the
+lease-scope note below.
 
-**Provisional wire contract** (`packages/herdr/src/downtime-worker.audit-availability.contract.ts`):
+**Shipped wire contract** (`packages/herdr/src/downtime-worker.audit-availability.contract.ts`):
 
 ```
-GET {proxyUrl}/llama/local/audit/status
+GET {proxyUrl}/llama/local/audit/availability
 
-200 -> { "cap": <n>, "live": <n>, "available": <bool>,
+200 -> { "cap": <n>, "live": <n>, "available": <0|1>,
          "leases": [ { "id": "<id>", "expires_at": <epoch ms> } ],
-         "reclaimed": <n>, "reason": "<open vocabulary>" }
+         "reclaimed": <n>, "reason": "<open vocabulary>",
+         "max_audits": <n> }   // additive, ignored
 ```
+
+The captured shipped payload (2026-11-13) is
+`{"cap":1,"live":0,"available":1,"leases":[],"max_audits":1}`: the
+`available` verdict is the NUMBER `0`/`1`, not a boolean.
 
 | Field | Aliases read | Rule |
 |---|---|---|
 | audit cap | `cap`, `max`, `max_audit` | finite, `>= 0` |
 | live leases | `live`, `in_flight`, `live_leases` | finite, `>= 0` |
-| availability verdict | `available`, `can_admit` | must be a real boolean — **never derived** from cap/live |
+| availability verdict | `available`, `can_admit` | a real boolean OR the shipped numeric `0`/`1` (coerced to a boolean); any other value fails closed — **never derived** from cap/live |
 | lease expiry | `expires_at`, `expires_at_ms`, `expiry`, `expiresAt` | positive epoch-ms number or a `Date.parse`-able ISO-8601 string |
 | lease identity | `id`, `lease_id`, `ticket_id`, `owner` | optional non-empty string |
 | reclaimed leases | `reclaimed` | finite, `>= 0` |
@@ -923,22 +1234,43 @@ GET {proxyUrl}/llama/local/audit/status
 
 **Fail-closed parse.** `parseAuditAvailabilityResponse(raw, httpStatus)` returns
 `null` for **every** unusable payload — a non-2xx status, a non-object body, a
-missing/non-finite/negative `cap` or `live`, a missing/non-boolean availability
+missing/non-finite/negative `cap` or `live`, a missing/invalid availability
 verdict, a `leases` value that is not an array, a malformed lease entry, or a
-malformed `reclaimed` count. A garbage payload can therefore never be read as
-"available". `available` is copied from the proxy's own field and never derived
-locally: two sides reading the same verdict is what keeps a dispatcher
+malformed `reclaimed` count. The verdict is accepted only as a real boolean or
+the proxy's shipped numeric `0`/`1`; `2`, `-1`, `"true"`, `"1"`, `null`, an
+object or an array all resolve `null`. A garbage payload can therefore never be
+read as "available". `available` is copied from the proxy's own field and never
+derived locally: two sides reading the same verdict is what keeps a dispatcher
 admission and a proxy refusal from disagreeing (parent AC2). Additive proxy
-fields are ignored, so the contract can evolve without breaking this reader.
+fields (such as `max_audits`) are ignored, so the contract can evolve without
+breaking this reader.
 
 **Behaviour now consumed.** The contract was pinned before the proxy existed;
 the client (`WL-0MWAMSCOP003R837`) was its first consumer and the audit gate
 (`WL-0MWAMSDNW000SL0E`) is the client's — see *Proxy-derived audit admission*.
 The contract test still pins the allowed reader set, so widening the
 dispatch-path consumers is a deliberate, reviewed change.
-`AUDIT_AVAILABILITY_PATH` lives in `downtime-worker.constants.ts`; the contract
-module, the client and their key symbols are re-exported from the
-`downtime-worker.ts` barrel.
+`AUDIT_AVAILABILITY_PATH` lives in `downtime-worker.constants.ts` (resolved per
+call via `resolveAuditAvailabilityPath()`, so `HERDR_AUDIT_AVAILABILITY_PATH`
+overrides it without a rebuild); the contract module, the client and their key
+symbols are re-exported from the `downtime-worker.ts` barrel.
+
+**Availability-only admission is a pre-check, not a reservation.**
+`GET /llama/local/audit/availability` is a point-in-time observation of
+`{ cap, live, available, leases }` — its own OpenAPI description calls it "the
+dispatcher's lease-derived availability signal". It **observes** leases; it
+neither creates nor reserves one, so two hosts that both read
+`live: 0, available: 1` in the same window can both dispatch (the 2026-11-03
+two-audits-on-one-GPU failure). The atomic cross-host arbiter is the proxy's
+lease protocol — `POST /llama/local/audit/lease` (`200` acquired/ renewed,
+`429 audit-budget-saturated` with a bounded `retry_after_s` when a *different
+session* holds the budget, `503 audit-budget-unavailable` on registry failure),
+plus `POST /llama/local/audit/lease/renew` and
+`DELETE /llama/local/audit/lease/{session_id}`. Herdr does **not** call it yet:
+lease acquisition is deferred to **WL-0MWFJH3NW006F5GN**. Single-machine
+concurrency is already serialised by the machine-wide downtime leader plus the
+host-budget ledger, but the audit budget is **cross-machine**, so only the
+proxy can arbitrate it atomically.
 
 **The client** (`packages/herdr/src/downtime-worker.audit-availability.ts`,
 child `WL-0MWAMSCOP003R837`) is the counterpart of `createLocalReserver` and
@@ -949,9 +1281,11 @@ createAuditAvailabilityClient(proxyUrl, fetcher = globalThis.fetch, timeoutMs = 
   -> () => Promise<AuditAvailabilityOutcome>
 ```
 
-One call = one `GET {proxyUrl}{AUDIT_AVAILABILITY_PATH}` (URL normalised with
-the reserve client's trailing-slash convention, `accept: application/json`),
-bounded by the poller's timeout. It **never throws** and resolves exactly one
+One call = one `GET {proxyUrl}{resolveAuditAvailabilityPath()}` (default
+`/llama/local/audit/availability`, overridable via
+`HERDR_AUDIT_AVAILABILITY_PATH`; URL normalised with the reserve client's
+trailing-slash convention, `accept: application/json`), bounded by the
+poller's timeout. It **never throws** and resolves exactly one
 typed outcome:
 
 | Outcome | Cause |
@@ -977,7 +1311,7 @@ every path (no open handle after a call). The audit gate maps `endpoint-absent`,
 `maxAudit` cap. The proxy owns the audit budget and the live audit-lease
 registry (sibling llm item `LP-0MW95FYMH006XYNK`), and every ContextHub host
 already talks to the proxy for model traffic, so
-`GET {proxyUrl}/llama/local/audit/status` is the single **cross-machine**
+`GET {proxyUrl}/llama/local/audit/availability` is the single **cross-machine**
 serialisation of the resource an audit actually contends for (the one local
 `llama-server` GPU). Two hosts can no longer independently believe they are
 under their own cap while contending for the same GPU — the 2026-11-03
@@ -2615,7 +2949,16 @@ to the next candidate ONLY for an allow-listed **continuable hold**:
   `host-budget-unknown`, `audit-budget-saturated`, `audit-budget-unknown`,
   `audit-host-saturated`: the candidate is budgeted, but a prep candidate
   ranked behind it (`plan` / `intake` / `risk-effort`) is not, so the scan
-  records the hold (reason + `{live, max}`) and keeps scanning.
+  records the hold (reason + `{live, max}`) and keeps scanning. The hold is
+  recorded on TWO rungs (WL-0MWDDHVF2004PTYX): an **audit** refusal
+  (`audit-budget-*`, or the legacy `host-budget-audit` /
+  `audit-host-saturated`) lands on `HeadScanHolds.auditBudget` (carrying the
+  failing exchange as `detail` when the proxy read failed closed), an
+  **implement/host** refusal on `HeadScanHolds.hostBudget` — so the leader's
+  terminal chain can rank an audit refusal ABOVE an implement one: a tick
+  whose audit budget refused (`audit-budget-unknown` + `detail: 'http-404'`)
+  must say so, never `host-budget-implement` (a broken proxy contract is not
+  an ambient implement-cap statement).
 
 Everything else is **terminal/strike-worthy** and returns immediately, ending
 the tick exactly as before: `wl-error`, `spawn-failed`, `marker-write-failed`,
@@ -2824,7 +3167,7 @@ path. Capping the `plan` / `intake` / `risk-effort` tiers is likewise out of
 scope (`kind` is recorded, so extending is trivial). **Multi-machine
 coordination is no longer out of scope for the audit budget:** the local
 ledger remains single-machine, and the **proxy-owned audit budget queried over
-HTTP** (`GET {proxyUrl}/llama/local/audit/status`) is the cross-machine
+HTTP** (`GET {proxyUrl}/llama/local/audit/availability`) is the cross-machine
 serialisation that supersedes the old `machine-coordination.ts` note. See
 *Proxy-derived audit admission* above.
 
@@ -2853,7 +3196,7 @@ disagree:
 
 | Surface | What it shows | Source |
 |---|---|---|
-| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement` for implement; `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier; the legacy `host-budget-audit` / `host-budget-unknown` / `audit-host-saturated` under `HERDR_AUDIT_LOCAL_BUDGET=1`) plus a `budget` evidence figure (`live`/`max` for the tier), and the `audit-budget-divergence` / `audit-budget-legacy` evidence entries | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
+| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement` for implement; `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier; the legacy `host-budget-audit` / `host-budget-unknown` / `audit-host-saturated` under `HERDR_AUDIT_LOCAL_BUDGET=1`) plus a `budget` evidence figure (`live`/`max` for the tier) and, on a fail-closed audit read, the failing exchange as `detail` (`http-404` / `timeout` / `network` / `bad-body` / `seam-absent`) — the decision entry names the broken proxy contract without reading code (WL-0MWDDHVF2004PTYX AC3); plus the `audit-budget-divergence` / `audit-budget-legacy` evidence entries | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
 | Herdr header token | `budget-implement` / `budget-audit` / `budget-unknown`, from the shared `decisionHeaderToken` mapping, so the header says *why* the tick stopped — consistent with `contention` / `slot-owner` / `saturated` | `downtime-worker.constants.ts` |
 | stderr skip line | `[worklog-plugin] Downtime <tier> tier skipped: <reason> (live=n, max=m)` (`tier` is `budget` for `audit-budget-unknown` / `host-budget-unknown`) | `hostBudgetSkipLine` (`host-budget-status.ts`) |
 | Worklist header counter | read-only `[budget: implement n/max · audit n/max]`, rendered from already-available state; it never spawns `wl`, never mutates and never changes a dispatch decision, and renders nothing when the budget is unavailable (no chrome in the common case) | `readHostBudgetStatus` (`host-budget-status.ts`) |
@@ -2880,7 +3223,7 @@ recorded.
 > **Current state (WL-0MW95GBEG005ERHS).** The per-host ledger cap described
 > below is **no longer the audit-admission authority**. Audit admission is
 > proxy-derived: `getActiveAudit` and `admitHostDispatch` read the proxy's
-> `GET {proxyUrl}/llama/local/audit/status` verdict and fail closed as
+> `GET {proxyUrl}/llama/local/audit/availability` verdict and fail closed as
 > `audit-budget-unknown` when it cannot answer. The ledger's audit entries and
 > `budget.json` `maxAudit` are **observability only** for admission
 > (header/dialog/sweep) and the **one-release legacy path**
@@ -2946,7 +3289,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 
 | Guard | Scope | Sees | Action |
 |---|---|---|---|
-| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/status`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
+| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/availability`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
 | **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip that audit candidate and keep scanning; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
 | **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |
@@ -2971,7 +3314,7 @@ per-user; ledger writes run under the existing coordination lock with an
 atomic tmp+rename, so the audit tier adds no read-modify-write contention on
 the shared `downtime-coordination.json`). **Cross-machine serialisation** of
 the audit resource is the **proxy-owned audit budget queried over HTTP** —
-`GET {proxyUrl}/llama/local/audit/status` — not flock/NFS. This supersedes the
+`GET {proxyUrl}/llama/local/audit/availability` — not flock/NFS. This supersedes the
 old single-machine note in `machine-coordination.ts`; see *Proxy-derived audit
 admission* above.
 
@@ -3408,7 +3751,7 @@ Every refusal still applies on both settings: unusable per-slot detail
 (`contention_queue_depth > 0` / `prefill_gate_waiters > 0`), the prefill
 serialisation gate (`evaluatePrefillPacing`), owned slots
 (`countFreeUnownedSlots` excludes them), the proxy-owned audit budget
-(`GET {proxyUrl}/llama/local/audit/status`; the legacy `maxAudit` cap only
+(`GET {proxyUrl}/llama/local/audit/availability`; the legacy `maxAudit` cap only
 under `HERDR_AUDIT_LOCAL_BUDGET=1`) and a
 `parent`/unclassifiable candidate. The relaxed slot stays **pinned** to that
 one leaf audit (`ctx.leafAuditAdmission`, the C4 single-tier pin), so no
@@ -3720,11 +4063,12 @@ through.
 
 > **Retired for the coordination leader (WL-0MTK1ILM2009QYB2).** The cross-root
 > round-robin cursor ordering below was a *second ranking* on the dispatch path
-> and is removed: the coordination leader now dispatches offers in file order
-> (each offer is its root's Herdr list head). Cross-project interleaving is
-> achieved by offer removal + re-offer: a dispatched root's entry is removed and
-> its owner re-offers its next Herdr head at the next check-in, so the next
-> cycle serves the next offer in the file. The cursor module
+> and is removed: the coordination leader now dispatches ENTRIES in file order,
+> iterating the offers inside each entry (v2: up to one nominee per bucket; see
+> *Leader: iterating an entry's offers*). Cross-project interleaving is
+> achieved by offer removal + re-offer: a dispatched offer is removed (only the
+> last offer drops its entry) and the owner re-offers its next head at the next
+> check-in, so the next cycle serves the next offer in the file. The cursor module
 > (`downtime-round-robin-by-root.ts`) and `sortEntriesByRoundRobin` /
 > `advanceRoundRobinCursor` remain exported only for module tests — nothing on
 > the dispatch path calls them. The historical description below is retained
@@ -4083,7 +4427,11 @@ likewise re-read live every tick and clamped on load
   last dispatch.
 - **A worklog root with dispatchable work is never served:** if no herdr
   instance runs in that root it writes no coordination offer, so the offer
-  path can never see it. Register the root in `downtimeWorklogRoots` (the
+  path can never see it. A root that *does* run an instance with dispatch
+  disabled is better served by `downtimeOfferOnly` than by the registry —
+  see the decision table under
+  [*Which cross-root mechanism applies when*](#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots).
+  Register a root in `downtimeWorklogRoots` (the
   absolute path of the worklog ROOT — the parent of `.worklog/`), then
   confirm `loadSettings` kept it: a relative path, a missing/unreadable
   directory, or one without `.worklog/worklog.db` is dropped **per entry**
@@ -4097,7 +4445,7 @@ likewise re-read live every tick and clamped on load
   live-audit-lease count, possibly held by ANOTHER ContextHub host sharing the
   same local `llama-server` GPU. This is expected cross-machine serialisation,
   not a failure: audits resume when a live lease expires or is released on the
-  proxy. Inspect the proxy read (`curl <proxyUrl>/llama/local/audit/status`) and
+  proxy. Inspect the proxy read (`curl <proxyUrl>/llama/local/audit/availability`) and
   the decision log (`grep 'audit-budget-saturated'
   <root>/.worklog/downtime-coordination.log`). **To raise the audit cap now,
   change the proxy's audit-budget configuration** (sibling llm item
@@ -4108,7 +4456,7 @@ likewise re-read live every tick and clamped on load
   client use.
 - **Audits skipped with `audit-budget-unknown` (WL-0MW95GBEG005ERHS):** the
   audit tier **failed closed** because the proxy cannot answer — `404`
-  (`endpoint-absent`, the proxy predates `/llama/local/audit/status`),
+  (`endpoint-absent`, the proxy predates `/llama/local/audit/availability`),
   `unreachable` (timeout/network/`http-<status>`), `unparsable` (`bad-body`),
   or no availability seam wired. Audit dispatch stops with a named reason
   rather than silently trusting a per-host cap. Check the proxy URL reachability
@@ -4242,7 +4590,9 @@ strings: `soft-deleted`, `producer-review`, `assignee-hold`,
 `not-dispatchable`, `audit-fresh`, `audit-recency`, `effort-cap`,
 `dispatched-marker`, `attempt-budget-exhausted`, `non-terminal-cooldown`,
 `code-freeze`, `cpu-saturated`, `audit-slot-min`, `review-queue-hold`,
-`in-flight-pane`, `slots-unavailable`, `wl-error`.
+`in-flight-pane`, `slots-unavailable`, `audit-budget` (the proxy-derived
+audit budget refused the audit offer — the per-offer counterpart of the
+`auditBudgetHold` terminal hold, WL-0MWDDHVF2004PTYX AC5), `wl-error`.
 
 **The result semantics are unchanged.** A fully-held window is still
 `noCandidate` (the 60-minute no-candidate cooldown behaves exactly as before,

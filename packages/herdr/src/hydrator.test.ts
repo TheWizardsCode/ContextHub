@@ -11,11 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetExecFileAsync, setExecFileAsync, resetWorklogDir, setWorklogDir } from './fetcher.js';
 import {
   hydratorExecRouter,
+  makeCrossWorkspacePanes,
   makeWorstCaseItems,
   makeWorstCasePanes,
+  type CrossWorkspacePaneFixture,
 } from './hydrator.fixtures.js';
 import {
   ALLOWED_STAGES_BY_STATUS,
+  HYDRATOR_CLAIM_GRACE_MS,
   applyActivePaneMarkers,
   buildReleaseComment,
   collectPaneWorkItemIds,
@@ -36,6 +39,7 @@ import {
   type HydratorDeps,
   type HydratorItem,
   type HydratorPane,
+  type ReleaseEvidence,
 } from './hydrator.js';
 import type { ClaimHolderVerdict } from './claim-lock.js';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -67,6 +71,19 @@ interface ContractDeps extends HydratorDeps {
   maxItemsPerTick?: number;
 }
 
+/**
+ * The workspace-agnostic pane read the implementation child
+ * (WL-0MWHBSWC20067SMY) adds to `HydratorDeps` (parent AC1/AC4):
+ * `herdr pane list` with NO `--workspace` scope, i.e. the panes of every
+ * workspace on the host. Declared here — like the clock and per-step budget
+ * seams above — so the red witnesses in this file compile and run before the
+ * seam exists in the production type. `listActivePanes()` called with no
+ * workspace id is the other permitted shape for the same read.
+ */
+interface CrossWorkspaceDeps extends ContractDeps {
+  listAllActivePanes?: () => Promise<HydratorPane[] | null>;
+}
+
 function makeDeps(overrides: Partial<ContractDeps> = {}): {
   deps: ContractDeps;
   applied: AppliedDemotion[];
@@ -87,6 +104,28 @@ function makeDeps(overrides: Partial<ContractDeps> = {}): {
 }
 
 const WL = 'WL-0MSOJLZD9004P8PI';
+
+// Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): an item claimed
+// within `HYDRATOR_CLAIM_GRACE_MS` is never released even with no pane
+// visible yet; past the window today's rule applies. A LEGACY payload with
+// no `updatedAt`/`activityAt` fails open toward KEEPING the claim (treated
+// as a fresh claim inside the window). Fixtures that exercise the
+// past-window release path therefore carry an explicit OLD timestamp (far
+// outside any clock used in this file) so "today's rule" applies
+// deterministically.
+const PAST_WINDOW_ISO = '2020-01-01T00:00:00.000Z';
+
+/** Build an in-progress item already past the claim grace window. */
+const staleItem = (
+  overrides: Partial<HydratorItem> = {},
+): HydratorItem => ({
+  id: WL,
+  status: 'in-progress',
+  stage: 'plan_complete',
+  updatedAt: PAST_WINDOW_ISO,
+  activityAt: PAST_WINDOW_ISO,
+  ...overrides,
+});
 
 // ── ID extraction ─────────────────────────────────────────────────────
 
@@ -289,6 +328,91 @@ describe('pane-based active marker (selection list)', () => {
     await applyActivePaneMarkers(nulled, async () => null, 'wCurrent');
     expect(nulled[0].status).toBe('open');
   });
+
+  // ── Display vs demotion pane scope (WL-0MWHBSRS4001TFNJ, parent AC2) ──
+  //
+  // The demotion fix (parent AC1, implementation child WL-0MWHBSWC20067SMY)
+  // widens the pane evidence behind "is this item being worked on?" to every
+  // workspace. The selection-list marker must NOT follow: "does this item
+  // have a pane in MY workspace?" is a different question, and widening the
+  // display path would light rows for panes the producer cannot see in this
+  // workspace (WL-0MV1BWETT005GSUJ intent preserved).
+  //
+  // Contract: display = workspace-scoped, demotion = workspace-agnostic.
+
+  it('does not stamp the green circle for an item whose only matching pane is in another workspace (parent AC2)', async () => {
+    const fixture = makeCrossWorkspacePanes(WL, { paneIn: 'dispatcher' });
+    const items: Array<{
+      id: string;
+      status?: string;
+      stage?: string;
+      agentState?: string;
+    }> = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+
+    // The plugin's own (item-less) pane is visible; the item's dispatch pane
+    // lives in the Dispatcher workspace, so neither the in-progress status
+    // marker nor the green circle may be stamped.
+    await applyActivePaneMarkers(items, fixture.listActivePanes, fixture.pluginWorkspaceId);
+
+    expect(items[0].status).toBe('open');
+    expect(items[0].agentState).toBeUndefined();
+
+    // Same fixture, pane placed in the plugin's own workspace: the marker
+    // DOES light up. The discriminator is the workspace, not the pane count.
+    const inPlugin = makeCrossWorkspacePanes(WL, { paneIn: 'plugin' });
+    const marked = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    await applyActivePaneMarkers(marked, inPlugin.listActivePanes, inPlugin.pluginWorkspaceId);
+    expect(marked[0].status).toBe('in-progress');
+  });
+
+  it(
+    'display = workspace-scoped, demotion = workspace-agnostic: an out-of-workspace pane never lights the marker but still suppresses release (parent AC2)',
+    async () => {
+      // ONE pane set, two questions. `w5M:p1` is the plugin's own worklist
+      // pane; `w6B:p3` is the item's dispatch pane in the Dispatcher
+      // workspace (the reported 2026-11-15 release).
+      const fixture = makeCrossWorkspacePanes(WL, { paneIn: 'dispatcher' });
+
+      // DISPLAY — workspace-scoped: the row stays unmarked.
+      const items: Array<{
+        id: string;
+        status?: string;
+        stage?: string;
+        agentState?: string;
+      }> = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+      await applyActivePaneMarkers(items, fixture.listActivePanes, fixture.pluginWorkspaceId);
+      expect(items[0].status).toBe('open');
+      expect(items[0].agentState).toBeUndefined();
+
+      // DEMOTION — workspace-agnostic (parent AC1): the SAME pane is evidence
+      // the item is being worked on, so the live dispatch claim is kept via
+      // the wider `listAllActivePanes` read (WL-0MWHBSWC20067SMY).
+      const applied: Array<{ id: string; status: string; stage: string }> = [];
+      const deps: CrossWorkspaceDeps = {
+        listInProgressItems: async () => [
+          { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'dispatcher' },
+        ],
+        // Both permitted shapes of the workspace-agnostic read, so either
+        // implementation satisfies this test.
+        listActivePanes: fixture.listActivePanes,
+        listAllActivePanes: fixture.listAllActivePanes,
+        listOutboundDeps: async () => [],
+        // Pane evidence must be the ONLY signal: pin a dead claim holder.
+        hasLiveClaimHolder: async () =>
+          new Map<string, ClaimHolderVerdict>([[WL, { held: false, reason: 'no-lock-file' }]]),
+        applyDemotion: async (id, status, stage) => {
+          applied.push({ id, status, stage });
+          return true;
+        },
+        log: () => {},
+      };
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      expect(result.demoted).toBe(0);
+      expect(applied).toEqual([]);
+    },
+  );
 });
 
 // ── Dependency blocker ────────────────────────────────────────────────
@@ -466,7 +590,7 @@ describe('runHydrationOnce', () => {
 
   it('demotes a pane-less plain item to open at intake_complete (AC3 else-branch)', async () => {
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
     });
     await runHydrationOnce(deps);
@@ -546,7 +670,10 @@ describe('runHydrationOnce', () => {
 
   it('counts a failed demotion as skipped, not demoted', async () => {
     const { deps } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      // Past the grace window so the release is attempted; the failing
+      // `applyDemotion` is what must be counted as skipped (parent AC5 keeps
+      // only in-window claims, which never reach the demotion seam).
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       applyDemotion: async () => false,
     });
@@ -556,7 +683,7 @@ describe('runHydrationOnce', () => {
 
   it('treats a throwing dependency lookup as not-blocked and still releases the item', async () => {
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       listOutboundDeps: async () => {
         throw new Error('dep lookup failed');
@@ -572,7 +699,7 @@ describe('runHydrationOnce', () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
         { id: WL, status: 'in-progress', stage: 'in_review' },
-        { id: other, status: 'in-progress', stage: 'plan_complete' },
+        { id: other, status: 'in-progress', stage: 'plan_complete', updatedAt: PAST_WINDOW_ISO, activityAt: PAST_WINDOW_ISO },
       ],
       listActivePanes: async () => [],
     });
@@ -630,7 +757,7 @@ describe('live claim holder probe (orchestration)', () => {
   it('releases a pane-less item whose recorded holder is dead, logging the dead-holder signal', async () => {
     const logs: string[] = [];
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       listOutboundDeps: async () => [],
       hasLiveClaimHolder: async () =>
@@ -865,6 +992,222 @@ describe('live claim holder probe (orchestration)', () => {
   });
 });
 
+// ── Claim grace window (parent AC5, test-first WL-0MWHBSSOX001RUYA) ──
+//
+// A hydrator tick that lands between a dispatch spawning its pane and the pane
+// title becoming readable sees NO pane for a just-claimed item. Parent AC5
+// bounds that spawn→visible window: an item claimed within the configured
+// grace window is never released even with no visible pane; once the window
+// passes, today's rule applies.
+//
+// Contract choices pinned here (the impl child WL-0MWHBSX81003M0EM
+// implements to these):
+//   • recency rides the EXISTING `wl list --json` fields `updatedAt` /
+//     `activityAt` (ISO 8601 strings) — no new timestamp field. The hydrator
+//     propagates them and derives claim age as
+//     `now() − max(timestamp(updatedAt), timestamp(activityAt))`;
+//   • precedence matches `held` (WL-0MVWDB3IG004NRIU): the grace branch is
+//     evaluated AFTER `in_review → completed` and `blocked`, so it suppresses
+//     ONLY the final release to `open`;
+//   • absent OR unparseable recency fails open toward KEEPING the claim —
+//     treated as a fresh claim still inside the window (the parent's "keep
+//     the claim on ambiguity" decision: a stuck claim is recoverable, a
+//     released claim under a live agent is not);
+//   • the default window is ONE exported constant `HYDRATOR_CLAIM_GRACE_MS`
+//     (documented default 120 000 ms, per the parent's open question),
+//     overridable via the `hydratorClaimGraceMs` settings key.
+//
+// RED WITNESSES — `it.fails` bodies assert the POST-fix behaviour and fail
+// against today's code for a BEHAVIOUR reason (the item is released instead
+// of kept, the constant is undefined), so the suite stays green; the impl
+// child flips each `it.fails` → `it` as the grace window lands. The plain
+// `it` bodies (boundary-past release, precedence) are green both before and
+// after the fix — they pin invariants that must never relax.
+
+/** Documented default for `HYDRATOR_CLAIM_GRACE_MS` (parent open question). */
+const GRACE_DEFAULT_MS = 120_000;
+
+describe('claim grace window (AC5)', () => {
+  /** Fixed injected clock instant (no real timers anywhere in this block). */
+  const NOW_MS = Date.parse('2026-11-15T10:00:00.000Z');
+  /** ISO timestamp for a moment `ms` before the injected clock instant. */
+  const isoBefore = (ms: number): string => new Date(NOW_MS - ms).toISOString();
+
+  /**
+   * The narrow grace-window item surface the impl child adds to `HydratorItem`.
+   * Declared here (like the `ContractDeps` clock seams above) so the red
+   * witnesses compile and run before the fields exist in the production type.
+   */
+  interface GraceWindowItem extends HydratorItem {
+    /** `wl list --json` recency fields (ISO 8601) the claim age derives from. */
+    updatedAt?: string;
+    activityAt?: string;
+  }
+
+  /** `ContractDeps` widened to carry the recency fields. */
+  interface GraceWindowDeps extends ContractDeps {
+    listInProgressItems?: () => Promise<GraceWindowItem[] | null>;
+  }
+
+  interface GraceApplied {
+    id: string;
+    status: string;
+    stage: string;
+    opts?: DemotionOptions;
+  }
+
+  /** Grace-window deps factory; records the demotion options like `makeCrossDeps`. */
+  function makeGraceDeps(overrides: Partial<GraceWindowDeps> = {}): {
+    deps: GraceWindowDeps;
+    applied: GraceApplied[];
+  } {
+    const applied: GraceApplied[] = [];
+    const deps: GraceWindowDeps = {
+      listInProgressItems: async () => [],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      applyDemotion: async (id, status, stage, opts) => {
+        applied.push({ id, status, stage, opts });
+        return true;
+      },
+      log: () => {},
+      ...overrides,
+    };
+    return { deps, applied };
+  }
+
+  /** A just-claimed item (5 s old, well inside the default 120 s window). */
+  const freshItem = (): GraceWindowItem => ({
+    id: WL,
+    status: 'in-progress',
+    stage: 'plan_complete',
+    updatedAt: isoBefore(5_000),
+    activityAt: isoBefore(5_000),
+  });
+
+  it(
+    'keeps an item claimed 5 s ago with no visible pane: inside the grace window (injected clock, no real timers)',
+    async () => {
+      const { deps, applied } = makeGraceDeps({
+        now: () => NOW_MS,
+        listInProgressItems: async () => [freshItem()],
+        listActivePanes: async () => [],
+      });
+
+      const result = await runHydrationOnce(deps);
+
+      // A tick that lands in the spawn→visible gap must not release: the
+      // claim age (5 s) is below HYDRATOR_CLAIM_GRACE_MS, so the item is kept
+      // (counted skipped), never demoted.
+      expect(result).toMatchObject({ ok: true, considered: 1, demoted: 0, skipped: 1 });
+      expect(applied).toEqual([]);
+    },
+  );
+
+  it('releases the same item one millisecond past the grace window exactly as today', async () => {
+    // Boundary computation reads the production constant directly (the fix
+    // has landed): the documented default drives the fixture.
+    const graceMs = HYDRATOR_CLAIM_GRACE_MS;
+    const { deps, applied } = makeGraceDeps({
+      now: () => NOW_MS,
+      listInProgressItems: async () => [
+        {
+          ...freshItem(),
+          updatedAt: isoBefore(graceMs + 1),
+          activityAt: isoBefore(graceMs + 1),
+        },
+      ],
+      listActivePanes: async () => [],
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    // Once the window has passed, today's rule applies unchanged.
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({ id: WL, status: 'open', stage: 'intake_complete' });
+    // "Exactly as today": the deciding signal is unchanged — no new
+    // grace-only suppression of the no-pane release, and the same comment
+    // text rides the demotion.
+    expect(applied[0].opts?.reason).toBe('released because no matching pane');
+  });
+
+  it('never overrides the in_review → completed (audit tier) transition', async () => {
+    const { deps, applied } = makeGraceDeps({
+      now: () => NOW_MS,
+      listInProgressItems: async () => [
+        { ...freshItem(), stage: 'in_review' },
+      ],
+      listActivePanes: async () => [],
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    // Same precedence as `held`: a fresh claim never blocks the audit-tier
+    // completion — the grace branch suppresses ONLY the release to `open`.
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({ id: WL, status: 'completed', stage: 'in_review' });
+  });
+
+  it('never overrides the dependency blocked transition', async () => {
+    const { deps, applied } = makeGraceDeps({
+      now: () => NOW_MS,
+      listInProgressItems: async () => [freshItem()],
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [
+        { id: 'WL-OTHER', status: 'open', stage: 'plan_complete' },
+      ],
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    // A fresh claim never hides an active dependency: the grace branch is
+    // evaluated after `blocked`, so the item still demotes to `blocked`.
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({ id: WL, status: 'blocked', stage: 'plan_complete' });
+  });
+
+  it(
+    'keeps the claim when recency is absent OR unparseable (legacy payload, fail-open: treated as a fresh claim inside the window)',
+    async () => {
+      const other = 'AH-0MTVYBL2L0085G6G';
+      const { deps, applied } = makeGraceDeps({
+        now: () => NOW_MS,
+        listInProgressItems: async () => [
+          // Absent: a legacy payload with no recency fields at all.
+          { id: WL, status: 'in-progress', stage: 'plan_complete' },
+          // Unparseable: a malformed timestamp is just as ambiguous.
+          {
+            id: other,
+            status: 'in-progress',
+            stage: 'plan_complete',
+            updatedAt: 'not-a-date',
+            activityAt: 'also-not-a-date',
+          },
+        ],
+        listActivePanes: async () => [],
+      });
+
+      const result = await runHydrationOnce(deps);
+
+      // An unknowable claim age is ambiguous evidence: never released (the
+      // parent's "keep the claim on ambiguity" decision). Both items are
+      // kept and counted skipped.
+      expect(result).toMatchObject({ ok: true, considered: 2, demoted: 0, skipped: 2 });
+      expect(applied).toEqual([]);
+    },
+  );
+
+  it(
+    'reads the default window from the single exported constant HYDRATOR_CLAIM_GRACE_MS (documented default 120 000 ms)',
+    () => {
+      expect(HYDRATOR_CLAIM_GRACE_MS).toBe(GRACE_DEFAULT_MS);
+    },
+  );
+});
+
 // ── Release clears the scheduling hold (WL-0MVWDB7F2003SORI) ─────────
 // A non-empty `assignee` is the scheduling hold (WL-0MV85WDOM007BKF8), so a
 // release that writes only status/stage leaves the item permanently
@@ -885,6 +1228,79 @@ describe('release clears the scheduling hold', () => {
     // An explicitly empty holder is "no holder", never an empty suffix.
     expect(buildReleaseComment('released because no matching pane', '')).toBe(
       'released because no matching pane; previous assignee: (none)',
+    );
+  });
+
+  it('appends the compact evidence suffix after the unchanged legacy prefix (parent AC8)', () => {
+    const evidence: ReleaseEvidence = {
+      paneCount: 14,
+      workspaceIds: ['w6B', 'w5M', 'w7C'],
+      claimAgeMs: 240_000,
+      graceMs: 120_000,
+      itemId: WL,
+    };
+    expect(
+      buildReleaseComment('released because no matching pane', 'dispatcher', evidence),
+    ).toBe(
+      'released because no matching pane; previous assignee: dispatcher; evidence: ' +
+        '14 panes in 3 workspaces (w5M,w6B,w7C) none titled WL-…; claim age 240s (grace 120s)',
+    );
+  });
+
+  it('workspace ids are sorted and deduplicated, capped with +N overflow (parent AC8)', () => {
+    const evidence: ReleaseEvidence = {
+      paneCount: 30,
+      workspaceIds: ['wZ', 'wA', 'wC', 'wM', 'wB', 'wD', 'wE', 'wF', 'wA'],
+      claimAgeMs: 60_000,
+      graceMs: 60_000,
+      itemId: WL,
+    };
+    const comment = buildReleaseComment('released because no matching pane', 'implement', evidence);
+    // Sorted, deduplicated (wA appears twice), capped at
+    // HYDRATOR_RELEASE_EVIDENCE_MAX_WORKSPACES (6) with +N overflow; the
+    // overflow marker is the `+2` (8 distinct ids − 6 listed).
+    expect(comment).toContain(
+      '30 panes in 8 workspaces (wA,wB,wC,wD,wE,wF,+2) none titled WL-…; claim age 60s (grace 60s)',
+    );
+    // The cap bounds the comment (proven by the full-phrase assertion above;
+    // the capped list is a substring of it).
+    expect(comment.length).toBeLessThanOrEqual(200);
+  });
+
+  it('dead-holder variant carries the same evidence with the deciding signal named once (parent AC8)', () => {
+    const evidence: ReleaseEvidence = {
+      paneCount: 14,
+      workspaceIds: ['w5M', 'w6B', 'w7C'],
+      claimAgeMs: 240_000,
+      graceMs: 120_000,
+      itemId: WL,
+    };
+    const comment = buildReleaseComment(
+      'released because no pane and claim holder dead',
+      'implement',
+      evidence,
+    );
+    expect(comment.startsWith(
+      'released because no pane and claim holder dead; previous assignee: implement; evidence: ',
+    )).toBe(true);
+    // Evidence present: panes, workspaces, claim age, grace.
+    expect(comment).toContain('14 panes in 3 workspaces (w5M,w6B,w7C)');
+    expect(comment).toContain('claim age 240s (grace 120s)');
+    // The no-pane fact is the deciding signal's first half — named once, so
+    // the evidence does NOT restate it as "none titled …".
+    expect(comment).not.toContain('none titled');
+  });
+
+  it('renders an unknowable claim age as unknown, not a bogus number (parent AC8)', () => {
+    const evidence: ReleaseEvidence = {
+      paneCount: 0,
+      workspaceIds: [],
+      claimAgeMs: null,
+      graceMs: 120_000,
+      itemId: WL,
+    };
+    expect(buildReleaseComment('released because no matching pane', '', evidence)).toContain(
+      'claim age unknown (grace 120s)',
     );
   });
 
@@ -966,6 +1382,33 @@ describe('release clears the scheduling hold', () => {
     );
   });
 
+  it('production wiring appends the evidence to the release comment (parent AC8)', async () => {
+    resetWorklogDir();
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    const applied = await deps.applyDemotion(WL, 'open', 'intake_complete', {
+      previousAssignee: 'dispatcher',
+      reason: 'released because no matching pane',
+      evidence: {
+        paneCount: 14,
+        workspaceIds: ['w5M', 'w6B', 'w7C'],
+        claimAgeMs: 240_000,
+        graceMs: 120_000,
+        itemId: WL,
+      },
+    });
+
+    expect(applied).toBe(true);
+    const comment = calls.find((call) => call.args.includes('comment'));
+    expect(comment).toBeDefined();
+    expect(comment!.args).toContain(
+      'released because no matching pane; previous assignee: dispatcher; evidence: ' +
+        '14 panes in 3 workspaces (w5M,w6B,w7C) none titled WL-…; claim age 240s (grace 120s)',
+    );
+  });
+
   it('does not comment when the CAS guard rejects the demotion (holder changed concurrently)', async () => {
     resetWorklogDir();
     const calls: Array<{ bin: string; args: string[] }> = [];
@@ -1011,6 +1454,8 @@ describe('release clears the scheduling hold', () => {
                 status: 'in-progress',
                 stage: 'plan_complete',
                 assignee: 'implement',
+                updatedAt: PAST_WINDOW_ISO,
+                activityAt: PAST_WINDOW_ISO,
               },
             ],
           }),
@@ -1057,6 +1502,13 @@ describe('release clears the scheduling hold', () => {
       listActivePanes: async () => [
         { pane_id: 'wC:p1', label: `implement - ${WL}`, workspace_id: 'wCurrent' },
       ],
+      // The wider demotion read must also be served by an injected seam —
+      // production wiring would hit the exec stub (which answers `{}` for
+      // everything), and a kept-item test asserts ZERO spawns below
+      // (WL-0MWHBSWC20067SMY).
+      listAllActivePanes: async () => [
+        { pane_id: 'wC:p1', label: `implement - ${WL}`, workspace_id: 'wCurrent' },
+      ],
       listOutboundDeps: async () => [],
       hasLiveClaimHolder: async () =>
         new Map<string, ClaimHolderVerdict>([[other, { held: true, reason: 'flock-held' }]]),
@@ -1074,7 +1526,7 @@ describe('release clears the scheduling hold', () => {
     const logs: string[] = [];
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'implement' },
+        { ...staleItem(), assignee: 'implement' },
       ],
       listActivePanes: async () => [],
       listOutboundDeps: async () => [],
@@ -1086,16 +1538,38 @@ describe('release clears the scheduling hold', () => {
     expect(applied).toEqual([
       { id: WL, status: 'open', stage: 'intake_complete' },
     ]);
-    expect(logs).toContain(
-      `[hydrator] released ${WL}: in-progress/plan_complete → open/intake_complete (no matching pane)`,
-    );
+    // The release log line keeps the deciding signal AND names the claim age
+    // and window when a release is allowed past the grace window (parent
+    // WL-0MWH56SWX004HSKQ AC5). The exact claim-age number depends on the
+    // wall clock, so assert both phrases on the same line.
+    expect(
+      logs.some(
+        (line) =>
+          line.includes(`[hydrator] released ${WL}: in-progress/plan_complete → open/intake_complete (no matching pane)`) &&
+          line.includes('claim age') &&
+          line.includes('past grace window'),
+      ),
+    ).toBe(true);
+    // Parent AC8: the same evidence lands on the log line (primary local
+    // trail) so log-only debugging sees the panes/workspaces/age/grace too.
+    expect(
+      logs.some((line) => line.includes('evidence:') && line.includes('panes in')),
+    ).toBe(true);
   });
 
-  it('passes the observed holder and the deciding signal to the demotion seam', async () => {
+  it('passes the observed holder, the deciding signal and the release evidence to the demotion seam', async () => {
     const seen: Array<{ id: string; opts?: DemotionOptions }> = [];
+    // Deterministic clock so the evidence claim age is exact (parent AC8).
+    const NOW_MS = Date.parse('2026-11-15T10:00:00.000Z');
+    const claimAgeMs = NOW_MS - Date.parse(PAST_WINDOW_ISO);
     const { deps } = makeDeps({
+      now: () => NOW_MS,
       listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete', assignee: 'implement' },
+        { ...staleItem(), assignee: 'implement' },
+      ],
+      listAllActivePanes: async () => [
+        { pane_id: 'w5M:p1', label: 'Work Items', workspace_id: 'w5M' },
+        { pane_id: 'w6B:p3', label: 'Dispatcher pane (fallback)', workspace_id: 'w6B' },
       ],
       listActivePanes: async () => [],
       listOutboundDeps: async () => [],
@@ -1115,6 +1589,13 @@ describe('release clears the scheduling hold', () => {
         opts: {
           previousAssignee: 'implement',
           reason: 'released because no pane and claim holder dead',
+          evidence: {
+            paneCount: 2,
+            workspaceIds: ['w5M', 'w6B'],
+            claimAgeMs,
+            graceMs: HYDRATOR_CLAIM_GRACE_MS,
+            itemId: WL,
+          },
         },
       },
     ]);
@@ -1136,7 +1617,7 @@ describe('createHydratorRunner', () => {
 
   it('runs the hydration cycle when visible', async () => {
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
     });
     const run = createHydratorRunner(deps, { isVisible: async () => true });
@@ -1148,7 +1629,7 @@ describe('createHydratorRunner', () => {
   it('runs immediately on the hidden→visible focus-resume (no interval wait)', async () => {
     let visible = false;
     const listInProgressItems = vi.fn(async () => [
-      { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      staleItem(),
     ]);
     const { deps, applied } = makeDeps({
       listInProgressItems,
@@ -1291,9 +1772,7 @@ describe('batched dependency reads (F4)', () => {
 
   it('releases an item whose batched dep entry is missing (fail-open)', async () => {
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
-      ],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       listOutboundDepsBatch: async () => new Map(), // no entry for WL
     });
@@ -1327,9 +1806,7 @@ describe('batched dependency reads (F4)', () => {
   it('falls back to the per-item dep seam when the batched read is unavailable', async () => {
     const perItem = vi.fn(async () => []) as unknown as HydratorDeps['listOutboundDeps'];
     const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
-      ],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () => [],
       listOutboundDeps: perItem,
       listOutboundDepsBatch: async () => undefined,
@@ -1413,7 +1890,7 @@ describe('pane-title matching (verification)', () => {
   it('demotes when no pane title carries the ID', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+        staleItem(),
       ],
       listActivePanes: async () => [
         { pane_id: 'wC:p1', label: 'A general shell session', workspace_id: 'wCurrent' },
@@ -1432,7 +1909,7 @@ describe('workspace scoping at orchestration level', () => {
   it('demotes when the only matching pane is in a different workspace', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+        staleItem(),
       ],
       listActivePanes: async () => [
         { pane_id: 'wO:p1', label: `Downtime triggered - ${WL}`, workspace_id: 'wOther' },
@@ -1461,6 +1938,277 @@ describe('workspace scoping at orchestration level', () => {
     // Pane in current workspace → item not demoted.
     expect(applied).toEqual([]);
   });
+});
+
+// ── Cross-workspace demotion evidence (WL-0MWHBSQUU009LKML) ───────────
+// Parent WL-0MWH56SWX004HSKQ, AC1/AC3/AC4.
+//
+// The 2026-11-15 01:11 release: the plugin reports its own workspace
+// (`HERDR_WORKSPACE_ID` → `w5M` in ContextHub) while the downtime fallback
+// placement put the dispatch pane in the Dispatcher workspace (`w6B`).
+// Demotion evidence was read with `herdr pane list --workspace w5M`, so the
+// live pane was invisible and the claim was released ~5 s after spawn.
+//
+// Frozen contract for the implementation child (WL-0MWHBSWC20067SMY):
+// demotion evidence comes from a WORKSPACE-AGNOSTIC pane read
+// (`listAllActivePanes()`, or `listActivePanes()` with no workspace id),
+// while the selection-list marker keeps its workspace-scoped read (pinned
+// by the sibling test child WL-0MWHBSRS4001TFNJ). "Is this item being
+// worked on anywhere?" and "does it have a pane in my workspace?" are
+// separate questions and must not share one filter.
+//
+// The `it` bodies below assert the POST-FIX behaviour — they were authored
+// as `it.fails` RED WITNESSES (the repo's documented test-first pattern,
+// `downtime-worker.clamps.test.ts`) and flipped to plain `it` when the
+// implementation child (WL-0MWHBSWC20067SMY) landed the wider read. The
+// plain `it` AC3 case is the anti-over-correction guard.
+
+describe('cross-workspace demotion evidence (parent AC1/AC3/AC4)', () => {
+  /** The item of the reported release (`Downtime triggered plan …`). */
+  const REPRODUCED = 'WL-0MWFKDH78002T2CR';
+
+  interface CrossApplied {
+    id: string;
+    status: string;
+    stage: string;
+    previousAssignee?: string;
+    reason?: string;
+  }
+
+  /**
+   * Deps for the cross-workspace cases: the injected `listActivePanes` is the
+   * scoped `herdr pane list --workspace <id>` fake, `listAllActivePanes` the
+   * wider read. Every call is recorded so "no release" is observable as an
+   * empty `applied` list (a release comment is written by `applyDemotion`).
+   */
+  function makeCrossDeps(
+    fixture: CrossWorkspacePaneFixture,
+    overrides: Partial<CrossWorkspaceDeps> = {},
+  ): { deps: CrossWorkspaceDeps; applied: CrossApplied[] } {
+    const applied: CrossApplied[] = [];
+    const deps: CrossWorkspaceDeps = {
+      listInProgressItems: async () => [
+        {
+          id: REPRODUCED,
+          status: 'in-progress',
+          stage: 'plan_complete',
+          assignee: 'dispatcher',
+          // Parent AC5: recency past the claim grace window so the AC3
+          // pane-less release path exercises "today's rule" (a
+          // timestamp-less legacy item would be kept as a fresh claim).
+          updatedAt: PAST_WINDOW_ISO,
+          activityAt: PAST_WINDOW_ISO,
+        },
+      ],
+      listActivePanes: fixture.listActivePanes,
+      listAllActivePanes: fixture.listAllActivePanes,
+      listOutboundDeps: async () => [],
+      applyDemotion: async (id, status, stage, opts) => {
+        applied.push({
+          id,
+          status,
+          stage,
+          previousAssignee: opts?.previousAssignee,
+          reason: opts?.reason,
+        });
+        return true;
+      },
+      log: () => {},
+      ...overrides,
+    };
+    return { deps, applied };
+  }
+
+  it(
+    'does not release a live dispatch claim whose pane is in the Dispatcher workspace (AC1, reported state)',
+    async () => {
+      // Pane `w6B:p3`, plugin workspace `w5M`: exactly the reported state.
+      const fixture = makeCrossWorkspacePanes(REPRODUCED, {
+        paneIn: 'dispatcher',
+        label: `Downtime triggered plan finish moves the pane - ${REPRODUCED}`,
+      });
+      const { deps, applied } = makeCrossDeps(fixture);
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      // The live pane is evidence the item is being worked, wherever it
+      // lives: no demotion, no release comment (comments ride on
+      // `applyDemotion`).
+      expect(result.considered).toBe(1);
+      expect(result.demoted).toBe(0);
+      expect(applied).toEqual([]);
+    },
+  );
+
+  it(
+    'production wiring writes no release update and no release comment for that item (AC1)',
+    async () => {
+      const fixture = makeCrossWorkspacePanes(REPRODUCED);
+      const calls: Array<{ bin: string; args: string[] }> = [];
+      const panePayload = fixture.panes.map((pane) => ({
+        pane_id: pane.pane_id,
+        tab_id: `${pane.workspace_id}:t1`,
+        workspace_id: pane.workspace_id,
+        label: pane.label,
+      }));
+
+      // A herdr stand-in whose unscoped `pane list` sees BOTH workspaces and
+      // whose `--workspace`-scoped read sees only that workspace — the two
+      // read shapes the fix must distinguish.
+      setExecFileAsync((async (_bin: string, args: string[]) => {
+        calls.push({ bin: _bin, args });
+        if (args.includes('pane') && args.includes('list')) {
+          const wsIndex = args.indexOf('--workspace');
+          const scoped = wsIndex >= 0 ? args[wsIndex + 1] : undefined;
+          const panes = scoped
+            ? panePayload.filter((pane) => pane.workspace_id === scoped)
+            : panePayload;
+          return { stdout: JSON.stringify({ result: { panes } }), stderr: '' };
+        }
+        if (args.includes('dep')) return { stdout: JSON.stringify({ outbound: [] }), stderr: '' };
+        if (args.includes('update')) return { stdout: JSON.stringify({ success: true }), stderr: '' };
+        if (args.includes('comment')) return { stdout: JSON.stringify({ success: true }), stderr: '' };
+        if (args.includes('list')) {
+          return {
+            stdout: JSON.stringify({
+              workItems: [
+                {
+                  id: REPRODUCED,
+                  status: 'in-progress',
+                  stage: 'plan_complete',
+                  assignee: 'dispatcher',
+                },
+              ],
+            }),
+            stderr: '',
+          };
+        }
+        return { stdout: '{}', stderr: '' };
+      }) as never);
+
+      const deps: HydratorDeps = {
+        ...createProductionHydratorDeps({ log: () => {} }),
+        // The real claim probe touches the filesystem; pin a dead holder so
+        // the pane evidence is the only signal under test.
+        hasLiveClaimHolder: async () =>
+          new Map<string, ClaimHolderVerdict>([[REPRODUCED, { held: false, reason: 'stale' }]]),
+        listOutboundDepsBatch: async () => undefined,
+        listOutboundDeps: async () => [],
+      };
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      expect(result.demoted).toBe(0);
+      // No `wl update` (hold clear) and no `wl comment add` (release trail).
+      expect(calls.filter((call) => call.args.includes('update'))).toEqual([]);
+      expect(calls.filter((call) => call.args.includes('comment'))).toEqual([]);
+      // AC10: exactly ONE pane-list spawn per hydrate tick, and the demotion
+      // read passes NO `--workspace` filter — it is the workspace-agnostic
+      // machine-wide read (WL-0MWHBSWC20067SMY).
+      const paneListCalls = calls.filter(
+        (call) => call.args.includes('pane') && call.args.includes('list'),
+      );
+      expect(paneListCalls).toHaveLength(1);
+      expect(paneListCalls[0].args).toEqual(['pane', 'list']);
+    },
+  );
+
+  it('still releases an item with no pane in any workspace and no live claim holder (AC3)', async () => {
+    // No over-correction: a genuinely pane-less claim stays releasable, with
+    // today's release-comment text (parent AC3).
+    const fixture = makeCrossWorkspacePanes(REPRODUCED, { paneIn: 'none' });
+    const { deps, applied } = makeCrossDeps(fixture, {
+      hasLiveClaimHolder: async () =>
+        new Map<string, ClaimHolderVerdict>([[REPRODUCED, { held: false, reason: 'no-lock-file' }]]),
+    });
+
+    const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toMatchObject({
+      id: REPRODUCED,
+      status: 'open',
+      stage: 'intake_complete',
+      previousAssignee: 'dispatcher',
+      reason: 'released because no matching pane',
+    });
+  });
+
+  it('prep-tier pane-only contract: intake/plan/audit hold no per-child lock, so pane evidence is the only busy signal (AC7)', async () => {
+    // Header contract (hydrator.ts, parent AC7): `/skill:intake`,
+    // `/skill:plan` and audit runs hold NO per-child claim lock, so for those
+    // tiers pane evidence is the ONLY busy signal — the claim-holder probe is
+    // the second signal only where a lock exists (the implement tier). A
+    // dispatcher-dispatched plan item whose pane lives in the Dispatcher
+    // workspace is therefore kept purely by pane evidence, even when the
+    // probe (wired with a no-lock-file verdict, as it would find for a
+    // prep-tier item) reports no holder.
+    const fixture = makeCrossWorkspacePanes(REPRODUCED, {
+      paneIn: 'dispatcher',
+      label: `Downtime triggered plan - ${REPRODUCED}`,
+    });
+    const { deps, applied } = makeCrossDeps(fixture, {
+      // The probe finds nothing for a prep item (no per-child lock): the
+      // pane above must be the whole decision.
+      hasLiveClaimHolder: async () =>
+        new Map<string, ClaimHolderVerdict>([[REPRODUCED, { held: false, reason: 'no-lock-file' }]]),
+    });
+
+    const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+    expect(result).toMatchObject({ ok: true, considered: 1, demoted: 0 });
+    expect(applied).toEqual([]);
+  });
+
+  it(
+    'keeps the claim and reports ok:false when the wider pane read is unavailable (AC4)',
+    async () => {
+      const fixture = makeCrossWorkspacePanes(REPRODUCED);
+      const { deps, applied } = makeCrossDeps(fixture, {
+        // The scoped read works; ONLY the workspace-agnostic read is
+        // unavailable — ambiguous evidence must never become a release.
+        listActivePanes: async (workspaceId?: string) =>
+          typeof workspaceId === 'string' && workspaceId.length > 0
+            ? fixture.listActivePanes(workspaceId)
+            : null,
+        listAllActivePanes: async () => null,
+      });
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      expect(result.ok).toBe(false);
+      expect(result.demoted).toBe(0);
+      // No release comment either: a release only happens via applyDemotion.
+      expect(applied).toEqual([]);
+    },
+  );
+
+  it(
+    'keeps the claim when the wider pane read exceeds its step budget (AC4)',
+    async () => {
+      const fixture = makeCrossWorkspacePanes(REPRODUCED);
+      // Slow but settling (no test hang): well past the 10 ms step budget.
+      const slowRead = () =>
+        new Promise<HydratorPane[]>((resolve) => setTimeout(() => resolve([...fixture.panes]), 60));
+      const { deps, applied } = makeCrossDeps(fixture, {
+        listActivePanes: async (workspaceId?: string) =>
+          typeof workspaceId === 'string' && workspaceId.length > 0
+            ? fixture.listActivePanes(workspaceId)
+            : slowRead(),
+        listAllActivePanes: slowRead,
+        stepTimeoutMs: 10,
+      });
+
+      const result = await runHydrationOnce(deps, fixture.pluginWorkspaceId);
+
+      // A timed-out wider read is indistinguishable from an unavailable one:
+      // fail open by keeping the claim.
+      expect(result.ok).toBe(false);
+      expect(result.demoted).toBe(0);
+      expect(applied).toEqual([]);
+    },
+  );
 });
 
 describe('unparseable pane list output fails open', () => {
@@ -1505,6 +2253,29 @@ describe('production active-detection spawns (pane list)', () => {
     expect(paneCall).toBeDefined();
     expect(paneCall!.args).toEqual(['pane', 'list']);
   });
+
+  it('runs exactly ONE machine-wide pane-list spawn per hydrate tick, with no --workspace filter (AC10)', async () => {
+    // WL-0MWHBSWC20067SMY parent AC10: the workspace-agnostic demotion read
+    // replaces the scoped read — still exactly ONE `herdr pane list` spawn
+    // per tick, and that single demotion read passes NO `--workspace` filter
+    // (a pane in the Dispatcher workspace must be evidence).
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    // A full tick against the recording router (empty in-progress list):
+    // in-progress list spawn + pane-list spawn. Count only pane-list
+    // spawns — the demotion read must be exactly one machine-wide
+    // `herdr pane list` with no `--workspace`.
+    const result = await runHydrationOnce(deps, 'wCurrent');
+
+    expect(result.ok).toBe(true);
+    const paneListCalls = calls.filter(
+      (call) => call.args.includes('pane') && call.args.includes('list'),
+    );
+    expect(paneListCalls).toHaveLength(1);
+    expect(paneListCalls[0].args).toEqual(['pane', 'list']);
+  });
 });
 
 describe('closed pane clears the in-progress marker (cadence re-evaluation)', () => {
@@ -1512,9 +2283,7 @@ describe('closed pane clears the in-progress marker (cadence re-evaluation)', ()
     let visiblePane: string | undefined = `Downtime triggered - ${WL}`;
     const applied: AppliedDemotion[] = [];
     const { deps } = makeDeps({
-      listInProgressItems: async () => [
-        { id: WL, status: 'in-progress', stage: 'plan_complete' },
-      ],
+      listInProgressItems: async () => [staleItem()],
       listActivePanes: async () =>
         visiblePane
           ? [{ pane_id: 'wC:p1', label: visiblePane, workspace_id: 'wCurrent' }]
@@ -1819,7 +2588,16 @@ describe('per-step timing logs (AC3)', () => {
       now: () => clock,
       listInProgressItems: async () => {
         clock += 7;
-        return [{ id: WL, status: 'in-progress', stage: 'plan_complete' }];
+        // Parent AC5: recency past the claim grace window under the injected
+        // clock so the item reaches the demotion-apply step (a fresh claim
+        // would be kept and the step would never log).
+        return [{
+          id: WL,
+          status: 'in-progress',
+          stage: 'plan_complete',
+          updatedAt: new Date(clock - 200_000).toISOString(),
+          activityAt: new Date(clock - 200_000).toISOString(),
+        }];
       },
       listActivePanes: async () => {
         clock += 3;

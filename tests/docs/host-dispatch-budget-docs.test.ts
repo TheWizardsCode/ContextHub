@@ -185,7 +185,7 @@ describe('proxy-derived audit admission is documented (WL-0MW95GBEG005ERHS)', ()
       expect(dispatcherDoc).toContain(token);
     }
     expect(dispatcherDoc).toContain('HERDR_AUDIT_LOCAL_BUDGET');
-    expect(dispatcherDoc).toContain('/llama/local/audit/status');
+    expect(dispatcherDoc).toContain('/llama/local/audit/availability');
   });
 
   it('has a gate table with the proxy-derived audit rows and the one-release flag', () => {
@@ -212,7 +212,7 @@ describe('proxy-derived audit admission is documented (WL-0MW95GBEG005ERHS)', ()
     expect(dispatcherDoc).toMatch(
       /\| `~\/\.herdr\/downtime\/dispatch-budget\.json` \|.*observability-only for admission/,
     );
-    expect(dispatcherDoc).toContain('GET {proxyUrl}/llama/local/audit/status');
+    expect(dispatcherDoc).toContain('GET {proxyUrl}/llama/local/audit/availability');
     expect(dispatcherDoc).toContain('LP-0MW95FYMH006XYNK');
   });
 

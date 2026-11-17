@@ -2,6 +2,10 @@
  * packages/herdr/src/pane-title.ts — shared pane-title construction
  * (WL-0MSJ4E8UA005KG9Y)
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * (cross-referenced here) live in `docs/dev/downtime-dispatcher.md` → *Pane
+ * creation architecture*.
+ *
  * Centralized pane-title builders shared by the manual spawn paths
  * (index.ts), the shell-command path (index.ts → run-in-pane.sh) and the
  * downtime dispatcher (downtime-worker.ts), so every pi pane follows one

@@ -24,7 +24,9 @@ import {
   dispatchDowntimeWork,
   isTransientDowntimeError,
   withTransientRetry,
+  evaluateCriticalFirstGuard,
 } from './downtime-worker.js';
+import type { InFlightPanes } from './downtime-worker.types.js';
 import { makeDeps } from './downtime-worker.fixtures.js';
 
 // ── Bounded concurrent dispatch (F1, parent WL-0MT50LKAK001EF5Q) ──────
@@ -110,6 +112,93 @@ describe('bounded concurrent dispatch — claim safety regression', () => {
       expect(deps.claimItem).toHaveBeenCalledTimes(1);
     }
   });
+});
+
+// ── Nomination guard — duplicate-dispatch window (parent AC6, child AC4) ──
+
+describe('nomination guard — no re-offer while pane is live', () => {
+  it(
+    'evaluateCriticalFirstGuard prevents nomination of an item whose pane is in-flight (parent AC6)',
+    () => {
+      // Parent AC6: after a dispatch, while its pane is live, the item is not
+      // returned to the dispatchable pool — `wl next` / the candidate selection
+      // cannot nominate it on the next cycle. This test pins the gate that
+      // evaluates the in-flight set against a candidate.
+      //
+      // A dispatcher-dispatched prep item (`/skill:plan`) with a live pane
+      // in the Dispatcher workspace is the canonical scenario: hydrator
+      // evidence shows the item was released (because hydrator only looked
+      // in the plugin workspace), and the dispatcher re-nominated it on
+      // the next cycle — the duplicate-dispatch window of parent AC6.
+      const dispatchedItem = 'WL-0MWFKDH78002T2CR';
+      const otherItem = 'WL-0MWFKDH78002T2DB';
+
+      // InFlightPanes carries the panes seen this cycle: the dispatched
+      // item's pane is live, the other item has no pane.
+      const inFlight: InFlightPanes = {
+        available: true,
+        itemIds: new Set([dispatchedItem]),
+      };
+
+      // The dispatched item MUST NOT be re-offered.
+      const dispatchedGuard = evaluateCriticalFirstGuard(
+        dispatchedItem,
+        inFlight,
+        undefined,
+        Date.now(),
+        120_000, // markerStaleWindowMs
+      );
+      expect(dispatchedGuard.escalate).toBe(false);
+      expect(dispatchedGuard.reason).toBe('in-flight-pane');
+
+      // An item with no pane is eligible for nomination.
+      const otherGuard = evaluateCriticalFirstGuard(
+        otherItem,
+        inFlight,
+        undefined,
+        Date.now(),
+        120_000,
+      );
+      expect(otherGuard.escalate).toBe(true);
+      expect(otherGuard.reason).toBe('no-live-pane');
+    },
+  );
+
+  it(
+    'evaluateCriticalFirstGuard defers when pane query is unavailable but marker is fresh',
+    () => {
+      // When the pane query cannot prove in-flight state (timeout / error),
+      // the gate falls back to the marker TTL — fresh marker ⇒ defer,
+      // stale marker ⇒ escalate. This is the fail-open path: ambiguity
+      // keeps the item from being re-offered until proven otherwise.
+      const inFlightUnavailable: InFlightPanes = {
+        available: false,
+        itemIds: new Set(),
+      };
+
+      // Fresh marker within the stale window — defer (no re-offer).
+      const freshGuard = evaluateCriticalFirstGuard(
+        'WL-XXX',
+        inFlightUnavailable,
+        new Date(Date.now() - 60_000).toISOString(), // 1 min ago
+        Date.now(),
+        120_000,
+      );
+      expect(freshGuard.escalate).toBe(false);
+      expect(freshGuard.reason).toBe('in-flight-unverified');
+
+      // Stale marker beyond the window — escalate (release to dispatch pool).
+      const staleGuard = evaluateCriticalFirstGuard(
+        'WL-YYY',
+        inFlightUnavailable,
+        new Date(Date.now() - 300_000).toISOString(), // 5 min ago
+        Date.now(),
+        120_000,
+      );
+      expect(staleGuard.escalate).toBe(true);
+      expect(staleGuard.reason).toBe('marker-stale-escalation');
+    },
+  );
 });
 
 // ── Transient retry (WL-0MTOTCETU004YYIU AC3 — bounded backoff) ───────

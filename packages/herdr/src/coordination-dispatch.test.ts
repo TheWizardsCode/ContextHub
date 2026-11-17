@@ -381,6 +381,56 @@ describe('dispatchFromCoordination', () => {
     expect(getEntry(testDir, 'inst-1')).not.toBe(null);
   });
 
+  it('AC5: a genuine anchor-unavailable decision records the machine-readable detail on the no-dispatch entry (WL-0MWHCUZ5C000I7S6)', async () => {
+    // Parent AC6 / this item's AC5: the incident log showed 124 identical
+    // `anchor-unavailable` entries with no way to tell a vanished workspace
+    // from a broken CLI. The entry must now carry the failing boundary.
+    // A PEER's offer drives the leader's coordination dispatch directly (an
+    // own-instance offer requires a seeded own head — the peer entry is the
+    // live recurrence used by the other coordinator decision tests).
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [makeEntry('inst-peer', 'WL-PLAN', '/repo')],
+    });
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const worker = makeCoordWorker({
+      coordinationDir: testDir,
+      instanceId: 'inst-a',
+      depsOverrides: {
+        getDispatcherAnchor: vi.fn().mockResolvedValue(null),
+        fetchItem: vi.fn().mockResolvedValue({
+          ok: true,
+          info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }),
+        }),
+        recordDecision,
+      },
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    try {
+      await worker.worker.tick(); // election + first check-in
+      await worker.worker.tick(); // idle run starts
+      vi.setSystemTime(10_000_000 + 60_001);
+      const at = await worker.worker.tick(); // idle threshold met → dispatch attempt
+
+      expect(at.dispatched).toBe(false);
+      // Tick results carry no reason — the refusal lives on the decision
+      // entries recorded below (the subject of this test).
+      const calls = recordDecision.mock.calls.map((call) => call[0] as CoordinationLogEntry);
+      const entry = calls.find(
+        (e) => e.operation === 'no-dispatch' && e.reason === 'anchor-unavailable',
+      );
+      expect(entry).toBeDefined();
+      // The failing boundary (a null anchor stub without a more specific
+      // report names the generic herdr boundary) rides on the decision entry
+      // so the log alone is diagnosable — `reason` stays `anchor-unavailable`.
+      expect(entry?.detail).toBe('herdr-unreadable');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('legacy wiring without getDispatcherAnchor spawns without an anchorId key', async () => {
     const deps = makeCoordinationDeps({
       fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }) }),
@@ -741,13 +791,20 @@ describe('dispatchFromCoordination', () => {
 
 // ── Eligibility re-check at dispatch time (WL-0MTMPIQBE001J41P / WL-0MTOC170J001QMIT) ─
 // Entries are never pruned by age; dispatch-time fetchItem+classify is the sole gate.
-// Stale entries are removed eagerly (no pane, no marker). The round-robin cursor
-// IS advanced for the selected root at selection time (WL-0MTQ2FGSK004CBRK — the
-// cursor advances atomically via selectLeastRecentlyServed even if the entry is
-// later skipped or removed).
+// Stale entries are removed eagerly (no pane, no marker).
+//
+// Rewritten for WL-0MWFIZ8H5005FVNN (post-dispatch round-robin charge): the
+// round-robin cursor is charged when an offer is CONSUMED, not when a root is
+// selected. Selection is a pure read, so an entry dropped by the filter chain
+// charges nothing and only the root whose offer actually dispatches is charged.
+// The old comments here documented selection-time charging (WL-0MTQ2FGSK004CBRK)
+// and are deliberately replaced, not deleted.
 
 describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', () => {
-  it('removes a needsProducerReview entry without cursor advance and dispatches next eligible', async () => {
+  // Flipped by WL-0MWFJT3H9008A0LM (consumed-offer charge): the selected
+  // (stale) root is no longer charged at selection time while the dispatching
+  // root is now charged on its consumed offer.
+  it('removes a needsProducerReview entry without charging it and charges the dispatching root', async () => {
     const stale = makeEntry('inst-stale', 'WL-STALE', '/roots/contexthub');
     const ok = makeEntry('inst-ok', 'WL-OK', '/roots/sorraagents');
     writeCoordinationFile(testDir, { version: 1, entries: [stale, ok] });
@@ -769,11 +826,14 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(spawnCall).toContain('WL-OK');
     // Stale entry eagerly removed, no pane/marker for it
     expect(getEntry(testDir, 'inst-stale')).toBe(null);
-    // The round-robin cursor IS advanced for the selected root at selection
-    // time, even though the entry is later removed (WL-0MTQ2FGSK004CBRK).
+    // Rewritten for WL-0MWFIZ8H5005FVNN (dispatch-driven charge): the stale
+    // contexthub offer was dropped by the filter chain, so its root is NOT
+    // charged; the root that actually dispatched (sorraagents) IS charged.
+    // (The old assertion — "selected root advanced" — encoded the selection-
+    // time charging this change removes.)
     const after = loadRoundRobinCursor(testDir);
-    expect(after['/roots/contexthub']).not.toBe(before['/roots/contexthub']); // selected root advanced
-    expect(after['/roots/sorraagents']).toBe(before['/roots/sorraagents']); // unselected root untouched
+    expect(after['/roots/contexthub']).toBe(before['/roots/contexthub']); // filter-chain drop: no charge
+    expect(after['/roots/sorraagents']).not.toBe(before['/roots/sorraagents']); // dispatch charges its own root
     // Exactly one spawn, for the eligible entry
     expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
@@ -868,13 +928,16 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(getEntry(testDir, 'inst-old')).toBe(null); // removed via dispatch path, not prune
   });
 
-  it('when all entries are stale the result is no-candidate with all stale removed and cursor untouched', async () => {
+  // Flipped to `it(...)` by WL-0MWFJSVXT0033M9M (pure selection): selection no
+  // longer writes, so a tick that dispatches nothing leaves the cursor intact.
+  it('when all entries are stale the result is no-candidate with all stale removed and the cursor byte-identical', async () => {
     const a = makeEntry('inst-a', 'WL-A', '/roots/a');
     const b = makeEntry('inst-b', 'WL-B', '/roots/b');
     writeCoordinationFile(testDir, { version: 1, entries: [a, b] });
-    const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    const { saveRoundRobinCursor, ROUND_ROBIN_BY_ROOT_FILE_NAME } = await import('./downtime-round-robin-by-root.js');
     saveRoundRobinCursor(testDir, { '/roots/a': '2026-09-01T00:00:00.000Z', '/roots/b': '2026-09-01T00:00:00.000Z' });
-    const before = loadRoundRobinCursor(testDir);
+    const cursorPath = join(testDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
+    const before = readFileSync(cursorPath, 'utf8');
     const deps = makeCoordinationDeps({
       fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-X', status: 'in_progress', stage: 'in_progress' }) }),
       spawnAgentPane: vi.fn(),
@@ -885,11 +948,377 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     expect(getEntry(testDir, 'inst-a')).toBe(null);
     expect(getEntry(testDir, 'inst-b')).toBe(null);
+    // Rewritten for WL-0MWFIZ8H5005FVNN: nothing was consumed, so the tick
+    // must leave the cursor byte-identical — selection performs no write.
+    // (The old assertion encoded selection-time charging — WL-0MTQ2FGSK004CBRK.)
+    expect(readFileSync(cursorPath, 'utf8')).toBe(before);
+  });
+});
+
+// ── Dispatch-driven round-robin charge (WL-0MWFIZ8H5005FVNN) ────────────
+//
+// RED BASELINE (TDD): the specs below encode the NEW contract — selection is a
+// pure read and the cursor is charged only when an offer is CONSUMED
+// (`dispatched`, `spawn-failed`, `marker-write-failed`). They were wrapped in
+// `it.fails(...)` so the red baseline commits green (the repo's documented TDD
+// pattern, as used by the registered-root sweep and clamps suites). The
+// implementation children flip each spec to `it(...)`:
+//   - WL-0MWFJSVXT0033M9M (pure selection) → DONE: the selection-purity specs
+//     (this file's "a tick where every offer is held" and the all-stale spec;
+//     plus the selection-purity block in downtime-round-robin-by-root.test.ts)
+//     now run as plain `it(...)`.
+//   - WL-0MWFJT3H9008A0LM (consumed-offer charge) → DONE: the charge table (both
+//     the positive charge rows and the neutral rows' positive control), the
+//     non-front-dispatch fixtures, the needsProducerReview rewrite and the
+//     four-root fairness spec now run as plain `it(...)`.
+//   - WL-0MWFJTCJ5004BKE4 (sweep charge) → the sweep specs in
+//     coordination-registered-root-sweep.test.ts (still `it.fails`).
+// Every spec failed on the pre-change code for a CHARGE-SEMANTICS reason — an
+// advanced cursor where none should be, or an unadvanced dispatching root —
+// never for a compile/import error.
+
+const CHARGE_ROOT_A = '/roots/charge-a';
+const CHARGE_ROOT_B = '/roots/charge-b';
+const CHARGE_SEED_A = '2026-01-01T00:00:00.000Z';
+const CHARGE_SEED_B = '2026-01-02T00:00:00.000Z';
+const CHARGE_NOW = Date.parse('2026-01-03T00:00:00.000Z');
+const HELD_ITEM_ID = 'WL-HELD-A';
+
+/** An implement candidate. */
+function implementCandidate(id: string, overrides: Partial<DowntimeItemInfo> = {}): DowntimeItemInfo {
+  return itemInfo({ id, status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S', ...overrides });
+}
+
+/**
+ * Deps for a two-root charge fixture: `heldRoot`'s implement offer is KEPT but
+ * skipped by the review-queue gate (the selected root consumes nothing), while
+ * `dispatchItem` in the other root drives the outcome under test.
+ */
+function chargeFixtureDeps(opts: {
+  heldRoot: string;
+  heldItemId: string;
+  dispatchItem: DowntimeItemInfo;
+  overrides?: Partial<DowntimeWorkerDeps>;
+}): DowntimeWorkerDeps {
+  return makeCoordinationDeps({
+    // A deep queue only for the held root holds its non-critical implement
+    // offer without removing it — a neutral hold that must never charge.
+    getReviewQueueCount: vi.fn(async (root: string) => (root === opts.heldRoot ? 20 : 0)),
+    fetchItem: vi.fn(async (id: string) => ({
+      ok: true as const,
+      info: id === opts.heldItemId
+        ? implementCandidate(opts.heldItemId)
+        : opts.dispatchItem,
+    })),
+    ...opts.overrides,
+  });
+}
+
+/**
+ * Control probe: a minimal fresh tick must charge the root whose offer is
+ * CONSUMED. Used by the neutral-outcome rows so each row depends on the
+ * consumed-offer charge existing (WL-0MWFJT3H9008A0LM) — otherwise a neutral
+ * row would already be green under pure selection alone (WL-0MWFJSVXT0033M9M)
+ * and could not pin the charge contract.
+ */
+async function expectConsumedOfferChargeLive(): Promise<void> {
+  const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+  const root = '/roots/charge-live';
+  const seed = '2020-01-01T00:00:00.000Z';
+  const nowMs = Date.parse('2026-01-05T00:00:00.000Z');
+  saveRoundRobinCursor(testDir, { [root]: seed });
+  const entry = makeEntry('inst-live', 'WL-LIVE', root);
+  writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+  const deps = makeCoordinationDeps({
+    fetchItem: vi.fn(async (id: string) => ({ ok: true as const, info: implementCandidate(id) })),
+  });
+  const outcome = await dispatchFromCoordination(
+    deps,
+    [entry],
+    { model: 'plan', cwd: root, coordinationDir: testDir },
+    nowMs,
+  );
+  expect(outcome.dispatched).toBe(true);
+  expect(loadRoundRobinCursor(testDir)[root]).toBe(new Date(nowMs).toISOString());
+}
+
+describe('dispatch-driven round-robin charge (WL-0MWFIZ8H5005FVNN)', () => {
+  it('charges the DISPATCHING root B when the selected root A holds its offer (non-front dispatch)', async () => {
+    const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_A, [CHARGE_ROOT_B]: CHARGE_SEED_B });
+    const entryA = makeEntry('inst-held-a', HELD_ITEM_ID, CHARGE_ROOT_A);
+    const entryB = makeEntry('inst-b', 'WL-DISPATCH-B', CHARGE_ROOT_B);
+    writeCoordinationFile(testDir, { version: 1, entries: [entryA, entryB] });
+
+    const deps = chargeFixtureDeps({
+      heldRoot: CHARGE_ROOT_A,
+      heldItemId: HELD_ITEM_ID,
+      dispatchItem: implementCandidate('WL-DISPATCH-B'),
+    });
+    const outcome = await dispatchFromCoordination(
+      deps,
+      [entryA, entryB],
+      { model: 'plan', cwd: CHARGE_ROOT_A, coordinationDir: testDir },
+      CHARGE_NOW,
+    );
+
+    expect(outcome.dispatched).toBe(true); // B dispatched
     const after = loadRoundRobinCursor(testDir);
-    // Cursor IS advanced for the selected root even when all entries are stale
-    // (WL-0MTQ2FGSK004CBRK — selection advances atomically, removal doesn't undo).
-    expect(after['/roots/a']).not.toBe(before['/roots/a']); // selected root advanced
-    expect(after['/roots/b']).toBe(before['/roots/b']);     // unselected root untouched
+    expect(after[CHARGE_ROOT_A]).toBe(CHARGE_SEED_A); // selected-but-held root: never charged
+    expect(after[CHARGE_ROOT_B]).toBe(new Date(CHARGE_NOW).toISOString()); // dispatching root charged
+  });
+
+  it('charges the DISPATCHING root A when the selected root B holds its offer (mirrored non-front dispatch)', async () => {
+    const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    // Mirror: B is cursor-oldest (selected) and holds; A (second position) dispatches.
+    saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_B, [CHARGE_ROOT_B]: CHARGE_SEED_A });
+    const entryA = makeEntry('inst-a', 'WL-DISPATCH-A', CHARGE_ROOT_A);
+    const entryB = makeEntry('inst-held-b', 'WL-HELD-B', CHARGE_ROOT_B);
+    writeCoordinationFile(testDir, { version: 1, entries: [entryA, entryB] });
+
+    const deps = chargeFixtureDeps({
+      heldRoot: CHARGE_ROOT_B,
+      heldItemId: 'WL-HELD-B',
+      dispatchItem: implementCandidate('WL-DISPATCH-A'),
+    });
+    const outcome = await dispatchFromCoordination(
+      deps,
+      [entryA, entryB],
+      { model: 'plan', cwd: CHARGE_ROOT_A, coordinationDir: testDir },
+      CHARGE_NOW,
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    const after = loadRoundRobinCursor(testDir);
+    expect(after[CHARGE_ROOT_B]).toBe(CHARGE_SEED_A); // selected-but-held root: never charged
+    expect(after[CHARGE_ROOT_A]).toBe(new Date(CHARGE_NOW).toISOString()); // dispatching root charged
+  });
+
+  it('selection purity: a tick where every offer is held leaves the cursor file byte-identical', async () => {
+    const { saveRoundRobinCursor, ROUND_ROBIN_BY_ROOT_FILE_NAME } = await import('./downtime-round-robin-by-root.js');
+    saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_A, [CHARGE_ROOT_B]: CHARGE_SEED_B });
+    const cursorPath = join(testDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
+    const before = readFileSync(cursorPath, 'utf8');
+
+    const deps = makeCoordinationDeps({
+      // EVERY root's queue is deep: both implement offers are kept but held.
+      getReviewQueueCount: vi.fn(async () => 20),
+      fetchItem: vi.fn(async (id: string) => ({ ok: true as const, info: implementCandidate(id) })),
+    });
+    const entries = [
+      makeEntry('inst-a', 'WL-A', CHARGE_ROOT_A),
+      makeEntry('inst-b', 'WL-B', CHARGE_ROOT_B),
+    ];
+    const outcome = await dispatchFromCoordination(
+      deps,
+      entries,
+      { model: 'plan', cwd: CHARGE_ROOT_A, coordinationDir: testDir },
+      CHARGE_NOW,
+    );
+
+    expect(outcome.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(readFileSync(cursorPath, 'utf8')).toBe(before);
+  });
+
+  // Table-driven per-outcome contract: the outcome classes named in the
+  // parent ACs (WL-0MWFIZ8H5005FVNN). Each row is one offer outcome; `charges`
+  // says whether the dispatching root is charged.
+  type ChargeTableRow = {
+    outcome: string;
+    charges: boolean;
+    item: DowntimeItemInfo;
+    overrides?: Partial<DowntimeWorkerDeps>;
+  };
+  const auditCandidate = (id: string): DowntimeItemInfo =>
+    itemInfo({ id, status: 'completed', stage: 'in_review', updatedAt: new Date(CHARGE_NOW - 60_000).toISOString() });
+  const table: ChargeTableRow[] = [
+    { outcome: 'dispatched', charges: true, item: implementCandidate('WL-CONSUME') },
+    {
+      outcome: 'spawn-failed',
+      charges: true,
+      item: implementCandidate('WL-SPAWN-FAILED'),
+      overrides: { spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'boom', exitCode: 1 }) },
+    },
+    {
+      outcome: 'marker-write-failed',
+      charges: true,
+      item: implementCandidate('WL-MARKER-FAILED'),
+      overrides: {
+        recordDispatch: vi.fn().mockResolvedValue(false),
+        // Rollback also fails → the claimed item is stranded; the offer is
+        // consumed (removed) so the dispatching root is charged.
+        rollbackClaim: vi.fn().mockResolvedValue(false),
+      },
+    },
+    {
+      outcome: 'claim-failed',
+      charges: false,
+      item: implementCandidate('WL-CLAIM-FAILED'),
+      overrides: { claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }) },
+    },
+    {
+      outcome: 'claim-rolled-back',
+      charges: false,
+      item: implementCandidate('WL-CLAIM-ROLLED-BACK'),
+      overrides: {
+        recordDispatch: vi.fn().mockResolvedValue(false),
+        rollbackClaim: vi.fn().mockResolvedValue(true),
+      },
+    },
+    {
+      outcome: 'reservation admit:false',
+      charges: false,
+      item: implementCandidate('WL-RESERVED'),
+      overrides: {
+        reserveLocalCapacity: vi.fn().mockResolvedValue({
+          status: 'refused',
+          refusal: { reason: 'queue-full', retryAfterSeconds: 12 },
+        }),
+      },
+    },
+    {
+      outcome: 'anchor-unavailable',
+      charges: false,
+      item: implementCandidate('WL-ANCHOR'),
+      overrides: { getDispatcherAnchor: vi.fn().mockResolvedValue(null) },
+    },
+    {
+      outcome: 'host-budget-implement',
+      charges: false,
+      item: implementCandidate('WL-HOST-BUDGET'),
+      overrides: {
+        admitHostDispatch: vi.fn().mockResolvedValue({ admitted: false, live: 2, max: 2, reason: 'host-budget-implement' }),
+        rollbackClaim: vi.fn().mockResolvedValue(true),
+      },
+    },
+    {
+      outcome: 'audit-budget-saturated',
+      charges: false,
+      item: auditCandidate('WL-AUDIT-BUDGET'),
+      overrides: {
+        admitHostDispatch: vi.fn().mockResolvedValue({ admitted: false, live: 1, max: 1, reason: 'audit-budget-saturated' }),
+        rollbackClaim: vi.fn().mockResolvedValue(true),
+      },
+    },
+    {
+      outcome: 'non-dispatchable filter-chain removal',
+      charges: false,
+      item: implementCandidate('WL-FILTERED', { needsProducerReview: true }),
+    },
+  ];
+
+  for (const row of table) {
+    it(`${row.charges ? 'charges' : 'does not charge'} on \`${row.outcome}\``, async () => {
+      const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+      saveRoundRobinCursor(testDir, { [CHARGE_ROOT_A]: CHARGE_SEED_A, [CHARGE_ROOT_B]: CHARGE_SEED_B });
+      const entryA = makeEntry('inst-held-a', HELD_ITEM_ID, CHARGE_ROOT_A);
+      const entryB = makeEntry('inst-outcome', row.item.id, CHARGE_ROOT_B);
+      writeCoordinationFile(testDir, { version: 1, entries: [entryA, entryB] });
+      const deps = chargeFixtureDeps({
+        heldRoot: CHARGE_ROOT_A,
+        heldItemId: HELD_ITEM_ID,
+        dispatchItem: row.item,
+        overrides: row.overrides ?? {},
+      });
+      await dispatchFromCoordination(
+        deps,
+        [entryA, entryB],
+        { model: 'plan', cwd: CHARGE_ROOT_A, coordinationDir: testDir },
+        CHARGE_NOW,
+      );
+
+      const after = loadRoundRobinCursor(testDir);
+      // The selected-but-held root must never be charged — selection is pure
+      // (this half fails on the current code for EVERY row).
+      expect(after[CHARGE_ROOT_A]).toBe(CHARGE_SEED_A);
+      if (row.charges) {
+        expect(after[CHARGE_ROOT_B]).toBe(new Date(CHARGE_NOW).toISOString());
+      } else {
+        expect(after[CHARGE_ROOT_B]).toBe(CHARGE_SEED_B);
+        // A neutral hold must not charge — but "nothing charges" is also true
+        // before the charge exists at all. Pin the positive half so this row
+        // stays RED until the consumed-offer charge lands (WL-0MWFJT3H9008A0LM).
+        await expectConsumedOfferChargeLive();
+      }
+    });
+  }
+
+  it('four-root fairness: no admissible root is skipped while surplus capacity exists', async () => {
+    const { saveRoundRobinCursor, loadRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    const roots = ['/roots/fair-1', '/roots/fair-2', '/roots/fair-3', '/roots/fair-4'];
+    saveRoundRobinCursor(testDir, {
+      [roots[0]]: '2025-12-01T00:00:00.000Z',
+      [roots[1]]: '2025-12-02T00:00:00.000Z',
+      [roots[2]]: '2025-12-03T00:00:00.000Z',
+      [roots[3]]: '2025-12-04T00:00:00.000Z',
+    });
+    // roots[0] always holds (deep review queue); the other three always offer
+    // an admissible implement. Under the CURRENT code the selected-but-held
+    // root is charged while a non-front winner is not, letting one productive
+    // root dispatch twice in a row (R2,R2,R3,R4,...) while its peers wait.
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn(async (root: string) => (root === roots[0] ? 20 : 0)),
+      fetchItem: vi.fn(async (id: string) => ({ ok: true as const, info: implementCandidate(id) })),
+    });
+    // The coordination file rotates like the real append-only check-in: a
+    // consumed offer is removed and its owner re-offers at the TAIL.
+    let order = roots.map((root, index) => makeEntry(`inst-fair-${index}`, `WL-FAIR-${index}`, root));
+    const dispatched: string[] = [];
+    const dispatchedAt: number[] = [];
+    for (let tick = 0; tick < 6; tick++) {
+      writeCoordinationFile(testDir, { version: 1, entries: order });
+      const nowMs = Date.parse('2026-01-04T00:00:00.000Z') + tick * 1_000;
+      const outcome = await dispatchFromCoordination(
+        deps,
+        [...order],
+        { model: 'plan', cwd: '/roots/leader', coordinationDir: testDir },
+        nowMs,
+      );
+      expect(outcome.dispatched).toBe(true);
+      const spawnCalls = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls;
+      const spawnOpts = spawnCalls[tick][1] as { cwd: string };
+      dispatched.push(spawnOpts.cwd);
+      dispatchedAt.push(nowMs);
+      // Consumed-offer charge (WL-0MWFJT3H9008A0LM): every tick charges exactly
+      // the root whose offer it consumed, and the permanently held root stays
+      // untouched — it is never charged merely for being selected.
+      const cursorThisTick = loadRoundRobinCursor(testDir);
+      expect(cursorThisTick[spawnOpts.cwd]).toBe(new Date(nowMs).toISOString());
+      expect(cursorThisTick[roots[0]]).toBe('2025-12-01T00:00:00.000Z');
+      const consumed = order.find((entry) => (entry.worklogRoot ?? entry.directory) === spawnOpts.cwd);
+      expect(consumed).toBeDefined();
+      order = [
+        ...order.filter((entry) => entry !== consumed),
+        makeEntry(consumed!.instanceId, consumed!.workItemId, spawnOpts.cwd),
+      ];
+    }
+
+    // The permanently held root never consumes a dispatch slot.
+    expect(dispatched).not.toContain(roots[0]);
+    // No productive root dispatches twice in a row while its peers hold
+    // admissible offers and surplus capacity exists.
+    for (let i = 1; i < dispatched.length; i++) {
+      expect(dispatched[i]).not.toBe(dispatched[i - 1]);
+    }
+    // Every productive root is served at least twice in the six-tick window.
+    for (const root of roots.slice(1)) {
+      expect(dispatched.filter((cwd) => cwd === root).length).toBeGreaterThanOrEqual(2);
+    }
+    // The cursor records exactly who was served — the in-loop assertion above
+    // pins every individual charge; this final read pins the last-write-wins
+    // state (`advanceRoot` stores the most recent dispatch per root).
+    const cursor = loadRoundRobinCursor(testDir);
+    const chargedRoots = Object.keys(cursor).filter(
+      (root) => Date.parse(cursor[root]) >= Date.parse('2026-01-04T00:00:00.000Z'),
+    );
+    expect(chargedRoots.sort()).toEqual([...new Set(dispatched)].sort());
+    const lastDispatchAt = new Map<string, number>();
+    for (let i = 0; i < dispatched.length; i++) lastDispatchAt.set(dispatched[i], dispatchedAt[i]);
+    for (const [root, at] of lastDispatchAt) {
+      expect(cursor[root]).toBe(new Date(at).toISOString());
+    }
+    expect(cursor[roots[0]]).toBe('2025-12-01T00:00:00.000Z');
   });
 });
 
@@ -1027,9 +1456,26 @@ describe('runCoordinationCheckIn', () => {
 
   it('updates the entry when the most-important (Herdr head) item changes', async () => {
     const deps = makeCoordinationDeps({
+      // Three-bucket windows (implement/audit/prep) fill EVERY bucket from the
+      // visible list, so the check-in needs exactly the one head read per pass
+      // (no widening on a fully-filled window — WL-0MWFJ8R1P005G1H1 test d).
       getHerdrListHead: vi.fn()
-        .mockResolvedValueOnce({ ok: true, items: [headItem({ id: 'WL-A', stage: 'idea', status: 'open' })] })
-        .mockResolvedValueOnce({ ok: true, items: [headItem({ id: 'WL-B', stage: 'intake_complete', status: 'open' })] }),
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-A', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-A2', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+            headItem({ id: 'WL-A3', stage: 'intake_complete', status: 'open' }),
+          ],
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-B', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-B2', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+            headItem({ id: 'WL-B3', stage: 'intake_complete', status: 'open' }),
+          ],
+        }),
     });
     await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
     await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
@@ -1040,7 +1486,14 @@ describe('runCoordinationCheckIn', () => {
     // First offer something, then the backlog empties.
     const deps = makeCoordinationDeps({
       getHerdrListHead: vi.fn()
-        .mockResolvedValueOnce({ ok: true, items: [headItem({ id: 'WL-A', stage: 'idea', status: 'open' })] })
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-A', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-A2', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+            headItem({ id: 'WL-A3', stage: 'intake_complete', status: 'open' }),
+          ],
+        })
         .mockResolvedValueOnce({ ok: true, items: [] }),
     });
     await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
@@ -1057,6 +1510,111 @@ describe('runCoordinationCheckIn', () => {
     const result = await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
     expect(result.updated).toBe(false);
     expect(getEntry(testDir, 'inst-1')?.workItemId).toBe('WL-EXISTING');
+  });
+
+  it('writes a bounded v2 offers array from the per-bucket nominees (one head read for all three buckets)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+        headItem({ id: 'WL-PREP', stage: 'intake_complete', status: 'open' }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    const result = await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    expect(result.offered).toBe('WL-IMP');
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    const entry = getEntry(testDir, 'inst-1');
+    expect(entry?.workItemId).toBe('WL-IMP');
+    // The v2 `offers` payload is the canonical per-bucket nominee array
+    // (implement → audit → prep) computed from the single head read.
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+      { kind: 'prep', workItemId: 'WL-PREP' },
+    ]);
+  });
+
+  it('orders the offers by canonical bucket, not window order — workItemId mirrors the first (implement) offer', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      // AUD appears first in the WINDOW (it is the window-first candidate),
+      // but the v2 offers payload follows the canonical bucket order
+      // implement → audit → prep (parent AC2: buckets, not a second ranking),
+      // and `workItemId` mirrors offers[0] so a v1-era leader reads the
+      // implement nominee (parent AC9).
+      items: [
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    const result = await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    expect(result.offered).toBe('WL-IMP');
+    const entry = getEntry(testDir, 'inst-1');
+    expect(entry?.workItemId).toBe('WL-IMP');
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+    ]);
+  });
+
+  it('widens a missing bucket into the tail — a window-sourced entry stays byte-identical when the tail adds nothing', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [
+        headItem({ id: 'WL-IMP', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+        headItem({ id: 'WL-AUD', stage: 'in_review', status: 'completed', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+      ],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+    // The missing prep bucket IS sought beyond the window (WL-0MWFJ8R1P005G1H1
+    // supersedes AC3's "never widened"), but the mock tail adds nothing, so
+    // the window-sourced offer payload is byte-identical. No widen signal.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+    const entry = getEntry(testDir, 'inst-1');
+    expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'audit', workItemId: 'WL-AUD' },
+    ]);
+  });
+
+  it('falls back to a single-offer entry when the visible window yields nothing and the offer comes from the whole-backlog extension', async () => {
+    // The only window item is freshly dispatched (marker exclusion filters the
+    // WHOLE window); the whole-backlog extension then finds the next
+    // implement. The entry carries ONE implement offer (the deepened nominee
+    // IS the single offer — the window partition contributed nothing), so a
+    // v1-era leader keeps reading exactly the pre-tier-aware offer.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-checkin-ext-'));
+    try {
+      writeDowntimeLog(root, [
+        { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
+      ] as never);
+      const getHerdrListHead = vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          items: [headItem({ id: 'WL-IMP-1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' })],
+        })
+        .mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-IMP-1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+            headItem({ id: 'WL-IMP-2', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' }),
+          ],
+        });
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+      const result = await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      expect(result.offered).toBe('WL-IMP-2');
+      const entry = getEntry(testDir, 'inst-1');
+      expect(entry?.workItemId).toBe('WL-IMP-2');
+      expect((entry as unknown as { offers?: Array<{ kind: string; workItemId: string }> }).offers).toEqual([
+        { kind: 'implement', workItemId: 'WL-IMP-2' },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -3869,5 +4427,1123 @@ describe('host-wide dispatch budget (F3)', () => {
     // AC5: neutral — the tick never reports 'no-candidate', so the worker
     // enters neither the cooldown nor a strike.
     expect(outcome.reason).not.toBe('no-candidate');
+  });
+});
+
+// ── Audit-budget refusal on the offer path (WL-0MWDDHVF2004PTYX) ─────────
+//
+// The proxy-derived audit budget (`audit-budget-saturated` /
+// `audit-budget-unknown`) refuses an OFFERED audit at admission. Before
+// WL-0MWDDHVF2004PTYX those outcomes matched none of the offer loop's
+// special cases and fell through unmasked — a tick with only audit refusals
+// could report `host-budget-implement` (an implement hold recorded later in
+// the same scan) or `no-candidate`, hiding a missing proxy endpoint (the
+// 2026-11-12 incident: ~130 consecutive `host-budget-implement` ticks and
+// zero `audit-budget-*` entries while `/llama/local/audit/status` answered
+// 404). The audit refusal is now recorded as its OWN neutral hold
+// (`auditBudgetHold`, why-origin AC1), ranked ABOVE the implement/host rung
+// in the terminal chain (AC2), carries the failing exchange as `detail`
+// (AC3), and is attributed in the per-offer rejection payload (AC5).
+function auditRefusalDeps(
+  reason: string,
+  detail?: string,
+  live = 0,
+  max = 0,
+): { deps: ReturnType<typeof makeCoordinationDeps>; entry: CoordinationEntry } {
+  const entry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+  const deps = makeCoordinationDeps({
+    admitHostDispatch: vi.fn().mockResolvedValue({
+      admitted: false,
+      live,
+      max,
+      reason,
+      ...(detail !== undefined ? { detail } : {}),
+    }),
+    fetchItem: vi.fn().mockResolvedValue({
+      ok: true,
+      info: itemInfo({
+        id: 'WL-AUD',
+        status: 'completed',
+        stage: 'in_review',
+        updatedAt: new Date().toISOString(),
+      }),
+    }),
+  });
+  return { deps, entry };
+}
+
+describe('audit-budget refusal on the offer path (WL-0MWDDHVF2004PTYX)', () => {
+  it('AC1: an audit-only refusal reports the audit-budget reason with detail and attribution (never host-budget-implement, never no-candidate)', async () => {
+    const { deps, entry } = auditRefusalDeps('audit-budget-unknown', 'http-404');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+    });
+
+    // The tick names the AUDIT gate — the exact incident it fixes.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-budget-unknown');
+    // The failing exchange is emitted in the same decision entry (AC3).
+    expect(outcome.detail).toBe('http-404');
+    expect(outcome.reason).not.toBe('host-budget-implement');
+    expect(outcome.reason).not.toBe('no-candidate');
+    // AC4: neutral — no pane, no marker, no claim left stranded.
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    // AC5: the per-offer rejection payload names the audit gate.
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-AUD', worklogRoot: '/roots/audit', gate: 'audit-budget' },
+    ]);
+    // The offer is KEPT — still valid once the proxy answers.
+    expect(getEntry(testDir, 'inst-audit')).not.toBeNull();
+  });
+
+  it('AC2: an audit refusal OUTRANKS an implement refusal in the same tick', async () => {
+    const auditEntry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+    const implementEntry = makeEntry('inst-imp', 'WL-IMP', '/roots/impl');
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [auditEntry, implementEntry],
+    });
+    const deps = makeCoordinationDeps({
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'audit'
+          ? {
+              admitted: false,
+              live: 1,
+              max: 1,
+              reason: 'audit-budget-saturated',
+            }
+          : { admitted: false, live: 2, max: 2, reason: 'host-budget-implement' },
+      ),
+      fetchItem: vi.fn(async (itemId: string) => ({
+        ok: true as const,
+        info: itemInfo(
+          itemId === 'WL-AUD'
+            ? {
+                id: 'WL-AUD',
+                status: 'completed',
+                stage: 'in_review',
+                updatedAt: new Date().toISOString(),
+              }
+            : {
+                id: 'WL-IMP',
+                status: 'open',
+                stage: 'plan_complete',
+                risk: 'Low',
+                effort: 'S',
+              },
+        ),
+      })),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [auditEntry, implementEntry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      effectiveFreeSlots: 2,
+    });
+
+    // The audit rung beats the ambient implement-cap statement: the tick
+    // explains the TIER that is actually dead, not the one that is merely full.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-budget-saturated');
+    expect(outcome.budget).toEqual({ live: 1, max: 1 });
+    expect(outcome.reason).not.toBe('host-budget-implement');
+    // Both offers are attributed — the audit with its own gate token.
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-AUD', worklogRoot: '/roots/audit', gate: 'audit-budget' },
+    ]);
+  });
+
+  it('AC3: the failing exchange detail reaches the outcome for http-404, timeout and bad-body', async () => {
+    for (const detail of ['http-404', 'timeout', 'bad-body'] as const) {
+      const { deps, entry } = auditRefusalDeps('audit-budget-unknown', detail);
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+      });
+      expect(outcome.reason).toBe('audit-budget-unknown');
+      expect(outcome.detail).toBe(detail);
+    }
+  });
+
+  it('AC7: an audit refusal alongside a successful dispatch does not pollute the success outcome', async () => {
+    const auditEntry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+    const implementEntry = makeEntry('inst-imp', 'WL-IMP', '/roots/impl');
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [auditEntry, implementEntry],
+    });
+    const deps = makeCoordinationDeps({
+      // Refuse the audit offer; admit the implement offer so it dispatches.
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'audit'
+          ? {
+              admitted: false,
+              live: 1,
+              max: 1,
+              reason: 'audit-budget-unknown',
+              detail: 'seam-absent',
+            }
+          : { admitted: true, live: 0, max: 2 },
+      ),
+      fetchItem: vi.fn(async (itemId: string) => ({
+        ok: true as const,
+        info: itemInfo(
+          itemId === 'WL-AUD'
+            ? {
+                id: 'WL-AUD',
+                status: 'completed',
+                stage: 'in_review',
+                updatedAt: new Date().toISOString(),
+              }
+            : {
+                id: 'WL-IMP',
+                status: 'open',
+                stage: 'plan_complete',
+                risk: 'Low',
+                effort: 'S',
+              },
+        ),
+      })),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [auditEntry, implementEntry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      effectiveFreeSlots: 2,
+    });
+
+    // The implement offer dispatches; the recorded audit hold must NOT leak
+    // budget/detail/rejections onto the success outcome.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.reason).toBeUndefined();
+    expect(outcome.budget).toBeUndefined();
+    expect(outcome.detail).toBeUndefined();
+    expect(outcome.offerRejections).toBeUndefined();
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Per-bucket nominees from one head read (parent WL-0MWDDHQON0015T3P AC2/AC3) ──
+//
+// Tier-aware offers (WL-0MWDDHQON0015T3P): each instance advertises the head
+// of EVERY dispatch bucket (`implement` / `audit` / `prep` — the union of
+// plan/intake/risk-effort) so a budget-refused head cannot hide the root's
+// other backlog. This slice (WL-0MWDVMYAC0064JNW) defines the OFFER-COMPUTATION
+// contract: all three nominees are drawn from the SAME sprint-view window the
+// single-offer path uses today, partitioned per bucket — one
+// `getHerdrListHead` call per computation, no new ranking/scoring logic, and
+// the single-offer path's fail-open, stall-scan short-circuit and sequential
+// filters preserved per bucket.
+//
+// GREEN (F2, WL-0MWDVMZNV0011FDT): `computeMostImportantItem` now returns the
+// single offer (`{ok:true, kind, candidate}`) PLUS a `nominees` array — the
+// per-bucket candidates of the same window, in canonical bucket order. The
+// four bodies below (`it.fails` until this slice) now run as plain `it`; the
+// two plain `it` bodies pin contracts that are preserved unchanged.
+describe('per-bucket nominees from one head read (parent AC2/AC3)', () => {
+  /**
+   * Post-F2 per-bucket nominee — the v2 `offers` entry shape F1's check-in
+   * write path consumes (`{kind, workItemId}`, at most one per bucket).
+   */
+  interface NomineeWitness {
+    kind: 'implement' | 'audit' | 'prep';
+    workItemId: string;
+  }
+
+  /** Read the per-bucket surface from a computation result. */
+  const nomineesOf = (result: unknown): NomineeWitness[] | undefined =>
+    (result as { nominees?: NomineeWitness[] }).nominees;
+
+  // Mixed-kind window fixtures in CANONICAL Herdr list order (the window IS
+  // the ranking — no new priority/age/scoring logic may re-order it).
+  const implementItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Implement ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', sortIndex });
+  const auditItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Audit ${id}`, status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString(), sortIndex });
+  /** Prep-bucket item (plan tier in the classification). */
+  const prepItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Prep ${id}`, status: 'open', stage: 'intake_complete', sortIndex });
+
+  it('AC1: each nominee is the canonical FIRST item of its bucket in window order — a lower sortIndex later in the window never displaces it', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        // Window order = the canonical ranking. The SECOND item of each bucket
+        // carries a lower sortIndex (which other logic would rank higher):
+        // per-bucket selection must keep the window-first item, otherwise a
+        // new scoring rule crept in.
+        items: [
+          implementItem('WL-IMP-1', 500),
+          auditItem('WL-AUD-1', 500),
+          prepItem('WL-PREP-1', 500),
+          implementItem('WL-IMP-2', 1),
+          auditItem('WL-AUD-2', 1),
+          prepItem('WL-PREP-2', 1),
+        ],
+      }),
+    });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-1' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+      { kind: 'prep', workItemId: 'WL-PREP-1' },
+    ]);
+  });
+
+  it('AC2: exactly ONE getHerdrListHead call computes all three nominees (no per-bucket wl spawn)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1')],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toHaveLength(3);
+    // The single sprint-view read served every bucket — no additional wl list
+    // spawn per bucket, and exactly the sprint view was requested.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    expect(getHerdrListHead).toHaveBeenCalledWith('/repo', expect.any(Number));
+  });
+
+  it('AC3: a bucket empty in the window is widened into the tail — an eligible tail item fills it and the widening is observed', async () => {
+    // The prep bucket is empty in the window; the tail (extension) holds one
+    // eligible prep item. The computation must keep walking the SAME ranking
+    // until the bucket has a nominee or the tail is exhausted (supersedes
+    // AC3's "the window is never widened to fill a bucket", WL-0MWFJ8R1P005G1H1).
+    const getHerdrListHead = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1')],
+      })
+      .mockResolvedValue({
+        ok: true,
+        items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-21')],
+      });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-1' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+      { kind: 'prep', workItemId: 'WL-PREP-21' },
+    ]);
+    // The fill used the SAME read path (one widening read, never per-bucket).
+    expect((result as { filledBeyondWindow?: { buckets: string[]; itemsRead: number } }).filledBeyondWindow).toEqual({
+      buckets: ['prep'],
+      itemsRead: 1,
+    });
+  });
+
+  it('AC3: per-bucket filters preserved — a fresh dispatch marker on the implement head skips to the NEXT offerable implement, other buckets unaffected', async () => {
+    // WL-IMP-1 was just dispatched at its current stage → the implement-bucket
+    // exclusion skips it and nominates the next offerable implement, while
+    // the audit and prep buckets still nominate their own canonical heads
+    // (the same sequential filters the single-offer path applies today).
+    const root = mkdtempSync(join(tmpdir(), 'herdr-nominees-'));
+    try {
+      writeDowntimeLog(root, [
+        { kind: 'implement', operation: 'dispatch', itemId: 'WL-IMP-1', stage: 'plan_complete', dispatchedAt: new Date(Date.now() - 60_000).toISOString() },
+      ] as never);
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1'), implementItem('WL-IMP-2')],
+        }),
+      });
+
+      const result = await computeMostImportantItem(deps, root, Date.now(), 20);
+      expect(result.ok).toBe(true);
+      expect(nomineesOf(result)).toEqual([
+        { kind: 'implement', workItemId: 'WL-IMP-2' },
+        { kind: 'audit', workItemId: 'WL-AUD-1' },
+        { kind: 'prep', workItemId: 'WL-PREP-1' },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3: preserve the {ok:false} fail-open contract — a head lookup failure yields no nominees and never throws (the caller keeps its entry)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({ ok: false, error: 'wl exploded' });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error).toBe('wl exploded');
+    // The single aborted read, exactly as today — never a per-bucket retry.
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    expect((result as { nominees?: unknown }).nominees).toBeUndefined();
+  });
+
+  it('AC3: preserve the stall-scan short-circuit — a resumed stalled pane yields stalledResume BEFORE any head read (no per-bucket read either)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1')],
+    });
+    const deps = makeCoordinationDeps({
+      getHerdrListHead,
+      scanStalledPanes: vi.fn().mockResolvedValue([
+        {
+          pane: { paneId: 'pane-1', label: 'Downtime triggered implement Some item - WL-STALLED', agent: 'pi', agentStatus: 'idle' },
+          item: { id: 'WL-STALLED', status: 'open', stage: 'plan_complete', title: 'Some item', updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() },
+          cwd: '/repo',
+          kind: 'implement',
+        },
+      ]),
+      resumeStalledPane: vi.fn().mockResolvedValue({ resumed: true, reason: 'prompt', paneId: 'pane-1', itemId: 'WL-STALLED', kind: 'implement' }),
+    });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('stalledResume' in result)) throw new Error('expected stalledResume');
+    expect(result.stalledResume).toBe(true);
+    // Short-circuit before the (single shared) head read — preserved per bucket.
+    expect(getHerdrListHead).not.toHaveBeenCalled();
+  });
+});
+
+// ── Per-bucket widening beyond the visible window (WL-0MWFJ8R1P005G1H1) ──
+//
+// The stray-window AC3 ("the window is never widened to fill a bucket") is
+// SUPERSEDED: the visible window is a RENDERING bound, not a dispatch bound,
+// so a bucket the window leaves empty is filled from beyond the window by the
+// whole-backlog extension — the SAME canonical ranking, the same sequential
+// filters, one read path (never a per-bucket read, never a second ranking).
+// These cases pin the widening contract: an unfilled bucket is sought in the
+// tail, the fill is observable (`filledBeyondWindow` names the buckets + items
+// read), and the fail-open / cost-bounding properties of the single-offer
+// extension are preserved.
+describe('per-bucket widening beyond the visible window (WL-0MWFJ8R1P005G1H1)', () => {
+  interface NomineeWitness {
+    kind: 'implement' | 'audit' | 'prep';
+    workItemId: string;
+  }
+
+  const nomineesOf = (result: unknown): NomineeWitness[] | undefined =>
+    (result as { nominees?: NomineeWitness[] }).nominees;
+
+  const implementItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Implement ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', sortIndex });
+  const auditItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Audit ${id}`, status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString(), sortIndex });
+  const prepItem = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Prep ${id}`, status: 'open', stage: 'intake_complete', sortIndex });
+  /** A fully-gated window filler (producer-review gate blocks every bucket). */
+  const gatedItem = (id: string, sortIndex: number): DowntimeHerdrItem =>
+    headItem({ id, title: `Gated ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', needsProducerReview: true, sortIndex });
+  /** Ranked list mock: window size = prefix of the canonical ranking. */
+  const rankedHead = (ranked: readonly DowntimeHerdrItem[]) =>
+    vi.fn().mockImplementation(async (_cwd: string, windowSize: number) => ({
+      ok: true,
+      items: ranked.slice(0, windowSize),
+    }));
+
+  it('(a) a fully-gated 20-item window + tail plan/implement yields both nominees, canonical order, with the widen signal', async () => {
+    const ranked = [
+      ...Array.from({ length: 20 }, (_, i) => gatedItem(`WL-G${i}`, i)),
+      prepItem('WL-PLAN-21', 1000),
+      implementItem('WL-IMP-22', 1001),
+    ];
+    const getHerdrListHead = rankedHead(ranked);
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    // The window contributed NO nominee (fully gated); the widening filled the
+    // prep + implement buckets from the SAME ranked tail, in canonical order.
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-22' },
+      { kind: 'prep', workItemId: 'WL-PLAN-21' },
+    ]);
+    expect((result as { filledBeyondWindow?: { buckets: string[]; itemsRead: number } }).filledBeyondWindow).toEqual({
+      buckets: ['implement', 'prep'],
+      itemsRead: 2,
+    });
+  });
+
+  it('(c) a tail with nothing eligible still resolves noCandidate with unchanged attribution (windowSize = head + reads)', async () => {
+    // 20 gated in-window + 40 gated beyond: the extension reads the tail but
+    // nothing is eligible, so the outcome and the attribution are unchanged.
+    const ranked = Array.from({ length: 60 }, (_, i) => gatedItem(`WL-G${i}`, i));
+    const getHerdrListHead = rankedHead(ranked);
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('noCandidate' in result) || !result.noCandidate) throw new Error('expected noCandidate');
+    // The empty path keeps today's windowSize accounting: head + every
+    // extended item actually read (20 + 30 + 10 = 60 after two geometric
+    // rounds), so the attribution is byte-identical to the pre-change result.
+    expect(result.attribution?.windowSize).toBe(60);
+    expect((result as { filledBeyondWindow?: unknown }).filledBeyondWindow).toBeUndefined();
+  });
+
+  it('(d) the extension is NOT entered when the window already fills every bucket (no extra reads)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1'), prepItem('WL-PREP-1')],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-1' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+      { kind: 'prep', workItemId: 'WL-PREP-1' },
+    ]);
+    expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    expect((result as { filledBeyondWindow?: unknown }).filledBeyondWindow).toBeUndefined();
+  });
+
+  it('(e) a wl failure in the extension leaves the window result unchanged (fail-open)', async () => {
+    // Window: implement + audit (single offer, 2 buckets). The 3rd bucket is
+    // unfilled → the extension is entered, but its lookup fails: the result is
+    // the SAME window-only nominees, byte-identical to the pre-change offer.
+    const getHerdrListHead = vi.fn()
+      .mockResolvedValueOnce({ ok: true, items: [implementItem('WL-IMP-1'), auditItem('WL-AUD-1')] })
+      .mockResolvedValueOnce({ ok: false, error: 'wl exploded' });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected candidate');
+    expect(result.candidate.id).toBe('WL-IMP-1');
+    expect(nomineesOf(result)).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP-1' },
+      { kind: 'audit', workItemId: 'WL-AUD-1' },
+    ]);
+    // No extra read surfaced anything, no widen signal.
+    expect((result as { filledBeyondWindow?: unknown }).filledBeyondWindow).toBeUndefined();
+  });
+
+  it('(b) after the leader refuses an audit offer, the same entry’s PREP nominee dispatches in the same tick', async () => {
+    // A root whose widened entry carries the BEST head of every bucket — an
+    // audit AND a prep nominee (the audit budget here is the widow-making
+    // gate from the 2026-11-13 evidence: `tce-the-rising` offered only
+    // [audit], refused it, and the leader had nothing else to fall through to).
+    // The entry is dispatch-shaped exactly like the widened check-in writes it
+    // (audit + prep), and the phase-2 ladder already supports the fall-through
+    // (parent AC4/AC7) — this pins it for the widened entry shape.
+    const entry = v2Entry('inst-1', '/roots/a', [offerAudit('WL-AUD'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      // Deep queue so the leader tries the DRAIN offer (audit) first, then
+      // falls through to prep in the same tick.
+      getReviewQueueCount: vi.fn().mockResolvedValue(5),
+      // The AUDIT admission is refused (budget saturated); the PREP (plan)
+      // admission is granted — the same tick must fall through to the prep.
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'audit'
+          ? { admitted: false, live: 1, max: 1, reason: 'audit-budget-saturated' }
+          : { admitted: true, live: 0, max: 2 },
+      ),
+      fetchItem: fetchById({
+        'WL-AUD': { id: 'WL-AUD', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    // Same tick, NO re-offer round trip: the prep nominee dispatches even
+    // though the audit was refused ahead of it (user story 2).
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-PREP');
+    // The refusal is attributed to the AUDIT offer, not the instance.
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-AUD', gate: 'audit-budget' }),
+      ]),
+    );
+  });
+
+  it('observability: the check-in log names the widened buckets + items read for a widened entry, and is absent for a window-only entry', async () => {
+    async function checkins(root: string): Promise<Array<Record<string, unknown>>> {
+      const entries = await readCoordinationLogEntries(root);
+      return entries
+        .filter((entry) => entry.operation === 'checkin')
+        .map((entry) => entry as unknown as Record<string, unknown>);
+    }
+
+    // Widened root: window = audit only; the eligible plan sits beyond it, so
+    // the computation fills the prep bucket from the tail. The check-in log
+    // line must carry the widening evidence an operator can read.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-widen-signal-'));
+    try {
+      const ranked = [
+        auditItem('WL-AUD', 0),
+        ...Array.from({ length: 19 }, (_, i) => gatedItem(`WL-G${i}`, i + 1)),
+        prepItem('WL-PREP-21', 1000),
+      ];
+      const getHerdrListHead = rankedHead(ranked);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-AUD', root)] });
+      await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      await vi.waitFor(async () => {
+        const log = await checkins(root);
+        expect(log.length).toBeGreaterThan(0);
+        expect(log[log.length - 1].filledBeyondWindow).toEqual({
+          buckets: ['prep'],
+          itemsRead: 1,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    // Window-only root: every bucket filled from the visible window — the
+    // check-in log line must NOT carry the signal (byte-identical entry).
+    const root2 = mkdtempSync(join(tmpdir(), 'herdr-window-signal-'));
+    try {
+      const getHerdrListHead = vi.fn().mockResolvedValue({
+        ok: true,
+        items: [implementItem('WL-IMP'), auditItem('WL-AUD'), prepItem('WL-PREP')],
+      });
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-2', 'WL-IMP', root2)] });
+      await runCoordinationCheckIn(deps, { cwd: root2, coordinationDir: testDir, instanceId: 'inst-2' });
+      await vi.waitFor(async () => {
+        const log = await checkins(root2);
+        expect(log.length).toBeGreaterThan(0);
+        expect(log[log.length - 1].filledBeyondWindow).toBeUndefined();
+      });
+    } finally {
+      rmSync(root2, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── v2 leader offer iteration: filter chain, drain-aware tie-break, partial removal, regression (parent WL-0MWDDHQON0015T3P AC4–AC8) ──
+//
+// Tier-aware offers (WL-0MWDDHQON0015T3P): one entry per instance carries up
+// to three BUCKET nominees (`implement` / `audit` / `prep` — parent AC1), and
+// the elected leader iterates the offers INSIDE an entry, applying the
+// existing, UNMODIFIED sequential filter chain to each (parent AC4: classify
+// → attempt budget → non-terminal cooldown → per-root code freeze → CPU gate
+// → audit slot minimum/pin → review-queue hold → host-budget admission →
+// CAS claim — no gate duplicated, relaxed or reordered). When several offers
+// are simultaneously admissible, selection follows the DRAIN-AWARE tie-break
+// (parent AC5): audit while the root's review queue is at/over
+// `browseItemCount`, else prep, else implement — the fixed implement-first
+// ladder is deliberately NOT implemented (precedent WL-0MW9X7EJ6009EL6E).
+// On a successful dispatch ONLY the dispatched offer is removed — the entry
+// keeps its remaining offers and an unchanged `lastUpdated` (parent AC6), so
+// the motivating 2/2-cap regression (parent AC7: an implement head refused by
+// the machine-wide cap no longer hides the entry's prep work; the tick never
+// ends `no-candidate`) is fixed. Cross-root round-robin still governs ROOT
+// order — tier choice happens only inside an entry, so no root gains an
+// unfair share (parent AC8; pinned in coordination-cross-root.test.ts).
+//
+// LANDED WITH F3 (WL-0MWDVN2HN004CQ1O). These bodies were committed RED under
+// `it.fails` by the test-first sibling WL-0MWDVN11K008HYVU and now run as
+// plain `it`: the leader iterates an entry's v2 `offers` payload (a v2-shaped
+// entry has no top-level `workItemId` at all), so `entryOffers` derives its
+// offer list from `offers` alone, and the partial-removal assertions rely on
+// F1 (WL-0MWDVMVX50012RSU) parsing `offers` back from the file.
+
+/** The v2 per-bucket offer payload (F1, WL-0MWDVMVX50012RSU) — at most one per bucket. */
+interface CoordOfferWitness {
+  kind: 'implement' | 'audit' | 'prep';
+  workItemId: string;
+}
+
+/** A v2 entry: the outer fields unchanged, the bucket payload in `offers`. */
+type V2EntryWitness = Omit<CoordinationEntry, 'workItemId'> & {
+  offers: CoordOfferWitness[];
+};
+
+/** Build a v2-shaped entry (offers payload, NO top-level `workItemId`). */
+function v2Entry(instanceId: string, worklogRoot: string, offers: CoordOfferWitness[]): CoordinationEntry {
+  const now = new Date().toISOString();
+  return {
+    instanceId,
+    worklogRoot,
+    directory: worklogRoot,
+    assignedAt: now,
+    lastUpdated: now,
+    offers,
+  } as unknown as CoordinationEntry;
+}
+
+const offerImplement = (workItemId: string): CoordOfferWitness => ({ kind: 'implement', workItemId });
+const offerAudit = (workItemId: string): CoordOfferWitness => ({ kind: 'audit', workItemId });
+const offerPrep = (workItemId: string): CoordOfferWitness => ({ kind: 'prep', workItemId });
+
+/** fetchItem mock keyed by item id, with a fallback for unknown ids. */
+function fetchById(specs: Record<string, Partial<DowntimeItemInfo> & { id: string }>) {
+  return vi.fn(async (id: string) => {
+    const spec = specs[id];
+    if (spec === undefined) return { ok: true, info: itemInfo({ id, stage: 'idea' }) };
+    return { ok: true, info: itemInfo(spec) };
+  });
+}
+
+/** Read the surviving entry from the coordination file after a dispatch. */
+function fileEntryAfterDispatch(): V2EntryWitness | null {
+  const data = readCoordinationFile(testDir);
+  if (data === null || data.entries.length === 0) return null;
+  return data.entries[0] as unknown as V2EntryWitness;
+}
+
+describe('sequential filter chain on the v2 offer path (parent AC4)', () => {
+  it('a multi-offer dispatch consults EVERY seam-based chain limb for the admissible offers — classify, per-root code freeze, CPU gate, review-queue hold, host-budget admission and the CAS claim', async () => {
+    const fetched: string[] = [];
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn(async (id: string) => {
+        fetched.push(id);
+        if (id === 'WL-AUD') {
+          return {
+            ok: true,
+            info: itemInfo({ id, status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() }),
+          } as const;
+        }
+        return { ok: true, info: itemInfo({ id, status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }) } as const;
+      }),
+      // Per-root code freeze + CPU gate are read once per tick, BEFORE the
+      // offer loop — the enumeration must still prove they ran for the cycle.
+      readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+      readHostCpu: vi.fn().mockReturnValue({ ok: true, percent: 10, source: 'proc-stat' }),
+      // Review-queue hold: shallow queue so the implement offer is ADMISSIBLE
+      // (the deep-queue hold is pinned by the audit-drain arm test below).
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      // Host-budget admission: consulted at the claim boundary for the
+      // budgeted implement kind.
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: true, live: 0, max: 2 }),
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerAudit('WL-AUD')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+      cpuGatePercent: 50,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    // 1. classify — EVERY offered item is re-fetched and re-classified at
+    //    dispatch time (a stale offer is dropped at dispatch, never by age).
+    expect(fetched).toEqual(expect.arrayContaining(['WL-IMP', 'WL-AUD']));
+    // 4. per-root code freeze — consulted.
+    expect(deps.readCodeFreezeStatus).toHaveBeenCalled();
+    // 5. CPU gate — consulted (fail-open reading, below the threshold).
+    expect(deps.readHostCpu).toHaveBeenCalled();
+    // 7. review-queue hold — consulted for the implement offer.
+    expect(deps.getReviewQueueCount).toHaveBeenCalled();
+    // 8. host-budget admission — the surviving offer is budgeted (implement
+    //    kind) and consults the machine-wide ledger exactly once.
+    expect(deps.admitHostDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'WL-IMP', kind: 'implement', cwd: '/roots/a' }),
+    );
+    // 9. CAS claim — the surviving offer is claimed against ITS OWN root
+    //    (the cross-root claim invariant, WL-0MTQ14W7L003II5A).
+    expect(deps.claimItem).toHaveBeenCalledWith(expect.anything(), expect.anything(), '/roots/a');
+  });
+
+  it('attempt-budget limb: a budget-exhausted offer is rejected with the neutral token (per-offer attribution) and the entry\u2019s other offer dispatches', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-budget-'));
+    try {
+      // One prior dispatch at the current stage with maxAttempts=1 → the
+      // implement offer has exhausted its budget; the prep offer is untouched.
+      writeDowntimeLog(root, [
+        {
+          kind: 'implement',
+          operation: 'dispatch',
+          itemId: 'WL-IMP',
+          stage: 'plan_complete',
+          dispatchedAt: new Date(Date.now() - 60_000).toISOString(),
+        },
+      ] as never);
+      const entry = v2Entry('inst-1', root, [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+      writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+      const deps = makeCoordinationDeps({
+        getReviewQueueCount: vi.fn().mockResolvedValue(0),
+        fetchItem: fetchById({
+          'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+          'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+        }),
+      });
+
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        freeSlots: 2,
+        browseItemCount: 5,
+        maxAttempts: 1,
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      // The rejection is attributed to the OFFER (workItemId), not the
+      // instance — per-offer, not per-instance (parent AC4 / offer-attribution).
+      expect(outcome.offerRejections).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ workItemId: 'WL-IMP', gate: 'attempt-budget-exhausted' }),
+        ]),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('non-terminal-cooldown limb: a same-kind offer in the pane-close cooldown is skipped neutrally and the entry\u2019s other offer dispatches', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-cooldown-root-'));
+    try {
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      writeFileSync(
+        join(root, '.worklog', 'downtime-dispatches.log'),
+        JSON.stringify({
+          entryType: 'pane-close',
+          itemId: 'WL-IMP',
+          kind: 'implement',
+          stage: 'plan_complete',
+          reasonCode: 'agent-ended-no-terminal',
+          outcome: 'requires-attention',
+          timestamp: new Date().toISOString(),
+          closed: true,
+        }) + '\n',
+        'utf-8',
+      );
+      const entry = v2Entry('inst-1', root, [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+      writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+      const deps = makeCoordinationDeps({
+        getReviewQueueCount: vi.fn().mockResolvedValue(0),
+        fetchItem: fetchById({
+          'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+          'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+        }),
+      });
+
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        freeSlots: 2,
+        browseItemCount: 5,
+        nonTerminalCooldownMs: 3_600_000,
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      expect(outcome.offerRejections).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ workItemId: 'WL-IMP', gate: 'non-terminal-cooldown' }),
+        ]),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('CPU-gate limb: an audit/implement offer under CPU saturation is skipped (KEPT, not removed) and a prep offer dispatches', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      readHostCpu: vi.fn().mockReturnValue({ ok: true, percent: 90, source: 'proc-stat' }),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+      cpuGatePercent: 50,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-IMP', gate: 'cpu-saturated' }),
+      ]),
+    );
+  });
+
+  it('audit-slot-minimum/pin limb: in the single-free-slot band a parent-scoped audit offer is skipped with the audit-slot-min token and a prep offer dispatches', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerAudit('WL-AUD'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      // Leaf band (freeSlots=1): only a TRUSTED LEAF may consume the single
+      // free slot — the neutral `parent` scope (the default) is rejected.
+      getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+      fetchItem: fetchById({
+        'WL-AUD': { id: 'WL-AUD', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 1,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-AUD', gate: 'audit-slot-min' }),
+      ]),
+    );
+  });
+});
+
+describe('drain-aware tie-break over admissible offers (parent AC5)', () => {
+  it('audit-drain arm: while the root review queue is at/over browseItemCount, an ADMISSIBLE audit offer dispatches even when prep and implement are also offered', async () => {
+    // The audit offer is the LAST entry in the array — the tie-break is not
+    // array order. The implement head is review-HELD (deep queue, non-critical)
+    // and the prep offer is admissible, but arm 1 (audit-drain) wins.
+    const entry = v2Entry('inst-1', '/roots/a', [
+      offerImplement('WL-IMP'),
+      offerPrep('WL-PREP'),
+      offerAudit('WL-AUD'),
+    ]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      // Queue at the drain threshold (>= browseItemCount) → the implement
+      // offer is held by the review-queue gate and the audit arm arms.
+      getReviewQueueCount: vi.fn().mockResolvedValue(5),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+        'WL-AUD': { id: 'WL-AUD', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-AUD');
+    expect(spawn[1].cwd).toBe('/roots/a');
+    // The deep queue review-hold is attributed to the IMPLEMENT offer —
+    // the hold is per offer, never a whole-instance skip.
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-IMP', gate: 'review-queue-hold' }),
+      ]),
+    );
+  });
+
+  it('prep arm: with a shallow review queue and a prep offer admissible, the PREP offer dispatches ahead of implement (no fixed implement-first ladder)', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-PREP');
+  });
+
+  it('implement arm: with a shallow queue and NO prep offer, an ADMISSIBLE implement offer dispatches even when an audit offer is also present', async () => {
+    // The audit offer does NOT win in a shallow queue — the audit-drain arm
+    // is gated on the review queue depth (a fixed audit-first ladder is not
+    // implemented either).
+    const entry = v2Entry('inst-1', '/roots/a', [offerAudit('WL-AUD'), offerImplement('WL-IMP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-AUD': { id: 'WL-AUD', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() },
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-IMP');
+  });
+});
+
+describe('only the dispatched offer is removed (partial removal, parent AC6)', () => {
+  it('dispatch-on-FIRST-offer removes only that offer — the entry survives with the remaining offer and an unchanged lastUpdated', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerPrep('WL-PREP'), offerImplement('WL-IMP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan'); // the FIRST offer (prep) is chosen
+    // Only the dispatched offer is removed: the entry REMAINS with the
+    // implement offer — no whole-entry removal, no owner re-check-in.
+    expect(getEntry(testDir, 'inst-1')).not.toBeNull();
+    const after = fileEntryAfterDispatch();
+    expect(after?.offers).toEqual([offerImplement('WL-IMP')]);
+    expect(after?.lastUpdated).toBe(entry.lastUpdated);
+  });
+
+  it('dispatch-on-SECOND-offer without a new check-in retains the FIRST offer with an unchanged lastUpdated', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan'); // the SECOND offer (prep) is chosen
+    // The FIRST offer (implement) is retained — dispatch never touches the
+    // owner's entry metadata: no new check-in ran, lastUpdated is unchanged.
+    expect(getEntry(testDir, 'inst-1')).not.toBeNull();
+    const after = fileEntryAfterDispatch();
+    expect(after?.offers).toEqual([offerImplement('WL-IMP')]);
+    expect(after?.lastUpdated).toBe(entry.lastUpdated);
+  });
+
+  it('an entry whose LAST offer dispatches is removed entirely (as today)', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(getEntry(testDir, 'inst-1')).toBeNull();
+  });
+});
+
+describe('2/2 implement-cap regression (parent AC7)', () => {
+  it('with an implement cap of 2/2 and an offered implement head, the entry\u2019s PREP nominee dispatches and the tick never reports no-candidate', async () => {
+    const entry = v2Entry('inst-1', '/roots/a', [offerImplement('WL-IMP'), offerPrep('WL-PREP')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      // Machine-wide implement ledger at the cap (2/2): any implement
+      // dispatch is refused with the neutral hold.
+      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: false, live: 2, max: 2, reason: 'host-budget-implement' }),
+      fetchItem: fetchById({
+        'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    // The prep nominee dispatches — the budget-refused implement head can
+    // no longer hide the root's prep work (the 2026-11-12 stall).
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-PREP');
+    // NEUTRAL, never the empty-backlog pause: the cap refusal and the prep
+    // dispatch are both non-`no-candidate`.
+    expect(outcome.reason).not.toBe('no-candidate');
+    // The implement head is still valid work — retained (only the dispatched
+    // offer was removed), so the next tick re-checks the ledger.
+    const after = fileEntryAfterDispatch();
+    expect(after?.offers).toEqual([offerImplement('WL-IMP')]);
+    expect(after?.lastUpdated).toBe(entry.lastUpdated);
   });
 });

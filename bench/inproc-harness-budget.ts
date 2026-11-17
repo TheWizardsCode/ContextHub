@@ -36,7 +36,14 @@ import { fileURLToPath } from 'url';
 import type { InprocProfileResult, InprocScenarioMeasurement } from './inproc-harness-profile.js';
 
 /** The profiled scenarios the budget covers (mirrors the profiler's own list). */
-export const INPROC_BUDGET_SCENARIOS = ['help', 'list-json', 'create', 'status'] as const;
+/**
+ * The profiled scenarios the budget covers (mirrors the profiler's own list).
+ *
+ * `cold-open` is the first-open (no database) path and `list-json`/`create`/
+ * `status` are warm invocations against an already-initialised store
+ * (WL-0MVWLBZG4003A803).
+ */
+export const INPROC_BUDGET_SCENARIOS = ['help', 'cold-open', 'list-json', 'create', 'status'] as const;
 
 /** Relative to the repository root. */
 export const INPROC_BUDGET_ARTEFACT_RELATIVE_PATH = 'bench/inproc-harness-budget.json';
@@ -276,9 +283,11 @@ export function deriveInprocHarnessBudget(
     headroomPct,
     maxHostLoadFactor: MAX_HOST_LOAD_FACTOR,
     method:
-      'median of N warm runs of the in-process harness against a fresh temp ' +
-      'store per run (bench script `npm run benchmark:inproc-harness -- --runs N`, ' +
-      'not a vitest test); same-host medians, absolute values are load sensitive',
+      'median of N warm runs of the in-process harness, one fresh temp store per ' +
+      'run: `cold-open` starts with no database (first-open bootstrap), the ' +
+      'data-access scenarios start from a fresh copy of an already-migrated seed ' +
+      'store (bench script `npm run benchmark:inproc-harness -- --runs N`, not a ' +
+      'vitest test); same-host medians, absolute values are load sensitive',
     scenarios,
   };
 }

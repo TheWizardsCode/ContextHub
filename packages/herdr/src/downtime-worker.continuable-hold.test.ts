@@ -34,8 +34,11 @@ import {
   type DowntimeWorkerDeps,
 } from './downtime-worker.js';
 import {
+  AUDIT_BUDGET_HOLD_REASONS,
   HOST_BUDGET_HOLD_REASONS,
   LOST_CLAIM_REASONS,
+  isAuditBudgetHoldOutcome,
+  isAuditBudgetHoldReason,
   isContinuableHoldOutcome,
   isHostBudgetHoldReason,
 } from './downtime-worker.dispatch-contract.js';
@@ -110,10 +113,16 @@ function filteredItem(id: string): DowntimeHerdrItem {
 }
 
 /** Refuse only the given budgeted kind; admit everything else. */
-function budgetRefusal(kind: 'implement' | 'audit', reason: string, live = 2, max = 2) {
+function budgetRefusal(
+  kind: 'implement' | 'audit',
+  reason: string,
+  live = 2,
+  max = 2,
+  detail?: string,
+) {
   return vi.fn(async (input: { kind: string }) =>
     input.kind === kind
-      ? { admitted: false as const, live, max, reason }
+      ? { admitted: false as const, live, max, reason, ...(detail !== undefined ? { detail } : {}) }
       : { admitted: true as const, live: 0, max },
   );
 }
@@ -140,6 +149,32 @@ describe('continuable-hold predicate (WL-0MWBT76WY00298AY AC1)', () => {
     ]);
   });
 
+  it('splits the budget holds into the AUDIT rung and the implement/host rung (WL-0MWDDHVF2004PTYX AC2)', () => {
+    // The audit rung: proxy-derived audit tokens plus the legacy audit tokens.
+    expect([...AUDIT_BUDGET_HOLD_REASONS]).toEqual([
+      'audit-budget-saturated',
+      'audit-budget-unknown',
+      'host-budget-audit',
+      'audit-host-saturated',
+    ]);
+    for (const reason of AUDIT_BUDGET_HOLD_REASONS) {
+      expect(isAuditBudgetHoldReason(reason)).toBe(true);
+      expect(isAuditBudgetHoldOutcome({ reason, kind: 'audit' })).toBe(true);
+      // The audit tier is refused regardless of the outcome's recorded kind.
+      expect(isAuditBudgetHoldOutcome({ reason, kind: 'implement' })).toBe(true);
+    }
+    // The implement rung: `host-budget-implement` is never an audit hold,
+    // and the tier-ambiguous `host-budget-unknown` is decided by kind.
+    expect(isAuditBudgetHoldReason('host-budget-implement')).toBe(false);
+    expect(isAuditBudgetHoldOutcome({ reason: 'host-budget-implement', kind: 'implement' })).toBe(false);
+    expect(isAuditBudgetHoldOutcome({ reason: 'host-budget-unknown', kind: 'audit' })).toBe(true);
+    expect(isAuditBudgetHoldOutcome({ reason: 'host-budget-unknown', kind: 'implement' })).toBe(false);
+    expect(isAuditBudgetHoldOutcome({ reason: 'host-budget-unknown' })).toBe(false);
+    // No other outcome family is an audit-budget hold.
+    expect(isAuditBudgetHoldReason('no-candidate')).toBe(false);
+    expect(isAuditBudgetHoldOutcome({ reason: 'wl-error', kind: 'audit' })).toBe(false);
+  });
+
   it('is false for every strike-worthy or unknown outcome (allow-list, not deny-list)', () => {
     const terminal = [
       'wl-error',
@@ -155,6 +190,7 @@ describe('continuable-hold predicate (WL-0MWBT76WY00298AY AC1)', () => {
     for (const reason of terminal) {
       expect(isContinuableHoldOutcome({ reason })).toBe(false);
       expect(isHostBudgetHoldReason(reason)).toBe(false);
+      expect(isAuditBudgetHoldReason(reason)).toBe(false);
     }
   });
 });
@@ -222,7 +258,7 @@ describe('dispatchFromOwnHead — continuable host-budget hold (AC2/AC4/AC6)', (
   });
 
   it('AC2: an audit refusal steps on to a trailing intake candidate', async () => {
-    const admitHostDispatch = budgetRefusal('audit', 'audit-budget-saturated', 1, 1);
+    const admitHostDispatch = budgetRefusal('audit', 'audit-budget-saturated', 1, 1, 'http-404');
     const deps = makeDeps({ admitHostDispatch });
     const ctx = ownHeadCtx({ head: [], tail: [auditItem('WL-AUD'), intakeItem('WL-INT')] });
 
@@ -230,10 +266,14 @@ describe('dispatchFromOwnHead — continuable host-budget hold (AC2/AC4/AC6)', (
 
     expect(outcome?.dispatched).toBe(true);
     expect(outcome?.kind).toBe('intake');
-    expect(ctx.holds.hostBudget).toEqual({
+    // An AUDIT refusal is recorded on its OWN rung (with the failing exchange
+    // on `detail`) — never conflated with the implement/host hold.
+    expect(ctx.holds.auditBudget).toEqual({
       reason: 'audit-budget-saturated',
       budget: { live: 1, max: 1 },
+      detail: 'http-404',
     });
+    expect(ctx.holds.hostBudget).toBeUndefined();
   });
 
   it('AC4: keeps the neutral refusal when nothing else dispatches', async () => {
@@ -268,8 +308,9 @@ describe('dispatchFromOwnHead — continuable host-budget hold (AC2/AC4/AC6)', (
       reason: 'host-budget-audit',
       budget: { live: 1, max: 1 },
     });
-    // … the hold is still recorded …
-    expect(ctx.holds.hostBudget?.reason).toBe('host-budget-audit');
+    // … the AUDIT hold is still recorded (on its own rung) …
+    expect(ctx.holds.auditBudget?.reason).toBe('host-budget-audit');
+    expect(ctx.holds.hostBudget).toBeUndefined();
     // … and the batch never hops to the second audit target.
     expect(admitHostDispatch).toHaveBeenCalledTimes(1);
   });
@@ -654,10 +695,44 @@ describe('leader terminal reason — host-budget hold (AC5)', () => {
       auditBatchMax: 1,
     });
 
-    // Precedence: leaf-audit pin → host budget (host budget is LAST).
+    // Precedence: leaf-audit pin → audit budget → host budget (budget LAST).
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('leaf-audit-pin-hold');
     expect(admitHostDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC2: an audit refusal OUTRANKS an implement refusal in the same tick (never masked)', async () => {
+    // One tick whose own-head window offers BOTH a refused audit and a
+    // refused implement: the audit-budget rung must win the terminal reason.
+    const admitHostDispatch = vi.fn(async (input: { kind: string }) =>
+      input.kind === 'audit'
+        ? {
+            admitted: false as const,
+            live: 1,
+            max: 1,
+            reason: 'audit-budget-unknown',
+            detail: 'http-404',
+          }
+        : { admitted: false as const, live: 2, max: 2, reason: 'host-budget-implement' },
+    );
+    const deps = leaderDeps({
+      getHerdrListHead: rankedOwnHead([filteredItem('WL-VIEW-1'), filteredItem('WL-VIEW-2')], [
+        auditItem('WL-AUD'),
+        implementItem('WL-IMP'),
+      ]),
+      admitHostDispatch,
+    });
+    const coordinationDir = makeTempDir('herdr-hold-precedence-');
+
+    const outcome = await dispatchLeader(deps, coordinationDir, { auditBatchMax: 1 });
+
+    // The audit rung (broken proxy contract, `detail: 'http-404'`) beats the
+    // ambient implement-cap statement — never `host-budget-implement`.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-budget-unknown');
+    expect(outcome.budget).toEqual({ live: 1, max: 1 });
+    expect(outcome.detail).toBe('http-404');
+    expect(admitHostDispatch).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -706,6 +781,30 @@ describe('dispatchDowntimeWork — continued refusal keeps the neutral reason (A
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('host-budget-implement');
     expect(outcome.budget).toEqual({ live: 2, max: 2 });
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC3: an audit-budget-unknown refusal carries the failing exchange as detail (direct path)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditItem('WL-AUD')] }),
+      // The Herdr-head scan consults the active-audit pre-check first.
+      getActiveAudit: vi.fn().mockResolvedValue({
+        ok: true,
+        active: true,
+        source: 'proxy',
+        reason: 'audit-budget-unknown',
+        detail: 'timeout',
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // The direct path already reports the audit reason (never drops the
+    // refusal, AC6); the failing exchange now reaches the outcome too (AC3).
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-budget-unknown');
+    expect(outcome.detail).toBe('timeout');
+    expect(outcome.budget).toBeUndefined(); // fail-closed read: no 0/0 fabrication
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });

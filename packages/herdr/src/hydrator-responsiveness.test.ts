@@ -95,6 +95,69 @@ describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
     expect(percentile(delays, 0.95)).toBeLessThan(100);
   });
 
+  it('keeps event-loop delay under 100 ms p95 with a MACHINE-WIDE pane payload (AC10)', async () => {
+    // Parent WL-0MWH56SWX004HSKQ AC10: the workspace-agnostic demotion read
+    // (WL-0MWHBSWC20067SMY) is still exactly ONE pane-list spawn per tick and
+    // must not regress UI responsiveness — a machine-wide `herdr pane list`
+    // payload (multiple workspaces, worst-case 60 panes) is the new worst
+    // case, so the same 100 ms p95 event-loop budget must hold through the
+    // wider seam.
+    const panes = makeWorstCasePanes(60); // spans wCurrent + wOther (machine-wide)
+    const items = makeWorstCaseItems(25);
+    const deps: HydratorDeps = {
+      listInProgressItems: async () => {
+        await delay(4);
+        return items;
+      },
+      // The wider seam is the production demotion read; the scoped seam is
+      // still present (legacy display path) but unused for demotion when the
+      // wider seam exists.
+      listActivePanes: async (workspaceId?: string) => {
+        await delay(4);
+        if (typeof workspaceId === 'string' && workspaceId.length > 0) {
+          return panes.filter((p) => p.workspace_id === workspaceId);
+        }
+        return panes;
+      },
+      listAllActivePanes: async () => {
+        await delay(4);
+        return panes;
+      },
+      listOutboundDeps: async () => {
+        await delay(4);
+        return [];
+      },
+      applyDemotion: async () => {
+        await delay(4);
+        return true;
+      },
+      maxItemsPerTick: 25,
+      log: () => {},
+    };
+
+    const intervalMs = 5;
+    const delays: number[] = [];
+    let last = Date.now();
+    const sampler = setInterval(() => {
+      const tick = Date.now();
+      delays.push(Math.max(0, tick - last - intervalMs));
+      last = tick;
+    }, intervalMs);
+
+    let result;
+    try {
+      result = await runHydrationOnce(deps, 'wCurrent');
+    } finally {
+      clearInterval(sampler);
+    }
+
+    expect(result.ok).toBe(true);
+    expect(result.demoted).toBe(25);
+    // Same budget as the scoped worst case: the machine-wide payload must not
+    // widen the command-input lag (AC10, no latency regression).
+    expect(percentile(delays, 0.95)).toBeLessThan(100);
+  });
+
   it('bounds the run and names a timed-out step instead of hanging', async () => {
     // A hung `wl`/`herdr` seam must not wedge the hydrate: the per-step
     // budget aborts the run, names the offending step, and keeps the

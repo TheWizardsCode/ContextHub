@@ -67,6 +67,7 @@ export type {
 // ── Host-wide dispatch-budget vocabulary ──────────────────────────────
 export {
   HOST_BUDGET_AUDIT_REASON,
+  HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_DECISION_REASONS,
   HOST_BUDGET_IMPLEMENT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,

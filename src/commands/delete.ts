@@ -24,13 +24,19 @@
  * the descendant is reported as `skipped`/`already deleted` rather than
  * producing a hard error.
  *
- * Delete attribution (WL-0MW8078CA006Q2P7): `--reason <text>` records why the
+ * Delete attribution: `--reason <text>` (WL-0MW8078CA006Q2P7) records why the
  * item was retired. When omitted, a pre-set `deleteReason` is preserved; when
  * neither exists the reason stays empty rather than being fabricated, so the
  * merge gate (`isAttributedDelete()`) never mistakes an intent-less delete for
  * a deliberate one. Recursive deletes prefix each descendant's reason with
  * `cascade from <parent-id>`, distinguishing a swept child from an item
  * retired in its own right.
+ *
+ * `--deleted-by <identity>` (WL-0MVZ5Y0VR0065TPJ) records who retired the item,
+ * matching the REST API's `deletedBy` attribution. When omitted — or blank —
+ * the CLI falls back to the configured git identity, and a blank value can
+ * never reach the DB (a whitespace-only `deletedBy` would satisfy
+ * `isAttributedDelete()` while `isSoftDeleted()` trims it away).
  */
 
 import type { PluginContext } from '../plugin-types.js';
@@ -56,6 +62,8 @@ interface DeleteResult {
   recursive?: boolean;
   /** The applied deletion reason for this id (empty for an unreasoned delete). */
   deleteReason?: string;
+  /** The applied deleting identity for this id (empty when unattributed). */
+  deletedBy?: string;
   /** Number of descendants removed along with this id. */
   deletedDescendantsCount?: number;
   /** The descendants removed along with this id, each with its cascade attribution. */
@@ -76,6 +84,11 @@ export default function register(ctx: PluginContext): void {
     .option('--no-recursive', 'Delete only the specified items, leaving children orphaned')
     .option('--no-sync', 'Skip auto-sync after deletion')
     .option('--reason <reason>', 'Reason for deletion (stored as deleteReason attribution)')
+    .option(
+      '--deleted-by <deletedBy>',
+      'Identity to record as deletedBy attribution (default: the configured git identity). ' +
+        'A blank or whitespace-only value falls back to the configured identity.'
+    )
     .action(async (ids: string[], options: DeleteOptions & { sync?: boolean }) =>
       withStoreMutationLock(dataPath, async () => {
       utils.requireInitialized();
@@ -89,7 +102,15 @@ export default function register(ctx: PluginContext): void {
       // and why, so the soft-delete carries real intent. The merge layer's
       // delete-side protection only propagates ATTRIBUTED deletes over a live
       // remote item — an unattributed delete would silently fail to propagate.
-      const deletedBy = await getConfiguredUserEmail();
+      //
+      // `--deleted-by` gives CLI parity with the REST API (src/api.ts:208): an
+      // explicit non-blank flag wins, while a blank/whitespace value falls back
+      // to the configured git identity. The trim guard is load-bearing
+      // (AC-4, WL-0MVZ5Y0VR0065TPJ): `isAttributedDelete()` treats a
+      // whitespace-only `deletedBy` as attribution while `isSoftDeleted()`
+      // (trim-aware) does not, so a blank value must never reach the DB.
+      const flagDeletedBy = typeof options.deletedBy === 'string' ? options.deletedBy.trim() : '';
+      const deletedBy = flagDeletedBy || (await getConfiguredUserEmail()) || undefined;
       // AC3 (WL-0MW8078CA006Q2P7): do NOT fabricate a default deleteReason.
       // When no --reason is supplied we pass `undefined` so the DB layer's
       // fallback (`|| item.deleteReason`) becomes reachable — pre-set reasons
@@ -150,6 +171,7 @@ export default function register(ctx: PluginContext): void {
             deletedWorkItem: existing,
             recursive,
             deleteReason: existing.deleteReason ?? '',
+            deletedBy: existing.deletedBy ?? '',
             message: `Skipped work item: ${normalizedId} (already deleted)`,
           });
           continue;
@@ -160,10 +182,12 @@ export default function register(ctx: PluginContext): void {
         const childrenCount = children.length;
 
         const deleted = db.delete(idLookup, recursive, { deletedBy, deleteReason });
-        // Re-read the persisted item so the reported reason is the value the
-        // merge layer will actually see (explicit reason, preserved pre-set
-        // reason, or empty for an unreasoned delete).
-        const appliedReason = deleted ? db.get(idLookup)?.deleteReason ?? deleteReason ?? '' : undefined;
+        // Re-read the persisted item so the reported attribution is the value
+        // the merge layer will actually see (explicit value, preserved
+        // pre-existing value, or empty when unattributed).
+        const applied = deleted ? db.get(idLookup) : undefined;
+        const appliedReason = deleted ? applied?.deleteReason ?? deleteReason ?? '' : undefined;
+        const appliedDeletedBy = deleted ? applied?.deletedBy ?? deletedBy ?? '' : undefined;
         if (!deleted) {
           const message = `Work item not found: ${normalizedId}`;
           results.push({ id: normalizedId, success: false, error: message, message });
@@ -181,6 +205,7 @@ export default function register(ctx: PluginContext): void {
           deletedWorkItem: existing,
           recursive,
           deleteReason: appliedReason,
+          deletedBy: appliedDeletedBy,
         };
         if (childrenCount > 0) {
           result.deletedDescendantsCount = childrenCount;
@@ -214,6 +239,9 @@ export default function register(ctx: PluginContext): void {
             // Echo the applied reason per id (AC1). Unreasoned deletes report
             // an empty string, never a fabricated default.
             if (r.deleteReason !== undefined) jsonOut.deleteReason = r.deleteReason;
+            // Echo the applied deletedBy so callers can confirm attribution
+            // without a follow-up read (AC-1, WL-0MVZ5Y0VR0065TPJ).
+            if (r.deletedBy !== undefined) jsonOut.deletedBy = r.deletedBy;
             if (r.skipped) jsonOut.skipped = true;
             if (r.skippedReason) jsonOut.skippedReason = r.skippedReason;
             if (r.deletedDescendantsCount !== undefined) {

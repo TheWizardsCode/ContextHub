@@ -255,8 +255,14 @@ export class WorklogDatabase {
     // JSONL only exists transiently during sync operations.
     // A read-only handle must NEVER write, so the JSONL refresh (an import
     // into SQLite) is skipped for it (F6): the store is opened as-is.
-    const itemCount = this.store.countWorkItems();
-    if (itemCount === 0 && options.readOnly !== true) {
+    // The file existence check comes first: with no JSONL present the refresh is
+    // a guaranteed no-op, so a warm open does not pay a COUNT query just to
+    // discover that (WL-0MVWLBZG4003A803).
+    if (
+      options.readOnly !== true &&
+      fs.existsSync(this.jsonlPath) &&
+      this.store.countWorkItems() === 0
+    ) {
       this.refreshFromJsonlIfNewer();
     }
   }
@@ -1302,6 +1308,24 @@ export class WorklogDatabase {
    */
   cascadePriorityDowngrade(parentId: string, newPriority: WorkItemPriority): WorkItem[] {
     return hierarchyModule.cascadePriorityDowngrade(this.ctx, this.ctx.itemHooks, parentId, newPriority);
+  }
+
+  /**
+   * Cascade a priority promotion up the ancestor chain.
+   *
+   * When a work item is `critical`, every non-critical ancestor is promoted to
+   * `critical`, transitively to the root, so a critical subtask can never be
+   * buried under a non-critical parent. Ancestors already at `critical` are
+   * skipped but do not stop the walk; unrelated branches are never touched.
+   *
+   * @param itemId - id of the work item that became (or already is) `critical`
+   * @returns the promoted ancestors in walk order — direct parent first, then
+   *   each successive ancestor up to the root (empty when none was promoted)
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MWETWNSO001UL2M).
+   */
+  cascadePriorityPromote(itemId: string): WorkItem[] {
+    return hierarchyModule.cascadePriorityPromote(this.ctx, this.ctx.itemHooks, itemId);
   }
 
   /**

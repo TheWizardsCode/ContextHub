@@ -17,15 +17,26 @@
  * that owns the offered item) so the leader can dispatch across roots.
  *
  *  - One entry per herdr instance: `{instanceId, workItemId, worklogRoot,
- *    directory (alias), assignedAt, lastUpdated}`.
+ *    directory (alias), assignedAt, lastUpdated}`. Since v2
+ *    (WL-0MWDDHQON0015T3P AC1) the offer payload is a bounded `offers` array
+ *    (at most one nominee per bucket, at most three total; duplicate
+ *    `(kind, workItemId)` pairs collapse) and `workItemId` mirrors the FIRST
+ *    offer so a v1-era leader keeps reading the first offer and ignoring the
+ *    rest (parent AC9 backward compatibility).
  *  - Safe concurrent access: writes happen under an exclusive lock file
  *    (`O_CREAT|O_EXCL` — the POSIX atomic create, equivalent to flock for
  *    the single-machine v1 scope) followed by an atomic tmp+rename write,
  *    so two instances updating simultaneously never corrupt the file and a
  *    crash never leaves a half-written JSON.
- *  - Entries do NOT expire by wall-clock age (WL-0MTMPIQBE001J41P): the
- *    leader validates eligibility at dispatch time via fetchItem+classify,
- *    so an offer persists until dispatched or dropped as non-dispatchable.
+ *  - Live entries do NOT expire by wall-clock age (WL-0MTMPIQBE001J41P):
+ *    the leader validates eligibility at dispatch time via
+ *    fetchItem+classify, so a LIVE instance's offers persist until
+ *    dispatched or dropped as non-dispatchable. DEAD entries — an instance
+ *    that STOPPED CHECKING IN (`lastUpdated` older than the bounded
+ *    staleness window, default 2 × the check-in cadence) — ARE pruned by
+ *    the leader on its check-in path (WL-0MWFJTKGM006BHLQ):
+ *    `pruneDeadEntries` removes exactly those entries, so the machine file
+ *    holds only live herdr instances.
  *
  * Fail-safe by contract (parent constraint): a missing or unreadable
  * coordination file, or a failed lock acquisition, degrades to the
@@ -37,7 +48,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getMachineCoordinationDir, ensureMachineCoordinationDir } from './machine-coordination.js';
-import { DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS } from './downtime-worker.constants.js';
+import {
+  DEFAULT_COORDINATION_CHECK_IN_MS,
+  DEFAULT_COORDINATION_STALE_WINDOW_MS,
+  DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+} from './downtime-worker.constants.js';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -47,8 +62,16 @@ export const COORDINATION_FILE = 'downtime-coordination.json';
 /** Exclusive lock file name used to serialize read-modify-write cycles. */
 export const COORDINATION_LOCK_FILE = 'downtime-coordination.lock';
 
-/** Current coordination file format version. */
-export const COORDINATION_FILE_VERSION = 1;
+/**
+ * Current coordination file format version.
+ *
+ * v2 (WL-0MWDDHQON0015T3P AC1): the offer payload is the tier-aware bounded
+ * `offers` array (`implement` / `audit` / `prep` buckets). A v1 file (single
+ * top-level `workItemId`, no `offers`) is migration-read as a one-offer entry
+ * and rewritten as v2 on the next check-in; no v1 file is ever dropped by the
+ * upgrade (AC1).
+ */
+export const COORDINATION_FILE_VERSION = 2;
 
 /** Leader lock file name (mirrors `leader-election.ts`). */
 export const LEADER_LEASE_FILE = 'downtime-leader-lease.json';
@@ -69,7 +92,13 @@ export const DEFAULT_LEADER_BLOCK_STALE_MS = 600_000;
  * One instance's contribution to the shared coordination list.
  *
  * - `instanceId` — unique herdr instance identifier.
- * - `workItemId` — the instance's most-important work item id.
+ * - `workItemId` — the instance's most-important work item id. Since v2 it
+ *   mirrors the FIRST `offers` entry (backward compat: a v1-era leader reads
+ *   the first offer and ignores the rest — parent AC9).
+ * - `offers` — v2 tier-aware offer payload (bounded: one nominee per bucket,
+ *   at most three total; duplicate `(kind, workItemId)` pairs collapse).
+ *   OPTIONAL so a legacy v1 shape (no `offers`) stays a valid entry and old
+ *   writers/readers interoperate (parent AC1/AC9).
  * - `worklogRoot` — the worklog ROOT (parent of `.worklog`) this instance
  *   operates on; the leader dispatches work in that directory. Preferred
  *   field name for the machine-wide file (WL-0MTF0KLO10043YAN).
@@ -87,6 +116,42 @@ export interface CoordinationEntry {
   worklogRoot?: string;
   assignedAt: string;
   lastUpdated: string;
+  /** v2 tier-aware offer payload (optional for legacy v1-shape entries). */
+  offers?: CoordinationOffer[];
+}
+
+/**
+ * The v2 offer buckets (parent WL-0MWDDHQON0015T3P AC1): the classifier
+ * outputs with `plan` / `intake` / `risk-effort` unioning to `prep`. At most
+ * one nominee per bucket, so at most three offers per entry.
+ */
+export type CoordinationOfferKind = 'implement' | 'audit' | 'prep';
+
+/** The v2 per-bucket offer payload (one nominee per bucket, bounded total). */
+export interface CoordinationOffer {
+  kind: CoordinationOfferKind;
+  workItemId: string;
+}
+
+/** Canonical bucket order used by the bounded-offers normalisation. */
+export const COORDINATION_OFFER_BUCKETS: readonly CoordinationOfferKind[] = [
+  'implement',
+  'audit',
+  'prep',
+];
+
+/**
+ * Map a classifier skill kind — or an already-bucketed kind — to its v2
+ * offer bucket (parent AC1): `implement`/`audit` stay; `prep` stays
+ * (write paths feed bucket kinds directly); `plan`/`intake`/`risk-effort`
+ * union to `prep`; anything else (null / unknown) maps to null (no offer).
+ */
+export function toOfferBucket(
+  kind: string | null | undefined,
+): CoordinationOfferKind | null {
+  if (kind === 'implement' || kind === 'audit' || kind === 'prep') return kind;
+  if (kind === 'plan' || kind === 'intake' || kind === 'risk-effort') return 'prep';
+  return null;
 }
 
 /**
@@ -162,8 +227,14 @@ function lockFilePath(worklogDir: string): string {
  * root uses the machine file and stale legacy files are ignored (no
  * double-write, no read fallback). The F2 AC1 proof sets
  * `HERDR_COORDINATION_DIR` so sharing is still proven.
+ *
+ * Shared policy: the budget-ledger reconciliation pass
+ * (`downtime-worker.budget-reconcile.ts`) resolves its ledger through
+ * this SAME function, so a tmp-root worker's first-tick reconcile is
+ * sandboxed to its own root instead of mutating the shared machine
+ * ledger (WL-0MWJPVWB6002208H) — one policy, one source of truth.
  */
-function resolveEffectiveDir(worklogDir: string): string | null {
+export function resolveEffectiveDir(worklogDir: string): string | null {
   const envSet = typeof process.env.HERDR_COORDINATION_DIR === 'string'
     && process.env.HERDR_COORDINATION_DIR.length > 0;
   const isTmpWorklog = worklogDir.startsWith(os.tmpdir())
@@ -194,6 +265,13 @@ function resolveEffectiveDir(worklogDir: string): string | null {
  * caller creates it on the next write); an unreadable or corrupt file also
  * returns `null` so a broken coordination file can never crash an instance
  * or silently mislead a reader. Never throws.
+ *
+ * v2 (WL-0MWDDHQON0015T3P AC1): a v2 entry's `offers` payload is parsed
+ * (re-bounded fail-safe) and `workItemId` mirrors the first offer; a v1 file
+ * (declared version < {@link COORDINATION_FILE_VERSION}) is migration-read as
+ * a one-offer entry per instance — the v1 single `workItemId` becomes one
+ * offer whose kind is the `implement` bucket default (see
+ * {@link migratedV1Offer}) — so no v1 file is ever dropped by the upgrade.
  */
 export function readCoordinationFile(worklogDir: string): CoordinationData | null {
   try {
@@ -203,6 +281,12 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
     if (typeof parsed !== 'object' || parsed === null) return null;
     const data = parsed as Partial<CoordinationData>;
     if (!Array.isArray(data.entries)) return null;
+    const fileVersion = typeof data.version === 'number' ? data.version : COORDINATION_FILE_VERSION;
+    // A v1 file carries one top-level `workItemId` and NO `offers` payload;
+    // migration-read it as a one-offer entry (parent AC1). v2 files are
+    // parsed as-is; a v2 entry without `offers` is kept as its legacy shape
+    // (fail-safe) so round-trips and old writers never surprise a reader.
+    const migrateV1 = fileVersion < COORDINATION_FILE_VERSION;
     // Validate each entry minimally: it must be an object carrying an
     // instanceId string. Malformed entries are dropped (fail-safe).
     // `worklogRoot` is the machine-wide field (WL-0MTF0KLO10043YAN);
@@ -216,23 +300,85 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
       const rawRoot = typeof entry.worklogRoot === 'string' && entry.worklogRoot.length > 0
         ? entry.worklogRoot
         : typeof entry.directory === 'string' ? entry.directory : '';
-      entries.push({
+      const rawWorkItemId = typeof entry.workItemId === 'string' ? entry.workItemId : '';
+      const base = {
         instanceId: entry.instanceId,
-        workItemId: typeof entry.workItemId === 'string' ? entry.workItemId : '',
+        workItemId: rawWorkItemId,
         directory: rawRoot,
         worklogRoot: rawRoot,
         assignedAt: typeof entry.assignedAt === 'string' ? entry.assignedAt : new Date(0).toISOString(),
         lastUpdated: typeof entry.lastUpdated === 'string' ? entry.lastUpdated : new Date(0).toISOString(),
-      });
+      } as CoordinationEntry;
+      if (Array.isArray(entry.offers) && entry.offers.length > 0) {
+        // v2: parse the bounded offer payload (re-bounded fail-safe) and
+        // mirror the first offer into `workItemId` for v1-era readers.
+        const offers = boundOffers(entry.offers);
+        entries.push({
+          ...base,
+          offers,
+          workItemId: offers.length > 0 ? offers[0].workItemId : rawWorkItemId,
+        });
+      } else if (migrateV1 && rawWorkItemId.length > 0) {
+        // v1 migration-read: the single top-level `workItemId` becomes a
+        // one-offer entry — never dropped by the upgrade (parent AC1).
+        entries.push({ ...base, offers: [migratedV1Offer(rawWorkItemId)] });
+      } else {
+        entries.push(base);
+      }
     }
     return {
-      version: typeof data.version === 'number' ? data.version : COORDINATION_FILE_VERSION,
+      version: fileVersion,
       entries,
       ...parseLeader(data.leader),
     };
   } catch {
     return null; // missing / unreadable / corrupt → fail-safe
   }
+}
+
+/**
+ * The v1 migration-read offer (parent AC1): a legacy single `workItemId`
+ * becomes ONE offer carrying that item. The bucket defaults to `implement`
+ * because the v1 head was `computeMostImportantItem`'s single most-important
+ * offer, which resolved to the implement tier in the overwhelming majority of
+ * cases (open / plan_complete with populated risk+effort — exactly the
+ * LEGACY_V1_ITEM fixture). The classifier remains the single source of bucket
+ * truth (parent AC4) and re-resolves the kind at dispatch time (the leader
+ * re-fetches + classifies every offer) and at the owner's next check-in (the
+ * entry is rewritten as v2, AC1), so the read-time default is never the
+ * dispatch decision.
+ */
+function migratedV1Offer(workItemId: string): CoordinationOffer {
+  return { kind: 'implement', workItemId };
+}
+
+/**
+ * Bound an offers payload (parent AC1): at most one nominee per bucket
+ * (first in array order — the array is already the bucket's canonical
+ * ranking, no second ranking), at most three total, and duplicate
+ * `(kind, workItemId)` pairs collapse. Malformed offers (empty id, unknown
+ * kind) are dropped fail-safe. Used on both the write seam (so an
+ * over-bounds array is never persisted) and the read seam (fail-safe).
+ */
+function boundOffers(raw: readonly unknown[]): CoordinationOffer[] {
+  const seenKinds = new Set<CoordinationOfferKind>();
+  const seenPairs = new Set<string>();
+  const out: CoordinationOffer[] = [];
+  for (const o of raw) {
+    if (typeof o !== 'object' || o === null) continue;
+    const offer = o as Partial<CoordinationOffer>;
+    if (typeof offer.workItemId !== 'string' || offer.workItemId.length === 0) continue;
+    const kind = toOfferBucket(offer.kind);
+    if (kind === null) continue;
+    const pairKey = `${kind}\u0000${offer.workItemId}`;
+    if (seenPairs.has(pairKey)) continue; // duplicate (kind, workItemId) → collapse
+    seenPairs.add(pairKey);
+    if (seenKinds.has(kind)) continue; // already one nominee for this bucket
+    seenKinds.add(kind);
+    out.push({ kind, workItemId: offer.workItemId });
+    if (out.length >= COORDINATION_OFFER_BUCKETS.length) break; // at most three total
+  }
+  return out;
 }
 
 /**
@@ -259,12 +405,26 @@ function parseLeader(raw: unknown): { leader?: CoordinationLeader } {
   };
 }
 
-/** Normalize an entry so `directory` and `worklogRoot` are both populated (compat). */
+/** Normalize an entry so `directory`/`worklogRoot` and the v2 offer payload are consistent (compat). */
 function normalizeEntry(entry: CoordinationEntry): CoordinationEntry {
   const root = typeof entry.worklogRoot === 'string' && entry.worklogRoot.length > 0
     ? entry.worklogRoot
     : entry.directory;
-  return { ...entry, directory: root, worklogRoot: root };
+  const base = { ...entry, directory: root, worklogRoot: root };
+  if (!Array.isArray(entry.offers) || entry.offers.length === 0) {
+    // Legacy v1-shape entry — keep the single `workItemId` as-is; there is
+    // no offers payload to bound (old writers/readers interoperate, AC9).
+    return base;
+  }
+  // v2: bound (one per bucket, max three, duplicates collapse) and mirror
+  // the FIRST offer into `workItemId` so a v1-era leader keeps reading the
+  // first offer and ignores the rest (parent AC9).
+  const offers = boundOffers(entry.offers);
+  return {
+    ...base,
+    offers,
+    workItemId: offers.length > 0 ? offers[0].workItemId : '',
+  };
 }
 
 /**
@@ -272,6 +432,11 @@ function normalizeEntry(entry: CoordinationEntry): CoordinationEntry {
  * writer can never observe a partially-written JSON, and a crash between
  * the tmp write and the rename leaves the previous file intact.
  * Returns false on I/O failure (fail-safe, never throws).
+ *
+ * The persisted version is ALWAYS the current format
+ * {@link COORDINATION_FILE_VERSION} — the write path never echoes a legacy
+ * version read back from disk (parent AC1: a v1 file is rewritten as v2 on
+ * the next check-in).
  */
 export function writeCoordinationFile(worklogDir: string, data: CoordinationData): boolean {
   try {
@@ -280,9 +445,12 @@ export function writeCoordinationFile(worklogDir: string, data: CoordinationData
     const effDir = resolveEffectiveDir(worklogDir) ?? worklogDir;
     fs.mkdirSync(effDir, { recursive: true });
     // Normalize entries so both `directory` (legacy) and `worklogRoot`
-    // (machine-wide) are persisted — old and new readers interoperate.
+    // (machine-wide) are persisted — old and new readers interoperate —
+    // and the v2 offer payload is bounded (one per bucket, max three,
+    // duplicates collapse).
     const normalized: CoordinationData = {
       ...data,
+      version: COORDINATION_FILE_VERSION,
       entries: data.entries.map(normalizeEntry),
     };
     fs.writeFileSync(tmpPath, JSON.stringify(normalized), 'utf-8');
@@ -401,6 +569,56 @@ export function removeEntry(
 }
 
 /**
+ * Remove ONE offer from an instance's v2 entry (parent WL-0MWDDHQON0015T3P
+ * AC6, "remove only what dispatched"): the entry keeps its remaining offers
+ * and its `lastUpdated`/`assignedAt` metadata untouched, so a second tier can
+ * be dispatched on the next tick without waiting for the owner's check-in
+ * cadence. When the removed offer was the entry's LAST one — and for every
+ * legacy v1-shaped entry, where the single `workItemId` IS the entry — the
+ * whole entry is dropped, exactly as `removeEntry` did before v2 (AC9).
+ *
+ * Returns what actually happened; `{false, false}` means the instance/offer
+ * was not present or the write failed (lock contention, I/O error —
+ * fail-safe, never throws).
+ */
+export function removeOffer(
+  worklogDir: string,
+  instanceId: string,
+  workItemId: string,
+): { offerRemoved: boolean; entryRemoved: boolean } {
+  const missed = { offerRemoved: false, entryRemoved: false };
+  const result = withCoordLock(worklogDir, () => {
+    const data = readCoordinationFile(worklogDir);
+    if (data === null) return missed;
+    const entry = data.entries.find((e) => e.instanceId === instanceId);
+    if (entry === undefined) return missed;
+    const offers = Array.isArray(entry.offers) ? entry.offers : [];
+    // Legacy v1-shaped entry: no payload, so the single `workItemId` is the
+    // offer AND the entry — drop the entry (v1 semantics preserved).
+    if (offers.length === 0) {
+      if (entry.workItemId !== workItemId) return missed;
+      const next = data.entries.filter((e) => e.instanceId !== instanceId);
+      return writeCoordinationFile(worklogDir, { ...data, entries: next })
+        ? { offerRemoved: true, entryRemoved: true }
+        : missed;
+    }
+    const remaining = offers.filter((o) => o.workItemId !== workItemId);
+    if (remaining.length === offers.length) return missed;
+    const entries =
+      remaining.length === 0
+        ? data.entries.filter((e) => e.instanceId !== instanceId)
+        : data.entries.map((e) =>
+            e.instanceId === instanceId
+              ? { ...e, offers: remaining, workItemId: remaining[0].workItemId }
+              : e,
+          );
+    if (!writeCoordinationFile(worklogDir, { ...data, entries })) return missed;
+    return { offerRemoved: true, entryRemoved: remaining.length === 0 };
+  });
+  return result ?? missed;
+}
+
+/**
  * Read one instance's entry. Returns null when absent.
  * Fail-safe: missing/corrupt file → null.
  */
@@ -509,9 +727,14 @@ export function removeLeader(worklogDir: string): boolean {
  * deliberately conservative: the worst that can happen is one extra idle tick
  * polling the offer list, never starvation.
  *
- * Entry expiry remains a deliberate no-op (`pruneStaleEntries` returns 0 and
- * never mutates the file, WL-0MTMPIQBE001J41P) — liveness lives ONLY in this
- * read predicate, so the coordination file keeps its non-expiring contract.
+ * LIVE entries never expire by wall-clock age: `pruneStaleEntries` stays a
+ * no-op that returns 0 and never mutates the file (WL-0MTMPIQBE001J41P), and
+ * dead-entry pruning (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ) removes only
+ * instances that STOPPED CHECKING IN (check-in staleness, default 2 × the
+ * check-in cadence) — an in-window entry's offers keep the non-expiring
+ * contract. Liveness thus lives in this read predicate AND in the leader's
+ * dead-entry prune; the coordination file keeps its non-expiring contract
+ * for every live instance.
  *
  * Deliberately cheap and fail-open: it is a pure in-memory scan of entries
  * the caller has already read (the dispatch attempt reads them once), so no
@@ -542,11 +765,13 @@ export function hasPeerOffer(
 }
 
 /**
- * @deprecated Time-based expiry removed (WL-0MTMPIQBE001J41P) — entries do
- * NOT expire by wall-clock age. The dispatcher validates eligibility at
- * dispatch time (fetchItem+classify), so an offer persists until
- * dispatched or found non-dispatchable. Kept as a no-op for compat;
- * always returns 0 and never mutates the file.
+ * @deprecated Time-based OFFER expiry removed (WL-0MTMPIQBE001J41P) — a
+ * LIVE instance's offers do NOT expire by wall-clock age; the dispatcher
+ * validates eligibility at dispatch time (fetchItem+classify). DEAD-entry
+ * pruning is implemented by {@link pruneDeadEntries} (WL-0MWFJTKGM006BHLQ),
+ * which removes only entries whose instances stopped checking in. This
+ * legacy helper stays a no-op for compat; always returns 0 and never
+ * mutates the file.
  */
 export function pruneStaleEntries(
   _worklogDir: string,
@@ -557,9 +782,104 @@ export function pruneStaleEntries(
 }
 
 /**
+ * One entry removed by {@link pruneDeadEntries}: the dead instance's
+ * identity, the worklog root it offered work from, and the timestamp of its
+ * last check-in (its `lastUpdated` at prune time).
+ */
+export interface PrunedEntry {
+  instanceId: string;
+  /** The worklog root the dead instance offered work from. */
+  worklogRoot: string;
+  /** The entry's last-seen timestamp (its `lastUpdated` at prune time). */
+  lastSeen: string;
+}
+
+/**
+ * Remove entries whose instances STOPPED CHECKING IN (dead-entry pruning,
+ * WL-0MWFJTKGM006BHLQ): an entry whose `lastUpdated` does not parse or is
+ * older than `staleWindowMs` (default
+ * {@link DEFAULT_COORDINATION_STALE_WINDOW_MS}, 2 × the check-in cadence, so
+ * one missed check-in is tolerated) is removed on the leader's check-in path
+ * BEFORE the dispatch walk reads the file — a crashed/killed instance's
+ * ghost offer never reaches `entryRoots`, the round-robin cursor or the
+ * dispatch scan.
+ *
+ * ONE `withCoordLock` read-modify-write: read the file, keep every entry
+ * whose `lastUpdated` parses and is within the window, and write ONLY when
+ * at least one entry was removed (nothing stale ⇒ no write — the file stays
+ * byte-identical). A duplicate stale entry for a root that also has a live
+ * entry is pruned while the freshest live entry (and its offers) survives
+ * unchanged, so `entryRoots` never sees the same root twice for a dead/live
+ * pair.
+ *
+ * LIVE offers never expire by age (WL-0MTMPIQBE001J41P); the only removal
+ * is by check-in staleness. The leadership holder may pass its own
+ * `opts.leaderInstanceId`: that entry is exempt because it is live by
+ * definition (its check-in refreshes it within this same tick) — pruning it
+ * would ghost the dispatcher's own offer until the next successful check-in.
+ *
+ * FAIL-OPEN on every error path (missing/corrupt file, lock contention,
+ * write failure): returns `[]` (plus the window) and never throws — the
+ * prune is skipped and retried on the next leader tick, and no prune record
+ * is reported for an entry that was not actually persisted as removed.
+ *
+ * Returns the pruned entries (with `worklogRoot` and the last-seen
+ * timestamp) plus the window that was applied, so the caller can write one
+ * `operation: 'prune'` coordination-log record per entry carrying the
+ * window.
+ */
+export function pruneDeadEntries(
+  coordinationDir: string,
+  opts: {
+    /** Injectable clock (ms since epoch); defaults to `Date.now()` in tests/callers. */
+    nowMs?: number;
+    /** Injectable staleness window (ms); defaults to {@link DEFAULT_COORDINATION_STALE_WINDOW_MS}. */
+    staleWindowMs?: number;
+    /** The leader's own instanceId — its entry is exempt (it is live by definition). */
+    leaderInstanceId?: string;
+  } = {},
+): { pruned: PrunedEntry[]; staleWindowMs: number } {
+  const nowMs = opts.nowMs ?? Date.now();
+  const staleWindowMs = opts.staleWindowMs ?? DEFAULT_COORDINATION_STALE_WINDOW_MS;
+  const empty = { pruned: [] as PrunedEntry[], staleWindowMs };
+  const result = withCoordLock(coordinationDir, () => {
+    const data = readCoordinationFile(coordinationDir);
+    if (data === null) return empty; // missing/corrupt → fail-open
+    const pruned: PrunedEntry[] = [];
+    const keep: CoordinationEntry[] = [];
+    for (const entry of data.entries) {
+      if (entry.instanceId === opts.leaderInstanceId) {
+        keep.push(entry); // the leader is live by definition
+        continue;
+      }
+      const updatedMs = Date.parse(entry.lastUpdated);
+      if (Number.isFinite(updatedMs) && nowMs - updatedMs <= staleWindowMs) {
+        keep.push(entry); // verified-live within the window
+      } else {
+        pruned.push({
+          instanceId: entry.instanceId,
+          worklogRoot: entry.worklogRoot ?? entry.directory,
+          lastSeen: entry.lastUpdated,
+        });
+      }
+    }
+    if (pruned.length === 0) return empty; // nothing stale → no write
+    // Write failed → the removal did not persist; report nothing (the next
+    // leader tick retries) so no prune record claims a removal that did not
+    // happen.
+    if (!writeCoordinationFile(coordinationDir, { ...data, entries: keep })) return empty;
+    return { pruned, staleWindowMs };
+  });
+  return result ?? empty; // lock contention → fail-open
+}
+
+/**
  * Merge a set of instance entries into the file (batch upsert). Used at
  * startup / scheduled check-ins when multiple instances may need their
- * entries refreshed in one cycle. Returns the number of entries written.
+ * entries refreshed in one cycle. Returns the number of entries in the
+ * UPSERTED BATCH (the caller's entries), not the file's total — the batch
+ * size is the meaningful "written" count for a caller who knows what it
+ * asked to write (parent AC1 duplicate-collapse tests pin this).
  * Fail-safe: lock contention or I/O failure → 0.
  */
 export function mergeEntries(
@@ -578,6 +898,6 @@ export function mergeEntries(
       byId.set(entry.instanceId, entry);
     }
     const next = Array.from(byId.values());
-    return writeCoordinationFile(worklogDir, { ...data, entries: next }) ? next.length : 0;
+    return writeCoordinationFile(worklogDir, { ...data, entries: next }) ? normalized.length : 0;
   }) ?? 0;
 }

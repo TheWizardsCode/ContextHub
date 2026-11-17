@@ -103,29 +103,137 @@ export function readInitSemaphore(): { version: string; initializedAt: string } 
 }
 
 /**
- * Load configuration from file
+ * Per-process config-parse cache infrastructure (WL-0MVWLBZG4003A803).
+ *
+ * `getDatabase()` calls {@link loadConfigRelaxed} on every CLI invocation and
+ * the in-process test harness makes ~1200 such calls per suite run. The config
+ * files are almost always unchanged between calls, so the YAML parse is
+ * repeated work; the cache below keys on the **content** of the resolved
+ * config files plus the `LLM_*` environment snapshot that
+ * `resolveLlmConfig()` folds into `config.llm`.
+ *
+ * Content (not mtime/size) is the key on purpose: two writes within one
+ * filesystem timestamp tick can share an mtime and even a size, and a stale
+ * config would change command behaviour. Reading two small files is far
+ * cheaper than parsing them, and the mtime/size shortcut would risk exactly
+ * the stale-read bug a cache must not introduce.
+ */
+interface ConfigFileContents {
+  /** Raw `config.defaults.yaml` content, or null when it is absent/unreadable. */
+  defaults: string | null;
+  /** Raw `config.yaml` content, or null when it is absent/unreadable. */
+  user: string | null;
+  /**
+   * True when `config.yaml` exists but could not be read. The loaders treat
+   * that as a hard failure (return null) exactly as they did before the cache.
+   */
+  userReadFailed: boolean;
+}
+
+interface ConfigCacheEntry extends ConfigFileContents {
+  /** Snapshot of the `LLM_*` env vars folded into `config.llm` at parse time. */
+  llmEnv: string;
+  value: WorklogConfig | null;
+}
+
+/** Env vars `resolveLlmConfig()` reads; a change must invalidate the cache. */
+const LLM_ENV_KEYS = ['LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY', 'LLM_TIMEOUT_MS'] as const;
+
+let validatedConfigCache: ConfigCacheEntry | null = null;
+let relaxedConfigCache: ConfigCacheEntry | null = null;
+
+/**
+ * Clear the per-process config cache. Called by in-process config writers and
+ * by tests; correctness does not depend on it (the content key detects every
+ * change) but it keeps a just-written config from being re-read.
+ */
+export function resetConfigCache(): void {
+  validatedConfigCache = null;
+  relaxedConfigCache = null;
+}
+
+/** Read `filePath` as UTF-8, or null when absent; log + flag a real read error. */
+function readConfigFile(
+  filePath: string,
+  label: 'defaults' | 'config',
+): { content: string | null; failed: boolean } {
+  try {
+    return { content: fs.readFileSync(filePath, 'utf-8'), failed: false };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { content: null, failed: false };
+    }
+    if (label === 'defaults') {
+      console.error('Error loading config defaults:', error);
+      console.error('Continuing without defaults...');
+    } else {
+      console.error('Error loading config:', error);
+    }
+    return { content: null, failed: true };
+  }
+}
+
+function readConfigFileContents(): ConfigFileContents {
+  const defaults = readConfigFile(getConfigDefaultsPath(), 'defaults');
+  const user = readConfigFile(getConfigPath(), 'config');
+  return { defaults: defaults.content, user: user.content, userReadFailed: user.failed };
+}
+
+function llmEnvSnapshot(): string {
+  return LLM_ENV_KEYS.map((key) => `${key}=${process.env[key] ?? ''}`).join('\u0000');
+}
+
+function cacheEntryMatches(
+  entry: ConfigCacheEntry,
+  files: ConfigFileContents,
+  llmEnv: string,
+): boolean {
+  return (
+    entry.defaults === files.defaults &&
+    entry.user === files.user &&
+    entry.userReadFailed === files.userReadFailed &&
+    entry.llmEnv === llmEnv
+  );
+}
+
+/**
+ * Load configuration from file.
+ *
+ * The YAML parse is memoised per process (WL-0MVWLBZG4003A803) and the cached
+ * object is shared between callers, so treat the returned config as immutable.
  */
 export function loadConfig(): WorklogConfig | null {
+  const files = readConfigFileContents();
+  const llmEnv = llmEnvSnapshot();
+  if (validatedConfigCache && cacheEntryMatches(validatedConfigCache, files, llmEnv)) {
+    return validatedConfigCache.value;
+  }
+  const value = parseValidatedConfig(files);
+  validatedConfigCache = { ...files, llmEnv, value };
+  return value;
+}
+
+/** Uncached body of {@link loadConfig}: parse + validate the given contents. */
+function parseValidatedConfig(files: ConfigFileContents): WorklogConfig | null {
   let config: WorklogConfig | null = null;
-  
+
   // First, load defaults if they exist
-  const defaultsPath = getConfigDefaultsPath();
-  if (fs.existsSync(defaultsPath)) {
+  if (files.defaults !== null) {
     try {
-      const content = fs.readFileSync(defaultsPath, 'utf-8');
-      config = yaml.load(content, { schema: yaml.CORE_SCHEMA }) as WorklogConfig;
+      config = yaml.load(files.defaults, { schema: yaml.CORE_SCHEMA }) as WorklogConfig;
     } catch (error) {
       console.error('Error loading config defaults:', error);
       console.error('Continuing without defaults...');
     }
   }
-  
+
   // Then, load user config and merge with defaults
-  const configPath = getConfigPath();
-  if (fs.existsSync(configPath)) {
+  if (files.userReadFailed) {
+    return null;
+  }
+  if (files.user !== null) {
     try {
-      const content = fs.readFileSync(configPath, 'utf-8');
-      const userConfig = yaml.load(content, { schema: yaml.CORE_SCHEMA }) as WorklogConfig;
+      const userConfig = yaml.load(files.user, { schema: yaml.CORE_SCHEMA }) as WorklogConfig;
       
       // Merge user config over defaults
       config = config ? { ...config, ...userConfig } : userConfig;
@@ -253,16 +361,30 @@ function validateSyncAllowedAuthors(config: WorklogConfig): string | null {
 /**
  * Load configuration without enforcing status/stage sections.
  * Useful for CLI paths that only need core fields like prefix.
+ *
+ * Memoised per process like {@link loadConfig} (WL-0MVWLBZG4003A803): this is
+ * the function `getDatabase()` calls on every invocation, so the repeated YAML
+ * parse was the hot path. The cached object is shared — treat it as immutable.
  */
 export function loadConfigRelaxed(): WorklogConfig | null {
+  const files = readConfigFileContents();
+  const llmEnv = llmEnvSnapshot();
+  if (relaxedConfigCache && cacheEntryMatches(relaxedConfigCache, files, llmEnv)) {
+    return relaxedConfigCache.value;
+  }
+  const value = parseRelaxedConfig(files);
+  relaxedConfigCache = { ...files, llmEnv, value };
+  return value;
+}
+
+/** Uncached body of {@link loadConfigRelaxed}: parse the given contents. */
+function parseRelaxedConfig(files: ConfigFileContents): WorklogConfig | null {
   let config: WorklogConfig | null = null;
 
   // First, load defaults if they exist
-  const defaultsPath = getConfigDefaultsPath();
-  if (fs.existsSync(defaultsPath)) {
+  if (files.defaults !== null) {
     try {
-      const content = fs.readFileSync(defaultsPath, 'utf-8');
-      config = yaml.load(content, { schema: yaml.CORE_SCHEMA }) as WorklogConfig;
+      config = yaml.load(files.defaults, { schema: yaml.CORE_SCHEMA }) as WorklogConfig;
     } catch (error) {
       console.error('Error loading config defaults:', error);
       console.error('Continuing without defaults...');
@@ -270,11 +392,12 @@ export function loadConfigRelaxed(): WorklogConfig | null {
   }
 
   // Then, load user config and merge with defaults
-  const configPath = getConfigPath();
-  if (fs.existsSync(configPath)) {
+  if (files.userReadFailed) {
+    return null;
+  }
+  if (files.user !== null) {
     try {
-      const content = fs.readFileSync(configPath, 'utf-8');
-      const userConfig = yaml.load(content, { schema: yaml.CORE_SCHEMA }) as WorklogConfig;
+      const userConfig = yaml.load(files.user, { schema: yaml.CORE_SCHEMA }) as WorklogConfig;
 
       // Merge user config over defaults
       config = config ? { ...config, ...userConfig } : userConfig;
@@ -567,6 +690,9 @@ export function saveConfig(config: WorklogConfig): void {
 
   const content = yaml.dump(config);
   fs.writeFileSync(getConfigPath(), content, 'utf-8');
+  // In-process writers invalidate the parse cache so the next read reflects the
+  // write immediately (the content key would also catch it).
+  resetConfigCache();
 }
 
 /** One recorded `prefix → project` mapping (`projects:` in config.yaml). */
@@ -640,6 +766,7 @@ export function recordProjectMapping(
     fs.mkdirSync(configDir, { recursive: true });
   }
   fs.writeFileSync(getConfigPath(), yaml.dump(config), 'utf-8');
+  resetConfigCache();
 }
 
 /**

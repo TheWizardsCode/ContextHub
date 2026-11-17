@@ -5730,9 +5730,16 @@ export async function runWorklistTui(
   // processes (AC5). The SAME runner is invoked immediately on the
   // hidden→visible resume below, so regaining focus re-checks without
   // waiting for the next 30 s tick (AC4).
+  //
+  // Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): the configured
+  // `hydratorClaimGraceMs` bounds the spawn→pane-title gap — an item claimed
+  // within the window is never released even with no pane visible yet. Read
+  // at runner-creation time (like the other creation-time wiring here); the
+  // settings clamp has already been applied by `loadSettings`.
   const runHydrator = createHydratorRunner(createProductionHydratorDeps(), {
     workspaceId: process.env.HERDR_WORKSPACE_ID ?? undefined,
     isVisible: () => paneGate.visible(),
+    claimGraceMs: loadSettings().hydratorClaimGraceMs,
   });
 
   // DB-change tracker: detects whether the worklog DB has changed since the

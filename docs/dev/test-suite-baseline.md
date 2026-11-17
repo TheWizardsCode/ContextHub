@@ -905,7 +905,12 @@ test — it is never run through `vitest`/`npm test`)
 4800H), node v22.22.1, **load average 4.14 / 6.56 / 7.99** (1/5/15 min)
 **Method:** median of **5 runs per scenario**, 1 discarded warmup run, one
 **fresh temporary worklog store per measured run** (never the repository
-`.worklog/`, which the profiler does not open even in its copy mode).
+`.worklog/`, which the profiler does not open even in its copy mode). Since
+WL-0MVWLBZG4003A803 the profiler measures five scenarios: `cold-open` keeps the
+original first-open regime (no database file, schema bootstrap included) and
+`list-json`/`create`/`status` measure the **warm** regime — a fresh temp copy of
+an already-migrated seed store per run, which is what repeated operator and
+multi-call test invocations actually do.
 
 ### What is attributed
 
@@ -966,6 +971,63 @@ averaged in, because it also pays module-graph and JIT warm-up: `wl --help`
 measured **19.5 ms** cold (commander registration 9.9 ms, plugin context
 5.3 ms, command action 3.4 ms) versus 2.3 ms warm. That difference — not a
 hidden per-call cost — is what the seed `~72 ms` figure for `--help` reflects.
+
+### Schema/config fast path — before/after (WL-0MVWLBZG4003A803)
+
+The follow-up implemented two production fast paths: a **schema-version gate**
+that skips the per-open `initializeSchema()` DDL once a store is fully migrated
+(the store's `schemaVersion` equals the code's version **and** every required
+base table exists **and** every additive `REQUIRED_COLUMNS` entry is present —
+one `sqlite_master` read plus a handful of read-only `PRAGMA table_info`
+probes, no DDL), and a **content-keyed per-process config cache** around
+`loadConfig`/`loadConfigRelaxed`. Both are behaviour-preserving: a new, older,
+partially-migrated (missing additive column), or otherwise drifted store (for
+example a legacy store migrated to the current version without the base schema)
+still takes the full slow path and is created/repaired exactly as before
+(covered by `tests/schema-fast-path.test.ts`), and the cache re-parses whenever
+a config file's content or the resolved `LLM_*` environment changes
+(`tests/config-cache.test.ts`).
+
+The fast path only applies to an **already-initialised** store — by definition a
+store with no database file still has to create the schema — so the measurement
+regime had to match the item's goal ("a warm CLI invocation against an
+already-initialised store"). The paired runs below were taken back to back on
+the same host with the same bench command (`npm run benchmark:inproc-harness --
+--runs 5`); the `after` run is the artefact regeneration (`--update-budget`).
+
+| scenario | before (ms) | after (ms) | change |
+|---|---|---|---|
+| `wl list --json` (**already-initialised**, the AC scenario) | 4.95 | **2.54** | **−48.7 %** (dbOpen 1.89 → 0.62, **−67 %**) |
+| `wl status --json` (already-initialised) | 3.29 | 2.54 | −22.8 % (dbOpen 1.08 → 0.58) |
+| `wl create -t <item> --json` (already-initialised) | 4.46 | 4.04 | −9.4 % (dbOpen 1.10 → 0.59; command work varies) |
+| `wl list --json` (`cold-open`, first open) | 4.60 | 3.63 | −21.1 % (dbOpen 2.05 → 1.59) |
+| `wl --help` (no data access) | 1.95 | 1.86 | noise |
+
+Host load averages (1/5/15 min): **before 1.46 / 1.25 / 2.06**, **after 1.38 /
+2.76 / 2.81** on `rgardler-AI-Laptop`, node v22.22.1 (medians of 5 runs; the
+after run carried a higher 5-minute load, so the comparison is conservative).
+
+Run-to-run spread is worth knowing: the **before** `list-json` median ranged
+**3.40–4.95 ms** across runs (load 1.1–1.5) because the old code re-runs the
+whole bootstrap on every open, while the **after** median stayed in a narrow
+**2.45–2.66 ms** band — the fast path is both faster and less load-sensitive.
+Against the **recorded child 1 baseline** on this item (4.74 ms) the same
+command now reports **2.54 ms — a 46 % drop, comfortably below the AC's
+≤ 3.3 ms target**. The remaining warm-call cost is dominated by the harness's
+fixed ~1.3–1.5 ms command registration (the parent's deliberately out-of-scope
+harness-side bucket), so the schema/config startup this item targets fell by
+**~50–67 %** (dbOpen) while the total is bounded by that fixed overhead.
+
+The first-open (`cold-open`) path improved ~21 % rather than collapsing: creating
+the schema is irreducible, but the per-open FTS5 probe's virtual-table
+create/drop was replaced by a direct create attempt (and, on the fast path, by
+the same read that answers the version question).
+
+Budget: `bench/inproc-harness-budget.json` was regenerated with
+`--update-budget` from the `after` run (5 scenarios: 1.86 / 3.63 / 2.54 / 4.04 /
+2.54 ms, load recorded in the artefact); `tests/cli/inproc-harness-budget.test.ts`
+stays green. `tests/cli/cli-inproc.ts` still constructs a database per call, so
+the saving is real production saving, not a harness workaround.
 
 ### Attribution — production-sized store (the parent's ~196–257 ms path)
 
@@ -1102,16 +1164,18 @@ edits the budget artefact, or that drops a scenario from it, fails
 `src/` startup work in WL-0MVWLBZG4003A803) regenerates the artefact with the
 command above and records the before/after numbers on its work item.
 
-The guard is host-load tolerant. A fresh 3-run measurement of the four
+The guard is host-load tolerant. A fresh 3-run measurement of the five
 scenarios is compared with `baseline * (1 + headroomPct/100) * loadFactor`,
 where `loadFactor = clamp(load1minNow / load1minAtCapture, 1, maxHostLoadFactor)`
 — 1 on a quiet host, capped at 8 on a saturated one. With the documented
-`headroomPct` of 250 and the recorded medians (2.3–5.1 ms), the limit is **3.5x
-the recorded median on an idle host** and up to 28x on a saturated host: it
-catches a real regression without flaking on load noise, which is the
-appropriate ratchet while the recorded outcome is a **re-scope** (no harness
-improvement landed — see the decision above) rather than a measured win. The
-guard costs ~230 ms of suite time (190 ms of profiling) and writes nothing.
+`headroomPct` of 250 and the recorded warm medians (1.8–4.2 ms), the limit is
+**3.5x the recorded median on an idle host** and up to 28x on a saturated host:
+it catches a real regression without flaking on load noise. The guard is a
+*measured* test, so from WL-0MVWLBZG4003A803 it runs in the isolated,
+serialised measured project in `vitest.config.ts` (the same group as the
+startup-cost suite): with six sibling fork workers a 2–4 ms call lost enough
+time to scheduling to inflate a median to 3.9x its baseline and fail the ratchet
+on an unchanged tree. It writes nothing.
 
 ### Caveats
 
@@ -1124,9 +1188,11 @@ guard costs ~230 ms of suite time (190 ms of profiling) and writes nothing.
   scheduling noise, which is more than 10 % of such a short call; the ≥ 90 %
   attribution standard is therefore asserted on each scenario's median, not on
   one sample.
-- **`db_open` covers the first-open path** (schema creation + migrations)
-  because every measured run uses a fresh store, matching a per-test
-  `beforeEach` fixture. Re-opening an existing store is cheaper.
+- **`cold-open` covers the first-open path** (schema creation + migrations),
+  matching a per-test `beforeEach` fixture; the `list-json`/`create`/`status`
+  scenarios measure the warm already-initialised store (a fresh temp copy of a
+  migrated seed), where the schema/config fast path from WL-0MVWLBZG4003A803
+  applies. Re-opening an existing store is cheaper than the first open.
 - **The copy regime is for reference.** It describes a production-sized store
   (what an operator or a real-project test sees), not the suite's temp stores;
   the profiler copies the named store's own files (`worklog.db`, `-wal`,
@@ -1402,6 +1468,9 @@ instead of reintroducing the flake.
   [Re-scope decision: no harness reuse](#re-scope-decision-no-harness-reuse-wl-0mvvxg4b200968bf)
 - Harness per-call cost budget guard (ratchet): WL-0MVVXG3UW00250V5 — see
   [Budget guard: harness per-call cost is ratcheted](#budget-guard-harness-per-call-cost-is-ratcheted-wl-0mvwxg3uw00250v5)
+- Schema/config production-startup fast path (warm before/after):
+  WL-0MVWLBZG4003A803 — see
+  [Schema/config fast path — before/after](#schemaconfig-fast-path--beforeafter-wl-0mvwlbzg4003a803)
 - install-herdr test hermeticity + explicit per-test timeout (load-induced
   30 s timeout): WL-0MVWL88MO002SQ2B — see
   [install-herdr script tests: hermetic install + explicit timeout](#install-herdr-script-tests-hermetic-install--explicit-timeout-wl-0mvwl88mo002sq2b)

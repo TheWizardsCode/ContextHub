@@ -49,6 +49,18 @@ export interface HostBudgetPromptRequest {
   live: number;
   /** The tier's configured cap (`budget.json` + env, clamped). */
   max: number;
+  /**
+   * Absolute path of the ledger's append-only audit trail
+   * (`dispatch-budget.log`), named in the dialog when known so the operator
+   * can read WHY the in-flight figure moved (WL-0MWFJDGXQ001OXP8).
+   */
+  trailPath?: string;
+  /**
+   * How many of `live` came from running PANES that have no ledger entry
+   * (WL-0MWFJDD8R005F5BV). Detail for this dialog only: the worklist header
+   * gains no chrome, so an operator who wants the breakdown reads it here.
+   */
+  unreserved?: number;
 }
 
 /** The two answers. Cancel is the state on open (safe default). */
@@ -213,6 +225,21 @@ export function formatHostBudgetDialog(
     ),
   );
   lines.push(padLine(''));
+  if (request.unreserved !== undefined && request.unreserved > 0) {
+    // The ledger drifted: these dispatches are running but unrecorded
+    // (WL-0MWFJDD8R005F5BV). Detail lives here, not in the header.
+    lines.push(
+      padLine(
+        `${ANSI.dim}${request.unreserved} running with no ledger entry${ANSI.reset}`,
+      ),
+    );
+  }
+  if (request.trailPath !== undefined && request.trailPath !== '') {
+    // The RCA entry point: the figure above is only trustworthy if the
+    // operator can see the operations that moved it
+    // (WL-0MWFJDGXQ001OXP8).
+    lines.push(padLine(`${ANSI.dim}trail: ${request.trailPath}${ANSI.reset}`));
+  }
   lines.push(
     padLine(`${ANSI.dim}[Enter/y] proceed anyway   [Esc/n] cancel (default)${ANSI.reset}`),
   );

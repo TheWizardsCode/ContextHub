@@ -44,7 +44,7 @@
  * Run: npx vitest run packages/herdr/src/host-dispatch-budget.acceptance.test.ts
  */
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -54,6 +54,7 @@ import {
   confirmHostDispatch,
   HOST_BUDGET_AUDIT_REFUSAL,
   HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+  HOST_BUDGET_CORRUPT_REFUSAL,
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
   readAuditBudgetState,
@@ -63,7 +64,16 @@ import {
   AUDIT_BUDGET_SATURATED_REASON,
   AUDIT_BUDGET_UNKNOWN_REASON,
 } from './downtime-worker.audit-availability.contract.js';
+import { repairBudgetLedgerFromPanes } from './host-dispatch-budget.repair.js';
 import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js';
+import { auditLeaseSessionId } from './downtime-worker.audit-lease.js';
+
+/** A held proxy-lease acquire outcome for the admission-admitting cases. */
+const LEASE_OK = (itemId: string): AuditLeaseAcquireOutcome => ({
+  status: 'ok',
+  lease: { sessionId: `herdr-audit-${itemId}` },
+});
 import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
 import { readCoordinationLogEntries } from './downtime-log.js';
 import {
@@ -154,9 +164,16 @@ function writeCaps(dir: string, caps: { maxImplement?: number; maxAudit?: number
   writeFileSync(budgetConfigPath(dir), JSON.stringify(caps) + '\n', 'utf8');
 }
 
-/** A live pane owned by `itemId` (the dispatcher's pane-title convention). */
-function livePane(paneId: string, itemId: string): HostBudgetLivePane {
-  return { paneId, title: `Downtime triggered - ${itemId}` };
+/**
+ * A live pane owned by `itemId` (the dispatcher's pane-title convention, which
+ * names the tier — the in-flight counting rule reads it, WL-0MWFJDD8R005F5BV).
+ */
+function livePane(
+  paneId: string,
+  itemId: string,
+  kind: 'implement' | 'audit' = 'implement',
+): HostBudgetLivePane {
+  return { paneId, title: `Downtime triggered ${kind} - ${itemId}` };
 }
 
 /**
@@ -172,6 +189,7 @@ function budgetSeams(
     now?: number;
     env?: Readonly<Record<string, string | undefined>>;
     auditAvailability?: AuditAvailabilityOutcome;
+    auditLease?: AuditLeaseAcquireOutcome;
     onAuditBudgetEvent?: (event: AuditBudgetLogEvent) => void;
   } = {},
 ): Pick<DowntimeWorkerDeps, 'admitHostDispatch' | 'confirmHostDispatch' | 'releaseHostDispatch'> {
@@ -197,6 +215,7 @@ function budgetSeams(
             ...(opts.auditAvailability !== undefined
               ? { auditAvailability: opts.auditAvailability }
               : {}),
+            ...(opts.auditLease !== undefined ? { auditLease: opts.auditLease } : {}),
             ...(opts.onAuditBudgetEvent !== undefined
               ? { onAuditBudgetEvent: opts.onAuditBudgetEvent }
               : {}),
@@ -217,9 +236,21 @@ function budgetSeams(
         );
       },
     ),
-    releaseHostDispatch: vi.fn(async (itemId: string) => {
-      release(itemId, { dir, now, env: CLEAN_ENV });
-    }),
+    releaseHostDispatch: vi.fn(
+      async (itemId: string, _cwd: string, identity?: { kind?: string; paneId?: string; attemptId?: string }) => {
+        release(
+          {
+            itemId,
+            ...(identity?.kind === 'implement' || identity?.kind === 'audit'
+              ? { kind: identity.kind }
+              : {}),
+            ...(identity?.paneId !== undefined ? { paneId: identity.paneId } : {}),
+            ...(identity?.attemptId !== undefined ? { attemptId: identity.attemptId } : {}),
+          },
+          { dir, now, env: CLEAN_ENV },
+        );
+      },
+    ),
   };
 }
 
@@ -256,6 +287,18 @@ function makeWorkerInstance(opts: {
   const deps = makeDeps({
     getNextImplementCandidate: vi.fn().mockResolvedValue(opts.candidate),
     recordDecision: opts.recordDecision,
+    // The tick's budget-reconcile pass reads the trusted pane list
+    // (WL-0MWFJDEY5002FBRE). Resolved lazily so a test that pushes a freshly
+    // confirmed pane is describing the same world the ledger holds.
+    getRunningDowntimePanes: vi.fn(async () => ({
+      ok: true,
+      count: opts.livePanes.length,
+      paneIds: opts.livePanes.map((pane) => pane.paneId),
+      records: opts.livePanes.map((pane) => ({
+        paneId: pane.paneId,
+        ...(pane.title !== undefined ? { label: pane.title } : {}),
+      })),
+    })),
     ...budgetSeams(opts.dir, {
       instanceId: opts.instanceId,
       livePanes: opts.livePanes,
@@ -321,6 +364,28 @@ function interactiveDeps(
   };
 }
 
+/**
+ * The stored attempt token for one entry — the identity a release must prove
+ * (WL-0MWFJD5T4003OM91). Throws when the test's reservation is missing, so a
+ * silently-absent entry can never make a release assertion vacuous.
+ */
+function attemptOf(
+  dir: string,
+  itemId: string,
+  kind: 'implement' | 'audit' = 'implement',
+): string {
+  const read = readBudget({ dir, now: T0, env: CLEAN_ENV });
+  const entry = read.ok
+    ? read.ledger.entries.find(
+        (candidate) => candidate.itemId === itemId && candidate.kind === kind,
+      )
+    : undefined;
+  if (entry?.attemptId === undefined) {
+    throw new Error(`no attemptId stored for ${kind}:${itemId}`);
+  }
+  return entry.attemptId;
+}
+
 const IMPLEMENT_CMD = '/skill:implement WL-0000000000000001';
 const AUDIT_CMD = '/skill:audit WL-0000000000000001';
 
@@ -348,13 +413,19 @@ describe('AC1 — machine-scoped ledger: read/reserve/release/reap + pure helper
       const read = readBudget({ dir, now: T0, env: CLEAN_ENV });
       expect(read.ok && read.ledger.entries.map((entry) => entry.itemId)).toEqual(['WL-1']);
 
-      // Release is keyed by item id and idempotent — the one seam every
-      // pane-close / dispatch-failure / failed-claim path calls (AC5).
-      expect(release('WL-1', { dir, now: T0, env: CLEAN_ENV })).toMatchObject({
+      // Release is keyed by the reserved attempt's identity and idempotent —
+      // the one seam every pane-close / dispatch-failure / failed-claim path
+      // calls (AC5, WL-0MWFJD5T4003OM91).
+      const identity = {
+        itemId: 'WL-1',
+        kind: 'implement' as const,
+        attemptId: attemptOf(dir, 'WL-1'),
+      };
+      expect(release(identity, { dir, now: T0, env: CLEAN_ENV })).toMatchObject({
         ok: true,
         removed: true,
       });
-      expect(release('WL-1', { dir, now: T0, env: CLEAN_ENV })).toMatchObject({
+      expect(release(identity, { dir, now: T0, env: CLEAN_ENV })).toMatchObject({
         ok: true,
         removed: false,
       });
@@ -489,7 +560,10 @@ describe('AC3 — maxAudit replaces the hard-coded single-flight', () => {
       expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
 
       // The shared release point frees the slot again.
-      release('WL-AUD', { dir, now: T0, env: CLEAN_ENV });
+      release(
+        { itemId: 'WL-AUD', kind: 'audit', attemptId: attemptOf(dir, 'WL-AUD', 'audit') },
+        { dir, now: T0, env: CLEAN_ENV },
+      );
       const third = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
       expect(third.dispatched).toBe(true);
     });
@@ -628,7 +702,12 @@ describe('AC5 — every release path gives the slot back', () => {
         max: 1,
         reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
       });
-      expect(release('WL-NEW', { dir, now: T0, env: CLEAN_ENV })).toMatchObject({ ok: true });
+      expect(
+        release(
+          { itemId: 'WL-NEW', kind: 'audit', attemptId: attemptOf(dir, 'WL-NEW', 'audit') },
+          { dir, now: T0, env: CLEAN_ENV },
+        ),
+      ).toMatchObject({ ok: true });
       expect(auditAdmit()).toMatchObject({ admitted: true, live: 0, max: 1 });
 
       // A killed leader's stale entry is reaped on read and dispatch resumes.
@@ -778,7 +857,15 @@ describe('AC8 — dispatcher-fired over-quota ticks are neutral skips', () => {
 
       // No cooldown was entered: freeing the slot lets the VERY NEXT tick
       // dispatch (a `no-candidate` cooldown would have suppressed it).
-      release('WL-OTHER', { dir, now: T0, env: CLEAN_ENV });
+      // The seeded entry's identity is its pane (it was written raw, so it
+      // carries no attempt token).
+      release(
+        { itemId: 'WL-OTHER', kind: 'implement', paneId: 'pane-1' },
+        { dir, now: T0, env: CLEAN_ENV },
+      );
+      // The pane has closed too, so the union count no longer sees it
+      // (WL-0MWFJDD8R005F5BV).
+      panes.length = 0;
       await worker.tick();
       expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     });
@@ -788,29 +875,46 @@ describe('AC8 — dispatcher-fired over-quota ticks are neutral skips', () => {
 // ── AC9 — corrupt ledger in both fail directions ─────────────────────
 
 describe('AC9 — a corrupt ledger fails closed for the dispatcher, open for a human', () => {
-  it('AC9: the dispatcher refuses with host-budget-unknown and rewrites the ledger from live panes', async () => {
+  it('AC9 (WL-0MWFJD8ZO000J1R8): the dispatcher refuses with host-budget-corrupt and NEVER rewrites the ledger', async () => {
     await withMachineDir(async (dir) => {
       writeCaps(dir, { maxImplement: 2 });
-      writeRawBudgetLedger(dir, '{ this is not json');
+      const corrupt = '{ this is not json';
+      writeRawBudgetLedger(dir, corrupt);
       const panes = [livePane('pane-1', 'WL-LIVE')];
 
       const deps = makeDeps({
         getNextImplementCandidate: vi.fn().mockResolvedValue(IMPLEMENT_CANDIDATE),
+        // The tick's budget-reconcile pass reads the trusted pane list: the
+        // worker tests must describe the same world the ledger seeding does
+        // (WL-0MWFJDEY5002FBRE).
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true,
+          count: panes.length,
+          paneIds: panes.map((pane) => pane.paneId),
+          records: panes.map((pane) => ({
+            paneId: pane.paneId,
+            ...(pane.title !== undefined ? { label: pane.title } : {}),
+          })),
+        }),
         ...budgetSeams(dir, { instanceId: 'instance-a', livePanes: panes }),
       });
 
       const refused = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
       expect(refused).toMatchObject({
         dispatched: false,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+        // The decision log names the corruption, not a generic unknown.
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
       expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      // No self-heal: an admission read must leave the bytes alone.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(corrupt);
 
-      // Self-healing: the unreadable document is rewritten from the live pane
-      // list, so a later tick can dispatch normally.
-      const repaired = readBudgetLedger(dir);
-      expect(repaired).not.toBeNull();
-      expect(repaired?.entries.map((entry) => entry.itemId)).toEqual(['WL-LIVE']);
+      // The EXPLICIT operator repair is the recovery path.
+      const repaired = repairBudgetLedgerFromPanes(panes, {
+        instanceId: 'operator',
+        root: INSTANCE_A_ROOT,
+      });
+      expect(repaired.ok).toBe(true);
 
       const healed = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
       expect(healed.dispatched).toBe(true);
@@ -848,7 +952,7 @@ describe('AC10 — the four observability surfaces quote one ledger state', () =
       const panes = [
         livePane('pane-1', 'WL-IMP-1'),
         livePane('pane-2', 'WL-IMP-2'),
-        livePane('pane-3', 'WL-AUD-1'),
+        livePane('pane-3', 'WL-AUD-1', 'audit'),
       ];
       writeBudgetLedger(dir, [
         makeBudgetEntry({ kind: 'implement', itemId: 'WL-IMP-1', paneId: 'pane-1', heartbeatAt: new Date(T0).toISOString() }),
@@ -996,6 +1100,9 @@ describe('proxy-derived audit admission (WL-0MWAMSK9H005BOHD)', () => {
             status: 'ok',
             availability: { cap: 1, live: 0, available: true },
           },
+          // The lease is THE admission gate (WL-0MWFJH3NW006F5GN AC2): this
+          // end-to-end case holds one so the proxy admission proceeds.
+          auditLease: LEASE_OK(AUDIT_CANDIDATE.id),
         }),
       });
 
@@ -1049,6 +1156,9 @@ describe('proxy-derived audit admission (WL-0MWAMSK9H005BOHD)', () => {
             availability: { cap: 1, live: 0, available: true },
           },
           onAuditBudgetEvent: (event) => events.push(event),
+          // The lease is THE admission gate (WL-0MWFJH3NW006F5GN AC2): this
+          // divergence case holds one so the proxy admission proceeds.
+          auditLease: LEASE_OK(AUDIT_CANDIDATE.id),
         }),
       });
 
@@ -1086,7 +1196,20 @@ describe('audit pre-check and admission agree (WL-0MWAMSK9H005BOHD AC2)', () => 
         const preCheck = await deps.getActiveAudit(INSTANCE_A_ROOT);
         const admission = admitHostDispatch(
           { kind: 'audit', itemId: 'WL-AGREE', instanceId: 'instance-a', root: INSTANCE_A_ROOT },
-          { dir, livePanes: [], now: T0, env: CLEAN_ENV, auditAvailability: availability },
+          {
+            dir,
+            livePanes: [],
+            now: T0,
+            env: CLEAN_ENV,
+            auditAvailability: availability,
+            // Lease gate (WL-0MWFJH3NW006F5GN AC2): a held lease accompanies an
+            // admitting pre-check so the agreement assertion stays about the
+            // availability path; a refused availability never reaches it.
+            auditLease:
+              availability.status === 'ok' && availability.availability.available
+                ? LEASE_OK('WL-AGREE')
+                : undefined,
+          },
         );
 
         expect(preCheck.ok).toBe(true);
@@ -1137,6 +1260,52 @@ describe('audit divergence logged by the real pre-check (WL-0MWAMSK9H005BOHD AC2
           local: { live: 0, maxAudit: 5 },
         });
       });
+    });
+  });
+});
+
+// ── Proxy audit-LEASE release at pane close (WL-0MWFJH3NW006F5GN AC3) ──
+
+describe('audit lease released at audit pane close (WL-0MWFJH3NW006F5GN AC3)', () => {
+  it('the real recordPaneClose seam releases the proxy lease for a closed audit pane', async () => {
+    await withMachineDir(async (dir) => {
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'dispatcher');
+      const released: string[] = [];
+      deps.auditLeaseClient = {
+        acquire: async () => ({ status: 'ok', lease: { sessionId: 'x', expiresAt: 0 } }),
+        renew: async () => ({ status: 'ok', lease: { sessionId: 'x', expiresAt: 0 } }),
+        release: vi.fn(async (sessionId: string) => {
+          released.push(sessionId);
+          return { status: 'ok' } as const;
+        }),
+      } as unknown as NonNullable<DowntimeWorkerDeps['auditLeaseClient']>;
+
+      // An AUDIT pane closing is the terminal path of an admitted audit: the
+      // shared GPU must be given back, re-deriving the session id from the
+      // item (nothing threaded).
+      await deps.recordPaneClose(
+        { itemId: 'WL-CLOSED', kind: 'audit', paneId: 'w9:p9' },
+        dir,
+      );
+      expect(released).toEqual([auditLeaseSessionId('WL-CLOSED')]);
+
+      // A NON-audit pane close never touches the lease.
+      await deps.recordPaneClose(
+        { itemId: 'WL-CLOSED', kind: 'implement', paneId: 'w9:p9' },
+        dir,
+      );
+      expect(released).toEqual([auditLeaseSessionId('WL-CLOSED')]);
+    });
+  });
+
+  it('an unwired lease client is a non-event (the pane-close record still lands)', async () => {
+    await withMachineDir(async (dir) => {
+      const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'dispatcher');
+      deps.auditLeaseClient = undefined;
+      // The close path runs to completion with no lease client and no throw.
+      await expect(
+        deps.recordPaneClose({ itemId: 'WL-C', kind: 'audit', paneId: 'p:1' }, dir),
+      ).resolves.toBeUndefined();
     });
   });
 });

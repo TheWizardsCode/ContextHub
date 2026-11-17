@@ -22,8 +22,10 @@ import {
   writeCoordinationFile,
   upsertEntry,
   removeEntry,
+  removeOffer,
   getEntry,
   pruneStaleEntries,
+  pruneDeadEntries,
   mergeEntries,
   tryAcquireCoordLock,
   hasPeerOffer,
@@ -194,6 +196,160 @@ describe('pruneStaleEntries (no-op, WL-0MTMPIQBE001J41P)', () => {
   it('returns 0 when the file is missing (fail-safe)', () => {
     expect(pruneStaleEntries(testDir, 300_000)).toBe(0);
   });
+
+  it('returns 0 and leaves the file byte-identical when called without nowMs', () => {
+    upsertEntry(testDir, makeEntry('inst-1', 'WL-ONE'));
+    const before = readFileSync(COORD_PATH(), 'utf-8');
+    const removed = pruneStaleEntries(testDir, 300_000); // no nowMs — uses Date.now()
+    expect(removed).toBe(0);
+    expect(readFileSync(COORD_PATH(), 'utf-8')).toBe(before);
+  });
+});
+
+// ── pruneDeadEntries (WL-0MWFJTKGM006BHLQ) ──────────────────────────
+// Dead-instance pruning is back, but ONLY for entries whose instance
+// STOPPED CHECKING IN (`lastUpdated` older than the bounded staleness
+// window, default 2 × the check-in cadence): the leader's check-in path
+// removes them in ONE `withCoordLock` read-modify-write. A LIVE instance's
+// offers never expire by age (the non-expiring contract above is
+// untouched). Fail-open on every error path (missing/corrupt file, lock
+// contention, write failure) → `[]` and no throw; no write at all when
+// nothing is stale (byte-identical file).
+
+describe('pruneDeadEntries (dead-entry pruning, WL-0MWFJTKGM006BHLQ)', () => {
+  const NOW = 2_000_000_000_000; // fixed epoch ms for deterministic tests
+  // Default window: 2 × the 5-minute check-in cadence (10 min).
+  const DEFAULT_WINDOW_MS = 2 * DEFAULT_COORDINATION_CHECK_IN_MS;
+  /** An ISO timestamp `agoMs` before NOW. */
+  const iso = (agoMs: number) => new Date(NOW - agoMs).toISOString();
+
+  it('removes a stale entry and keeps a live one; returns the pruned entry with worklogRoot + lastSeen, and the window used', () => {
+    const staleIso = iso(DEFAULT_WINDOW_MS + 1_000); // just past the window
+    const liveIso = iso(60_000); // well within the window
+    upsertEntry(testDir, makeEntry('live-1', 'WL-LIVE', { lastUpdated: liveIso }));
+    upsertEntry(testDir, makeEntry('dead-1', 'WL-DEAD', { lastUpdated: staleIso }));
+
+    const result = pruneDeadEntries(testDir, { nowMs: NOW });
+    expect(result.staleWindowMs).toBe(DEFAULT_WINDOW_MS);
+    expect(result.pruned).toEqual([
+      { instanceId: 'dead-1', worklogRoot: testDir, lastSeen: staleIso },
+    ]);
+    expect(getEntry(testDir, 'dead-1')).toBeNull();
+    expect(getEntry(testDir, 'live-1')).not.toBeNull();
+    expect(getEntry(testDir, 'live-1')!.lastUpdated).toBe(liveIso);
+  });
+
+  it('prunes a stale duplicate for a root with a live entry, leaving the live offers intact (AC b)', () => {
+    const liveIso = iso(60_000);
+    const staleIso = iso(DEFAULT_WINDOW_MS + 60_000);
+    // Live instance owns root with two offers; a dead instance's stale
+    // duplicate advertises the SAME root.
+    upsertEntry(testDir, {
+      ...makeEntry('live-root', 'WL-A', { lastUpdated: liveIso }),
+      offers: [
+        { kind: 'implement', workItemId: 'WL-A' },
+        { kind: 'audit', workItemId: 'WL-AA' },
+      ],
+    });
+    upsertEntry(testDir, {
+      ...makeEntry('dead-dup', 'WL-DEAD', { lastUpdated: staleIso }),
+      offers: [{ kind: 'implement', workItemId: 'WL-DEAD' }],
+    });
+
+    const result = pruneDeadEntries(testDir, { nowMs: NOW });
+    expect(result.pruned.map((p) => p.instanceId)).toEqual(['dead-dup']);
+    // The freshest live entry survives with every offer untouched.
+    const live = getEntry(testDir, 'live-root')!;
+    expect(live.workItemId).toBe('WL-A');
+    expect((live as unknown as { offers?: unknown[] }).offers).toHaveLength(2);
+    expect(live.lastUpdated).toBe(liveIso);
+    expect(getEntry(testDir, 'dead-dup')).toBeNull();
+  });
+
+  it('leaves a corrupt/unreadable file untouched and fails open (AC c)', () => {
+    writeFileSync(COORD_PATH(), '{ corrupt json !!!', 'utf-8');
+    expect(() => pruneDeadEntries(testDir, { nowMs: NOW })).not.toThrow();
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+    expect(readFileSync(COORD_PATH(), 'utf-8')).toBe('{ corrupt json !!!');
+  });
+
+  it('is idempotent: a second prune writes nothing (byte-identical) (AC d)', () => {
+    const staleIso = iso(DEFAULT_WINDOW_MS + 1_000);
+    upsertEntry(testDir, makeEntry('dead-1', 'WL-D', { lastUpdated: staleIso }));
+    upsertEntry(testDir, makeEntry('live-1', 'WL-L', { lastUpdated: iso(60_000) }));
+
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toHaveLength(1);
+    const afterFirst = readFileSync(COORD_PATH(), 'utf-8');
+    // Second tick: nothing stale remains → no write, file byte-identical.
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+    expect(readFileSync(COORD_PATH(), 'utf-8')).toBe(afterFirst);
+  });
+
+  it('never prunes a live-but-idle instance (no offers, refreshed within the window) (AC e)', () => {
+    const idleIso = iso(60_000);
+    const idle: CoordinationEntry = {
+      instanceId: 'idle-1',
+      workItemId: '',
+      directory: testDir,
+      worklogRoot: testDir,
+      assignedAt: idleIso,
+      lastUpdated: idleIso,
+      offers: [],
+    };
+    expect(upsertEntry(testDir, idle)).toBe(true);
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+    expect(getEntry(testDir, 'idle-1')).not.toBeNull();
+  });
+
+  it('fails open on lock contention — the stale entry survives and the prune returns []', () => {
+    upsertEntry(testDir, makeEntry('dead-1', 'WL-D', { lastUpdated: iso(DEFAULT_WINDOW_MS + 1_000) }));
+    const release = tryAcquireCoordLock(testDir);
+    expect(release).not.toBe(null);
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+    expect(getEntry(testDir, 'dead-1')).not.toBeNull();
+    release!();
+  });
+
+  it('fails open on a missing file', () => {
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([]);
+  });
+
+  it('prunes an entry whose lastUpdated does not parse (not verifiably live)', () => {
+    upsertEntry(testDir, makeEntry('garbage-1', 'WL-G', { lastUpdated: 'not-a-date' }));
+    expect(pruneDeadEntries(testDir, { nowMs: NOW }).pruned).toEqual([
+      { instanceId: 'garbage-1', worklogRoot: testDir, lastSeen: 'not-a-date' },
+    ]);
+    expect(getEntry(testDir, 'garbage-1')).toBeNull();
+  });
+
+  it('honours injectable nowMs and staleWindowMs', () => {
+    const sixMinIso = new Date(NOW - 6 * 60_000).toISOString(); // 6 min old
+    // Stale under a 5-minute window…
+    upsertEntry(testDir, makeEntry('mid-a', 'WL-M', { lastUpdated: sixMinIso }));
+    expect(pruneDeadEntries(testDir, { nowMs: NOW, staleWindowMs: 5 * 60_000 }).pruned).toHaveLength(1);
+    expect(getEntry(testDir, 'mid-a')).toBeNull();
+    // …live under a 10-minute window: a fresh 6-min-old entry survives, no write.
+    writeCoordinationFile(testDir, {
+      version: COORDINATION_FILE_VERSION,
+      entries: [makeEntry('mid-b', 'WL-N', { lastUpdated: sixMinIso })],
+    });
+    const before = readFileSync(COORD_PATH(), 'utf-8');
+    expect(pruneDeadEntries(testDir, { nowMs: NOW, staleWindowMs: 10 * 60_000 }).pruned).toEqual([]);
+    expect(getEntry(testDir, 'mid-b')).not.toBeNull();
+    expect(readFileSync(COORD_PATH(), 'utf-8')).toBe(before);
+  });
+
+  it('exempts the leader\'s own entry (it is live by definition; its check-in refreshes it this tick)', () => {
+    const staleIso = iso(DEFAULT_WINDOW_MS + 1_000);
+    upsertEntry(testDir, makeEntry('leader-inst', 'WL-L', { lastUpdated: staleIso }));
+    expect(pruneDeadEntries(testDir, { nowMs: NOW, leaderInstanceId: 'leader-inst' }).pruned).toEqual([]);
+    expect(getEntry(testDir, 'leader-inst')).not.toBeNull();
+  });
+
+  it('defaults nowMs to Date.now() when not provided', () => {
+    upsertEntry(testDir, makeEntry('fresh', 'WL-F')); // written at Date.now()
+    expect(pruneDeadEntries(testDir).pruned).toEqual([]);
+  });
 });
 
 // ── mergeEntries (batch check-in) ──────────────────────────────────────
@@ -295,7 +451,10 @@ describe('machine-wide shared file (AC1)', () => {
 // The actual machine dir used above is `process.env.HERDR_COORDINATION_DIR`;
 // this import just proves the symbol is reachable from this test module.
 import { getMachineCoordinationDir as getMachineCoordinationDirForTest } from './machine-coordination.js';
-import { DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS } from './downtime-worker.constants.js';
+import {
+  DEFAULT_COORDINATION_CHECK_IN_MS,
+  DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+} from './downtime-worker.constants.js';
 
 // ── hasPeerOffer liveness-aware staleness (WL-0MVR8GDJ3008WY3Y AC7) ──
 
@@ -459,5 +618,353 @@ describe('worklogRoot / directory compat', () => {
     const raw = JSON.parse(readFileSync(COORD_PATH(), 'utf-8')) as { entries: Array<Record<string, string>> };
     expect(raw.entries[0].directory).toBe('/tmp/merge-root');
     expect(raw.entries[0].worklogRoot).toBe('/tmp/merge-root');
+  });
+});
+
+// ── v2 schema contract: bounded offers, duplicate collapse, v1 migration-read (parent WL-0MWDDHQON0015T3P AC1/AC9, test-first slice WL-0MWDVMK48002NIHO) ──
+//
+// Tier-aware offers (parent AC1): `CoordinationEntry` carries a bounded
+// `offers` array — one nominee per bucket (`implement` / `audit` / `prep`,
+// the classifier outputs with plan/intake/risk-effort unioning to `prep`),
+// at most three offers total, and duplicate `(kind, workItemId)` pairs
+// collapse. `COORDINATION_FILE_VERSION` becomes `2`; a v1 file (single
+// top-level `workItemId`, no `offers`) is read as a one-offer entry whose
+// kind is derived by the classifier, and is rewritten as v2 on the next
+// check-in — no v1 file is ever dropped by the upgrade. Legacy
+// `removeEntry` semantics are preserved (parent AC9).
+//
+// GREEN (F1, WL-0MWDVMVX50012RSU): the v2 surface landed — `CoordinationEntry`
+// carries the bounded `offers` payload, `readCoordinationFile` parses it and
+// migration-reads v1 files, and `COORDINATION_FILE_VERSION` is 2.
+
+import { classifyItemForDispatch } from './downtime-worker.gates.js';
+import {
+  LEGACY_V1_ENTRY,
+  LEGACY_V1_INSTANCE_ID,
+  LEGACY_V1_ITEM,
+  LEGACY_V1_WORK_ITEM_ID,
+} from './__fixtures__/coordination-v1-entry.js';
+import {
+  CANONICAL_V2_OFFERS,
+  DUPLICATE_V2_OFFERS,
+  OVER_BUCKET_V2_OFFERS,
+  OVER_CAP_V2_OFFERS,
+  type CoordOfferWitness,
+} from './__fixtures__/coordination-v2-offers.js';
+
+/** The v2 per-bucket offer payload F1 introduces (at most one per bucket). */
+type V2EntryWitness = Omit<CoordinationEntry, 'workItemId'> & {
+  offers: CoordOfferWitness[];
+};
+
+/** Build a v2-shaped entry (offers payload, NO top-level `workItemId`). */
+function v2EntryWitness(instanceId: string, offers: CoordOfferWitness[]): CoordinationEntry {
+  const now = new Date().toISOString();
+  return {
+    instanceId,
+    directory: testDir,
+    worklogRoot: testDir,
+    assignedAt: now,
+    lastUpdated: now,
+    offers,
+  } as unknown as CoordinationEntry;
+}
+
+/** Map a classifier output to its v2 bucket (parent AC1: plan/intake/risk-effort → prep). */
+function toBucket(kind: string | null): 'implement' | 'audit' | 'prep' | null {
+  if (kind === 'implement' || kind === 'audit') return kind;
+  if (kind === 'plan' || kind === 'intake' || kind === 'risk-effort') return 'prep';
+  return null;
+}
+
+/** Read the persisted raw JSON (the on-disk contract, not the parsed view). */
+function rawFile(): { version: number; entries: Array<Record<string, unknown>> } {
+  return JSON.parse(readFileSync(COORD_PATH(), 'utf-8')) as {
+    version: number;
+    entries: Array<Record<string, unknown>>;
+  };
+}
+
+describe('v2 schema: bounded offers array (parent AC1)', () => {
+  it('COORDINATION_FILE_VERSION is bumped to 2 for the tier-aware offer contract', () => {
+    expect(COORDINATION_FILE_VERSION).toBe(2);
+  });
+
+  it('duplicate (kind, workItemId) pairs collapse to one offer on every write seam', () => {
+    // upsertEntry (per-check-in upsert) ...
+    expect(upsertEntry(testDir, v2EntryWitness('inst-1', DUPLICATE_V2_OFFERS))).toBe(true);
+    // ... and mergeEntries (the batch check-in write seam) collapse the same way.
+    expect(mergeEntries(testDir, [v2EntryWitness('inst-2', DUPLICATE_V2_OFFERS)])).toBe(1);
+
+    const data = readCoordinationFile(testDir)!;
+    expect(data.entries).toHaveLength(2);
+    const offersOf = (entry: CoordinationEntry): CoordOfferWitness[] =>
+      (entry as unknown as V2EntryWitness).offers;
+    // The exact duplicate pair is written ONCE — the array never inflates.
+    for (const entry of data.entries) {
+      expect(offersOf(entry)).toEqual(CANONICAL_V2_OFFERS);
+    }
+    // On disk too: the persisted JSON carries the collapsed arrays.
+    const raw = rawFile();
+    for (const entry of raw.entries) {
+      expect(entry.offers as CoordOfferWitness[]).toEqual(CANONICAL_V2_OFFERS);
+    }
+  });
+
+  it('an offers array exceeding one-per-bucket or three-offer bounds is not persisted', () => {
+    // Two implements in one bucket — the write must keep at most the FIRST
+    // (the canonical first item of the bucket; no second ranking).
+    expect(upsertEntry(testDir, v2EntryWitness('inst-bucket', OVER_BUCKET_V2_OFFERS))).toBe(true);
+    // Four offers (implement twice + audit + prep) — the write must stop at
+    // three total, one per bucket.
+    expect(upsertEntry(testDir, v2EntryWitness('inst-cap', OVER_CAP_V2_OFFERS))).toBe(true);
+
+    const data = readCoordinationFile(testDir)!;
+    const offersOf = (entry: CoordinationEntry): CoordOfferWitness[] =>
+      (entry as unknown as V2EntryWitness).offers;
+    expect(offersOf(data.entries[0])).toEqual([{ kind: 'implement', workItemId: 'WL-IMP-A' }]);
+    expect(offersOf(data.entries[1])).toEqual(CANONICAL_V2_OFFERS);
+    // On disk the bounded invariant holds too — an over-bounds array is never
+    // persisted.
+    const raw = rawFile();
+    expect(raw.entries[0].offers as CoordOfferWitness[]).toHaveLength(1);
+    expect(raw.entries[1].offers as CoordOfferWitness[]).toHaveLength(3);
+  });
+});
+
+describe('v1 migration-read and rewrite (parent AC1)', () => {
+  it('a v1 file (single workItemId, no offers) is read as a one-offer entry whose kind is derived by the classifier', () => {
+    writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
+    const data = readCoordinationFile(testDir);
+    expect(data).not.toBe(null);
+    // No v1 file is dropped by the upgrade — the entry survives the read.
+    expect(data!.entries).toHaveLength(1);
+    const entry = data!.entries[0] as unknown as V2EntryWitness;
+    expect(entry.instanceId).toBe(LEGACY_V1_INSTANCE_ID);
+    // The single v1 offer becomes exactly one `offers` entry...
+    expect(entry.offers).toHaveLength(1);
+    // ...carrying the v1 workItemId...
+    expect(entry.offers[0].workItemId).toBe(LEGACY_V1_WORK_ITEM_ID);
+    // ...and the classifier-derived kind (plan_complete / Low / S → implement).
+    expect(toBucket(classifyItemForDispatch(LEGACY_V1_ITEM))).toBe('implement');
+    expect(entry.offers[0].kind).toBe('implement');
+  });
+
+  it('a v1 file is rewritten as v2 on the next check-in and never dropped', () => {
+    writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
+    // The owner's next check-in recomputes its tier-aware offers and upserts
+    // the same instance's entry (the migrated one-offer shape).
+    const migrated = v2EntryWitness(LEGACY_V1_INSTANCE_ID, [
+      { kind: 'implement', workItemId: LEGACY_V1_WORK_ITEM_ID },
+    ]);
+    expect(upsertEntry(testDir, migrated)).toBe(true);
+
+    const data = readCoordinationFile(testDir)!;
+    // The write path persists the CURRENT format version (2) — never the
+    // legacy one read back from disk.
+    expect(data.version).toBe(2);
+    // The v1 entry survived the upgrade as a one-offer v2 entry.
+    expect(data.entries).toHaveLength(1);
+    const offers = (data.entries[0] as unknown as V2EntryWitness).offers;
+    expect(offers).toEqual([{ kind: 'implement', workItemId: LEGACY_V1_WORK_ITEM_ID }]);
+  });
+});
+
+describe('removeEntry v1 semantics preserved (parent AC9, GREEN today)', () => {
+  it('removes a legacy v1 entry by instanceId and returns it; an absent instance yields null', () => {
+    writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
+    expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).not.toBe(null);
+
+    const removed = removeEntry(testDir, LEGACY_V1_INSTANCE_ID);
+    expect(removed).not.toBe(null);
+    expect(removed!.instanceId).toBe(LEGACY_V1_INSTANCE_ID);
+    expect(removed!.workItemId).toBe(LEGACY_V1_WORK_ITEM_ID);
+    // The entry is gone; the file remains (empty) for the owner's next check-in.
+    expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+    expect(existsSync(COORD_PATH())).toBe(true);
+    expect(removeEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+  });
+});
+// ── Partial removal: only the dispatched offer goes (parent WL-0MWDDHQON0015T3P AC6) ──
+//
+// The leader dispatches one nominated bucket at a time, so the coordination
+// file must lose exactly that offer: the entry survives with its remaining
+// nominees and its owner metadata (`lastUpdated` / `assignedAt`) untouched, so
+// the next tick can dispatch the next tier WITHOUT waiting for the owner's
+// check-in cadence. `removeOffer` is the primitive that owns that rule; the
+// entry is dropped only when it has no offers left (v1 semantics).
+
+describe('removeOffer — partial removal (parent AC6)', () => {
+  it('removes only the dispatched offer and leaves the rest of the entry, including lastUpdated, untouched', () => {
+    const entry = v2EntryWitness('inst-1', CANONICAL_V2_OFFERS);
+    expect(upsertEntry(testDir, entry)).toBe(true);
+
+    const result = removeOffer(testDir, 'inst-1', 'WL-AUD');
+
+    expect(result).toEqual({ offerRemoved: true, entryRemoved: false });
+    const after = getEntry(testDir, 'inst-1');
+    expect(after).not.toBe(null);
+    // Exactly the dispatched offer is gone; the others keep their order.
+    expect((after as unknown as V2EntryWitness).offers).toEqual([
+      { kind: 'implement', workItemId: 'WL-IMP' },
+      { kind: 'prep', workItemId: 'WL-PREP' },
+    ]);
+    // A v1-era leader keeps reading a coherent first offer.
+    expect(after!.workItemId).toBe('WL-IMP');
+    // Owner metadata is never rewritten by a dispatch.
+    expect(after!.lastUpdated).toBe(entry.lastUpdated);
+    expect(after!.assignedAt).toBe(entry.assignedAt);
+  });
+
+  it('re-points workItemId at the surviving first offer when the FIRST offer dispatched', () => {
+    expect(upsertEntry(testDir, v2EntryWitness('inst-1', CANONICAL_V2_OFFERS))).toBe(true);
+
+    expect(removeOffer(testDir, 'inst-1', 'WL-IMP')).toEqual({
+      offerRemoved: true,
+      entryRemoved: false,
+    });
+
+    const after = getEntry(testDir, 'inst-1')!;
+    expect(after.workItemId).toBe('WL-AUD');
+    expect((after as unknown as V2EntryWitness).offers).toEqual([
+      { kind: 'audit', workItemId: 'WL-AUD' },
+      { kind: 'prep', workItemId: 'WL-PREP' },
+    ]);
+  });
+
+  it('removes the whole entry once its LAST offer is removed', () => {
+    expect(upsertEntry(testDir, v2EntryWitness('inst-1', CANONICAL_V2_OFFERS))).toBe(true);
+    removeOffer(testDir, 'inst-1', 'WL-IMP');
+    removeOffer(testDir, 'inst-1', 'WL-AUD');
+
+    expect(removeOffer(testDir, 'inst-1', 'WL-PREP')).toEqual({
+      offerRemoved: true,
+      entryRemoved: true,
+    });
+    expect(getEntry(testDir, 'inst-1')).toBe(null);
+    // The file remains (empty) so the owner re-offers at its next check-in.
+    expect(existsSync(COORD_PATH())).toBe(true);
+  });
+
+  it('drops a legacy v1-shaped entry whole (its single offer IS the entry)', () => {
+    writeFileSync(COORD_PATH(), JSON.stringify({ version: 1, entries: [LEGACY_V1_ENTRY] }), 'utf-8');
+
+    expect(removeOffer(testDir, LEGACY_V1_INSTANCE_ID, LEGACY_V1_WORK_ITEM_ID)).toEqual({
+      offerRemoved: true,
+      entryRemoved: true,
+    });
+    expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+  });
+
+  it('is a no-op for an unknown offer or an unknown instance', () => {
+    expect(upsertEntry(testDir, v2EntryWitness('inst-1', CANONICAL_V2_OFFERS))).toBe(true);
+
+    // An offer this entry never advertised: nothing is removed, nothing is
+    // rewritten.
+    const before = getEntry(testDir, 'inst-1')!;
+    expect(removeOffer(testDir, 'inst-1', 'WL-OTHER')).toEqual({
+      offerRemoved: false,
+      entryRemoved: false,
+    });
+    expect(getEntry(testDir, 'inst-1')!.lastUpdated).toBe(before.lastUpdated);
+    expect((getEntry(testDir, 'inst-1') as unknown as V2EntryWitness).offers).toEqual(
+      CANONICAL_V2_OFFERS,
+    );
+
+    expect(removeOffer(testDir, 'nobody', 'WL-IMP')).toEqual({
+      offerRemoved: false,
+      entryRemoved: false,
+    });
+  });
+});
+
+// ── Non-expiring offer contract: staleness never removes entries (partial — see parent WL-0MWFIZIAU007RBER child 1) ──
+//
+// Dead-instance pruning (child 2) is not yet present; this block pins the
+// behaviour that must survive it: an entry whose `lastUpdated` is arbitrarily
+// old is still returned by the read path and persists across the write seams.
+// Removal happens ONLY at dispatch time (`removeOffer` / `removeEntry`), never
+// by wall-clock age.
+
+describe('non-expiring offer contract survives arbitrary staleness', () => {
+  /** An ISO timestamp far beyond the 24 h liveness window (say, 48 h ago). */
+  const ANCIENT_ISO = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+  it('an entry older than 24 h is still returned by readCoordinationFile / getEntry', () => {
+    upsertEntry(testDir, makeEntry('ancient', 'WL-ANCIENT', { lastUpdated: ANCIENT_ISO }));
+
+    const data = readCoordinationFile(testDir);
+    expect(data).not.toBe(null);
+    expect(data!.entries).toHaveLength(1);
+    expect(data!.entries[0].instanceId).toBe('ancient');
+    expect(getEntry(testDir, 'ancient')).not.toBe(null);
+    expect(getEntry(testDir, 'ancient')!.lastUpdated).toBe(ANCIENT_ISO);
+  });
+
+  it('an entry older than 24 h survives an upsertEntry of a different instance', () => {
+    upsertEntry(testDir, makeEntry('ancient', 'WL-ANCIENT', { lastUpdated: ANCIENT_ISO }));
+    upsertEntry(testDir, makeEntry('fresh', 'WL-FRESH'));
+
+    const data = readCoordinationFile(testDir);
+    expect(data!.entries).toHaveLength(2);
+    expect(getEntry(testDir, 'ancient')).not.toBe(null);
+  });
+
+  it('an entry older than 24 h survives a mergeEntries write seam', () => {
+    upsertEntry(testDir, makeEntry('ancient', 'WL-ANCIENT', { lastUpdated: ANCIENT_ISO }));
+    mergeEntries(testDir, [makeEntry('fresh', 'WL-FRESH')]);
+
+    const data = readCoordinationFile(testDir);
+    expect(data!.entries).toHaveLength(2);
+    expect(getEntry(testDir, 'ancient')).not.toBe(null);
+  });
+
+  it('only removeEntry/removeOffer removes an ancient entry', () => {
+    upsertEntry(testDir, makeEntry('ancient', 'WL-ANCIENT', { lastUpdated: ANCIENT_ISO }));
+
+    // Reading and writing other instances never touches it.
+    mergeEntries(testDir, [makeEntry('fresh', 'WL-FRESH')]);
+    expect(getEntry(testDir, 'ancient')).not.toBe(null);
+
+    // Dispatch-time removal does.
+    expect(removeEntry(testDir, 'ancient')).not.toBe(null);
+    expect(getEntry(testDir, 'ancient')).toBe(null);
+  });
+});
+
+// ── Live-but-idle entry survives a read-then-merge cycle ───────────────
+//
+// An idle instance (no offers, fresh `lastUpdated`) is LIVE: it checked in
+// within the window. A read → merge cycle must leave its entry and its owner
+// metadata untouched.
+
+describe('live-but-idle entry survives a read-then-merge cycle unchanged', () => {
+  it('an entry with no offers and a fresh lastUpdated is unchanged after read-then-merge', () => {
+    const freshTs = new Date().toISOString();
+    const idle: CoordinationEntry = {
+      instanceId: 'idle-inst',
+      workItemId: '',
+      directory: testDir,
+      worklogRoot: testDir,
+      assignedAt: freshTs,
+      lastUpdated: freshTs,
+      offers: [],
+    };
+    expect(upsertEntry(testDir, idle)).toBe(true);
+
+    // Read the current file, then merge the same idle entry back (the
+    // check-in shape: re-assert the owner's own entry).
+    const data = readCoordinationFile(testDir)!;
+    const asRead = data.entries[0];
+    mergeEntries(testDir, [asRead]);
+
+    const after = getEntry(testDir, 'idle-inst')!;
+    expect(after.instanceId).toBe('idle-inst');
+    expect(after.lastUpdated).toBe(freshTs);
+    expect(after.assignedAt).toBe(freshTs);
+    // Still no offers — an idle entry stays idle.
+    expect((after as unknown as { offers?: unknown[] }).offers ?? []).toEqual([]);
+    // Still the only entry.
+    expect(readCoordinationFile(testDir)!.entries).toHaveLength(1);
   });
 });

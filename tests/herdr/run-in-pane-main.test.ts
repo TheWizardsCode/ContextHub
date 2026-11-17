@@ -146,3 +146,53 @@ describe('run-in-pane.sh main mode --cwd propagation', () => {
     expect(runLine).toContain('--priority');
   });
 });
+
+describe('run-in-pane.sh — canonical shared option parser (WL-0MWHWGZI4007D911)', () => {
+  // The parser is shared with send-to-pi.sh / open-pi-agent.sh; these pins
+  // prove the converged canonical forms apply here too: every value flag
+  // accepts BOTH `--flag <value>` and `--flag=<value>` (previously
+  // `--cwd=`/`--pane-name=` fell through into the command — documented
+  // convergence) and the per-script option set stays strict (send-to-pi-only
+  // flags are NOT consumed here: they start the command).
+
+  it('accepts the --cwd=<path> form (converged with send-to-pi.sh)', () => {
+    const { status, log } = runMain(['--cwd=/tmp/eq-form', 'echo hi']);
+    expect(status).toBe(0);
+    const split = splitInvocation(log);
+    expect(split).toBeDefined();
+    expect(split).toContain('--cwd');
+    expect(split).toContain('/tmp/eq-form');
+  });
+
+  it('accepts the --pane-name=<name> form (converged with send-to-pi.sh)', () => {
+    const { status, log } = runMain(['--pane-name=Shell Eq Name', '--cwd=/tmp/eq-form', 'echo hi']);
+    expect(status).toBe(0);
+    const renameLine = log.find((line) => line.includes('pane rename'));
+    expect(renameLine).toBeDefined();
+    expect(renameLine).toContain('Shell Eq Name');
+    const split = splitInvocation(log);
+    expect(split).toBeDefined();
+    expect(split).toContain('--cwd /tmp/eq-form');
+  });
+
+  it('--model is NOT an accepted flag: it starts the command (permissive per-script set)', () => {
+    const { status, log } = runMain(['--model', 'code', 'echo hi']);
+    expect(status).toBe(0);
+    // --model must be parsed as the first token of the command, never as an
+    // option (shell panes have no model — pivot table, WL-0MWHWGN23001KMQW).
+    const runLine = log.find((line) => line.includes('pane run') && line.includes('bash'));
+    expect(runLine).toBeDefined();
+    expect(runLine).toContain('--model');
+    expect(runLine).toContain('code');
+  });
+
+  it('keeps `--` as command text (run-in-pane had no end-of-options marker)', () => {
+    const { status, log } = runMain(['--', 'echo hi']);
+    expect(status).toBe(0);
+    const runLine = log.find((line) => line.includes('pane run') && line.includes('bash'));
+    expect(runLine).toBeDefined();
+    // The command is `-- echo hi`; bash -c treats `--` as a word here, so it
+    // must reach the pane run invocation as part of the command.
+    expect(runLine).toContain('--');
+  });
+});

@@ -149,7 +149,7 @@ describe('downtime-log split guard — live tree', () => {
     const baseline = readDowntimeLogBaseline(repoRoot);
     const exported = collectExportedNames(index, DOWNTIME_LOG_BARREL);
 
-    expect(baseline.symbols).toHaveLength(54);
+    expect(baseline.symbols).toHaveLength(55);
     expect(findMissingExports(baseline.symbols, exported)).toEqual([]);
   });
 

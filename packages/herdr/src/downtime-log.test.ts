@@ -518,6 +518,43 @@ describe('atomic rolling-log writes (WL-0MUBVL1FI0071WN3 / F5)', () => {
     const raw = readFileSync(join(cwd, '.worklog', COORDINATION_LOG_FILE), 'utf8');
     expect(() => JSON.parse(raw.trim())).not.toThrow();
   });
+
+  it('F6: concurrent appends never drop a record — a whole-file snapshot cannot clobber another append (WL-0MWI5ZA2D0081RDA)', async () => {
+    const cwd = makeTempCwd();
+    const TOTAL = 60;
+    // Fire every append WITHOUT awaiting, exactly like the leader tick's
+    // fire-and-forget `operation: 'election'` append racing its awaited
+    // `operation: 'prune'` append on the same coordination log. `appendRollingJsonl`
+    // is a whole-file read-modify-write; without per-file serialisation the
+    // earlier-issued append's `readFile` could resolve late under load and its
+    // snapshot `rename` would silently drop the awaited prune record (the
+    // WL-0MWI5ZA2D0081RDA flake: "the leader tick logged no operation:prune
+    // coordination-log record").
+    for (let i = 0; i < TOTAL; i++) {
+      void appendCoordinationLogEntry(cwd, {
+        kind: 'coordination',
+        operation: 'election',
+        instanceId: `inst-${i}`,
+      });
+    }
+    // Sentinel: queued after every append above, so its completion implies
+    // each earlier append has flushed and the final snapshot holds them all.
+    await appendCoordinationLogEntry(cwd, {
+      kind: 'coordination',
+      operation: 'election',
+      instanceId: 'sentinel',
+    });
+
+    const all = await readCoordinationLogEntries(cwd);
+    const instanceIds = all.map((e) => e.instanceId);
+    // No record was lost to a read-modify-write interleaving.
+    expect(instanceIds).toHaveLength(TOTAL + 1);
+    for (let i = 0; i < TOTAL; i++) {
+      expect(instanceIds).toContain(`inst-${i}`);
+    }
+    expect(instanceIds).toContain('sentinel');
+    expect(tmpFilesIn(cwd)).toEqual([]);
+  });
 });
 
 describe('readDowntimeLogEntries (fail-safe lookup)', () => {

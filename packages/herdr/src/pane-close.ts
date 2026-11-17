@@ -1,6 +1,9 @@
 /**
  * packages/herdr/src/pane-close.ts — Shared pane-closure classifier
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Pure logic module that decides, for one session/pane, whether it should be
  * programmatically closed by the scheduled reaper or the pane-triage skill.
  *

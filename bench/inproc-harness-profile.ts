@@ -11,19 +11,26 @@
  * runs only; nothing else in the suite is affected, and with the switch off the
  * harness performs no timing calls at all.
  *
- * Scenarios (one per AC1 case):
+ * Scenarios (one per AC1 case, plus the warm-store and first-open regimes):
  *
- *   - `help`      `wl --help` (no data access)
- *   - `list-json` `wl list --json`
- *   - `create`    `wl create -t <fixture item> --json`
- *   - `status`    `wl status --json`
+ *   - `help`       `wl --help` (no data access)
+ *   - `cold-open`  `wl list --json` against a store with **no database yet**, so
+ *                  `db_open` covers the first-open schema/bootstrap path (the
+ *                  shape of a per-test `beforeEach` fixture)
+ *   - `list-json`  `wl list --json` against an **already-initialised** store —
+ *                  the warm repeated-invocation regime a long-lived operator
+ *                  store (and most multi-call tests) pays (WL-0MVWLBZG4003A803)
+ *   - `create`     `wl create -t <fixture item> --json` (already-initialised)
+ *   - `status`     `wl status --json` (already-initialised)
  *
  * Each scenario reports the **median of >= 3 runs** (default 5) on this host,
  * with the load average recorded alongside the numbers. Every measured run
- * uses a **fresh temporary worklog store**, so `db_open` covers the first-open
- * path — schema creation and migrations — which is the shape of a per-test
- * `beforeEach` fixture. The repository's `.worklog/` is never touched and the
- * temp tree is removed on exit.
+ * uses a **fresh temporary worklog store**: the `empty` regime creates the
+ * `.worklog/` fixture only (first open pays the schema bootstrap), while the
+ * `initialised` regime starts each run from a **fresh copy of an already
+ * migrated seed store**, so the measured call is a warm invocation and the
+ * store is still throwaway per run. The repository's `.worklog/` is never
+ * touched and the temp tree is removed on exit.
  *
  * Usage:
  *   npm run benchmark:inproc-harness                  # text report
@@ -65,6 +72,18 @@ import {
 
 // ── Scenarios ────────────────────────────────────────────────────────
 
+/**
+ * How the per-run store is prepared before the measured call.
+ *
+ *  - `empty` — a fixture `.worklog/` with **no database**: the measured call
+ *    pays the first-open schema/migration bootstrap (the parent epic's regime).
+ *  - `initialised` — a per-run copy of an already-migrated seed store: the
+ *    measured call is a warm invocation against an existing store, which is
+ *    what repeated operator/test invocations actually do
+ *    (WL-0MVWLBZG4003A803).
+ */
+export type InprocStoreSetup = 'empty' | 'initialised';
+
 /** One profiled invocation. */
 export interface InprocProfileScenario {
   /** Stable identifier used in the JSON artefact and the table. */
@@ -73,18 +92,37 @@ export interface InprocProfileScenario {
   label: string;
   /** CLI argv (the script path and `--worklog-dir` are added by the profiler). */
   argv: string[];
+  /** How the per-run store is prepared (default `empty`). */
+  storeSetup?: InprocStoreSetup;
 }
 
-/** The four AC1 scenarios, in reporting order. */
+/** The profiled scenarios, in reporting order. */
 export const INPROC_PROFILE_SCENARIOS: readonly InprocProfileScenario[] = Object.freeze([
   Object.freeze({ name: 'help', label: 'wl --help (no data access)', argv: Object.freeze(['--help']) as string[] }),
-  Object.freeze({ name: 'list-json', label: 'wl list --json', argv: Object.freeze(['list', '--json']) as string[] }),
+  Object.freeze({
+    name: 'cold-open',
+    label: 'wl list --json (first open, schema bootstrap)',
+    argv: Object.freeze(['list', '--json']) as string[],
+    storeSetup: 'empty' as InprocStoreSetup,
+  }),
+  Object.freeze({
+    name: 'list-json',
+    label: 'wl list --json (already-initialised store)',
+    argv: Object.freeze(['list', '--json']) as string[],
+    storeSetup: 'initialised' as InprocStoreSetup,
+  }),
   Object.freeze({
     name: 'create',
     label: 'wl create -t <fixture item> --json',
     argv: Object.freeze(['create', '-t', 'In-process profile fixture item', '--json']) as string[],
+    storeSetup: 'initialised' as InprocStoreSetup,
   }),
-  Object.freeze({ name: 'status', label: 'wl status --json', argv: Object.freeze(['status', '--json']) as string[] }),
+  Object.freeze({
+    name: 'status',
+    label: 'wl status --json',
+    argv: Object.freeze(['status', '--json']) as string[],
+    storeSetup: 'initialised' as InprocStoreSetup,
+  }),
 ]);
 
 /**
@@ -359,6 +397,8 @@ export interface InprocMedians {
 export interface InprocScenarioMeasurement {
   name: string;
   label: string;
+  /** How this scenario's per-run store was prepared (see {@link InprocStoreSetup}). */
+  storeSetup: InprocStoreSetup;
   /** Exact command line recorded for reproduction (`<store>` = temp worklog). */
   command: string;
   argv: string[];
@@ -419,8 +459,12 @@ export interface InprocProfileResult {
   warmupRuns: number;
   /** How each measured run's worklog store was created. */
   store: string;
-  /** `fresh` = throwaway store per run; `copy` = a copy of `--store`. */
-  storeRegime: 'fresh' | 'copy';
+  /**
+   * `fresh` = throwaway store per run (`empty` setup); `copy` = a copy of an
+   * already-migrated store per run (`--store` or an `initialised` seed);
+   * `mixed` = scenarios use different setups (the default profile).
+   */
+  storeRegime: 'fresh' | 'copy' | 'mixed';
   /** Source of the profiled store when `storeRegime` is `copy`. */
   sourceStore: string | null;
   /** The exact invocation that produced the numbers. */
@@ -721,21 +765,40 @@ export async function runInprocHarnessProfile(options: InprocProfileOptions = {}
         'warm per-call numbers exclude it',
     };
 
+    // Seed store for the warm regime (WL-0MVWLBZG4003A803): one store is
+    // initialised through the same in-process harness, then copied afresh into
+    // every `initialised` run's temp directory. Its own profile records are
+    // discarded, so it costs nothing in the reported numbers.
+    let seedStore: string | null = null;
+    if (!sourceStore && scenarios.some((scenario) => (scenario.storeSetup ?? 'empty') === 'initialised')) {
+      const seedRoot = path.join(tempRoot, 'initialised-seed');
+      await measureOnce(
+        { name: 'initialised-seed', label: 'seed store initialisation (unmeasured)', argv: ['list', '--json'] },
+        seedRoot,
+        version,
+        null,
+      );
+      seedStore = path.join(seedRoot, '.worklog');
+    }
+
     const measurements: InprocScenarioMeasurement[] = [];
     for (const scenario of scenarios) {
+      const storeSetup = scenario.storeSetup ?? 'empty';
+      const scenarioSource = sourceStore ?? (storeSetup === 'initialised' ? seedStore : null);
       const scenarioRoot = path.join(tempRoot, scenario.name);
       for (let warmup = 0; warmup < warmupRuns; warmup += 1) {
-        await measureOnce(scenario, path.join(scenarioRoot, `warmup-${warmup + 1}`), version, sourceStore);
+        await measureOnce(scenario, path.join(scenarioRoot, `warmup-${warmup + 1}`), version, scenarioSource);
       }
       const measured: InprocAttribution[] = [];
       for (let run = 1; run <= runs; run += 1) {
-        measured.push(await measureOnce(scenario, path.join(scenarioRoot, `run-${run}`), version, sourceStore));
+        measured.push(await measureOnce(scenario, path.join(scenarioRoot, `run-${run}`), version, scenarioSource));
       }
       const medians = medianAttribution(measured);
       const categories = categoryTotals(medians.buckets);
       measurements.push({
         name: scenario.name,
         label: scenario.label,
+        storeSetup,
         command: commandLineFor(scenario, `<temp-store>/.worklog`),
         argv: [...scenario.argv],
         runs: measured,
@@ -787,8 +850,8 @@ export async function runInprocHarnessProfile(options: InprocProfileOptions = {}
       warmupRuns,
       store: sourceStore
         ? 'copy of the given store per measured run (the source store is never opened)'
-        : 'fresh temporary worklog store per measured run (first-open schema + migrations included)',
-      storeRegime: sourceStore ? 'copy' : 'fresh',
+        : 'fresh temporary worklog store per measured run: `empty` scenarios start with no database (first-open schema bootstrap), `initialised` scenarios start from a fresh copy of an already-migrated seed store (warm invocation)',
+      storeRegime: sourceStore ? 'copy' : seedStore ? 'mixed' : 'fresh',
       sourceStore,
       invocation:
         `npx tsx bench/inproc-harness-profile.ts --runs ${runs}` +

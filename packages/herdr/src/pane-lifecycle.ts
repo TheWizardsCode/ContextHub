@@ -1,6 +1,9 @@
 /**
  * packages/herdr/src/pane-lifecycle.ts — Pane-lifecycle monitor (pure logic)
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * DISABLED (WL-0MUMEKDK0008LKH8). Mechanism B — the dispatch-monitor pane
  * auto-close driven by this classifier — is switched off in the downtime
  * worker (`PANE_LIFECYCLE_MONITOR_ENABLED` in `downtime-worker.ts`). It was
@@ -8,6 +11,13 @@
  * (Mechanism A), which is now the only active auto-close path. The classifier
  * and its tests are retained for a future redesign — do not re-enable without
  * first reworking the double-close race. See `docs/dev/downtime-dispatcher.md`.
+ *
+ * The double-close race is resolved AT THE WIRING LEVEL (WL-0MWHWH6XL0025YX2
+ * AC2): `PANE_LIFECYCLE_MONITOR_ENABLED=false` is the single switch that
+ * guarantees no two mechanisms can both close a pane — the reaper
+ * (`pane-close.ts::classifySession`, via `pane-close-scheduler.ts`) is the
+ * only ACTIVE auto-close decision path; this classifier is documentation of
+ * the intended redesign, never a parallel closer.
  *
  * Supporting logic for the downtime worker's automatic pane lifecycle
  * management (WL-0MU308WSF0002JWN): dispatched panes stay open forever

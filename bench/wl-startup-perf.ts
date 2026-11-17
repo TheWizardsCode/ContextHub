@@ -126,7 +126,9 @@ export interface StartupScenarioMeasurement {
   kinds: Record<string, number>;
   p50WallMs: number;
   p95WallMs: number;
+  p50CpuMs: number | null;
   p95CpuMs: number | null;
+  p50RssMb: number | null;
   p95RssMb: number | null;
   maxRssMb: number | null;
   samples: StartupSample[];
@@ -434,7 +436,12 @@ function measureScenario(options: {
     kinds,
     p50WallMs: percentile(wall, 0.5) ?? 0,
     p95WallMs: percentile(wall, 0.95) ?? 0,
+    // The median is what the checked-in regression policy compares with the
+    // recorded budget (WL-0MWIGCK0E009GGLG): a p95 over a handful of samples is
+    // effectively the maximum, so one contended-host sample decided the verdict.
+    p50CpuMs: percentile(cpu, 0.5),
     p95CpuMs: percentile(cpu, 0.95),
+    p50RssMb: percentile(rss, 0.5),
     p95RssMb: percentile(rss, 0.95),
     maxRssMb: rss.length > 0 ? Math.max(...rss) : null,
     samples,
@@ -442,7 +449,7 @@ function measureScenario(options: {
 }
 
 /** Bare-node floor: same measurement method, no application code. */
-function measureBareNode(runs: number): BareNodeFloor & { runs: number } {
+function measureBareNode(runs: number, env: NodeJS.ProcessEnv): BareNodeFloor & { runs: number } {
   const wall: number[] = [];
   const cpu: number[] = [];
   const rss: number[] = [];
@@ -451,7 +458,9 @@ function measureBareNode(runs: number): BareNodeFloor & { runs: number } {
     const result = spawnSync(
       process.execPath,
       ['-e', 'process.stdout.write(JSON.stringify(process.resourceUsage()))'],
-      { encoding: 'utf-8', timeout: 30_000 }
+      // The control takes the same pinned TMPDIR as the measured scenarios, so
+      // the load factor compares like with like (WL-0MWIGCK0E009GGLG).
+      { encoding: 'utf-8', timeout: 30_000, env }
     );
     wall.push(performance.now() - start);
     if (result.status === 0) {
@@ -489,6 +498,41 @@ function seedFixture(invocation: string[], fixtureRoot: string, env: NodeJS.Proc
 }
 
 /**
+ * Environment every measured process (and the bare-node control) runs with.
+ *
+ * Two things are pinned rather than inherited (WL-0MWIGCK0E009GGLG):
+ *
+ *   - `WL_CACHE_DIR` points into the benchmark's throwaway directory, so the
+ *     run warms its own cache from scratch and never touches the operator's;
+ *   - `TMPDIR`/`TMP`/`TEMP` point at a fresh, empty directory the benchmark
+ *     owns. `tsx` keeps a per-user cache under `$TMPDIR/tsx-<uid>` and reads it
+ *     at startup: when the caller's TMPDIR is a long-lived scratch tree (the
+ *     test harness points it at a shared 4.3 GB directory whose `tsx-1000/`
+ *     cache holds 32k entries / 354 MB) the same `wl --version` measured
+ *     129-133 MiB instead of 95-99 MiB. That is an artefact of the caller's
+ *     environment, and it failed the 25 % RSS budget on unchanged code. Pinning
+ *     it makes the number describe the CLI rather than the harness.
+ */
+export function buildBenchmarkChildEnv(options: {
+  baseEnv: NodeJS.ProcessEnv;
+  cacheDir: string;
+  childTmpDir: string;
+}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...options.baseEnv,
+    WL_CACHE_DIR: options.cacheDir,
+    WL_TUI_MODE: '1',
+    TMPDIR: options.childTmpDir,
+    TMP: options.childTmpDir,
+    TEMP: options.childTmpDir,
+  };
+  delete env.WL_CACHE_DISABLED;
+  delete env.WL_SPAWN_COUNT;
+  delete env.WL_SPAWN_COUNT_FILE;
+  return env;
+}
+
+/**
  * Run the startup benchmark and return every measurement.
  *
  * When `worklogRoot` is omitted a throwaway 3-item fixture is created (and
@@ -507,20 +551,19 @@ export function runStartupBenchmark(options: StartupBenchmarkOptions = {}): Star
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-startup-bench-'));
   const cacheDir = path.join(tempDir, 'cache');
   const spawnDir = path.join(tempDir, 'spawns');
+  const childTmpDir = path.join(tempDir, 'tmp');
   fs.mkdirSync(spawnDir, { recursive: true });
+  fs.mkdirSync(childTmpDir, { recursive: true });
 
   const fixtureRoot = path.join(tempDir, 'fixture');
   const fixture = options.worklogRoot === undefined;
   const worklogRoot = path.resolve(options.worklogRoot ?? fixtureRoot);
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    WL_CACHE_DIR: cacheDir,
-    WL_TUI_MODE: '1',
-  };
-  delete env.WL_CACHE_DISABLED;
-  delete env.WL_SPAWN_COUNT;
-  delete env.WL_SPAWN_COUNT_FILE;
+  const env: NodeJS.ProcessEnv = buildBenchmarkChildEnv({
+    baseEnv: process.env,
+    cacheDir,
+    childTmpDir,
+  });
 
   try {
     if (fixture) {
@@ -558,7 +601,7 @@ export function runStartupBenchmark(options: StartupBenchmarkOptions = {}): Star
         )
         .join(' '),
       scenarios,
-      bareNode: measureBareNode(bareNodeRuns),
+      bareNode: measureBareNode(bareNodeRuns, env),
       importGraph,
     };
   } finally {

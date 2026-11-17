@@ -613,6 +613,7 @@ export async function dispatchDowntimeWork(
               dispatched: false,
               reason: auditHostBudgetReason ?? 'audit-host-saturated',
               ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}),
+              ...(auditHostBudgetDetail !== undefined ? { detail: auditHostBudgetDetail } : {}),
             });
           }
           return finalize({ dispatched: false, reason: 'audit-in-flight' });
@@ -638,7 +639,12 @@ export async function dispatchDowntimeWork(
         // {live, max} evidence — never 'no-candidate'. Nothing else dispatched,
         // so the tick is neutral: no cooldown, no strike.
         if (auditHostBudgetReason !== undefined && pinnedAuditItemId === undefined) {
-          return finalize({ dispatched: false, reason: auditHostBudgetReason, ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}) });
+          return finalize({
+            dispatched: false,
+            reason: auditHostBudgetReason,
+            ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}),
+            ...(auditHostBudgetDetail !== undefined ? { detail: auditHostBudgetDetail } : {}),
+          });
         }
         return finalize({ dispatched: false, reason: pinnedAuditItemId !== undefined ? LEAF_AUDIT_PIN_HOLD_REASON : 'no-candidate' });
       }

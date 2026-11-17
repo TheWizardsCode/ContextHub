@@ -31,20 +31,22 @@ import {
 import { buildDowntimePrompt } from './downtime-worker.prompts.js';
 import { TIER_EXPECTED } from './downtime-worker.gates.js';
 import {
-  DOWNTIME_PANE_LABEL_PREFIX,
-  paneLabelItemId,
-} from './downtime-worker.pane.js';
+  isDowntimePaneLabel,
+  paneItemIdFromLabel,
+} from './pane-label.js';
 import { resolveScheduledPromptPriority } from './scheduled-prompts.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { DispatcherAnchor } from './dispatcher-anchor.js';
 import {
   closePlaceholderRootPaneBestEffort,
+  placementAttribution,
   resolveDispatchPlacement,
 } from './downtime-worker.dispatch-placement.js';
 import type {
   DowntimeDispatchDeps,
   DowntimeDispatchOutcome,
   DowntimeReservationEvidence,
+  ProjectWorkspaceMismatch,
 } from './downtime-worker.dispatch-contract.js';
 import type {
   DowntimeCandidate,
@@ -87,15 +89,40 @@ async function releaseHostBudgetForFailure(
   kind: DowntimeSkillKind,
   itemId: string,
   cwd: string,
+  reason: string,
+  attemptId: string | undefined,
+  // Proxy audit lease (WL-0MWFJH3NW006F5GN AC3): true on abort paths AFTER
+  // an audit admission held one — the shared GPU goes back with the slot.
+  leaseHeld: boolean = false,
 ): Promise<void> {
   // The ledger records only implement/audit entries; plan/intake/scheduled
   // dispatches never reserve, so there is nothing to release.
   if (kind !== 'implement' && kind !== 'audit') return;
-  if (typeof deps.releaseHostDispatch !== 'function') return;
-  try {
-    await deps.releaseHostDispatch(itemId, cwd);
-  } catch {
-    // best-effort: a release failure must never mask the dispatch outcome
+  if (typeof deps.releaseHostDispatch === 'function') {
+    try {
+      // Identity, not just the item id (WL-0MWFJD5T4003OM91): the release can
+      // only remove THIS attempt's entry. An abort that named only the item
+      // used to delete a still-running dispatch's slot — the 2026-11-13
+      // under-count. `reason` labels the abort path in the ledger's audit
+      // trail (WL-0MWFJDGXQ001OXP8).
+      await deps.releaseHostDispatch(itemId, cwd, {
+        kind,
+        ...(attemptId !== undefined ? { attemptId } : {}),
+        reason,
+      });
+    } catch {
+      // best-effort: a release failure must never mask the dispatch outcome
+    }
+  }
+  // Proxy audit lease (WL-0MWFJH3NW006F5GN AC3): idempotent and best-effort
+  // — the session id is re-derived from the item id (`auditLeaseSessionId`),
+  // so nothing threads, and a leaked lease is bounded by the proxy's expiry.
+  if (leaseHeld && typeof deps.releaseAuditLease === 'function') {
+    try {
+      await deps.releaseAuditLease(itemId, cwd, { reason });
+    } catch {
+      // best-effort: a release failure must never mask the dispatch outcome
+    }
   }
 }
 
@@ -125,14 +152,30 @@ async function abortForAnchorUnavailable(
   claimExpected: DowntimeClaimExpected,
   cwd: string,
   reservation: DowntimeReservationEvidence | undefined,
+  attemptId: string | undefined,
+  leaseHeld: boolean,
+  detail: string | undefined,
+  projectWorkspaceMismatch?: ProjectWorkspaceMismatch,
 ): Promise<DowntimeDispatchOutcome> {
   const releasedReservation: DowntimeReservationEvidence | undefined =
     reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
-  await releaseHostBudgetForFailure(deps, kind, itemId, cwd);
+  await releaseHostBudgetForFailure(
+    deps,
+    kind,
+    itemId,
+    cwd,
+    'anchor-unavailable',
+    attemptId,
+    leaseHeld,
+  );
   const rollbackOk = await rollbackClaimForFailure(deps, itemId, claimExpected, cwd);
   return {
     dispatched: false,
     reason: 'anchor-unavailable',
+    // Diagnosable refusal (WL-0MWHCUZ5C000I7S6): the boundary rides on the outcome/decision entry; `reason` unchanged.
+    // Primary-path near-miss (WL-0MWHCV3PR002WSQM AC4) — never hidden by a fallback failure.
+    ...(detail !== undefined ? { detail } : {}),
+    ...(projectWorkspaceMismatch !== undefined ? { projectWorkspaceMismatch } : {}),
     ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
     ...(rollbackOk ? {} : { error: 'claim rollback failed after anchor-unavailable' }),
   };
@@ -354,6 +397,15 @@ export async function dispatchClaimedTier(
   // no-candidate cooldown — the next idle tick re-checks. `live`/`max` ride on
   // the outcome as evidence for the observability slice (F5).
   let budgetEvidence: { live: number; max: number } | undefined;
+  // The attempt token of THIS dispatch's reservation (WL-0MWFJD5T4003OM91):
+  // every later abort path releases with it, so it can only remove the entry
+  // this attempt created.
+  let budgetAttemptId: string | undefined;
+  // Audit lease (WL-0MWFJH3NW006F5GN AC3): true once admission ADMITS an
+  // AUDIT with a held proxy lease; every terminal path after that point must
+  // give the shared GPU back (spawn/marker/anchor abort below, pane close in
+  // the caller), so the release helper receives it on each abort.
+  let leaseHeld = false;
   if ((kind === 'implement' || kind === 'audit') && typeof deps.admitHostDispatch === 'function') {
     let admission: Awaited<ReturnType<NonNullable<DowntimeDispatchDeps['admitHostDispatch']>>> | null =
       null;
@@ -372,6 +424,7 @@ export async function dispatchClaimedTier(
       admission = { admitted: false, live: 0, max: 0, reason: 'host-budget-unknown' };
     }
     budgetEvidence = { live: admission.live, max: admission.max };
+    budgetAttemptId = admission.attemptId;
     if (!admission.admitted) {
       // Round trip: a granted local-capacity ticket can no longer reach a pane
       // (single-use — recorded released/expired, never reused or leaked), the
@@ -380,20 +433,40 @@ export async function dispatchClaimedTier(
       // frees a slot (AC2/AC3).
       const releasedReservation: DowntimeReservationEvidence | undefined =
         reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
-      await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
+      await releaseHostBudgetForFailure(
+        deps,
+        kind,
+        candidate.id,
+        opts.cwd,
+        'admission-refused',
+        admission.attemptId,
+      );
       const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
       return {
         dispatched: false,
         // Never a bare `undefined` reason: an admission seam that refuses
         // without a token still has to report why the tick stopped.
         reason: admission.reason ?? 'host-budget-unknown',
+        // The refused tier (WL-0MWDDHVF2004PTYX AC2): lets the caller split a
+        // tier-ambiguous `host-budget-unknown` between the audit and the
+        // implement rungs of the terminal-reason precedence.
+        kind,
         budget: budgetEvidence,
+        // The failing exchange on a fail-closed audit read
+        // (`audit-budget-unknown`): carried so the hold and the decision entry
+        // can name the broken proxy contract (AC3).
+        ...(admission.detail !== undefined ? { detail: admission.detail } : {}),
+        // The proxy's bounded deferral advice on a 429 audit-lease refusal
+        // (WL-0MWFJH3NW006F5GN AC2): honoured as the cooldown carried on the
+        // decision entry — the audit tier re-checks after `retry_after_s`.
+        ...(admission.retryAfterS !== undefined ? { retryAfterS: admission.retryAfterS } : {}),
         ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
         // A failed rollback leaves the item claimed (no worse than the
         // pre-fix state) — it is still not a spawn.
         ...(rollbackOk ? {} : { error: 'claim rollback failed after host-budget refusal' }),
       };
     }
+    if (admission.lease !== undefined) leaseHeld = true;
   }
 
   // ── Placement: project workspace + item-ID tab, then the fallbacks ──────
@@ -415,7 +488,10 @@ export async function dispatchClaimedTier(
     itemId: candidate.id,
   });
   if (!placement.ok) {
-    return abortForAnchorUnavailable(deps, kind, candidate.id, expected, opts.cwd, reservation);
+    return abortForAnchorUnavailable(
+      deps, kind, candidate.id, expected, opts.cwd, reservation, budgetAttemptId,
+      leaseHeld, placement.detail, placement.projectWorkspaceMismatch,
+    );
   }
   const anchorId = placement.anchorId;
   const anchorIsTabRoot = placement.anchorIsTabRoot;
@@ -472,6 +548,10 @@ export async function dispatchClaimedTier(
       ...(reservationSkippedReason !== undefined
         ? { reservationSkipped: reservationSkippedReason }
         : {}),
+      // Placement attribution (WL-0MWHW3PKX0048ZYL AC3 fallback reason +
+      // WL-0MWHCV3PR002WSQM AC4 near-miss): a successful Dispatcher fallback
+      // names why the primary path was not used, never hiding a mismatch.
+      ...placementAttribution(placement),
     });
   } catch {
     // Fail-closed: a throwing recordDispatch (stub or regression) is a marker
@@ -481,7 +561,15 @@ export async function dispatchClaimedTier(
   if (!marked) {
     // Host-budget release (F3 AC3): a claimed-but-unmarked dispatch never
     // spawns, so its reservation must not outlive it.
-    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
+    await releaseHostBudgetForFailure(
+      deps,
+      kind,
+      candidate.id,
+      opts.cwd,
+      'marker-write-failed',
+      budgetAttemptId,
+      leaseHeld,
+    );
     // Marker-write recovery (WL-0MT32F908002YFFA AC1): the CAS claim
     // succeeded but the marker write failed — the item is stranded in
     // `in_progress` with no marker, invisible to all future tiers.
@@ -551,7 +639,15 @@ export async function dispatchClaimedTier(
   if (!spawn.ok) {
     // Host-budget release (F3 AC3): the pane never appeared, so the reserved
     // slot is given back before the (long) failure-trace path below.
-    await releaseHostBudgetForFailure(deps, kind, candidate.id, opts.cwd);
+    await releaseHostBudgetForFailure(
+      deps,
+      kind,
+      candidate.id,
+      opts.cwd,
+      'spawn-failed',
+      budgetAttemptId,
+      leaseHeld,
+    );
     // Placeholder root-pane cleanup (WL-0MW5JE0SZ0057K30, defence in depth):
     // the item tab was provisioned but the split failed, so the blank root
     // pane is the only thing left in the tab. Close it (fail-safe — a live
@@ -705,7 +801,7 @@ export async function recordDispatchEnrichmentBestEffort(
       const panes = await deps.getRunningDowntimePanes(base.cwd);
       if (panes.ok && Array.isArray(panes.records)) {
         const match = panes.records.find(
-          (rec) => rec.label?.startsWith(DOWNTIME_PANE_LABEL_PREFIX) && paneLabelItemId(rec.label) === base.itemId,
+          (rec) => isDowntimePaneLabel(rec.label) && paneItemIdFromLabel(rec.label) === base.itemId,
         );
         paneId = match?.paneId ?? null;
       }

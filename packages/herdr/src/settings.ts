@@ -27,6 +27,7 @@ import {
 export { clampBrowseItemCount, MIN_BROWSE_ITEM_COUNT, MAX_BROWSE_ITEM_COUNT, DEFAULT_BROWSE_ITEM_COUNT };
 import {
   clampDowntimeAuditBatchMax,
+  clampDowntimeCoordinationEntryStaleMs,
   clampDowntimeIdleThresholdMs,
   clampDowntimeLongRunningThresholdMs,
   clampDowntimeMarkerStaleWindowMs,
@@ -38,6 +39,7 @@ import {
   clampDowntimeStallThresholdMs,
   clampDowntimeWorklogRoots,
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+  DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
   DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
@@ -72,6 +74,13 @@ import {
   clampDowntimeCpuGatePercent,
   DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
 } from './host-cpu.js';
+// Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): the default constant
+// and clamp live in hydrator.ts next to the other HYDRATOR_* budgets, so a
+// confirmed default is a one-line change there.
+import {
+  clampHydratorClaimGraceMs,
+  HYDRATOR_CLAIM_GRACE_MS,
+} from './hydrator.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -170,6 +179,17 @@ export interface PluginSettings {
    * clamped to [1 h, 7 days].
    */
   downtimeMarkerStaleWindowMs: number;
+  /**
+   * Dead-coordination-entry staleness window (WL-0MWFJTULD005DTQI): how
+   * long a copy of the entry can go without refreshing before the leader's
+   * dead-entry prune removes it as a crashed instance. Default 10 min —
+   * twice the coordination check-in cadence (2 × 5 min), so exactly one
+   * missed check-in is tolerated; clamped to [1 × cadence, 24 h], so a
+   * cadence-refreshing follower can never be pruned and a ghost entry
+   * cannot linger for days. Overridable via the `downtimeCoordinationEntryStaleMs`
+   * settings key, following the `downtimeMarkerStaleWindowMs` pattern.
+   */
+  downtimeCoordinationEntryStaleMs: number;
   /**
    * Enable the pre-dispatch stalled-work scan (WL-0MUYMBK6H005PY16). When on,
    * the dispatcher prefers resuming an existing stalled pane over opening a new
@@ -283,6 +303,14 @@ export interface PluginSettings {
    * never dispatch into an unexpected workspace.
    */
   downtimeWorklogRoots: string[];
+  /**
+   * Claim grace window (ms) — bounded spawn→pane-title gap budget
+   * (parent WL-0MWH56SWX004HSKQ AC5): an item claimed within this window is
+   * never released by the hydrator even when no pane is visible yet; past
+   * the window today's rule applies. Default 120 s;
+   * clamped to [0, 600000] — `0` disables the window (today's rule always).
+   */
+  hydratorClaimGraceMs: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -310,6 +338,8 @@ export const defaultSettings: PluginSettings = {
   downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   downtimeAuditBatchMax: DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  // Dead-coordination-entry staleness window (WL-0MWFJTULD005DTQI).
+  downtimeCoordinationEntryStaleMs: DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS,
   downtimeStallScanEnabled: DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
   downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   downtimeCapacityStarvationAlertMs: DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
@@ -327,6 +357,10 @@ export const defaultSettings: PluginSettings = {
   // offer-only + own-backlog candidate universe is unchanged. Never aliased
   // out of `defaultSettings` (see `freshDefaults`).
   downtimeWorklogRoots: [],
+  // Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): counted from the
+  // single exported constant in hydrator.ts so a confirmed default is a
+  // one-line change.
+  hydratorClaimGraceMs: HYDRATOR_CLAIM_GRACE_MS,
 };
 
 /** Minimum allowed maxSyncStalenessMs (1 s). */
@@ -490,6 +524,13 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
         ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
         : defaultSettings.downtimeMarkerStaleWindowMs,
+      // Dead-coordination-entry staleness window (WL-0MWFJTULD005DTQI):
+      // follows the marker-window pattern — non-number → default, then
+      // clamped to [1 × check-in cadence, 24 h].
+      downtimeCoordinationEntryStaleMs:
+        typeof parsed.downtimeCoordinationEntryStaleMs === 'number'
+          ? clampDowntimeCoordinationEntryStaleMs(parsed.downtimeCoordinationEntryStaleMs)
+          : defaultSettings.downtimeCoordinationEntryStaleMs,
       downtimeStallScanEnabled: typeof parsed.downtimeStallScanEnabled === 'boolean'
         ? parsed.downtimeStallScanEnabled : defaultSettings.downtimeStallScanEnabled,
       downtimeStallThresholdMs: typeof parsed.downtimeStallThresholdMs === 'number'
@@ -537,6 +578,13 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeWorklogRoots: resolveDowntimeWorklogRoots(
         clampDowntimeWorklogRoots(parsed.downtimeWorklogRoots),
       ),
+      // Claim grace window (parent WL-0MWH56SWX004HSKQ AC5): number-typed
+      // read with a clamp like the neighbouring settings (e.g.
+      // `downtimeMarkerStaleWindowMs`); a non-number value falls back to the
+      // default.
+      hydratorClaimGraceMs: typeof parsed.hydratorClaimGraceMs === 'number'
+        ? clampHydratorClaimGraceMs(parsed.hydratorClaimGraceMs)
+        : defaultSettings.hydratorClaimGraceMs,
       // NOTE (WL-0MU2EP6JL006A1U3): `downtimeMaxRunningPanes` and its legacy
       // alias `downtimeMaxConcurrentDispatches` are deliberately NOT read.
       // Dispatched panes stay open until an operator closes them, so a

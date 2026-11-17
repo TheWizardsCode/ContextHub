@@ -23,7 +23,9 @@
  * `audit-budget-saturated` / `audit-budget-unknown` /
  * `audit-host-saturated`). A budget refusal is recorded on
  * `flags.hostBudgetReason` / `flags.hostBudget` (reason + `{live, max}`
- * evidence) and the scan steps to the next candidate, so prep work ranked
+ * evidence) plus `flags.hostBudgetDetail` (the failing proxy exchange on a
+ * fail-closed audit read, WL-0MWDDHVF2004PTYX AC3) and the scan steps to the
+ * next candidate, so prep work ranked
  * behind the refused budgeted candidate still dispatches and the caller can
  * report the neutral terminal reason when nothing else does. Every other
  * non-dispatched outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
@@ -232,6 +234,10 @@ export async function dispatchFromHerdrList(
     if (isHostBudgetHoldReason(outcome.reason)) {
       flags.hostBudgetReason ??= outcome.reason;
       if (outcome.budget !== undefined) flags.hostBudget ??= outcome.budget;
+      // Failing exchange on a fail-closed audit-budget refusal
+      // (`audit-budget-unknown`): carried so the terminal decision can name
+      // the broken proxy contract (WL-0MWDDHVF2004PTYX AC3).
+      if (outcome.detail !== undefined) flags.hostBudgetDetail ??= outcome.detail;
     }
   }
 
@@ -391,6 +397,9 @@ export async function dispatchFromHerdrList(
     if (isHostBudgetHoldReason(outcome.reason)) {
       flags.hostBudgetReason ??= outcome.reason;
       if (outcome.budget !== undefined) flags.hostBudget ??= outcome.budget;
+      // Failing exchange on a fail-closed audit-budget refusal (AC3): carried
+      // so the terminal decision can name the broken proxy contract.
+      if (outcome.detail !== undefined) flags.hostBudgetDetail ??= outcome.detail;
     }
   }
   return null;

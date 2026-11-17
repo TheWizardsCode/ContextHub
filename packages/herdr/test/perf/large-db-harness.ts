@@ -65,6 +65,14 @@
  * (wider, documented) headroom, and every sample must be a genuine fast-path
  * refresh — one consolidated `wl worklist` spawn, not a per-subset fan-out.
  *
+ * RSS is the one absolute bound that shared-host contention can fake on
+ * UNCHANGED code: sibling agents' suites starve V8's GC and inflate the
+ * pane/spawn peak RSS reading (WL-0MWJNQ6S6006H5HH). The harness measures the
+ * host in-window (per-core load, `/proc/stat` CPU, idle-loop canary) and the
+ * RSS checks are REPORTED NOT GATED on a host measured contended — CPU time
+ * remains the load-independent gate that always applies; a quiet host keeps
+ * the tight 25 % RSS headroom.
+ *
  * ## Usage (module)
  *
  * ```ts
@@ -1043,6 +1051,13 @@ export interface LargeDbReport {
   idle: IdleTickResult;
   writeToReflect: WriteToReflectMetrics;
   samplesDetail: RefreshSample[];
+  /**
+   * In-window host conditions measured alongside the benchmark. The F1
+   * refresh ratchet uses them to REPORT-not-gate the absolute RSS checks on a
+   * contended shared host (WL-0MWJNQ6S6006H5HH); the F3 isolation scenarios
+   * record the same signal on their own window.
+   */
+  hostConditions?: HostConditions;
 }
 
 // ── Budget schema ────────────────────────────────────────────────────
@@ -1201,7 +1216,12 @@ export function defaultLargeDbBudget(): LargeDbBudget {
         'WL_SPAWN_COUNT_FILE instrumentation) is the load-independent regression gate, with ' +
         '100 % headroom because the tsx `src` target varies ~50 % run-to-run on a shared host. ' +
         'Wall time and event-loop blocking get 200 % + a 500 ms / 100 ms floor; peak and ' +
-        'aggregate RSS keep a tighter 25 % headroom so memory regressions still fail promptly.',
+        'aggregate RSS keep a tighter 25 % headroom so memory regressions still fail promptly. ' +
+        'The RSS checks are REPORTED NOT GATED when the host was measured contended in-window ' +
+        '(load/core, /proc/stat CPU or the idle-loop canary — WL-0MWJNQ6S6006H5HH): shared-host ' +
+        'contention starves V8\'s GC and inflates peak RSS on unchanged code, so the absolute ' +
+        'RSS reading describes the host, not the plugin; CPU time remains the gate that always ' +
+        'applies, and the tight 25 % headroom is still enforced on a quiet host.',
     },
     profiles: {
       default: {
@@ -1348,6 +1368,13 @@ export interface LargeDbEvaluationInput {
   pane: { peakRssMb: number; aggregateRssMb: number };
   idle: IdleTickResult;
   writeToReflect: { p95ReflectMs: number };
+  /**
+   * In-window host conditions measured alongside the benchmark (load/core,
+   * `/proc/stat` CPU utilisation, idle-loop canary). Present in real
+   * harness reports; absent in synthetic policy inputs means "quiet" — the
+   * absolute RSS headroom is always enforced.
+   */
+  hostConditions?: HostConditions;
 }
 
 /**
@@ -1362,7 +1389,11 @@ export interface LargeDbEvaluationInput {
  *   5. p95 event-loop blocking must stay within `eventLoopHeadroomPct` +
  *      `eventLoopFloorMs`;
  *   6. per-spawn, aggregate-spawn and pane peak RSS must stay within
- *      `rssHeadroomPct`;
+ *      `rssHeadroomPct` — REPORTED NOT GATED when the host was measured
+ *      contended in-window (WL-0MWJNQ6S6006H5HH: V8 GC starvation on a
+ *      contended shared host inflates peak RSS on unchanged code, so the
+ *      absolute reading describes the host, not the plugin; CPU time is the
+ *      load-independent gate that always applies);
  *   7. write → reflect p95 must stay within `wallHeadroomPct` + `wallFloorMs`;
  *   8. the parent AC targets are asserted for the `full` profile once
  *      `acTargets.enforced` is true.
@@ -1474,6 +1505,19 @@ export function evaluateLargeDbBudget(
   });
 
   // 6. Memory.
+  //
+  // WL-0MWJNQ6S6006H5HH (second occurrence of WL-0MWJAHK3J0026P68): in-window
+  // HOST contention (sibling agents' suites on a shared host) starves V8's GC
+  // and inflates the pane process peak RSS plus its spawned CLI children's RSS
+  // on UNCHANGED code — pristine dev read `paneAggregateRssMb` 138.2–144.1 MiB
+  // vs a 137.9 MiB limit (110.3 recorded + 25 %) under load, then passed on
+  // rerun when load eased. The absolute RSS reading therefore only describes
+  // the plugin on a host measured QUIET in-window, so on a contended host the
+  // tight headroom is REPORTED NOT GATED (same policy as the auto-sync
+  // absolute event-loop bound, WL-0MVMSE2S0006L56D). CPU time always remains
+  // the load-independent regression gate; on a quiet host the 25 % headroom is
+  // enforced exactly as before.
+  const hostContended = hostContendedForAbsoluteTiming(input.hostConditions);
   const rssLimit = (recorded: number | null): number | null =>
     recorded === null ? null : recorded * (1 + policy.rssHeadroomPct / 100);
   const rssChecks: Array<[string, number | null, number | null]> = [
@@ -1484,12 +1528,17 @@ export function evaluateLargeDbBudget(
   for (const [metric, measured, recorded] of rssChecks) {
     const limit = rssLimit(recorded);
     if (limit === null || measured === null) continue;
+    const withinHeadroom = measured <= limit;
     push({
       metric,
       measured: round1(measured),
       limit: Math.round(limit * 10) / 10,
-      ok: measured <= limit,
-      detail: `recorded ${round1(recorded as number)} MiB + ${policy.rssHeadroomPct}% RSS headroom`,
+      ok: hostContended || withinHeadroom,
+      detail:
+        `recorded ${round1(recorded as number)} MiB + ${policy.rssHeadroomPct}% RSS headroom` +
+        (hostContended
+          ? ' — host contended in-window, RSS reading reported not gated (CPU stays the gate)'
+          : ''),
     });
   }
 
@@ -1639,6 +1688,8 @@ export interface LargeDbHarnessOptions {
   keep?: boolean;
   /** Pre-generated fixture (skips generation; the caller owns cleanup). */
   fixture?: LargeDbFixture;
+  /** Idle-window canary length for host-contention detection (ms, default 250). */
+  idleCanaryMs?: number;
 }
 
 /**
@@ -1750,6 +1801,15 @@ export async function runLargeDbHarness(
   const savedSpawnFile = process.env.WL_SPAWN_COUNT_FILE;
   const spawnArgs: string[][] = [];
 
+  // In-window host conditions (WL-0MWJNQ6S6006H5HH): per-core load and
+  // `/proc/stat` CPU utilisation sampled across the measured window, plus an
+  // idle-loop canary — the same self-calibrating contention signal the F3
+  // isolation scenarios record. The F1 RSS ratchet reports-not-gates its
+  // absolute checks on a host measured contended, just as F3 does for the
+  // absolute event-loop bound (WL-0MVMSE2S0006L56D).
+  const hostLoadProbe = startHostLoadProbe();
+  const hostCpuProbe = startHostCpuProbe();
+
   const refresh = async (): Promise<void> => {
     const scope = createInProcessRefreshScope();
     try {
@@ -1801,6 +1861,7 @@ export async function runLargeDbHarness(
     await refresh();
     await refresh();
     const rssBeforeSamplesKb = process.resourceUsage().maxRSS;
+    const idleNoise = await measureIdleLoopNoise(options.idleCanaryMs ?? 250);
 
     const measured: RefreshSample[] = [];
     for (let index = 0; index < samples; index += 1) {
@@ -1939,10 +2000,20 @@ export async function runLargeDbHarness(
         p95ReflectMs: round1(percentile(reflectMs, 0.95) ?? 0),
       },
       samplesDetail: measured,
+      // Stop the probes on the closing sample so the window covers the whole
+      // measured phase (prime → refreshes → idle tick → write/reflect).
+      hostConditions: {
+        loadPerCore: hostLoadProbe.stop(),
+        cpuPercent: hostCpuProbe.stop().cpuPercent,
+        cpuSource: hostCpuProbe.stop().cpuSource,
+        idleNoise,
+      },
     };
 
     return report;
   } finally {
+    hostLoadProbe.stop();
+    hostCpuProbe.stop();
     resetExecFileAsync();
     resetWorklogDir();
     if (savedCacheDir === undefined) delete process.env.WL_CACHE_DIR;

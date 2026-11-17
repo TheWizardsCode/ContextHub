@@ -103,6 +103,29 @@ The default-view refresh now spawns far fewer `wl` processes:
     shared with a mandatory subset keep the richer `wl list` audit fields
     (`auditResult`, `auditedAt`, `fingerprint`, `currentFingerprint`), so the
     audit-bucket sort classifies them exactly as before.
+  - **Blocker pinning (WL-0MW7YJYS5009H7WC)** — every ACTIVE blocker of a
+    visible `status=blocked` item is also shown in the default view: a root
+    blocker as itself, a child blocker via its ROOT ancestor (the same
+    "show parents, not children" parent-substitution rule the critical-child
+    path applies — the child itself never renders at the top level). Without
+    this, a saturated review queue (deep `in_review` bucket, `othersLimit 0`)
+    leaves every open blocker cut by the browse window while the blocked rows
+    it waits on stay visible. Each pinned blocker is grouped WITH the blocked
+    item it blocks (same group/label, immediately after it; a blocker that
+    blocks several visible items appears once, in the first/lowest group) and
+    becomes a dispatch candidate from the list head (`getHerdrListHead` feeds
+    the dispatcher the same selection). **Default view only** — the guarantee
+    does not extend to the deliberately narrow stage-filtered views
+    (`fetchItemsByStage`/`fetchItemsByPriority`), which stay strictly
+    root-only and unfiltered by dependency edges (AC11).
+  - **Read cost unchanged (AC8)** — pinning adds NO new `wl` process spawn per
+    visible blocked item: the outbound `depends-on` edges of all selected
+    blocked ids are read in ONE batched in-process pass (the shareable
+    `readOutboundDepsInProcess` reader behind `fetchOutboundDepsForItems`),
+    filtered through the shared `isActiveBlocker` predicate, and ancestor
+    chains are resolved from the same in-process store. Measured before/after
+    on the default refresh: still **1** `wl` spawn (`wl worklist`) — the
+    `fetcher-spawn-cap` / split-guard suites stay green.
   - **Fail-open fallback** — an older `wl` without the command, a non-zero exit,
     a malformed payload or a missing subset key falls back to the per-subset
     spawn path with unchanged behaviour. A *hung* `wl` is deliberately NOT
@@ -203,6 +226,17 @@ below the 1,000-line ceiling.
   (≤ 100 ms p95) across watch-triggered refreshes.
 - `packages/herdr/src/hydrator-responsiveness.test.ts` — event-loop delay
   guard for the real watch primitive under a burst of writes.
+- **Hydrator demotion vs display pane scope.** The hydrator's demotion scan
+  ("is this item being worked on ANYWHERE?") reads panes **cross-workspace**
+  (one machine-wide `herdr pane list` per tick), while the selection-list's
+  in-progress marker / green circle ("does this item have a pane in MY
+  workspace?") stays **workspace-scoped** — two questions, two filters
+  (WL-0MWH56SWX004HSKQ, AC1/AC2). The claim **grace window**
+  (`hydratorClaimGraceMs`, default 120 s) bounds the spawn→pane-title gap so
+  a just-claimed item is never released with no pane visible yet (AC5); the
+  prep/audit tiers keep pane evidence as their only busy signal (AC7). Full
+  contract, fail-open rules and the settings row are in
+  [`docs/dev/downtime-dispatcher.md`](downtime-dispatcher.md#hydrator-demotion-evidence-is-cross-workspace-display-markers-stay-workspace-scoped).
 - `bench/herdr-refresh-perf.ts` (+ `tests/bench/herdr-refresh-perf.test.ts`) —
   repeatable warm/cold latency and `wl` spawn-count benchmark.
 
@@ -253,6 +287,17 @@ between the fix items (F3–F6) could not be caught.
 - **peak RSS per spawn / aggregate per pane** — per-spawn peaks come from the
   spawn records; the pane aggregate is the refresh's own RSS delta plus its
   largest concurrent `wl` child.
+
+  **Host contention (WL-0MWJNQ6S6006H5HH):** the RSS checks carry a tight 25 %
+  headroom so memory regressions fail promptly, but this host is shared and
+  sibling agents' suites starve V8's GC, inflating peak RSS on **unchanged**
+  code (pristine dev read pane aggregate 138.2–144.1 MiB vs a 137.9 MiB limit
+  under load, passing on rerun when load eases). The harness therefore measures
+  the host **in-window** — per-core load, `/proc/stat` CPU utilisation and an
+  idle-loop canary — and on a host measured contended the absolute RSS checks
+  are **reported not gated** (CPU time stays the load-independent gate; the
+  same policy documented for the auto-sync event-loop bound below). On a quiet
+  host the tight 25 % headroom is enforced exactly as before.
 - **write → reflect** — the state counter is bumped exactly as a `wl` write
   does while the REAL `watchDbChanges` handle is armed; detection (debounced
   watch callback) and reflection (watch + refresh data path) are both reported.
@@ -263,9 +308,21 @@ between the fix items (F3–F6) could not be caught.
 real scale (~2,600 items / ~100 MB on disk) and is run on demand:
 
 ```sh
-# Default-suite ratchet (also runs inside the herdr test group)
+# Default-suite ratchet (runs in the vitest `startup-budget-measured` project)
 npx tsx packages/herdr/test/perf/large-db-harness.ts --profile default --json
 
+The measured ratchet (`large-db-refresh-budget.test.ts`) runs in the isolated,
+serialised vitest project shared with the other measured suites (`maxWorkers: 1`,
+`sequence.groupOrder: 1` — see `docs/dev/wl-startup-import-budget.md`). It
+measures the pane's own RSS delta via `process.resourceUsage().maxRSS`, which
+inside the parallel fork pool was inflated by sibling workers starving V8's GC:
+`paneAggregateRssMb` breached its 25 % headroom on an unchanged tree (140.7 vs a
+137.9 MB limit) until the ratchet joined the isolated project
+(WL-0MWJAHK3J0026P68). A standalone harness run (above) measures the same code
+on a quiet host and stays inside the recorded budget.
+```
+
+```sh
 # Full-scale run: text output, then machine-readable
 npm run test:perf:large
 npm run test:perf:large -- --json

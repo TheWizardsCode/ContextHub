@@ -15,7 +15,16 @@
  * herdr or wl. In fixture mode the producer-review lookup defaults to false
  * and closing is a recorded no-op.
  *
- * Exit code mirrors `runReaperCli`: 0 on success, 1 on any close failure.
+ * Ledger repair mode: `--repair-budget-ledger` (WL-0MWFJD8ZO000J1R8) is the
+ * EXPLICIT operator recovery for a corrupt/unreadable dispatch-budget ledger.
+ * An admission read never rewrites the ledger, so this is how an operator
+ * rebuilds it from the live pane list: every dispatcher label form is decoded
+ * (decoration stripped, `Manually triggered` accepted), and the write is
+ * refused while any live dispatcher pane cannot be accounted for. The
+ * reconstructed set is printed as JSON.
+ *
+ * Exit code mirrors `runReaperCli`: 0 on success, 1 on any close failure (or a
+ * refused/failed ledger repair).
  */
 
 import { execFile } from 'node:child_process';
@@ -30,15 +39,22 @@ import {
   parsePaneProcessInfo,
 } from './pane-close-herdr.js';
 import { resolveHerdrBin } from './herdr-bin.js';
+import { spawnCliStdout, DEFAULT_CLI_TIMEOUT_MS } from './cli-spawn.js';
 import { releaseHostDispatch } from './host-dispatch-budget.admission.js';
-import { sweepClosedPanes } from './host-dispatch-budget.js';
+import {
+  decodeBudgetPaneLabel,
+  repairBudgetLedgerFromPanes,
+} from './host-dispatch-budget.repair.js';
+import { sweepClosedPanes, type HostBudgetLivePane } from './host-dispatch-budget.js';
+import { parseHerdrPaneListOutput } from './downtime-worker.pane.js';
 import type { ReaperDeps } from './pane-close-reaper.js';
 import { runReaperCli } from './pane-close-reaper.js';
 
 const execFileAsync = promisify(execFile);
 
-/** Default per-command timeout for herdr / wl calls (60 s). */
-export const CLI_COMMAND_TIMEOUT_MS = 60 * 1000;
+/** Default per-command timeout for herdr / wl calls (60 s — the shared
+ * canonical CLI spawn timeout, `cli-spawn.ts`, WL-0MWHWHB3X004H9VG AC1). */
+export const CLI_COMMAND_TIMEOUT_MS = DEFAULT_CLI_TIMEOUT_MS;
 
 /** Injectable I/O, so tests can exercise the CLI without real processes. */
 export interface PaneCloseCliIo {
@@ -46,6 +62,22 @@ export interface PaneCloseCliIo {
   readFile(path: string): string;
   env: NodeJS.ProcessEnv;
   cwd: string;
+}
+
+/**
+ * Split `--repair-budget-ledger` out of argv (WL-0MWFJD8ZO000J1R8).
+ *
+ * Mutually exclusive with the reaper's own flags: the repair prints its own
+ * JSON report and exits, so the remaining argv is irrelevant when it is set.
+ */
+export function extractRepairArg(argv: string[]): { repair: boolean; rest: string[] } {
+  const rest: string[] = [];
+  let repair = false;
+  for (const arg of argv) {
+    if (arg === '--repair-budget-ledger') repair = true;
+    else rest.push(arg);
+  }
+  return { repair, rest };
 }
 
 /** Split `--fixture <path>` out of argv; the remainder is passed through. */
@@ -99,20 +131,16 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
   }
 
   return createHerdrReaperDeps({
-    listPanesRaw: async () => {
-      const { stdout } = await io.execFileAsync(herdrBin, ['pane', 'list'], {
-        encoding: 'utf8',
-        timeout: CLI_COMMAND_TIMEOUT_MS,
+    listPanesRaw: async () =>
+      spawnCliStdout(io.execFileAsync, [herdrBin], ['pane', 'list'], {
+        timeoutMs: CLI_COMMAND_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
         cwd: io.cwd,
-      });
-      return stdout;
-    },
+      }),
     closePane: async (paneId: string) => {
       try {
-        await io.execFileAsync(herdrBin, ['pane', 'close', paneId], {
-          encoding: 'utf8',
-          timeout: CLI_COMMAND_TIMEOUT_MS,
+        await spawnCliStdout(io.execFileAsync, [herdrBin], ['pane', 'close', paneId], {
+          timeoutMs: CLI_COMMAND_TIMEOUT_MS,
           cwd: io.cwd,
         });
         return true;
@@ -125,7 +153,14 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
     // CONFIRMED entries whose pane the trusted read no longer lists. Both are
     // best-effort and never change the reaper outcome.
     releasePaneBudget: async (pane) => {
-      if (pane.itemId !== '') releaseHostDispatch(pane.itemId);
+      // The CLOSED PANE is the identity (WL-0MWFJD5T4003OM91): a sibling pane
+      // close for the same item must not release a live dispatch's entry.
+      if (pane.itemId === '') return;
+      releaseHostDispatch({
+        itemId: pane.itemId,
+        ...(pane.kind === 'implement' || pane.kind === 'audit' ? { kind: pane.kind } : {}),
+        paneId: pane.id,
+      });
     },
     sweepBudgetLedger: async (parsedPanes) => {
       sweepClosedPanes(parsedPanes.map((pane) => ({ paneId: pane.paneId })));
@@ -133,12 +168,16 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
     invokingPaneId,
     // Item lookup (parent AC2/AC6): producer-review flag + work-item stage.
     getItemInfo: async (itemId: string) => {
-      const { stdout } = await io.execFileAsync('wl', ['show', itemId, '--json'], {
-        encoding: 'utf8',
-        timeout: CLI_COMMAND_TIMEOUT_MS,
-        maxBuffer: 4 * 1024 * 1024,
-        cwd: io.cwd,
-      });
+      const stdout = await spawnCliStdout(
+        io.execFileAsync,
+        ['wl'],
+        ['show', itemId, '--json'],
+        {
+          timeoutMs: CLI_COMMAND_TIMEOUT_MS,
+          maxBuffer: 4 * 1024 * 1024,
+          cwd: io.cwd,
+        },
+      );
       const parsed = extractJsonValue(stdout) as {
         workItem?: { needsProducerReview?: boolean; stage?: string };
       };
@@ -152,12 +191,12 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
     // than the agent itself. Fail-closed to 0.
     childProcessCount: async (pane) => {
       try {
-        const { stdout } = await io.execFileAsync(
-          herdrBin,
+        const stdout = await spawnCliStdout(
+          io.execFileAsync,
+          [herdrBin],
           ['pane', 'process-info', '--pane', pane.paneId],
           {
-            encoding: 'utf8',
-            timeout: CLI_COMMAND_TIMEOUT_MS,
+            timeoutMs: CLI_COMMAND_TIMEOUT_MS,
             maxBuffer: 4 * 1024 * 1024,
             cwd: io.cwd,
           },
@@ -173,12 +212,104 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
   });
 }
 
+/**
+ * Run one EXPLICIT ledger repair from the machine-wide live pane list
+ * (WL-0MWFJD8ZO000J1R8).
+ *
+ * Prints a JSON report — the reconstructed entries, the panes accounted for and
+ * (on a refusal) the panes that blocked the write — and returns the exit code:
+ * 0 repaired, 1 refused/failed. A failed `herdr pane list` is a refusal (an
+ * unknown pane list must never be treated as "no panes": that would write an
+ * empty ledger over live work).
+ */
+export async function runBudgetLedgerRepair(
+  io: PaneCloseCliIo,
+  fixtureRaw: string | undefined,
+  invokingPaneId: string | undefined,
+): Promise<number> {
+  const herdrBin = resolveHerdrBin(io.env);
+  let raw: string;
+  if (fixtureRaw !== undefined) {
+    raw = fixtureRaw;
+  } else {
+    try {
+      raw = await spawnCliStdout(io.execFileAsync, [herdrBin], ['pane', 'list'], {
+        timeoutMs: CLI_COMMAND_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+        cwd: io.cwd,
+      });
+    } catch (err) {
+      process.stderr.write(
+        `[worklog-plugin] budget-ledger repair refused: "herdr pane list" failed ` +
+          `(${err instanceof Error ? err.message : String(err)}) — an unknown pane list ` +
+          'must never be repaired as empty\n',
+      );
+      return 1;
+    }
+  }
+  const records = parseHerdrPaneListOutput(raw);
+  if (records === null) {
+    process.stderr.write(
+      '[worklog-plugin] budget-ledger repair refused: the pane list could not be parsed\n',
+    );
+    return 1;
+  }
+  const panes: HostBudgetLivePane[] = records.map((record) => ({
+    paneId: record.paneId,
+    ...(typeof record.label === 'string' ? { title: record.label } : {}),
+  }));
+
+  const result = repairBudgetLedgerFromPanes(panes, {
+    instanceId: `herdr:${process.pid}`,
+    root: io.cwd,
+  });
+
+  if (!result.ok) {
+    process.stderr.write(`[worklog-plugin] budget-ledger repair: ${result.message}\n`);
+    console.log(
+      JSON.stringify(
+        {
+          repaired: false,
+          reason: result.reason,
+          unaccounted: result.unaccounted ?? [],
+          // Per-pane decode evidence, so the operator can see WHY a pane was
+          // not accounted for.
+          panes: panes.map((pane) => ({
+            paneId: pane.paneId,
+            label: pane.title ?? '',
+            decoded: decodeBudgetPaneLabel(pane.title),
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    return 1;
+  }
+
+  console.log(
+    JSON.stringify(
+      {
+        repaired: true,
+        invokingPaneId: invokingPaneId ?? null,
+        count: result.count,
+        entries: result.entries,
+        accountedPaneIds: result.accountedPaneIds,
+      },
+      null,
+      2,
+    ),
+  );
+  return 0;
+}
+
 /** Entry point. Returns the process exit code. */
 export async function main(
   argv: string[] = process.argv.slice(2),
   io?: Partial<PaneCloseCliIo>,
 ): Promise<number> {
-  const { fixture, rest } = extractFixtureArg(argv);
+  const { repair, rest: withoutRepair } = extractRepairArg(argv);
+  const { fixture, rest } = extractFixtureArg(withoutRepair);
   const resolvedIo: PaneCloseCliIo = {
     execFileAsync: io?.execFileAsync ?? execFileAsync,
     readFile: io?.readFile ?? ((path: string) => readFileSync(path, 'utf8')),
@@ -189,6 +320,9 @@ export async function main(
   // Surface the invoking pane id in the JSON envelope so the Python skill can
   // exclude it even though the classifier also computes `isInvokingPane`.
   const invoking = resolvedIo.env.HERDR_PANE_ID ?? resolvedIo.env.HERDR_PANE;
+  if (repair) {
+    return runBudgetLedgerRepair(resolvedIo, fixtureRaw, invoking);
+  }
   const args = [...rest];
   if (invoking && !args.includes('--invoking-pane')) {
     args.push('--invoking-pane', invoking);

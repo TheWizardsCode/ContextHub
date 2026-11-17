@@ -30,6 +30,12 @@ import {
 } from './settings.js';
 import * as settingsModule from './settings.js';
 import {
+  clampHydratorClaimGraceMs,
+  HYDRATOR_CLAIM_GRACE_MS,
+  HYDRATOR_CLAIM_GRACE_FLOOR_MS,
+  HYDRATOR_CLAIM_GRACE_MAX_MS,
+} from './hydrator.js';
+import {
   DEFAULT_DOWNTIME_LEAF_AUDIT_IMMEDIATE,
   DEFAULT_DOWNTIME_OFFER_ONLY,
   DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
@@ -37,7 +43,14 @@ import {
   MIN_DOWNTIME_STALL_THRESHOLD_MS,
   MAX_DOWNTIME_STALL_THRESHOLD_MS,
   clampDowntimeStallThresholdMs,
+  clampDowntimeCoordinationEntryStaleMs,
 } from './downtime-worker.js';
+import {
+  DEFAULT_COORDINATION_CHECK_IN_MS,
+  DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS,
+  DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS,
+  DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS,
+} from './downtime-worker.constants.js';
 
 function tempSettingsPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'herdr-settings-test-'));
@@ -136,6 +149,35 @@ describe('downtimeNoCandidateCooldownMs', () => {
   });
 });
 
+describe('hydratorClaimGraceMs (parent WL-0MWH56SWX004HSKQ AC5)', () => {
+  it('defaults to the single exported constant (120_000 ms)', () => {
+    expect(defaultSettings.hydratorClaimGraceMs).toBe(HYDRATOR_CLAIM_GRACE_MS);
+    expect(HYDRATOR_CLAIM_GRACE_MS).toBe(120_000);
+  });
+
+  it('clamps into the [0, 600_000] range like the neighbouring windows', () => {
+    // Below the 0 floor → clamped up to 0 (window disabled — "today's rule").
+    expect(clampHydratorClaimGraceMs(-1)).toBe(HYDRATOR_CLAIM_GRACE_MS);
+    expect(HYDRATOR_CLAIM_GRACE_FLOOR_MS).toBe(0);
+    expect(clampHydratorClaimGraceMs(0)).toBe(0);
+    // Above the 10 min ceiling → clamped down.
+    expect(HYDRATOR_CLAIM_GRACE_MAX_MS).toBe(600_000);
+    expect(clampHydratorClaimGraceMs(3_600_000)).toBe(600_000);
+    // In-range preserved.
+    expect(clampHydratorClaimGraceMs(90_000)).toBe(90_000);
+    // Non-finite → default.
+    expect(clampHydratorClaimGraceMs(NaN)).toBe(HYDRATOR_CLAIM_GRACE_MS);
+  });
+
+  it('loads a persisted value and falls back to the default for non-numbers', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, hydratorClaimGraceMs: 90_000 });
+    expect(loadSettings(path).hydratorClaimGraceMs).toBe(90_000);
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, hydratorClaimGraceMs: 'soon' }), 'utf-8');
+    expect(loadSettings(path).hydratorClaimGraceMs).toBe(HYDRATOR_CLAIM_GRACE_MS);
+  });
+});
+
 describe('downtimeMarkerStaleWindowMs (WL-0MU6UL0RJ008IHGT)', () => {
   it('defaults to 86_400_000 ms (24 hours)', () => {
     expect(defaultSettings.downtimeMarkerStaleWindowMs).toBe(24 * 60 * 60 * 1000);
@@ -158,6 +200,50 @@ describe('downtimeMarkerStaleWindowMs (WL-0MU6UL0RJ008IHGT)', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMarkerStaleWindowMs: 'later' }), 'utf-8');
     expect(loadSettings(path).downtimeMarkerStaleWindowMs).toBe(24 * 60 * 60 * 1000);
+  });
+});
+
+describe('downtimeCoordinationEntryStaleMs (WL-0MWFJTULD005DTQI)', () => {
+  it('defaults to 2 × the check-in cadence (10 min), derived — never a hard-coded literal', () => {
+    expect(DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS).toBe(
+      2 * DEFAULT_COORDINATION_CHECK_IN_MS,
+    );
+    expect(defaultSettings.downtimeCoordinationEntryStaleMs).toBe(
+      2 * DEFAULT_COORDINATION_CHECK_IN_MS,
+    );
+  });
+
+  it('clamps the floor to exactly one check-in interval so a cadence-refreshing follower can never be pruned at the floor', () => {
+    // The floor IS the check-in cadence: a follower that refreshes every
+    // check-in is always younger than or equal to the floor, so the
+    // leader's prune (age ≤ window ⇒ keep) can never remove it.
+    expect(DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS).toBe(DEFAULT_COORDINATION_CHECK_IN_MS);
+    expect(clampDowntimeCoordinationEntryStaleMs(1_000)).toBe(DEFAULT_COORDINATION_CHECK_IN_MS);
+    expect(clampDowntimeCoordinationEntryStaleMs(NaN)).toBe(2 * DEFAULT_COORDINATION_CHECK_IN_MS);
+  });
+
+  it('loads a persisted value and clamps into the [1 × cadence, 24 h] range', () => {
+    const path = tempSettingsPath();
+    // Below the floor → clamped up to one check-in interval.
+    saveSettings(path, { ...defaultSettings, downtimeCoordinationEntryStaleMs: DEFAULT_COORDINATION_CHECK_IN_MS - 1 });
+    expect(loadSettings(path).downtimeCoordinationEntryStaleMs).toBe(DEFAULT_COORDINATION_CHECK_IN_MS);
+    // Above the 24 h ceiling → clamped down.
+    saveSettings(path, { ...defaultSettings, downtimeCoordinationEntryStaleMs: 48 * 60 * 60 * 1000 });
+    expect(loadSettings(path).downtimeCoordinationEntryStaleMs).toBe(24 * 60 * 60 * 1000);
+    // In-range preserved.
+    saveSettings(path, { ...defaultSettings, downtimeCoordinationEntryStaleMs: 30 * 60 * 1000 });
+    expect(loadSettings(path).downtimeCoordinationEntryStaleMs).toBe(30 * 60 * 1000);
+  });
+
+  it('falls back to the default when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeCoordinationEntryStaleMs: 'soon' }), 'utf-8');
+    expect(loadSettings(path).downtimeCoordinationEntryStaleMs).toBe(2 * DEFAULT_COORDINATION_CHECK_IN_MS);
+  });
+
+  it('caps at 24 h (DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS)', () => {
+    expect(DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS).toBe(24 * 60 * 60 * 1000);
+    expect(clampDowntimeCoordinationEntryStaleMs(25 * 60 * 60 * 1000)).toBe(24 * 60 * 60 * 1000);
   });
 });
 

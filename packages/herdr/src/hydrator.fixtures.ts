@@ -17,7 +17,7 @@
  * vitest runtime.
  */
 
-import type { HydratorItem, HydratorPane } from './hydrator.js';
+import type { HydratorDeps, HydratorItem, HydratorPane } from './hydrator.js';
 
 // ── Recording exec seam ───────────────────────────────────────────────
 
@@ -103,6 +103,11 @@ export function makeWorstCasePanes(count = 60): HydratorPane[] {
 /**
  * Worst-case in-progress volume: `count` (default 25) pane-less candidates,
  * all at `plan_complete` so every one is eligible for demotion.
+ *
+ * Each item carries past-the-grace-window recency (parent
+ * WL-0MWH56SWX004HSKQ AC5) so "today's rule" applies deterministically — a
+ * claim age well past `HYDRATOR_CLAIM_GRACE_MS` (120 s) under any real
+ * clock. Timestamp-less fixtures would be kept as fresh claims (fail-open).
  */
 export function makeWorstCaseItems(count = 25): HydratorItem[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -110,5 +115,105 @@ export function makeWorstCaseItems(count = 25): HydratorItem[] {
     title: `Stuck item ${i}`,
     status: 'in-progress',
     stage: 'plan_complete',
+    updatedAt: '2020-01-01T00:00:00.000Z',
+    activityAt: '2020-01-01T00:00:00.000Z',
   }));
+}
+
+// ── Cross-workspace dispatch placement (WL-0MWHBSQUU009LKML) ──────────
+//
+// Reproduces the 2026-11-15 01:11 release: the plugin reports its own
+// workspace (`HERDR_WORKSPACE_ID` → `w5M` in ContextHub) while the downtime
+// fallback placement puts the dispatch pane in the **Dispatcher** workspace
+// (`w6B`). A pane read scoped to the plugin workspace cannot see it, so
+// `hasActivePane` is deterministically false and the claim is released
+// seconds after spawn (parent WL-0MWH56SWX004HSKQ, root cause 1).
+//
+// The fixture builds both workspaces' panes plus the two read shapes the
+// hydrator must distinguish:
+//   • `listActivePanes(workspaceId)` — `herdr pane list --workspace <id>`
+//     (the workspace-SCOPED display read, unchanged by the fix),
+//   • `listAllActivePanes()` / `listActivePanes()` (no workspace) — the
+//     workspace-AGNOSTIC demotion-evidence read the fix adds (parent AC1).
+
+/** Plugin (`HERDR_WORKSPACE_ID`) workspace of the reported release. */
+export const CROSS_WORKSPACE_PLUGIN_WORKSPACE = 'w5M';
+/** Dispatcher workspace the fallback placement puts dispatch panes in. */
+export const CROSS_WORKSPACE_DISPATCHER_WORKSPACE = 'w6B';
+
+/** Where the item's dispatch pane lives (`none` = pane-less everywhere). */
+export type CrossWorkspacePanePlacement = 'dispatcher' | 'plugin' | 'none';
+
+export interface CrossWorkspacePaneSpec {
+  /** Workspace holding the item's dispatch pane; defaults to `dispatcher`
+   *  (the bug: visible only to a workspace-agnostic read). */
+  paneIn?: CrossWorkspacePanePlacement;
+  /** Pane title for the dispatch pane; defaults to a dispatch-shaped title. */
+  label?: string;
+  /** Plugin (hydrator) workspace; defaults to {@link CROSS_WORKSPACE_PLUGIN_WORKSPACE}. */
+  pluginWorkspaceId?: string;
+  /** Dispatcher workspace; defaults to {@link CROSS_WORKSPACE_DISPATCHER_WORKSPACE}. */
+  dispatcherWorkspaceId?: string;
+}
+
+export interface CrossWorkspacePaneFixture {
+  pluginWorkspaceId: string;
+  dispatcherWorkspaceId: string;
+  /** Every pane on the host, across both workspaces. */
+  panes: HydratorPane[];
+  /**
+   * `herdr pane list [--workspace <id>]` fake: scoped to `workspaceId` when
+   * given, every pane when omitted (the wider read's other permitted shape).
+   */
+  listActivePanes: HydratorDeps['listActivePanes'];
+  /** Workspace-agnostic pane read, as its own seam. */
+  listAllActivePanes: () => Promise<HydratorPane[]>;
+}
+
+/**
+ * Build the reported cross-workspace pane layout for `itemId`.
+ *
+ * Always includes the plugin's own (non-item) worklist pane, so a scoped read
+ * is non-empty and still misses the dispatch pane — the discriminator is the
+ * workspace, never the pane count.
+ */
+export function makeCrossWorkspacePanes(
+  itemId: string,
+  spec: CrossWorkspacePaneSpec = {},
+): CrossWorkspacePaneFixture {
+  const pluginWorkspaceId = spec.pluginWorkspaceId ?? CROSS_WORKSPACE_PLUGIN_WORKSPACE;
+  const dispatcherWorkspaceId =
+    spec.dispatcherWorkspaceId ?? CROSS_WORKSPACE_DISPATCHER_WORKSPACE;
+  const paneIn = spec.paneIn ?? 'dispatcher';
+  const label = spec.label ?? `Downtime triggered plan finish moves the pane - ${itemId}`;
+
+  const panes: HydratorPane[] = [
+    {
+      pane_id: `${pluginWorkspaceId}:p1`,
+      label: 'Work Items',
+      workspace_id: pluginWorkspaceId,
+    },
+  ];
+  if (paneIn !== 'none') {
+    const workspaceId = paneIn === 'dispatcher' ? dispatcherWorkspaceId : pluginWorkspaceId;
+    panes.push({
+      pane_id: `${workspaceId}:p3`,
+      // Pane-title existence is the only signal: `agent_status` is carried
+      // but must never decide the outcome.
+      label,
+      workspace_id: workspaceId,
+      agent_status: 'working',
+    });
+  }
+
+  return {
+    pluginWorkspaceId,
+    dispatcherWorkspaceId,
+    panes,
+    listActivePanes: async (workspaceId?: string) =>
+      typeof workspaceId === 'string' && workspaceId.length > 0
+        ? panes.filter((pane) => pane.workspace_id === workspaceId)
+        : [...panes],
+    listAllActivePanes: async () => [...panes],
+  };
 }

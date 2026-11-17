@@ -97,6 +97,21 @@ export interface LastExportTimestamps {
 const SCHEMA_VERSION = 9;
 
 /**
+ * Tables the current code queries without a guard. A store whose `schemaVersion`
+ * is current but which is missing one of these is not fully bootstrapped (e.g. a
+ * legacy store that `wl doctor upgrade` migrated without the base schema), so it
+ * must take the slow path and have the table created (WL-0MVWLBZG4003A803).
+ */
+const REQUIRED_TABLES = Object.freeze([
+  'metadata',
+  'workitems',
+  'comments',
+  'dependency_edges',
+  'audit_results',
+  'last_export_timestamps',
+] as const);
+
+/**
  * A column required by the current code that may be absent from databases
  * created by an older release. `CREATE TABLE IF NOT EXISTS` never alters an
  * existing table, so a column added to a CREATE statement in a later release
@@ -262,7 +277,11 @@ export class SqlitePersistentStore {
   private verbose: boolean;
   /** True when this handle was opened with SQLite's READONLY flag (F6). */
   private _readOnly: boolean = false;
+  /** True when this open skipped the schema/migration bootstrap (see the getter). */
+  private _schemaBootstrapSkipped: boolean = false;
   private _ftsAvailable: boolean = false;
+  /** Result of the single fast-path state query (see {@link readBootstrapState}). */
+  private _bootstrapState: { skipDdl: boolean; ftsAvailable: boolean } | null = null;
   private _listPendingMigrations?: (dbPath: string) => MigrationInfo[];
 
   // ── In-memory cache state (Phase 5) ──────────────────────────────────
@@ -328,7 +347,9 @@ export class SqlitePersistentStore {
     // write. It is only usable against an already-initialised store (a
     // `schemaVersion` metadata row exists); otherwise the DDL below throws and
     // the constructor rejects, so callers fail open.
-    const skipDdl = readOnly && this.isSchemaInitialised();
+    const skipDdl = readOnly ? this.isSchemaInitialised() : this.readBootstrapState().skipDdl;
+    const bootstrapState = readOnly ? null : this._bootstrapState;
+    this._schemaBootstrapSkipped = skipDdl;
 
     if (!skipDdl) {
       // Initialize schema
@@ -340,10 +361,18 @@ export class SqlitePersistentStore {
     }
 
     // Initialize FTS5 index (best-effort; falls back to app-level search if
-    // unavailable). An already-initialised read-only store detects the
-    // existing `worklog_fts` table instead of the FTS probe's create/drop,
-    // which would be a schema write on the read-only path.
-    this._ftsAvailable = skipDdl ? this.detectFtsAvailable() : this.initializeFts();
+    // unavailable). On the write fast path the bootstrap-state query already
+    // reported whether `worklog_fts` exists, so no extra probe is needed; if
+    // the table is genuinely absent (e.g. FTS5 was unavailable when the store
+    // was created) the full create still runs, so a later-available FTS5 is
+    // picked up. A read-only handle never writes.
+    if (!skipDdl) {
+      this._ftsAvailable = this.initializeFts();
+    } else if (bootstrapState) {
+      this._ftsAvailable = bootstrapState.ftsAvailable || this.initializeFts();
+    } else {
+      this._ftsAvailable = this.detectFtsAvailable();
+    }
   }
 
   /**
@@ -361,6 +390,15 @@ export class SqlitePersistentStore {
   }
 
   /**
+   * Whether this open skipped the schema/migration bootstrap because the store
+   * was already fully migrated (WL-0MVWLBZG4003A803). Exposed for tests and
+   * diagnostics; read-only handles also report `true` when they skip DDL.
+   */
+  get schemaBootstrapSkipped(): boolean {
+    return this._schemaBootstrapSkipped;
+  }
+
+  /**
    * True when the store has already been initialised: a `schemaVersion`
    * metadata row exists. `initializeSchema` writes that row, so its presence
    * implies every table/index the current code queries exists. A missing
@@ -372,6 +410,70 @@ export class SqlitePersistentStore {
     } catch (_err) {
       return false;
     }
+  }
+
+  /**
+   * True when the store is fully bootstrapped at the current schema version:
+   * `schemaVersion` equals {@link SCHEMA_VERSION}, every {@link REQUIRED_TABLES}
+   * table exists, and every additive column the current code requires is
+   * present — plus whether the FTS index table already exists. This is the
+   * precondition for skipping the DDL bootstrap entirely (WL-0MVWLBZG4003A803).
+   *
+   * The extra table/column checks are deliberate: `schemaVersion` alone cannot
+   * gate safely. The additive columns (`audit_results.fingerprint`,
+   * `workitems.activityAt`, `workitems.auditWaiver`) were added *within* the
+   * schema version, and a legacy store can be migrated to the current version
+   * while still missing base tables (the previous unconditional
+   * `CREATE TABLE IF NOT EXISTS` self-healed that). Checking them is one
+   * `sqlite_master` read plus a handful of read-only `PRAGMA table_info` probes
+   * (no DDL); anything missing falls through to the slow path, which creates or
+   * repairs it exactly as before.
+   *
+   * A missing `metadata` table (a brand-new or corrupt file) makes the query
+   * fail, which reads as "not current" and runs the slow path unchanged.
+   */
+  private readBootstrapState(): { skipDdl: boolean; ftsAvailable: boolean } {
+    try {
+      const lookedUpTables: readonly string[] = [...REQUIRED_TABLES, 'worklog_fts'];
+      const rows = this.db
+        .prepare(
+          `SELECT 'schemaVersion' AS kind, value AS value FROM metadata WHERE key = 'schemaVersion'
+           UNION ALL
+           SELECT 'table' AS kind, name AS value FROM sqlite_master
+            WHERE type = 'table' AND name IN (${lookedUpTables.map(() => '?').join(', ')})`,
+        )
+        .all(...lookedUpTables) as Array<{ kind: string; value: string }>;
+      let schemaVersion: string | null = null;
+      const presentTables = new Set<string>();
+      for (const row of rows) {
+        if (row.kind === 'schemaVersion') schemaVersion = row.value;
+        else presentTables.add(row.value);
+      }
+      const current =
+        schemaVersion !== null &&
+        parseInt(schemaVersion, 10) === SCHEMA_VERSION &&
+        REQUIRED_TABLES.every((table) => presentTables.has(table)) &&
+        this.findMissingRequiredColumns().length === 0;
+      this._bootstrapState = { skipDdl: current, ftsAvailable: presentTables.has('worklog_fts') };
+      return this._bootstrapState;
+    } catch (_err) {
+      this._bootstrapState = { skipDdl: false, ftsAvailable: false };
+      return this._bootstrapState;
+    }
+  }
+
+  /**
+   * The {@link REQUIRED_COLUMNS} entries absent from this store. Read-only
+   * (one `PRAGMA table_info` per table), shared by the fast-path gate and
+   * {@link repairRequiredColumns} so the check and the repair cannot drift.
+   */
+  private findMissingRequiredColumns(): RequiredColumn[] {
+    const missing: RequiredColumn[] = [];
+    for (const req of REQUIRED_COLUMNS) {
+      const cols = this.db.prepare(`PRAGMA table_info('${req.table}')`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => String(c.name) === req.column)) missing.push(req);
+    }
+    return missing;
   }
 
   /**
@@ -603,9 +705,7 @@ export class SqlitePersistentStore {
    */
   private repairRequiredColumns(): RequiredColumn[] {
     const applied: RequiredColumn[] = [];
-    for (const req of REQUIRED_COLUMNS) {
-      const cols = this.db.prepare(`PRAGMA table_info('${req.table}')`).all() as Array<{ name: string }>;
-      if (cols.some((c) => String(c.name) === req.column)) continue;
+    for (const req of this.findMissingRequiredColumns()) {
       this.db.exec(req.ddl);
       if (req.sentinel) {
         this.setMetadata(req.sentinel, '1');
@@ -1693,15 +1793,11 @@ export class SqlitePersistentStore {
    */
   private initializeFts(): boolean {
     try {
-      // Probe FTS5 availability by attempting to compile a no-op statement
-      this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(x)`);
-      this.db.exec(`DROP TABLE IF EXISTS _fts5_probe`);
-    } catch (_err) {
-      // FTS5 extension is not compiled in
-      return false;
-    }
-
-    try {
+      // Creating the table directly is the availability check: a SQLite build
+      // without the FTS5 module throws "no such module: fts5", which is caught
+      // below. (This replaces the former per-open `_fts5_probe` create+drop,
+      // which cost a virtual-table round trip on every first open —
+      // WL-0MVWLBZG4003A803.)
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS worklog_fts USING fts5(
           title,

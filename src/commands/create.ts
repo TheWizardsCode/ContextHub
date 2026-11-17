@@ -4,7 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { CreateOptions } from '../cli-types.js';
-import type { WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent } from '../types.js';
+import type { WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent, WorkItem } from '../types.js';
 import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { promises as fs } from 'fs';
@@ -282,6 +282,20 @@ export default function register(ctx: PluginContext): void {
         }
       }
 
+      // A critical child must never be buried under a non-critical ancestor:
+      // promote the whole ancestor chain to `critical`, transitively to the
+      // root (parent WL-0MWDD2JE6006CL7I, operator answer Q1-B). The shared
+      // cascade skips ancestors already at `critical` without stopping the
+      // walk. Best-effort: a promotion failure must not abort the create.
+      let promotedAncestors: WorkItem[] = [];
+      if (parentId && item.priority === 'critical') {
+        try {
+          promotedAncestors = db.cascadePriorityPromote(item.id);
+        } catch (err) {
+          console.error(`Warning: failed to promote ancestors of ${item.id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       const refreshed = db.get(item.id) || item;
 
       // Include audit data in JSON output when audit was provided
@@ -297,12 +311,16 @@ export default function register(ctx: PluginContext): void {
           id: item.id,
           success: true,
           workItem: refreshed,
+          ...(promotedAncestors.length > 0 ? { promotedAncestors } : {}),
           ...(demotedParent ? { demotedParent } : {}),
         });
       } else {
         const format = resolveFormat(program);
         console.log(`ID: ${refreshed.id}`);
         console.log(humanFormatWorkItem(refreshed, db, format));
+        if (promotedAncestors.length > 0) {
+          console.log(`[Promoted ancestors to critical: ${promotedAncestors.map(a => a.id).join(', ')}]`);
+        }
         if (demotedParent) {
           console.log(`[Parent ${demotedParent.parent.id} demoted from ${demotedParent.from.status}/${demotedParent.from.stage} to ${demotedParent.to.status}/${demotedParent.to.stage}]`);
         }

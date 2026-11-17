@@ -29,10 +29,11 @@
  * classified BEFORE the general non-2xx case, so "the sibling proxy item has
  * not shipped" is distinguishable from every other unusable exchange (AC3).
  *
- * The proxy endpoint is still provisional (sibling llm item
- * LP-0MW95FYMH006XYNK; probed 2026-11-10 — `/llama/local/audit/status` answers
- * `404` on the live proxy); nothing calls this client on the dispatch path yet
- * — the audit gate (WL-0MWAMSDNW000SL0E) is its first consumer.
+ * The proxy endpoint is the SHIPPED `GET /llama/local/audit/availability`
+ * (LP-0MW95FYMH006XYNK), validated 2026-11-13; it is resolved per call via
+ * `resolveAuditAvailabilityPath()` so `HERDR_AUDIT_AVAILABILITY_PATH` can point
+ * herdr at a renamed endpoint without a rebuild. The audit gate
+ * (WL-0MWAMSDNW000SL0E) is its first consumer.
  *
  * Layering: imports `./downtime-worker.constants.js`,
  * `./downtime-worker.poller.js` (the shared poll timeout) and
@@ -44,7 +45,7 @@ import {
   parseAuditAvailabilityResponse,
   type AuditAvailability,
 } from './downtime-worker.audit-availability.contract.js';
-import { AUDIT_AVAILABILITY_PATH } from './downtime-worker.constants.js';
+import { resolveAuditAvailabilityPath } from './downtime-worker.constants.js';
 import { DEFAULT_DOWNTIME_POLL_TIMEOUT_MS } from './downtime-worker.poller.js';
 
 // ── Client surface (types) ────────────────────────────────────────────
@@ -91,7 +92,12 @@ export type AuditAvailabilityClient = () => Promise<AuditAvailabilityOutcome>;
 // ── Client ────────────────────────────────────────────────────────────
 
 /**
- * Create the client for `GET {proxyUrl}{AUDIT_AVAILABILITY_PATH}`.
+ * Create the client for `GET {proxyUrl}{resolveAuditAvailabilityPath()}`.
+ *
+ * The path is resolved PER CALL (default `AUDIT_AVAILABILITY_PATH`, the
+ * shipped `/llama/local/audit/availability`), so the
+ * `HERDR_AUDIT_AVAILABILITY_PATH` override takes effect without recreating the
+ * client.
  *
  * The URL is normalised with the same trailing-slash convention as
  * `createLocalReserver` (every trailing `/` is stripped before the path is
@@ -109,8 +115,9 @@ export function createAuditAvailabilityClient(
   fetcher: AuditAvailabilityFetcher = globalThis.fetch as unknown as AuditAvailabilityFetcher,
   timeoutMs: number = DEFAULT_DOWNTIME_POLL_TIMEOUT_MS,
 ): AuditAvailabilityClient {
-  const url = `${proxyUrl.replace(/\/+$/, '')}${AUDIT_AVAILABILITY_PATH}`;
+  const base = proxyUrl.replace(/\/+$/, '');
   return async () => {
+    const url = `${base}${resolveAuditAvailabilityPath()}`;
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {

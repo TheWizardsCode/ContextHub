@@ -115,6 +115,12 @@ export interface OrchestratorContext {
   activeAuditBatch: ActiveAuditBatch | null;
   lastPaneMonitorAt: number;
   lastPaneCloseReaperAt: number;
+  /**
+   * Host-budget ledger reconciliation cadence gate
+   * (WL-0MWFJDEY5002FBRE): timestamp of the last reconcile pass. 0 forces a
+   * pass on the first tick.
+   */
+  lastBudgetReconcileAt: number;
   cooldownUntil: number | null;
   errorStrikes: number;
   lastDecisionReason: string | null;
@@ -706,6 +712,26 @@ export async function performDispatch(
           // outcome — one set of numbers for every surface. Absent on every
           // non-budget outcome, so existing entry shapes are unchanged.
           ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
+          // Failing exchange on a fail-closed audit-budget refusal
+          // (`audit-budget-unknown`): the decision entry names the broken
+          // proxy contract (`http-404` / `timeout` / `network` / `bad-body` /
+          // `seam-absent`) without reading code (WL-0MWDDHVF2004PTYX AC3).
+          // Absent on every other outcome, so existing entry shapes are
+          // unchanged.
+          ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+          // Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM AC4): the
+          // recorded `HERDR_RESOLVED_CWD` mismatch rides the decision entry
+          // (expected vs actual root, pane/workspace ids) when placement
+          // failed closed after a near-miss — a fallback failure never hides
+          // the primary-path diagnosis. Absent on every other outcome.
+          ...(outcome.projectWorkspaceMismatch !== undefined
+            ? { projectWorkspaceMismatch: outcome.projectWorkspaceMismatch }
+            : {}),
+          // Audit-lease cooldown (WL-0MWFJH3NW006F5GN AC2): the proxy's
+          // bounded `retry_after_s` on a 429 audit-lease refusal — the
+          // deferral advice an operator reads to know when the tier re-checks.
+          // Absent on every other outcome.
+          ...(outcome.retryAfterS !== undefined ? { retryAfterS: outcome.retryAfterS } : {}),
           // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
           // slice C2): a refusal carries its reason as the decision reason
           // (distinct header token) plus `admit: false`, `retryAfterS` and

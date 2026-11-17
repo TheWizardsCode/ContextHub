@@ -605,6 +605,8 @@ describe('reserve / release', () => {
       expect(result.entry).toEqual({
         kind: 'implement',
         itemId: 'WL-A',
+        // Mints the release identity for this attempt (WL-0MWFJD5T4003OM91).
+        attemptId: expect.any(String),
         instanceId: 'instance-a',
         root: '/repo/a',
         startedAt: iso,
@@ -695,18 +697,36 @@ describe('reserve / release', () => {
     });
   });
 
-  it('releases by itemId, is idempotent, and never creates a missing ledger', async () => {
+  it('releases by identity, is idempotent, and never creates a missing ledger', async () => {
     await withMachineDir((dir) => {
       expect(existsSync(budgetLedgerPath(dir))).toBe(false);
-      expect(release('WL-A')).toEqual({ ok: true, removed: false });
+      expect(release({ itemId: 'WL-A', kind: 'implement', paneId: 'p:1' })).toEqual({
+        ok: true,
+        removed: false,
+        refused: false,
+      });
       expect(existsSync(budgetLedgerPath(dir))).toBe(false);
 
       reserve(
-        { kind: 'implement', itemId: 'WL-A', instanceId: 'i', root: '/r' },
+        {
+          kind: 'implement',
+          itemId: 'WL-A',
+          instanceId: 'i',
+          root: '/r',
+          paneId: 'p:1',
+        },
         { now: NOW },
       );
-      expect(release('WL-A')).toEqual({ ok: true, removed: true });
-      expect(release('WL-A')).toEqual({ ok: true, removed: false });
+      expect(release({ itemId: 'WL-A', kind: 'implement', paneId: 'p:1' })).toEqual({
+        ok: true,
+        removed: true,
+        refused: false,
+      });
+      expect(release({ itemId: 'WL-A', kind: 'implement', paneId: 'p:1' })).toEqual({
+        ok: true,
+        removed: false,
+        refused: false,
+      });
       const read = readBudget();
       expect(read.ok).toBe(true);
       if (!read.ok) return;
@@ -726,7 +746,11 @@ describe('reserve / release', () => {
         root: '/r',
       });
       expect(reserved).toEqual({ ok: false, unknown: true, reason: 'corrupt' });
-      expect(release('WL-A')).toEqual({ ok: false, unknown: true, reason: 'corrupt' });
+      expect(release({ itemId: 'WL-A', kind: 'implement', paneId: 'p:1' })).toEqual({
+        ok: false,
+        unknown: true,
+        reason: 'corrupt',
+      });
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
     });
   });
@@ -956,7 +980,7 @@ describe('reap and liveCount', () => {
       liveCount('implement', [], { dir: null, now: NOW }),
       reap([], { dir: null, now: NOW }),
       reserve({ kind: 'implement', itemId: 'WL-A', instanceId: 'i', root: '/r' }, { dir: null }),
-      release('WL-A', { dir: null }),
+      release({ itemId: 'WL-A', kind: 'implement', paneId: 'p:1' }, { dir: null }),
     ]) {
       expect(result).toEqual({ ok: false, unknown: false, reason: 'no-coordination-dir' });
     }

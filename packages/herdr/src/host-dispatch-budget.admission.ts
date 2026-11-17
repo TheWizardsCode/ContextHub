@@ -7,21 +7,33 @@
  * `host-dispatch-budget.ts`) plus the live pane list into exactly ONE
  * admission decision for a dispatch — admit (and reserve), refuse because the
  * tier is at/over its cap, or refuse because the ledger cannot be trusted
- * (fail closed + repair from live state). The ledger contract itself
+ * (fail closed; repair is an explicit operator action, never a read side
+ * effect). The ledger contract itself
  * (read/reserve/release/reap, configuration, liveness table) lives in
  * `host-dispatch-budget.ts` and is not restated here.
  *
  * ## Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, parent
- * ## WL-0MW95GBEG005ERHS)
+ * ## WL-0MW95GBEG005ERHS; lease gate WL-0MWFJH3NW006F5GN)
  *
- * The **audit** tier's capacity decision is the proxy's audit-availability
- * verdict (the shared local resource), NOT the per-host `budget.json`
- * `maxAudit` cap. `admitHostDispatch` maps the proxy read through
- * {@link decideAuditAvailability} — the same helper the dispatcher's
- * `getActiveAudit` pre-check uses — so the pre-check and admission can never
- * disagree and the refusal tokens are the proxy's (`audit-budget-saturated` /
- * `audit-budget-unknown`). A proxy read that cannot be trusted fails CLOSED as
- * `audit-budget-unknown` with the failing exchange recorded.
+ * The **audit** tier's capacity decision is the proxy's shared-local-resource
+ * arbitration, NOT the per-host `budget.json` `maxAudit` cap. Since
+ * WL-0MWFJH3NW006F5GN admission is TWO steps, never one:
+ *
+ *  1. the availability read is the PRE-CHECK ({@link decideAuditAvailability}
+ *     — the same helper the dispatcher's `getActiveAudit` pre-check uses, so
+ *     the pre-check and admission can never disagree). Its result alone can
+ *     never admit: it only gates HOW EARLY an acquire is attempted and stays
+ *     the divergence/evidence signal. A proxy read that cannot be trusted
+ *     fails CLOSED as `audit-budget-unknown` with the failing exchange
+ *     recorded;
+ *  2. the proxy audit-LEASE acquire ({@link decideAuditLeaseAdmission}) is
+ *     THE admission decision: dispatch proceeds only on `200`, a `429` maps
+ *     to `audit-budget-saturated` with the proxy's `retry_after_s` honoured
+ *     as the cooldown, a `503` maps to `audit-budget-unavailable` (proxy
+ *     registry fault, distinct from the local unknown token) and a transport
+ *     failure still fails closed as `audit-budget-unknown`. The caller
+ *     acquires only when the pre-check admits, so a refused read never
+ *     churns or leaks a lease.
  *
  * The local `dispatch-budget.json` ledger is **observability only** for the
  * audit tier: an admitted audit is still reserved (and confirmed/released on
@@ -60,9 +72,14 @@
  *    degrades exactly as before the budget existed (parent AC11).
  *  - **Ledger exists but cannot be trusted** (`unknown: true` — corrupt bytes,
  *    an invalid document, an unreadable file): REFUSE with
- *    `host-budget-unknown`, and rewrite the ledger from the live pane list so
- *    the NEXT tick can make a real decision (AC6). A dropped/ignored unknown
- *    read would under-count and admit work the operator capped.
+ *    `host-budget-corrupt` and leave the ledger BYTE-IDENTICAL
+ *    (WL-0MWFJD8ZO000J1R8). An admission read never rewrites the document: the
+ *    old automatic whole-ledger repair reconstructed entries only from panes
+ *    whose title started with `Downtime`, so it silently dropped decorated
+ *    (`⚠️`/`🚫`) and `Manually triggered` panes — 6 of 10 live implements on
+ *    2026-11-13. Recovery is the explicit, complete, operator-initiated
+ *    `host-dispatch-budget.repair.ts`. A dropped/ignored unknown read would
+ *    still under-count, hence the refusal.
  *  - **Lock contention / I/O failure while reserving**: REFUSE with
  *    `host-budget-unknown`. The reservation could not be recorded, so the
  *    dispatcher cannot prove the host is within budget — the fail-closed arm.
@@ -92,7 +109,6 @@ import {
   freshCount,
   HERDR_AUDIT_LOCAL_BUDGET_ENV,
   isLegacyAuditBudgetEnabled,
-  liveCount,
   readBudgetConfig,
   release,
   replaceBudget,
@@ -101,18 +117,22 @@ import {
   type HostBudgetKind,
   type HostBudgetLivePane,
   type HostBudgetOptions,
+  type HostBudgetReleaseInput,
 } from './host-dispatch-budget.js';
-import { DOWNTIME_PANE_LABEL_PREFIX, paneLabelItemId } from './downtime-worker.pane.js';
+import { readHostBudgetLiveWork } from './host-dispatch-budget.counting.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
+  HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_IMPLEMENT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
 } from './downtime-log.js';
 import {
   AUDIT_BUDGET_SATURATED_REASON,
   AUDIT_BUDGET_UNKNOWN_REASON,
+  AUDIT_BUDGET_UNAVAILABLE_REASON,
 } from './downtime-worker.audit-availability.contract.js';
 import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js';
 import {
   AUDIT_BUDGET_DIVERGENCE_REASON,
   AUDIT_BUDGET_LEGACY_REASON,
@@ -144,8 +164,17 @@ export const HOST_BUDGET_AUDIT_REFUSAL = HOST_BUDGET_AUDIT_REASON;
  */
 export const HOST_BUDGET_AUDIT_SATURATED_REFUSAL = 'audit-host-saturated';
 
-/** Refusal reason: the ledger could not be trusted (fail closed + repair). */
+/** Refusal reason: the ledger could not be trusted (lock/I-O failure). */
 export const HOST_BUDGET_UNKNOWN_REFUSAL = HOST_BUDGET_UNKNOWN_REASON;
+
+/**
+ * Refusal reason: the ledger EXISTS but cannot be trusted (corrupt/unreadable
+ * bytes). Distinct from {@link HOST_BUDGET_UNKNOWN_REFUSAL} so the decision log
+ * names the damage rather than a generic unknown, and so an operator knows a
+ * repair (`host-dispatch-budget.repair.ts`) is what is needed
+ * (WL-0MWFJD8ZO000J1R8).
+ */
+export const HOST_BUDGET_CORRUPT_REFUSAL = HOST_BUDGET_CORRUPT_REASON;
 
 /** The refusal tokens this module can return. */
 export type HostBudgetRefusalReason =
@@ -153,7 +182,9 @@ export type HostBudgetRefusalReason =
   | typeof HOST_BUDGET_AUDIT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL
+  | typeof HOST_BUDGET_CORRUPT_REFUSAL
   | typeof AUDIT_BUDGET_SATURATED_REASON
+  | typeof AUDIT_BUDGET_UNAVAILABLE_REASON
   | typeof AUDIT_BUDGET_UNKNOWN_REASON;
 
 /** The refusal tokens the AUDIT tier can report (never `host-budget-implement`). */
@@ -161,6 +192,7 @@ export type HostBudgetAuditRefusalReason =
   | typeof HOST_BUDGET_AUDIT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL
+  | typeof HOST_BUDGET_CORRUPT_REFUSAL
   | typeof AUDIT_BUDGET_SATURATED_REASON
   | typeof AUDIT_BUDGET_UNKNOWN_REASON;
 
@@ -209,6 +241,19 @@ export interface HostBudgetAdmissionOptions extends HostBudgetOptions {
    */
   auditAvailability?: AuditAvailabilityOutcome;
   /**
+   * The proxy's audit-lease ACQUIRE outcome for THIS dispatch attempt
+   * (WL-0MWFJH3NW006F5GN). Acquired by the caller ONLY when the availability
+   * pre-check admitted (see {@link decideAuditAvailability}) and the legacy
+   * flag is off, so the admission sees the lease outcome exactly when it is
+   * the deciding gate — the availability read alone can never admit.
+   *
+   * `undefined` on the proxy path means the lease seam was not provided and
+   * ADMISSION FAILS CLOSED as `audit-budget-unknown` with
+   * `detail: 'lease-seam-absent'` (availability-only admission is the exact
+   * race this item removes).
+   */
+  auditLease?: AuditLeaseAcquireOutcome;
+  /**
    * Audit-budget decision-log sink (WL-0MWAMSK9H005BOHD). Invoked at most once
    * per admission: a `divergence` event when the proxy and the local ledger
    * disagree about audit capacity, and a `legacy` event when the one-release
@@ -248,88 +293,60 @@ export interface HostBudgetAdmission {
   max: number;
   /** Present only on a refusal. */
   reason?: HostBudgetRefusalReason;
-  /** True when an unreadable ledger was rewritten from live state (AC6). */
+  /**
+   * The failing exchange on a fail-closed AUDIT refusal
+   * (`audit-budget-unknown`): `http-404`, `timeout`, `network`,
+   * `http-<status>`, `bad-body` or `seam-absent` — verbatim from
+   * {@link AuditAvailabilityDecision.detail}, so the decision entry can name
+   * the broken proxy contract (WL-0MWDDHVF2004PTYX AC3). Absent on an
+   * implement refusal and on a `saturated` (proxy answered) audit refusal.
+   */
+  detail?: string;
+  /**
+   * Always absent from this version: an admission read never rewrites the
+   * ledger (WL-0MWFJD8ZO000J1R8). Kept on the wire so an older consumer's
+   * optional check keeps compiling.
+   */
   repaired?: boolean;
+  /**
+   * The attempt token of the reservation this admission created
+   * (WL-0MWFJD5T4003OM91). Every abort path of the dispatch attempt releases
+   * with THIS token, so it can only ever remove its own entry — never one
+   * belonging to an earlier, still-running dispatch of the same item.
+   */
+  attemptId?: string;
+  /**
+   * The PROXY AUDIT LEASE this admission holds (WL-0MWFJH3NW006F5GN AC1):
+   * present on an AUDIT admission whose acquire answered `200`. The caller
+   * releases with `auditLeaseSessionId(itemId)` on every terminal path (the
+   * id is derived from the item, so it never needs threading).
+   */
+  lease?: { sessionId: string; expiresAt?: number };
+  /**
+   * The proxy's bounded `retry_after_s` cooldown on a `429` lease refusal
+   * (WL-0MWFJH3NW006F5GN AC2): carried on the `audit-budget-saturated`
+   * refusal so the dispatcher honours the proxy's advice instead of
+   * re-attempting immediately. Absent when the proxy did not serve one or the
+   * refusal was not a 429.
+   */
+  retryAfterS?: number;
 }
 
 function refuseReason(kind: HostBudgetKind): HostBudgetRefusalReason {
   return kind === 'audit' ? HOST_BUDGET_AUDIT_REFUSAL : HOST_BUDGET_IMPLEMENT_REFUSAL;
 }
 
-function kindOf(pane: HostBudgetLivePane): HostBudgetKind {
-  const title = pane.title;
-  if (typeof title === 'string') {
-    const match = /^Downtime (?:triggered )?(implement|audit)\b/.exec(title);
-    if (match !== null) return match[1] as HostBudgetKind;
-  }
-  // Conservative default: a live downtime pane whose kind cannot be read is
-  // counted against the implement tier. Over-counting refuses a dispatch
-  // (fail-closed); guessing `audit` could over-admit implement work.
-  return 'implement';
-}
-
-function entriesFromLivePanes(
-  livePanes: readonly HostBudgetLivePane[],
-  input: HostBudgetAdmissionInput,
-  now: number,
-): HostBudgetEntry[] {
-  const at = new Date(now).toISOString();
-  const entries: HostBudgetEntry[] = [];
-  const seen = new Set<string>();
-  for (const pane of livePanes) {
-    // Only dispatcher-created panes can be reconstructed: their title carries
-    // the downtime prefix and the work-item id suffix. Any other live pane is
-    // not evidence of a dispatch (and must never be counted as one).
-    if (typeof pane.title !== 'string' || !pane.title.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) {
-      continue;
-    }
-    const itemId = paneLabelItemId(pane.title);
-    if (itemId === null || seen.has(itemId)) continue;
-    seen.add(itemId);
-    entries.push({
-      kind: kindOf(pane),
-      itemId,
-      instanceId: input.instanceId,
-      paneId: pane.paneId,
-      root: input.root,
-      startedAt: at,
-      heartbeatAt: at,
-    });
-  }
-  return entries;
-}
-
-/**
- * Rewrite an unreadable ledger from the live pane list (AC6).
- *
- * Only live downtime panes whose label carries a work-item id can be
- * reconstructed (`paneLabelItemId` — the dispatcher's own pane-title
- * convention); a pane with no id is skipped because there is no entry key to
- * write. Best-effort: returns false when the write fails, which does NOT
- * change the refusal (the tick is skipped either way).
- */
-export function repairLedgerFromLivePanes(
-  livePanes: readonly HostBudgetLivePane[],
-  input: HostBudgetAdmissionInput,
-  opts: HostBudgetOptions = {},
-): boolean {
-  const entries = entriesFromLivePanes(livePanes, input, opts.now ?? Date.now());
-  return replaceBudget(entries, opts).ok;
-}
-
 /**
  * Options for the audit tier's admission pre-check ({@link readAuditBudgetState}).
  *
- * `livePanes` is OPTIONAL and only consulted when the ledger cannot be read
- * (AC6): the dispatch loop calls this pre-check once per audit candidate, so an
- * eager pane-list subprocess would add a `herdr pane list` per candidate. Absent
- * panes means "cannot repair now" — the tick still fails closed, and the next
- * call that can supply panes repairs the ledger. Absence is exactly the
- * UNKNOWN pane state of WL-0MW9VQX5T001GCUP: an unknown read must never rewrite
- * a corrupt ledger as empty, so "no list ⇒ no repair" is the safe arm.
+ * `livePanes` is accepted for call-site compatibility but NO LONGER triggers a
+ * repair: an admission read never rewrites the ledger
+ * (WL-0MWFJD8ZO000J1R8). A damaged ledger fails closed with
+ * `host-budget-corrupt` and the operator runs the explicit repair in
+ * `host-dispatch-budget.repair.ts`.
  */
 export interface HostBudgetAuditStateOptions extends HostBudgetOptions {
-  /** Live pane list used ONLY to repair an unreadable ledger (AC6). */
+  /** Accepted but unused: admission never repairs (WL-0MWFJD8ZO000J1R8). */
   livePanes?: readonly HostBudgetLivePane[];
   /** Instance identity recorded on repaired entries (diagnostics only). */
   instanceId?: string;
@@ -400,6 +417,75 @@ export function decideAuditAvailability(
     return { active: true, reason: AUDIT_BUDGET_SATURATED_REASON, budget };
   }
   return { active: false, budget };
+}
+
+/**
+ * The audit tier's lease-map leading decision (WL-0MWFJH3NW006F5GN AC2).
+ *
+ * The SINGLE mapping from one proxy audit-lease ACQUIRE outcome to an
+ * admission answer — the step that makes the availability read a PRE-CHECK
+ * that can never admit on its own:
+ *
+ *  - `undefined` (no lease seam on the proxy path) ⇒ refuse
+ *    `audit-budget-unknown` with `detail: 'lease-seam-absent'`
+ *    (fail closed — availability-only admission is the race being removed);
+ *  - `ok` (200) ⇒ admit, carrying the held lease for the release discipline;
+ *  - `saturated` (429) ⇒ refuse `audit-budget-saturated` with the proxy's
+ *    bounded `retry_after_s` honoured as the cooldown;
+ *  - `unavailable` (503) ⇒ refuse `audit-budget-unavailable` (a proxy
+ *    registry fault, NOT a local unknown) and fall back per the documented
+ *    bounded wait — the next idle tick re-checks;
+ *  - `endpoint-absent` / `unreachable` / `unparsable` ⇒ refuse
+ *    `audit-budget-unknown` naming the failing exchange in `detail`
+ *    (fail closed).
+ */
+export function decideAuditLeaseAdmission(
+  lease: AuditLeaseAcquireOutcome | undefined,
+): AuditLeaseAdmissionDecision {
+  if (lease === undefined) {
+    return {
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'lease-seam-absent',
+    };
+  }
+  switch (lease.status) {
+    case 'ok':
+      return {
+        admitted: true,
+        lease: { sessionId: lease.lease.sessionId, ...(lease.lease.expiresAt !== undefined ? { expiresAt: lease.lease.expiresAt } : {}) },
+      };
+    case 'saturated':
+      return {
+        admitted: false,
+        reason: AUDIT_BUDGET_SATURATED_REASON,
+        ...(lease.retryAfterS !== undefined ? { retryAfterS: lease.retryAfterS } : {}),
+      };
+    case 'unavailable':
+      return { admitted: false, reason: AUDIT_BUDGET_UNAVAILABLE_REASON };
+    case 'endpoint-absent':
+    case 'unreachable':
+    case 'unparsable':
+      return {
+        admitted: false,
+        reason: AUDIT_BUDGET_UNKNOWN_REASON,
+        detail: lease.reason,
+      };
+  }
+}
+
+/**
+ * The audit-lease admission answer ({@link decideAuditLeaseAdmission}):
+ * `admitted: true` with the held {@link HostBudgetAdmission.lease} evidence;
+ * `admitted: false` with the shared refusal token, the proxy's `retry_after_s`
+ * cooldown (on a `saturated` refusal) and/or the failing exchange `detail`.
+ */
+export interface AuditLeaseAdmissionDecision {
+  admitted: boolean;
+  reason?: typeof AUDIT_BUDGET_SATURATED_REASON | typeof AUDIT_BUDGET_UNAVAILABLE_REASON | typeof AUDIT_BUDGET_UNKNOWN_REASON;
+  detail?: string;
+  retryAfterS?: number;
+  lease?: { sessionId: string; expiresAt?: number };
 }
 
 /**
@@ -478,8 +564,9 @@ function emitAuditBudgetEvent(
  *     (AC3 — a disabled tier is refused whatever the ledger holds);
  *  3. count fresh audit entries (no live-pane requirement, plus a non-stale
  *     legacy marker as one synthetic entry);
- *  4. unreadable ledger ⇒ repair from the live pane list and report
- *     `host-budget-unknown` (AC6 — fail closed, self-heal for the next tick);
+ *  4. unreadable ledger ⇒ report `host-budget-corrupt` (bytes untouched, no
+ *     repair — WL-0MWFJD8ZO000J1R8); a lock/I-O failure reports
+ *     `host-budget-unknown`;
  *  5. unresolvable coordination dir ⇒ not at cap: with no machine dir there is
  *     no ledger and no new failure mode (parent AC11);
  *  6. at/over cap ⇒ `audit-host-saturated` when `max === 1`, otherwise
@@ -507,26 +594,15 @@ export function readAuditBudgetState(
       // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
       return { atCap: false, live: 0, max };
     }
-    // Repair from observed live state only when the caller could supply a pane
-    // list; a caller that cannot (the per-candidate pre-check) still fails
-    // closed, and the next pane-carrying call self-heals the ledger.
-    const repaired =
-      opts.livePanes === undefined
-        ? false
-        : repairLedgerFromLivePanes(
-            opts.livePanes,
-            {
-              kind: 'audit',
-              // The synthetic entry key is never written by a repair:
-              // reconstructed entries take their own item ids from the pane
-              // labels.
-              itemId: '',
-              instanceId: opts.instanceId ?? `herdr:${process.pid}`,
-              root: opts.root ?? '',
-            },
-            ledgerOptions,
-          );
-    return { atCap: true, live: 0, max, reason: HOST_BUDGET_UNKNOWN_REFUSAL, repaired };
+    // NO repair (WL-0MWFJD8ZO000J1R8): an admission read never rewrites the
+    // ledger. A damaged document fails closed and is left byte-identical, and
+    // the refusal token names the corruption so the operator can act.
+    return {
+      atCap: true,
+      live: 0,
+      max,
+      reason: count.unknown ? HOST_BUDGET_CORRUPT_REFUSAL : HOST_BUDGET_UNKNOWN_REFUSAL,
+    };
   }
 
   if (count.count >= max) {
@@ -554,8 +630,8 @@ export function readAuditBudgetState(
 function reserveAuditForObservability(
   input: HostBudgetAdmissionInput,
   ledgerOptions: HostBudgetOptions,
-): void {
-  reserve(
+): string | undefined {
+  const reserved = reserve(
     {
       kind: 'audit',
       itemId: input.itemId,
@@ -565,6 +641,7 @@ function reserveAuditForObservability(
     },
     ledgerOptions,
   );
+  return reserved.ok ? reserved.entry.attemptId : undefined;
 }
 
 /**
@@ -572,10 +649,13 @@ function reserveAuditForObservability(
  *
  * Byte-for-byte the pre-proxy behaviour: {@link readAuditBudgetState} decides
  * from `budget.json` `maxAudit` + the local ledger, the refusal tokens are the
- * legacy ones, the ledger is repaired when unreadable, and the slot is
+ * legacy ones, an unreadable ledger fails closed without being rewritten, and
+ * the slot is
  * reserved only when the state admits. The proxy is never consulted, and a
  * reservation failure fails CLOSED exactly as before (the ledger could not
- * prove the host is within budget).
+ * prove the host is within budget). An unreadable ledger is NOT repaired here
+ * either (WL-0MWFJD8ZO000J1R8): the legacy path fails closed and reports the
+ * corruption.
  */
 function admitAuditLegacy(
   input: HostBudgetAdmissionInput,
@@ -618,17 +698,31 @@ function admitAuditLegacy(
       reason: HOST_BUDGET_UNKNOWN_REFUSAL,
     };
   }
-  return { admitted: true, live: state.live, max: state.max };
+  return {
+    admitted: true,
+    live: state.live,
+    max: state.max,
+    ...(reserved.entry.attemptId !== undefined ? { attemptId: reserved.entry.attemptId } : {}),
+  };
 }
 
 /**
  * The audit branch: proxy-derived by default, local behind the one-release
- * flag (WL-0MWAMSK9H005BOHD).
+ * flag (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN).
  *
- * The proxy verdict decides. The local ledger is read only to detect a
- * DIVERGENCE (and to reserve an observability entry after an admission); an
- * entry can never cause a refusal and a reservation failure never changes the
- * answer.
+ * The proxy verdict decides — TWO steps, never one (WL-0MWFJH3NW006F5GN):
+ *
+ *  1. the availability read is the PRE-CHECK ({@link decideAuditAvailability});
+ *     it gates HOW EARLY an acquire is attempted and stays the divergence
+ *     evidence, but its result alone can never admit;
+ *  2. the lease ACQUIRE outcome ({@link decideAuditLeaseAdmission}) is THE
+ *     admission decision: the dispatch proceeds only on `200`, and a `429` /
+ *     `503` / transport error maps to the shared refusal token with the
+ *     proxy's `retry_after_s` honoured.
+ *
+ * The local ledger is read only to detect a DIVERGENCE (and to reserve an
+ * observability entry after an admission); an entry can never cause a refusal
+ * and a reservation failure never changes the answer.
  */
 function admitAuditDispatch(
   input: HostBudgetAdmissionInput,
@@ -642,7 +736,8 @@ function admitAuditDispatch(
       message:
         `${HERDR_AUDIT_LOCAL_BUDGET_ENV}=1 — audit admission uses the per-host ` +
         'budget.json maxAudit cap and local ledger (one-release legacy path; ' +
-        'remove the flag to return to the proxy-managed budget)',
+        'remove the flag to return to the proxy-managed budget) — no proxy ' +
+        'read and no audit lease',
     });
     return admitAuditLegacy(input, opts);
   }
@@ -665,20 +760,44 @@ function admitAuditDispatch(
     });
   }
 
+  // Step 1 — the PRE-CHECK: an availability refusal stops the attempt before
+  // any lease churn; the caller only ever acquires when this admits, so the
+  // admission and the caller reach the same decision from the same state.
   if (decision.active) {
     return {
       admitted: false,
       live: decision.budget?.live ?? 0,
       max: decision.budget?.max ?? 0,
       reason: decision.reason ?? AUDIT_BUDGET_UNKNOWN_REASON,
+      // The failing exchange on a fail-closed read (`audit-budget-unknown`):
+      // carried so the terminal reason and the decision entry can name the
+      // broken proxy contract (WL-0MWDDHVF2004PTYX AC3).
+      ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
     };
   }
 
-  reserveAuditForObservability(input, ledgerOptions);
+  // Step 2 — the LEASE is the admission decision (WL-0MWFJH3NW006F5GN AC2):
+  // only a `200` admit; every refusal maps to the shared token and, on a
+  // `429`, carries the proxy's bounded `retry_after_s` as the cooldown.
+  const leaseDecision = decideAuditLeaseAdmission(opts.auditLease);
+  if (!leaseDecision.admitted) {
+    return {
+      admitted: false,
+      live: decision.budget?.live ?? 0,
+      max: decision.budget?.max ?? 0,
+      reason: leaseDecision.reason ?? AUDIT_BUDGET_UNKNOWN_REASON,
+      ...(leaseDecision.detail !== undefined ? { detail: leaseDecision.detail } : {}),
+      ...(leaseDecision.retryAfterS !== undefined ? { retryAfterS: leaseDecision.retryAfterS } : {}),
+    };
+  }
+
+  const attemptId = reserveAuditForObservability(input, ledgerOptions);
   return {
     admitted: true,
     live: decision.budget?.live ?? 0,
     max: decision.budget?.max ?? 0,
+    ...(attemptId !== undefined ? { attemptId } : {}),
+    ...(leaseDecision.lease !== undefined ? { lease: leaseDecision.lease } : {}),
   };
 }
 
@@ -694,9 +813,9 @@ function admitAuditDispatch(
  *  3. count live dispatches (reaping stale, pane-less entries on read — but
  *     with an UNKNOWN pane list (`livePanes: undefined`) the freshness rule
  *     counts and nothing is reaped, WL-0MW9VQX5T001GCUP);
- *  4. unreadable ledger ⇒ when the pane list is KNOWN, repair from live panes
- *     and refuse (`unknown`); when it is unknown, refuse WITHOUT rewriting
- *     (the next pane-carrying tick self-heals);
+ *  4. unreadable ledger ⇒ refuse `host-budget-corrupt` with the bytes
+ *     untouched (never repaired from a read — WL-0MWFJD8ZO000J1R8); a
+ *     lock/I-O failure is `host-budget-unknown`;
  *  5. at/over cap ⇒ refuse with the observed `live`/`max` (AC2);
  *  6. otherwise reserve the slot and admit.
  *
@@ -727,32 +846,35 @@ export function admitHostDispatch(
     return { admitted: false, live: 0, max: 0, reason: refuseReason(input.kind) };
   }
 
-  const count = liveCount(input.kind, opts.livePanes, ledgerOptions);
+  // The ONE in-flight rule (WL-0MWFJDD8R005F5BV): ledger entries PLUS live
+  // dispatcher panes that no entry accounts for. Admission and the worklist
+  // header quote the same figure, so the cap can no longer be enforced against
+  // a ledger that has drifted from the panes actually running.
+  const count = readHostBudgetLiveWork(input.kind, opts.livePanes, ledgerOptions);
   if (!count.ok) {
     if (!count.unknown && count.reason === 'no-coordination-dir') {
       // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
       return { admitted: true, live: 0, max };
     }
-    // Repair from observed live state ONLY when the pane read succeeded and
-    // the list is authoritative; an unknown pane state (failed read) must
-    // never rewrite a corrupt ledger from nothing (WL-0MW9VQX5T001GCUP AC1).
-    const repaired =
-      opts.livePanes === undefined
-        ? false
-        : repairLedgerFromLivePanes(opts.livePanes, input, ledgerOptions);
+    // NO repair (WL-0MWFJD8ZO000J1R8): an admission read never rewrites the
+    // ledger. Repairs are an explicit operator action
+    // (`host-dispatch-budget.repair.ts`), because a reconstruction from the
+    // live pane list used to drop decorated and manually-triggered panes —
+    // 6 of the 10 running implements on 2026-11-13. The tick fails closed and
+    // the ledger stays byte-identical; `host-budget-corrupt` names the damage
+    // so the decision log carries it.
     return {
       admitted: false,
       live: 0,
       max,
-      reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-      repaired,
+      reason: count.unknown ? HOST_BUDGET_CORRUPT_REFUSAL : HOST_BUDGET_UNKNOWN_REFUSAL,
     };
   }
 
-  if (count.count >= max) {
+  if (count.live >= max) {
     return {
       admitted: false,
-      live: count.count,
+      live: count.live,
       max,
       reason: refuseReason(input.kind),
     };
@@ -773,12 +895,19 @@ export function admitHostDispatch(
     // longer be proven within budget, so fail closed.
     return {
       admitted: false,
-      live: count.count,
+      live: count.live,
       max,
       reason: HOST_BUDGET_UNKNOWN_REFUSAL,
     };
   }
-  return { admitted: true, live: count.count, max };
+  // The union figure (WL-0MWFJDD8R005F5BV) AND the release identity
+  // (WL-0MWFJD5T4003OM91) belong on the same verdict.
+  return {
+    admitted: true,
+    live: count.live,
+    max,
+    ...(reserved.entry.attemptId !== undefined ? { attemptId: reserved.entry.attemptId } : {}),
+  };
 }
 
 /**
@@ -790,8 +919,13 @@ export function admitHostDispatch(
  * admission until the pane id is known). The audit tier counts a fresh entry
  * regardless (the marker semantics), so the confirmation only records the
  * pane id for observability. Best-effort: a failing seam never affects the
- * dispatch, and the release-by-item-id on pane close (or the stale reap)
+ * dispatch, and the release-by-pane-id on pane close (or the stale reap)
  * remains the backstop.
+ *
+ * The confirmation is keyed on (itemId, kind) and keeps the reservation's
+ * attempt token, so it can only ever annotate the caller's own entry — it never
+ * overwrites a different tier's or a different attempt's entry
+ * (WL-0MWFJD5T4003OM91).
  */
 export function confirmHostDispatch(
   input: HostBudgetAdmissionInput,
@@ -804,6 +938,9 @@ export function confirmHostDispatch(
       instanceId: input.instanceId,
       root: input.root,
       ...(input.paneId !== undefined ? { paneId: input.paneId } : {}),
+      // Distinguished in the audit trail from the first reservation, so an RCA
+      // can see when the pane id was written back (WL-0MWFJDGXQ001OXP8).
+      op: 'confirm',
     },
     opts,
   ).ok;
@@ -811,15 +948,25 @@ export function confirmHostDispatch(
 
 /**
  * Release a dispatch's reservation (pane close, abort path, failed claim
- * rollback). Idempotent and best-effort: never throws, and a missing entry is
- * a successful no-op, so every release path may call it unconditionally.
+ * rollback) by FULL IDENTITY.
+ *
+ * Idempotent and best-effort: never throws, and a missing entry is a successful
+ * no-op, so every release path may call it unconditionally. The identity is the
+ * entry key (`itemId` + optional `kind`) plus the attempt token from admission
+ * or the confirmed pane id — a caller that proves neither is refused, and one
+ * that proves a different identity leaves the entry alone
+ * (WL-0MWFJD5T4003OM91).
+ *
+ * `opts.reason` / `opts.actor` are forwarded to the audit trail, so a deletion
+ * records WHY it happened (`anchor-unavailable`, `pane-close`, …) and who did
+ * it — the attribution the 2026-11-13 RCA lacked (WL-0MWFJDGXQ001OXP8).
  */
 export function releaseHostDispatch(
-  itemId: string,
+  identity: HostBudgetReleaseInput,
   opts: HostBudgetOptions = {},
 ): boolean {
   try {
-    return release(itemId, opts).ok;
+    return release(identity, opts).ok;
   } catch {
     return false;
   }

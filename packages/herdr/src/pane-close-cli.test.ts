@@ -9,7 +9,12 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
-import { extractFixtureArg, extractJsonValue, main } from './pane-close-cli';
+import { extractFixtureArg, extractJsonValue, extractRepairArg, main } from './pane-close-cli';
+import {
+  readBudgetLedger,
+  withMachineDir,
+  writeRawBudgetLedger,
+} from './host-dispatch-budget.fixtures.js';
 
 describe('extractFixtureArg', () => {
   it('separates --fixture from pass-through flags', () => {
@@ -154,5 +159,120 @@ describe('main — fixture mode', () => {
     const output = JSON.parse(logged.join('\n'));
     expect(output.panes).toHaveLength(1);
     expect(output.panes[0].paneId).toBe('w1:p1');
+  });
+});
+
+// ── Operator ledger repair mode (WL-0MWFJD8ZO000J1R8) ─────────────────
+
+describe('extractRepairArg', () => {
+  it('strips --repair-budget-ledger out of argv', () => {
+    expect(extractRepairArg(['--repair-budget-ledger', '--json'])).toEqual({
+      repair: true,
+      rest: ['--json'],
+    });
+    expect(extractRepairArg(['--json'])).toEqual({ repair: false, rest: ['--json'] });
+  });
+});
+
+describe('main — --repair-budget-ledger (explicit operator repair)', () => {
+  /** Run the CLI against an isolated machine dir and captured stdout/stderr. */
+  async function runRepair(
+    fixture: unknown,
+    env: NodeJS.ProcessEnv,
+  ): Promise<{ code: number; payload: unknown; stderr: string }> {
+    const logged: string[] = [];
+    const errored: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((line: string) => {
+      logged.push(String(line));
+    });
+    const errSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(((chunk: string | Uint8Array) => {
+        errored.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+    try {
+      const code = await main(['--repair-budget-ledger', '--fixture', '/tmp/panes.json'], {
+        readFile: () => JSON.stringify(fixture),
+        env,
+        cwd: '/tmp',
+      });
+      return { code, payload: JSON.parse(logged.join('\n')), stderr: errored.join('') };
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  }
+
+  it('reconstructs decorated and manual panes and prints the repaired set', async () => {
+    await withMachineDir(async (dir) => {
+      writeRawBudgetLedger(dir, '{ corrupt');
+      const result = await runRepair(
+        {
+          result: {
+            panes: [
+              {
+                pane_id: 'w1:p1',
+                label: '⚠️ Downtime triggered implement Do it - WL-1',
+                agent: 'pi',
+                agent_status: 'working',
+              },
+              {
+                pane_id: 'w1:p2',
+                label: 'Manually triggered audit Audit it - WL-2',
+                agent: 'pi',
+                agent_status: 'working',
+              },
+              { pane_id: 'w1:p3', label: 'rgardler@host: ~/projects/x', agent_status: 'idle' },
+            ],
+          },
+        },
+        { HERDR_COORDINATION_DIR: dir } as NodeJS.ProcessEnv,
+      );
+
+      expect(result.code).toBe(0);
+      expect(result.payload).toMatchObject({ repaired: true, count: 2 });
+      const repaired = readBudgetLedger(dir);
+      expect(repaired?.entries.map((entry) => `${entry.kind}:${entry.itemId}`).sort()).toEqual([
+        'audit:WL-2',
+        'implement:WL-1',
+      ]);
+    });
+  });
+
+  it('refuses (exit 1) and leaves the ledger untouched when a pane cannot be accounted for', async () => {
+    await withMachineDir(async (dir) => {
+      const corrupt = '{ corrupt';
+      writeRawBudgetLedger(dir, corrupt);
+      const result = await runRepair(
+        {
+          result: {
+            panes: [
+              {
+                pane_id: 'w1:p1',
+                label: 'Downtime triggered implement Do it - WL-1',
+                agent: 'pi',
+                agent_status: 'working',
+              },
+              {
+                pane_id: 'w1:p2',
+                label: '🚫 Downtime triggered implement no item id',
+                agent: 'pi',
+                agent_status: 'working',
+              },
+            ],
+          },
+        },
+        { HERDR_COORDINATION_DIR: dir } as NodeJS.ProcessEnv,
+      );
+
+      expect(result.code).toBe(1);
+      expect(result.payload).toMatchObject({
+        repaired: false,
+        reason: 'incomplete',
+        unaccounted: [expect.objectContaining({ paneId: 'w1:p2' })],
+      });
+      expect(result.stderr).toContain('Refusing to repair');
+    });
   });
 });

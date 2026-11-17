@@ -76,6 +76,11 @@ import {
   type HostBudgetLivePanesResult,
 } from './host-dispatch-budget.admission.js';
 import { isLegacyAuditBudgetEnabled, sweepClosedPanes } from './host-dispatch-budget.js';
+import {
+  auditLeaseSessionId,
+  createAuditLeaseClient,
+  type AuditLeaseAcquireOutcome,
+} from './downtime-worker.audit-lease.js';
 import { AUDIT_BUDGET_DIVERGENCE_REASON } from './downtime-log-budget.js';
 // User-fired (interactive) host-budget gate (WL-0MVXY0Z93002HKCZ F4): the
 // counterpart of the dispatcher's admission. At/over cap it asks first — with
@@ -577,6 +582,13 @@ export function createDowntimeDeps(
     // caller that passes no limit; it defaults to the sprint-view default so an unwindowed head
     // is never produced. `fetchNextItems` applies mandatory-always, browseItemCount windowing,
     // and regroupWorkItems grouping — the sole ranking path.
+    //
+    // DISPATCH-HEAD EFFECT OF BLOCKER PINNING (WL-0MW7YJYS5009H7WC AC10): pinning runs INSIDE
+    // fetchNextItems, so the head is the SAME pinned selection the worklist renders. A pinned
+    // blocker of a visible blocked item is therefore a dispatch candidate from the list head —
+    // deliberate, not incidental: the ordering change is covered by
+    // `index.downtime-select.test.ts` ('getHerdrListHead surfaces the pinned blockers of a
+    // visible blocked item (AC10)'). Default-view only; stage-filtered reads never pin.
     //
     // ROOT-AWARE (WL-0MVR8GDJ3008WY3Y AC3): `cwd` is the worklog ROOT whose head is
     // read. The read targets `<cwd>/.worklog` explicitly (`--worklog-dir`) so the
@@ -1298,19 +1310,43 @@ export function createDowntimeDeps(
     async recordPaneClose(entry, cwd: string): Promise<void> {
       // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
       // AC2): the audit slot is released by the dispatch-budget ledger release
-      // below (keyed by item id, so it covers every kind and outcome). The
-      // legacy `active-audit` file is never removed by this version.
+      // below. The legacy `active-audit` file is never removed by this version.
       //
       // Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3 AC3): a closed pane
-      // gives its machine-wide slot back immediately, whatever the lifecycle
-      // outcome — the ledger entry is keyed by item id, so this release is
-      // idempotent and safe for every kind/outcome. Best-effort: a failed
-      // release never blocks the pane-close record, and the ledger's stale
-      // reap remains the backstop.
+      // gives its OWN machine-wide slot back. Since WL-0MWFJD5T4003OM91 the
+      // release carries the closed pane id (and its kind), so closing an item's
+      // finished `intake`/`plan`/`audit` pane can no longer delete the entry of
+      // a still-running `implement` dispatch for the same item. Best-effort: a
+      // failed release never blocks the pane-close record, and the ledger's
+      // stale reap remains the backstop.
       try {
-        releaseHostBudgetDispatch(entry.itemId);
+        releaseHostBudgetDispatch(
+          {
+            itemId: entry.itemId,
+            ...(entry.kind === 'implement' || entry.kind === 'audit'
+              ? { kind: entry.kind }
+              : {}),
+            paneId: entry.paneId,
+          },
+          { reason: 'pane-close', actor: `herdr:${process.pid}` },
+        );
       } catch {
         // fail-safe: a release failure must never crash worker
+      }
+      // Proxy audit lease (WL-0MWFJH3NW006F5GN AC3): the pane-close terminal
+      // path of an AUDIT pane gives the shared GPU back. Idempotent and
+      // best-effort — this must never block the pane-close record, and the
+      // proxy's own lease expiry remains the backstop. NOTE: this method is
+      // reachable only from the DISABLED pane-lifecycle monitor
+      // (`PANE_LIFECYCLE_MONITOR_ENABLED = false`); the reaper — the only
+      // active auto-close path — releases through its own seam wired in
+      // `runPaneCloseReaper` (WL-0MWJ7QONS0052HXX).
+      if (entry.kind === 'audit' && typeof this.releaseAuditLease === 'function') {
+        try {
+          await this.releaseAuditLease(entry.itemId, cwd, { reason: 'pane-close' });
+        } catch {
+          // fail-safe: a release failure must never crash worker
+        }
       }
       await appendPaneCloseLogEntry(cwd, entry);
     },
@@ -1406,10 +1442,46 @@ export function createDowntimeDeps(
         // pane read no longer lists (operator/herdr close, crashed session).
         // Both are best-effort — the reaper wraps them fail-open.
         releasePaneBudget: async (pane) => {
-          if (pane.itemId !== '') releaseHostBudgetDispatch(pane.itemId);
+          if (pane.itemId !== '') {
+            // Identity is the CLOSED PANE, not the item (WL-0MWFJD5T4003OM91):
+            // closing an item's finished `intake`/`plan`/`audit` pane must not
+            // delete the entry of a still-running dispatch for the same item.
+            // `pane-close` labels it in the audit trail
+            // (WL-0MWFJDGXQ001OXP8).
+            releaseHostBudgetDispatch(
+              {
+                itemId: pane.itemId,
+                ...(pane.kind === 'implement' || pane.kind === 'audit'
+                  ? { kind: pane.kind }
+                  : {}),
+                paneId: pane.id,
+              },
+              { reason: 'pane-close', actor: `herdr:${process.pid}` },
+            );
+          }
         },
+        // Proxy audit lease (WL-0MWJ7QONS0052HXX): the reaper is the ONLY
+        // active auto-close path — the `recordPaneClose` release above sits
+        // behind the DISABLED pane-lifecycle monitor and never runs in
+        // production — so a closed audit pane returns its shared GPU lease
+        // here, re-deriving the session id from the item id
+        // (`auditLeaseSessionId`) exactly as `recordPaneClose` does. Wired
+        // only when the worker has the release method; a worker without it
+        // keeps the seam absent (legacy callers unchanged, the lease expires
+        // on the proxy's own TTL). Best-effort: the reaper wraps it fail-open.
+        ...(typeof this.releaseAuditLease === 'function'
+          ? {
+              releaseAuditLease: async (pane) => {
+                if (pane.itemId !== '') {
+                  await this.releaseAuditLease!(pane.itemId, cwd, { reason: 'pane-close' });
+                }
+              },
+            }
+          : {}),
         sweepBudgetLedger: async (panes) => {
-          sweepClosedPanes(panes.map((pane) => ({ paneId: pane.paneId })));
+          sweepClosedPanes(panes.map((pane) => ({ paneId: pane.paneId })), {
+            actor: `herdr:${process.pid}`,
+          });
         },
       });
       const result = await runScheduledPaneClose(
@@ -1468,14 +1540,34 @@ export function createDowntimeDeps(
     ) {
       const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
       const audit = input.kind === 'audit';
-      // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD): read the SAME
-      // availability the dispatcher's pre-check read and hand the typed outcome
-      // to admission, so both reach the SAME decision. The one-release legacy
-      // flag skips the proxy entirely.
+      // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN):
+      // read the SAME availability the dispatcher's pre-check read and hand
+      // the typed outcome to admission, so both reach the SAME decision. The
+      // one-release legacy flag skips the proxy entirely.
       const auditAvailability =
         audit && !isLegacyAuditBudgetEnabled() && this.readAuditAvailability !== undefined
           ? await this.readAuditAvailability()
           : undefined;
+      // Audit-lease ACQUIRE (WL-0MWFJH3NW006F5GN AC2): the availability read
+      // is a PRE-CHECK that can never admit on its own — the admission
+      // decision is the proxy's atomic lease. The acquire is attempted ONLY
+      // when the pre-check admits (gating on the SAME helper admission uses,
+      // so the caller and admission can never disagree), so a refused
+      // availability read never churns or leaks a lease. The session id is
+      // stable per dispatch attempt (`auditLeaseSessionId(itemId)`), so a
+      // retry of this item renews rather than competes.
+      let auditLease: AuditLeaseAcquireOutcome | undefined;
+      if (
+        audit &&
+        !isLegacyAuditBudgetEnabled() &&
+        this.auditLeaseClient !== undefined &&
+        auditAvailability !== undefined
+      ) {
+        const preCheck = decideAuditAvailability(auditAvailability);
+        if (!preCheck.active) {
+          auditLease = await this.auditLeaseClient.acquire(auditLeaseSessionId(input.itemId));
+        }
+      }
       return admitHostBudgetDispatch(
         {
           kind: audit ? 'audit' : 'implement',
@@ -1493,6 +1585,7 @@ export function createDowntimeDeps(
                 onAuditBudgetEvent: (event: AuditBudgetLogEvent) =>
                   appendAuditBudgetLogEntry(input.cwd, event),
                 ...(auditAvailability !== undefined ? { auditAvailability } : {}),
+                ...(auditLease !== undefined ? { auditLease } : {}),
               }
             : {}),
         },
@@ -1512,8 +1605,37 @@ export function createDowntimeDeps(
         // best-effort: the pane-close release remains the backstop
       }
     },
-    async releaseHostDispatch(itemId): Promise<void> {
-      releaseHostBudgetDispatch(itemId);
+    async releaseHostDispatch(itemId, _cwd, release): Promise<void> {
+      // Full identity (WL-0MWFJD5T4003OM91): the kind and the attempt token (or
+      // the closed pane) restrict the removal to the caller's own entry.
+      releaseHostBudgetDispatch(
+        {
+          itemId,
+          ...(release?.kind === 'implement' || release?.kind === 'audit'
+            ? { kind: release.kind }
+            : {}),
+          ...(release?.paneId !== undefined ? { paneId: release.paneId } : {}),
+          ...(release?.attemptId !== undefined ? { attemptId: release.attemptId } : {}),
+        },
+        {
+          ...(release?.reason !== undefined ? { reason: release.reason } : {}),
+          actor: `herdr:${process.pid}`,
+        },
+      );
+    },
+    // Audit lease release (WL-0MWFJH3NW006F5GN AC3): release the proxy lease
+    // an ADMITTED audit holds, re-deriving the session id from the item id
+    // (`auditLeaseSessionId`) so no state is threaded. Idempotent and
+    // best-effort: an unwired client, an unheld session or a throwing release
+    // is a non-event (a leaked lease is bounded by the proxy's own expiry,
+    // which the availability read reports as `reclaimed`).
+    async releaseAuditLease(this: DowntimeWorkerDeps, itemId: string, cwd: string, release): Promise<void> {
+      if (this.auditLeaseClient === undefined) return;
+      try {
+        await this.auditLeaseClient.release(auditLeaseSessionId(itemId));
+      } catch {
+        // best-effort: a release failure must never change a dispatch outcome
+      }
     },
     // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
     // `needsProducerReview = true` when an item exhausts its automatic
@@ -1752,6 +1874,15 @@ export async function main(): Promise<void> {
   downtimeDeps.readAuditAvailability = createAuditAvailabilityClient(
     runSettings.downtimeProxyUrl,
   );
+  // Audit-lease client (WL-0MWFJH3NW006F5GN): same wiring point as the
+  // availability client, so BOTH reads use the proxy URL from the SAME
+  // `runSettings` snapshot. A missing/older proxy answers 404 → acquire
+  // resolves `endpoint-absent` → admission fails CLOSED as
+  // `audit-budget-unknown` (never a silent revert to availability-only
+  // admission). The session id is derived per item by the admission seam.
+  downtimeDeps.auditLeaseClient = createAuditLeaseClient(
+    runSettings.downtimeProxyUrl,
+  );
 
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
@@ -1802,6 +1933,10 @@ export async function main(): Promise<void> {
         auditBatchMax: s.downtimeAuditBatchMax,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
+        // Dead-coordination-entry staleness window (WL-0MWFJTULD005DTQI):
+        // re-read each tick like markerStaleWindowMs, so a settings change
+        // applies without a plugin restart.
+        coordinationEntryStaleMs: s.downtimeCoordinationEntryStaleMs,
         // Stalled-work scan before new-item selection (WL-0MUYMBSA90092QV2).
         stallScanEnabled: s.downtimeStallScanEnabled,
         stallScanThresholdMs: s.downtimeStallThresholdMs,

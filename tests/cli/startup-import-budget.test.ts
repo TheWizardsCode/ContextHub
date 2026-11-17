@@ -42,11 +42,13 @@ import {
   MAX_HOST_LOAD_FACTOR,
   type StartupBudget,
   type StartupBudgetScenario,
+  type StartupStatistic,
 } from '../../bench/startup-budget.js';
 import {
   runStartupBenchmark,
   resolveStartupTarget,
   buildStartupInvocation,
+  buildBenchmarkChildEnv,
   percentile,
   type StartupBenchmarkResult,
   type StartupScenarioMeasurement,
@@ -69,12 +71,23 @@ function syntheticResult(
     kinds: { 'cache-hit': 5 },
     p50WallMs: 1000,
     p95WallMs: 1200,
+    p50CpuMs: 900,
     p95CpuMs: 900,
+    p50RssMb: 80,
     p95RssMb: 80,
     maxRssMb: 82,
     samples: [],
     ...overrides,
   };
+  // A caller that overrides a p95 sample without its p50 counterpart models a
+  // *tight* distribution (every sample moved together): the median mirrors the
+  // p95 so the statistic under test — not the sample spread — decides the
+  // verdict. Pass an explicit p50 to model a spiked/skewed distribution.
+  if (overrides.p50CpuMs === undefined) scenario.p50CpuMs = scenario.p95CpuMs;
+  if (overrides.p50RssMb === undefined) scenario.p50RssMb = scenario.p95RssMb;
+  if (overrides.p50WallMs === undefined && overrides.p95WallMs !== undefined) {
+    scenario.p50WallMs = overrides.p95WallMs;
+  }
   return {
     target,
     entry: CLI_ENTRY,
@@ -98,7 +111,10 @@ function syntheticResult(
 }
 
 /** Budget with known numbers, independent of the checked-in file. */
-function syntheticBudget(overrides: Partial<StartupBudget> = {}): StartupBudget {
+function syntheticBudget(
+  overrides: Partial<StartupBudget> = {},
+  statistic: StartupStatistic = 'p50'
+): StartupBudget {
   const scenario: StartupBudgetScenario = {
     expectedKind: 'cache-hit',
     p50WallMs: 1000,
@@ -120,9 +136,11 @@ function syntheticBudget(overrides: Partial<StartupBudget> = {}): StartupBudget 
     },
     regression: {
       runs: 5,
+      statistic,
       cpuHeadroomPct: 50,
       wallHeadroomPct: 200,
       wallFloorMs: 250,
+      rssHeadroomPct: 25,
       note: 'test policy',
     },
     baselines: {
@@ -320,7 +338,8 @@ describe('startup import budget — regression policy', () => {
     );
 
     expect(evaluation.ok).toBe(false);
-    expect(evaluation.violations.join('\n')).toContain('p95CpuMs');
+    // The declared statistic (median of the measured samples) labels the check.
+    expect(evaluation.violations.join('\n')).toContain('p50CpuMs');
     expect(evaluation.violations.join('\n')).toContain('1400');
   });
 
@@ -339,7 +358,7 @@ describe('startup import budget — regression policy', () => {
       syntheticResult({ p95WallMs: 5000 }),
       syntheticBudget()
     );
-    expect(evaluation.violations.join('\n')).toContain('p95WallMs');
+    expect(evaluation.violations.join('\n')).toContain('p50WallMs');
     // The control measured the same floor as the baseline: an un-loaded host,
     // so the wall budget keeps its un-normalised limit.
     expect(evaluation.hostLoadFactor).toBe(1);
@@ -370,7 +389,7 @@ describe('startup import budget — regression policy', () => {
     );
 
     expect(evaluation.hostLoadFactor).toBe(1);
-    expect(evaluation.violations.join('\n')).toContain('p95WallMs');
+    expect(evaluation.violations.join('\n')).toContain('p50WallMs');
   });
 
   it('bounds the host-load factor so a wild control sample cannot mask a regression', () => {
@@ -382,7 +401,7 @@ describe('startup import budget — regression policy', () => {
     );
 
     expect(evaluation.hostLoadFactor).toBe(MAX_HOST_LOAD_FACTOR);
-    expect(evaluation.violations.join('\n')).toContain('p95WallMs');
+    expect(evaluation.violations.join('\n')).toContain('p50WallMs');
     expect(evaluation.violations.join('\n')).toContain('29050');
   });
 
@@ -393,7 +412,7 @@ describe('startup import budget — regression policy', () => {
     const evaluation = evaluateStartupBudget(result, syntheticBudget());
 
     expect(evaluation.hostLoadFactor).toBe(1);
-    expect(evaluation.violations.join('\n')).toContain('p95WallMs');
+    expect(evaluation.violations.join('\n')).toContain('p50WallMs');
   });
 
   it('requires the measured samples to be genuine cache hits', () => {
@@ -430,7 +449,159 @@ describe('startup import budget — regression policy', () => {
   });
 });
 
+describe('startup import budget — robust statistic (WL-0MWIGCK0E009GGLG)', () => {
+  // The measured assertions used to derive a "p95" from a four-sample set,
+  // which is the maximum of four: one contended host sample failed the gate
+  // while the code under test was unchanged. The policy now declares a median
+  // estimator over an odd sample count, so a single spike cannot decide the
+  // verdict — but a genuine regression (which moves every sample) still must.
+
+  it('declares a median over an odd sample count in the checked-in budget', () => {
+    const budget = readStartupBudget(repoRoot);
+
+    expect(budget.regression.statistic).toBe('p50');
+    expect(budget.regression.runs).toBeGreaterThanOrEqual(5);
+    // An odd count makes the median a real sample rather than an average of two.
+    expect(budget.regression.runs % 2).toBe(1);
+  });
+
+  it('keeps the headroom thresholds unchanged (AC5 — no loosening)', () => {
+    const budget = readStartupBudget(repoRoot);
+
+    expect(budget.regression.rssHeadroomPct).toBe(25);
+    expect(budget.regression.cpuHeadroomPct).toBe(100);
+    expect(budget.regression.maxHostLoadFactor).toBe(MAX_HOST_LOAD_FACTOR);
+  });
+
+  it('ignores a single spiked sample under the median, unlike p95', () => {
+    // One of the samples measured 140 MiB while the rest stayed at the
+    // recorded level — exactly the shape that failed the gate
+    // (WL-0MWIF616V008380O: p95RssMb 131 vs a 130.8 limit).
+    const spiked = syntheticResult({ p50RssMb: 80, p95RssMb: 140 });
+
+    const median = evaluateStartupBudget(spiked, syntheticBudget());
+    expect(median.violations).toEqual([]);
+    expect(median.ok).toBe(true);
+    expect(median.checks.map((check) => check.metric)).toContain('p50RssMb');
+
+    // The same measurement under the old estimator still fails, so the test
+    // pins the *estimator* change rather than a loosened threshold.
+    const p95 = evaluateStartupBudget(spiked, syntheticBudget({}, 'p95'));
+    expect(p95.ok).toBe(false);
+    expect(p95.violations.join('\n')).toContain('p95RssMb');
+  });
+
+  it('still fails a uniform RSS regression under the median (AC4)', () => {
+    // Every sample 30 % above the recorded 80 MiB baseline (limit 100 MiB).
+    const regressed = syntheticResult({ p50RssMb: 104, p95RssMb: 104 });
+
+    const evaluation = evaluateStartupBudget(regressed, syntheticBudget());
+    expect(evaluation.ok).toBe(false);
+    expect(evaluation.violations.join('\n')).toContain('p50RssMb');
+    expect(evaluation.violations.join('\n')).toContain('104');
+  });
+
+  it('normalises the RSS budget by the host slowdown the bare-node control measured', () => {
+    // A loaded host inflates BOTH the bare-node control and the measured CLI
+    // peak RSS on unchanged code (the WL-0MWIGNGP3001O7HP failure: p95RssMb
+    // 132.4 vs a 132.4 limit on a tree that recorded 105.9 MiB at baseline,
+    // with byte-identical node/node_modules — memory pressure, not a code
+    // regression). The wall budget already scales with the bare-node
+    // host-load factor; RSS must use the SAME factor, or a memory-pressured
+    // host flakes the memory ratchet on green code.
+    //
+    // 130 MiB measured vs the un-normalised 80 MiB x 1.25 = 100 MiB limit
+    // would fail; with the host measured 3x slower at the bare-node floor the
+    // normalised limit is 80 x 3 x 1.25 = 300 MiB, so it passes.
+    const loaded = syntheticResult(
+      { p50RssMb: 130, p95RssMb: 130 }, // beyond the un-normalised 100 MiB limit
+      'src',
+      { bareNodeP95WallMs: 1350 } // host measured 3x slower
+    );
+    const evaluation = evaluateStartupBudget(loaded, syntheticBudget());
+
+    expect(evaluation.hostLoadFactor).toBeCloseTo(3, 5);
+    expect(evaluation.violations).toEqual([]);
+    expect(evaluation.ok).toBe(true);
+  });
+
+  it('still fails an RSS regression on an idle host (normalisation is upward-only)', () => {
+    // An idle host (bare-node control matching the recorded floor, factor 1)
+    // must keep the tight 25 % RSS headroom intact — the same 104 MiB sample
+    // that was masked by the 3x load factor above fails here.
+    const idle = syntheticResult({ p50RssMb: 104, p95RssMb: 104 });
+
+    const evaluation = evaluateStartupBudget(idle, syntheticBudget());
+    expect(evaluation.hostLoadFactor).toBe(1);
+    expect(evaluation.ok).toBe(false);
+    expect(evaluation.violations.join('\n')).toContain('p50RssMb');
+    expect(evaluation.violations.join('\n')).toContain('104');
+  });
+
+  it('still fails a uniform wall-time regression under the median (AC4)', () => {
+    // Limit is 1200 ms x 3 + 250 ms = 3850 ms; every sample moved past it.
+    const regressed = syntheticResult({ p50WallMs: 4000, p95WallMs: 4000 });
+
+    const evaluation = evaluateStartupBudget(regressed, syntheticBudget());
+    expect(evaluation.ok).toBe(false);
+    expect(evaluation.violations.join('\n')).toContain('p50WallMs');
+    expect(evaluation.violations.join('\n')).toContain('4000');
+  });
+
+  it('still fails a uniform CPU-time regression under the median (AC4)', () => {
+    // Limit is 900 ms + 50 % = 1350 ms.
+    const regressed = syntheticResult({ p50CpuMs: 1400, p95CpuMs: 1400 });
+
+    const evaluation = evaluateStartupBudget(regressed, syntheticBudget());
+    expect(evaluation.ok).toBe(false);
+    expect(evaluation.violations.join('\n')).toContain('p50CpuMs');
+  });
+
+  it('falls back to p95 when a measurement carries no median sample', () => {
+    // Measurements recorded before the estimator change have no p50 fields;
+    // the check must still run (and still fail) rather than silently pass.
+    const legacy = syntheticResult({ p95RssMb: 140 });
+    delete (legacy.scenarios[0] as { p50RssMb?: unknown }).p50RssMb;
+
+    const evaluation = evaluateStartupBudget(legacy, syntheticBudget());
+    expect(evaluation.ok).toBe(false);
+    expect(evaluation.violations.join('\n')).toContain('p95RssMb');
+  });
+});
+
 describe('startup import budget — measurement helpers', () => {
+  it('pins the measured child environment instead of inheriting the caller\'s', () => {
+    // Root cause of the RSS flake (WL-0MWIGCK0E009GGLG): `tsx` reads a per-user
+    // cache under `$TMPDIR/tsx-<uid>`, so an inherited TMPDIR that points at a
+    // long-lived scratch tree inflated the measured `wl --version` from ~96 MiB
+    // to ~131 MiB on unchanged code. The benchmark must own the child's temp
+    // directory (and its client cache), whatever the caller passes in.
+    const env = buildBenchmarkChildEnv({
+      baseEnv: {
+        PATH: '/usr/bin',
+        TMPDIR: '/var/tmp/shared-scratch',
+        TMP: '/var/tmp/shared-scratch',
+        TEMP: '/var/tmp/shared-scratch',
+        WL_CACHE_DISABLED: '1',
+        WL_SPAWN_COUNT: '1',
+        WL_SPAWN_COUNT_FILE: '/tmp/spawn.log',
+      },
+      cacheDir: '/bench/cache',
+      childTmpDir: '/bench/tmp',
+    });
+
+    expect(env.TMPDIR).toBe('/bench/tmp');
+    expect(env.TMP).toBe('/bench/tmp');
+    expect(env.TEMP).toBe('/bench/tmp');
+    expect(env.WL_CACHE_DIR).toBe('/bench/cache');
+    // Unrelated environment is preserved (the CLI is measured as it normally runs).
+    expect(env.PATH).toBe('/usr/bin');
+    // Opt-outs that would change what is measured are removed.
+    expect(env.WL_CACHE_DISABLED).toBeUndefined();
+    expect(env.WL_SPAWN_COUNT).toBeUndefined();
+    expect(env.WL_SPAWN_COUNT_FILE).toBeUndefined();
+  });
+
   it('computes the p95 sample (max for small samples)', () => {
     expect(percentile([1, 2, 3, 4, 5], 0.95)).toBe(5);
     expect(percentile([5, 1, 3], 0.5)).toBe(3);
@@ -473,11 +644,44 @@ describe('startup import budget — measured regression', { timeout: 300_000 }, 
       // (each warmup is a full tsx spawn) without changing what it measures;
       // the sampled `runs` (the gate itself) are unchanged.
       warmupRuns: 2,
-      bareNodeRuns: 2,
+      // Five bare-node samples give a reliable host-load factor; two samples
+      // was too noisy under parallel full-suite load (WL-0MWI7A1N7009NLIM).
+      bareNodeRuns: 5,
     });
 
     const evaluation = evaluateStartupBudget(result, budget);
     expect(evaluation.violations, evaluation.violations.join('\n')).toEqual([]);
+
+    // Evidence hook (WL-0MWIGCK0E009GGLG AC3): the quiet runner discards a
+    // green run's console output, so set WL_STARTUP_BUDGET_RECORD=<path> to
+    // capture this run's measurement and verdict for the record.
+    const recordPath = process.env.WL_STARTUP_BUDGET_RECORD;
+    if (recordPath) {
+      fs.writeFileSync(
+        recordPath,
+        `${JSON.stringify(
+          {
+            recordedAt: new Date().toISOString(),
+            hostLoad: os.loadavg()[0],
+            verdict: evaluation.ok ? 'pass' : 'fail',
+            violations: evaluation.violations,
+            hostLoadFactor: evaluation.hostLoadFactor,
+            envDigest: Object.entries(process.env)
+              .filter(([key]) =>
+                /NODE|TSX|VITEST|ESBUILD|WL_|UV_|LANG|LC_|CI$|TEST/i.test(key)
+              )
+              .map(([key, value]) => `${key}=${String(value)}`)
+              .sort(),
+            envTotalLength: (JSON.stringify(process.env) ?? '').length,
+            envKeys: Object.keys(process.env).length,
+            execArgv: process.execArgv,
+            result,
+          },
+          null,
+          2
+        )}\n`
+      );
+    }
     // Every measured scenario must have been a served cache hit (or a
     // recorded `--version` spawn), so the numbers describe the fast path.
     for (const scenario of result.scenarios) {

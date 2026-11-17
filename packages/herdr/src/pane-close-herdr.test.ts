@@ -268,6 +268,34 @@ describe('createHerdrReaperDeps', () => {
     });
   });
 
+  it('derives agentProcessAlive from the shared discovery liveness (AC3) — done/exited/empty are NOT alive, work-class statuses are', async () => {
+    // Pins the "one liveness definition" contract (WL-0MWHWH6XL0025YX2 AC3):
+    // the reaper shares `isPaneAgentLive` with the in-flight resolution and
+    // the ship guard, with the deliberate extra guard that an EMPTY status is
+    // also not-alive (never close on unknown liveness).
+    const raw = JSON.stringify({
+      panes: [
+        { pane_id: 'p1', label: 'Downtime triggered plan A - WL-0AAA', agent: 'pi', agent_status: 'work', agent_session: { value: '/tmp/a.jsonl' } },
+        { pane_id: 'p2', label: 'Downtime triggered plan B - WL-0BBB', agent: 'pi', agent_status: 'done', agent_session: { value: '/tmp/b.jsonl' } },
+        { pane_id: 'p3', label: 'Downtime triggered plan C - WL-0CCC', agent: 'pi', agent_status: 'exited', agent_session: { value: '/tmp/c.jsonl' } },
+        { pane_id: 'p4', label: 'Downtime triggered plan D - WL-0DDD', agent: 'pi', agent_status: '', agent_session: { value: '/tmp/d.jsonl' } },
+        { pane_id: 'p5', label: 'Downtime triggered plan E - WL-0EEE', agent: undefined, agent_status: 'idle', agent_session: { value: '/tmp/e.jsonl' } },
+      ],
+    });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+    const panes = await deps.listPanes();
+    expect(panes.map((p) => [p.id, p.agentProcessAlive])).toEqual([
+      ['p1', true], // work-class status → alive
+      ['p2', false], // done → not alive
+      ['p3', false], // exited → not alive
+      ['p4', false], // empty status → not alive (deliberate reaper guard)
+      ['p5', false], // no agent → not alive (shared agent-presence check)
+    ]);
+  });
+
   it('maps workspace_id into PaneStatus.workspaceId (WL-0MUJMXVPO0016DZM AC1)', async () => {
     const raw = JSON.stringify({
       panes: [
@@ -598,6 +626,28 @@ describe('createHerdrReaperDeps — budget release and dead-pane sweep', () => {
     const [pane] = await deps.listPanes();
     await deps.releasePaneBudget?.(pane);
     expect(releasePaneBudget).toHaveBeenCalledWith(pane);
+  });
+
+  it('forwards releaseAuditLease to the injected io seam (WL-0MWJ7QONS0052HXX)', async () => {
+    const releaseAuditLease = vi.fn().mockResolvedValue(undefined);
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(rawOnePane),
+      closePane: vi.fn().mockResolvedValue(true),
+      releaseAuditLease,
+    });
+    const [pane] = await deps.listPanes();
+    await deps.releaseAuditLease?.(pane);
+    expect(releaseAuditLease).toHaveBeenCalledWith(pane);
+  });
+
+  it('an unwired releaseAuditLease seam is a no-op (legacy reaper callers unchanged)', async () => {
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(rawOnePane),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+    const [pane] = await deps.listPanes();
+    // Absent seam: calling the forwarded method must be a non-event, never throw.
+    await expect(deps.releaseAuditLease?.(pane)).resolves.toBeUndefined();
   });
 
   it('forwards the RAW parsed panes to the sweep after a trusted read', async () => {
