@@ -29,7 +29,7 @@
  * single-machine: flock/NFS coordination across machines is NOT used. The
  * cross-machine mechanism for the one resource that actually needs it — the
  * audit budget — is the PROXY's audit budget and live audit-lease registry,
- * queried by herdr over HTTP (`GET {proxyUrl}/llama/local/audit/status`). See
+ * queried by herdr over HTTP (`GET {proxyUrl}/llama/local/audit/availability`). See
  * `docs/dev/downtime-dispatcher.md` → "Proxy-derived audit admission". This
  * supersedes the older "multi-machine is out of scope" note.
  */

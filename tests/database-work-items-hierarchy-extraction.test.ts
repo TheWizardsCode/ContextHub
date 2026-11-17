@@ -69,6 +69,7 @@ const OWNERSHIP: ReadonlyArray<{
     members: [
       ['getChildren', 'getChildren'],
       ['cascadePriorityDowngrade', 'cascadePriorityDowngrade'],
+      ['cascadePriorityPromote', 'cascadePriorityPromote'],
       ['demoteParentOnChildAdded', 'demoteParentOnChildAdded'],
       ['revertToPlanComplete', 'revertToPlanComplete'],
       ['getChildCounts', 'getChildCounts'],

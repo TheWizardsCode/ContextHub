@@ -1,12 +1,19 @@
 /**
  * packages/herdr/src/pane-close-herdr.ts — Production reaper deps wiring
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Bridges the injectable `ReaperDeps` interface to real herdr CLI + pi
  * session-log I/O (WL-0MUJW9FFW009008M / WL-0MUJL1NAH0042GOS).
  *
- * The pure parsing/mapping helpers (`parseHerdrPaneCloseList`,
- * `paneKindFromLabel`, `readFinalAssistantEntries`) are exported and tested;
- * the I/O shell is thin and fail-closed (never throws into the worker).
+ * The raw `herdr pane list` parse and the shared liveness vocabulary live in
+ * the canonical discovery module `pane-discovery.ts` (WL-0MWHWH6XL0025YX2);
+ * this module re-exports the parse for backward compatibility and derives the
+ * per-pane `agentProcessAlive` from the shared `isPaneAgentLive` predicate
+ * (AC3: one liveness definition). The remaining pure helpers
+ * (`paneKindFromLabel`, `readFinalAssistantEntries`, …) are exported and
+ * tested; the I/O shell is thin and fail-closed (never throws into the worker).
  */
 
 import { closeSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
@@ -15,185 +22,40 @@ import { join } from 'node:path';
 import type { PaneStatus, ReaperDeps } from './pane-close-reaper.js';
 import { sessionIdFromSessionPath } from './downtime-worker.route-outcome.js';
 import { terminateProcessGroup } from './process-group.js';
+// Canonical label→id / label→kind parsing lives in `pane-label.ts`
+// (WL-0MWHWH1HV009C46C); imported for the deps factory below and
+// re-exported so this module's public surface is unchanged — every call site
+// (including the tests) resolves the canonical implementation through one
+// name.
+import { paneItemIdFromLabel, paneKindFromLabel } from './pane-label.js';
+export { paneItemIdFromLabel, paneKindFromLabel } from './pane-label.js';
+export type { PaneLabelKind as ReaperPaneKind } from './pane-label.js';
+// Canonical discovery (WL-0MWHWH6XL0025YX2): the raw pane-list parse and the
+// shared liveness predicate live in `pane-discovery.ts`. The parse is
+// re-exported so existing importers keep resolving it through this module;
+// the liveness predicate is consumed below so the reaper shares ONE "live"
+// definition with the in-flight resolution (AC3).
+import {
+  isPaneAgentLive,
+  parseHerdrPaneCloseList,
+  type ParsedHerdrPane,
+} from './pane-discovery.js';
+export { parseHerdrPaneCloseList } from './pane-discovery.js';
+export type { HerdrAgentSession } from './pane-discovery.js';
 
 // ── Raw herdr pane-list shape ─────────────────────────────────────────
-
-/** The `agent_session` field of a `herdr pane list` record. */
-export interface HerdrAgentSession {
-  agent?: string;
-  kind?: string;
-  source?: string;
-  value?: string;
-}
-
-/** One raw `herdr pane list` record (only the fields the reaper needs). */
-export interface HerdrPaneCloseRecord {
-  pane_id?: string;
-  paneId?: string;
-  label?: string;
-  agent?: string;
-  agent_status?: string;
-  agentStatus?: string;
-  workspace_id?: string;
-  workspaceId?: string;
-  tab_id?: string;
-  tabId?: string;
-  agent_session?: HerdrAgentSession;
-  agentSession?: HerdrAgentSession;
-  cwd?: string;
-  foreground_cwd?: string;
-  foregroundCwd?: string;
-}
-
-/** A parsed pane record normalised for the reaper. */
-export interface ParsedHerdrPane {
-  paneId: string;
-  label: string;
-  agent?: string;
-  agentStatus?: string;
-  /** Session log path derived from `agent_session.value` (when present). */
-  sessionPath?: string;
-  /** Raw `agent_session` field (session log path + agent metadata). */
-  agentSession?: HerdrAgentSession;
-  workspaceId?: string;
-  tabId?: string;
-  /** Pane working directory, when reported (activity-probe input). */
-  cwd?: string;
-  /** Foreground process working directory, when reported. */
-  foregroundCwd?: string;
-}
-
-/**
- * Locate the pane array in a raw `herdr pane list` response. Tolerates log
- * lines before the JSON envelope — including a bracketed prefix such as
- * `[herdr] starting` — the `{result:{panes:[…]}}` shape, a top-level `{panes}`
- * object and a bare array. Tries each plausible JSON start (`{` then `[`) and
- * returns the first payload that yields a pane array, so callers fail closed
- * (`null`) only when none does.
- */
-function extractPaneArray(raw: string): unknown[] | null {
-  const candidates: number[] = [];
-  const brace = raw.indexOf('{');
-  const bracket = raw.indexOf('[');
-  if (brace >= 0) candidates.push(brace);
-  if (bracket >= 0 && bracket !== brace) candidates.push(bracket);
-  candidates.sort((a, b) => a - b);
-
-  for (const start of candidates) {
-    let payload: unknown;
-    try {
-      payload = JSON.parse(raw.slice(start));
-    } catch {
-      continue;
-    }
-    if (Array.isArray(payload)) return payload;
-    if (payload && typeof payload === 'object') {
-      const obj = payload as Record<string, unknown>;
-      const result = obj.result;
-      const resultObj =
-        result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
-      if (Array.isArray(resultObj?.panes)) return resultObj.panes;
-      if (Array.isArray(obj.panes)) return obj.panes;
-    }
-  }
-  return null;
-}
-
-/**
- * Shared `herdr pane list` parser — the single parse contract used by both the
- * pane-closure reaper ({@link createHerdrReaperDeps}) and the downtime
- * dispatcher (`parseHerdrPaneListOutput`). Tolerates log lines before the JSON
- * envelope, the `{result:{panes:[…]}}` / `{panes:[…]}` shapes and a bare
- * array; returns `null` when no pane array can be found (caller fails closed).
- */
-export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
-  const panes = extractPaneArray(raw);
-  if (panes === null) return null;
-
-  const parsed: ParsedHerdrPane[] = [];
-  for (const entry of panes) {
-    if (!entry || typeof entry !== 'object') continue;
-    const rec = entry as HerdrPaneCloseRecord;
-    const paneId = rec.pane_id ?? rec.paneId;
-    if (typeof paneId !== 'string' || paneId === '') continue;
-    const agentStatus =
-      typeof rec.agent_status === 'string'
-        ? rec.agent_status
-        : typeof rec.agentStatus === 'string'
-          ? rec.agentStatus
-          : undefined;
-    const session = rec.agent_session ?? rec.agentSession;
-    const agentSession =
-      session && typeof session === 'object' && !Array.isArray(session)
-        ? (session as HerdrAgentSession)
-        : undefined;
-    const sessionPath =
-      typeof agentSession?.value === 'string' && agentSession.value !== ''
-        ? agentSession.value
-        : undefined;
-    parsed.push({
-      paneId,
-      label: typeof rec.label === 'string' ? rec.label : '',
-      agent: typeof rec.agent === 'string' ? rec.agent : undefined,
-      agentStatus,
-      sessionPath,
-      agentSession,
-      workspaceId:
-        typeof rec.workspace_id === 'string'
-          ? rec.workspace_id
-          : typeof rec.workspaceId === 'string'
-            ? rec.workspaceId
-            : undefined,
-      tabId:
-        typeof rec.tab_id === 'string'
-          ? rec.tab_id
-          : typeof rec.tabId === 'string'
-            ? rec.tabId
-            : undefined,
-      cwd: typeof rec.cwd === 'string' ? rec.cwd : undefined,
-      foregroundCwd:
-        typeof rec.foreground_cwd === 'string'
-          ? rec.foreground_cwd
-          : typeof rec.foregroundCwd === 'string'
-            ? rec.foregroundCwd
-            : undefined,
-    });
-  }
-  return parsed;
-}
+// The raw `HerdrPaneCloseRecord` / `ParsedHerdrPane` shapes, the
+// JSON-envelope-tolerant `extractPaneArray` and the shared
+// `parseHerdrPaneCloseList` contract all moved to `pane-discovery.ts`
+// (WL-0MWHWH6XL0025YX2) so the parse lives beside the predicates that
+// consume it; re-exported above for backward compatibility.
 
 // ── Label → kind / item id ────────────────────────────────────────────
-
-const PANE_KINDS = ['implement', 'risk-effort', 'intake', 'audit', 'plan'] as const;
-export type ReaperPaneKind = PaneStatus['kind'];
-
-/**
- * Derive the pane kind from its label. Scans for the skill keyword the
- * launcher embeds (`Downtime triggered <kind> …`, `Manually triggered
- * <kind> …`, or a bare `<skill> …`). Unknown labels classify as `unknown`
- * (fail-closed: the classifier never auto-closes `unknown` unless the marker
- * or dead-agent/idle rules apply — and those are still bounded by the guards).
- */
-export function paneKindFromLabel(label: string): ReaperPaneKind {
-  const lower = (label ?? '').toLowerCase();
-  for (const kind of PANE_KINDS) {
-    if (lower.includes(kind)) return kind;
-  }
-  return 'unknown';
-}
-
-/**
- * Trailing work-item id in a pane label (`… - WL-XXXX`). Reuses the same
- * suffix convention as the downtime pane titles. Returns `''` when absent.
- */
-export function paneItemIdFromLabel(label: string): string {
-  if (typeof label !== 'string' || label === '') return '';
-  const idx = label.lastIndexOf(' - ');
-  if (idx < 0) return '';
-  const id = label.slice(idx + 3).trim();
-  // Work-item ids are single tokens like WL-0ABC123 or CG-0ABC123.
-  return /^[A-Z]{2,}-[A-Z0-9]+$/.test(id) ? id : '';
-}
+// Canonical: `pane-label.ts` (WL-0MWHWH1HV009C46C). `paneKindFromLabel`
+// (loose keyword scan over PANE_KINDS, `unknown` when absent) and
+// `paneItemIdFromLabel` (validated ` - ` suffix, `''` when absent) are
+// re-exported above and consumed below — one parse for the reaper and the
+// dispatcher.
 
 // ── Session-log tail reading ──────────────────────────────────────────
 
@@ -513,6 +375,16 @@ export interface HerdrReaperIo {
    */
   releasePaneBudget?(pane: PaneStatus): Promise<void>;
   /**
+   * Proxy audit-lease release (WL-0MWJ7QONS0052HXX): called once per closed
+   * AUDIT pane after a successful close so the shared GPU lease a completed
+   * audit still holds is returned immediately. Wired by `index.ts` to the
+   * worker's existing `releaseAuditLease` (item-id-derived session id) — the
+   * release `recordPaneClose` performs lives behind the disabled
+   * pane-lifecycle monitor and never runs in production. Idempotent and
+   * best-effort. Absent → legacy callers skip the release.
+   */
+  releaseAuditLease?(pane: PaneStatus): Promise<void>;
+  /**
    * Dead-pane ledger sweep (WL-0MW5KC8J300942EA): called once per reaper run
    * with the RAW parsed pane list of that run. Receives `ParsedHerdrPane[]`
    * (not the session-filtered `PaneStatus[]`) so a dispatch pane whose session
@@ -581,8 +453,14 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
         }
 
         const itemId = paneItemIdFromLabel(pane.label);
-        const status = (pane.agentStatus ?? '').toLowerCase();
-        const agentProcessAlive = status !== 'done' && status !== 'exited' && status !== '';
+        // Shared liveness (WL-0MWHWH6XL0025YX2 AC3): `isPaneAgentLive` is the
+        // single "live" definition shared with the in-flight resolution and the
+        // ship guard (agent present && status not done/exited). The reaper
+        // additionally treats an EMPTY status as not-alive: an unknown liveness
+        // must never read as "agent alive → idle-close", and the dead-agent
+        // outcome never closes — so the extra guard is fail-closed (deliberate,
+        // documented divergence from the dispatch-side fail-open on unknown).
+        const agentProcessAlive = isPaneAgentLive(pane) && (pane.agentStatus ?? '') !== '';
 
         // Producer-review + item-stage lookup (parent AC2/AC6). Prefer the
         // combined `getItemInfo`; fall back to the boolean-only lookup.
@@ -649,6 +527,11 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
     async releasePaneBudget(pane: PaneStatus): Promise<void> {
       if (typeof io.releasePaneBudget !== 'function') return;
       await io.releasePaneBudget(pane);
+    },
+
+    async releaseAuditLease(pane: PaneStatus): Promise<void> {
+      if (typeof io.releaseAuditLease !== 'function') return;
+      await io.releaseAuditLease(pane);
     },
 
     async sweepBudgetLedger(): Promise<void> {

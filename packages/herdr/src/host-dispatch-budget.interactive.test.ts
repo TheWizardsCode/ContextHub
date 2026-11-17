@@ -43,6 +43,7 @@ import {
   type HostBudgetDialogChoice,
   type HostBudgetPromptRequest,
 } from './host-budget-dialog.js';
+import { budgetAuditTrailPath } from './host-dispatch-budget.audit.js';
 import { HOST_BUDGET_CONFIG_FILE } from './host-dispatch-budget.js';
 import {
   budgetLedgerPath,
@@ -222,7 +223,13 @@ describe('at cap (AC4/AC6/AC7)', () => {
 
       expect(confirm).toHaveBeenCalledTimes(1);
       const request = confirm.mock.calls[0][0];
-      expect(request).toEqual({ kind: 'implement', live: 2, max: 2 });
+      expect(request).toEqual({
+        kind: 'implement',
+        live: 2,
+        max: 2,
+        // The dialog names the ledger's audit trail (WL-0MWFJDGXQ001OXP8).
+        trailPath: budgetAuditTrailPath(dir),
+      });
       // The copy the dialog renders: at cap ⇒ over by 1.
       expect(formatHostBudgetHeadline(request)).toBe(
         'Implement dispatch would exceed the host quota (2 running, max 2) — over by 1.',
@@ -246,7 +253,12 @@ describe('at cap (AC4/AC6/AC7)', () => {
       await prepareInteractiveAgentDispatch(IMPLEMENT_CMD, deps);
 
       const request = confirm.mock.calls[0][0];
-      expect(request).toEqual({ kind: 'implement', live: 3, max: 2 });
+      expect(request).toEqual({
+        kind: 'implement',
+        live: 3,
+        max: 2,
+        trailPath: budgetAuditTrailPath(dir),
+      });
       expect(formatHostBudgetHeadline(request)).toContain('(3 running, max 2) — over by 2.');
     });
   });
@@ -300,7 +312,12 @@ describe('at cap (AC4/AC6/AC7)', () => {
 
       await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
 
-      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'audit', live: 0, max: 0 });
+      expect(confirm.mock.calls[0][0]).toEqual({
+        kind: 'audit',
+        live: 0,
+        max: 0,
+        trailPath: budgetAuditTrailPath(dir),
+      });
       expect(formatHostBudgetHeadline(confirm.mock.calls[0][0])).toContain(
         'Audit dispatch would exceed the host quota (0 running, max 0) — over by 1.',
       );
@@ -317,7 +334,12 @@ describe('at cap (AC4/AC6/AC7)', () => {
       await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
 
       expect(confirm).toHaveBeenCalledTimes(1);
-      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'audit', live: 1, max: 1 });
+      expect(confirm.mock.calls[0][0]).toEqual({
+        kind: 'audit',
+        live: 1,
+        max: 1,
+        trailPath: budgetAuditTrailPath(dir),
+      });
     });
   });
 });
@@ -431,7 +453,12 @@ describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
 
       // At cap ⇒ it PROMPTS with the same count the header shows.
       expect(confirm).toHaveBeenCalledTimes(1);
-      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'audit', live: 1, max: 1 });
+      expect(confirm.mock.calls[0][0]).toEqual({
+        kind: 'audit',
+        live: 1,
+        max: 1,
+        trailPath: budgetAuditTrailPath(dir),
+      });
       const header = readHostBudgetStatus({
         dir,
         livePanes: makeLivePaneList(['WL-LIVE-1']),
@@ -452,7 +479,12 @@ describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
       await prepareInteractiveAgentDispatch(AUDIT_CMD, deps);
 
       expect(confirm).toHaveBeenCalledTimes(1);
-      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'audit', live: 1, max: 1 });
+      expect(confirm.mock.calls[0][0]).toEqual({
+        kind: 'audit',
+        live: 1,
+        max: 1,
+        trailPath: budgetAuditTrailPath(dir),
+      });
     });
   });
 
@@ -640,7 +672,12 @@ describe('unknown pane state in the interactive gate (WL-0MW9VQX5T001GCUP)', () 
       // so the gate is AT cap and PROMPTS instead of silently admitting with a
       // false zero.
       expect(confirm).toHaveBeenCalledTimes(1);
-      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'implement', live: 1, max: 1 });
+      expect(confirm.mock.calls[0][0]).toEqual({
+        kind: 'implement',
+        live: 1,
+        max: 1,
+        trailPath: budgetAuditTrailPath(dir),
+      });
       // Neither the stale entry was reaped NOR a reservation written (the gate
       // prompts instead of reserving): the ledger is byte-identical.
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
@@ -669,7 +706,12 @@ describe('unknown pane state in the interactive gate (WL-0MW9VQX5T001GCUP)', () 
       // livePanesTrusted derives from the tri-state: `{ok:false}` ⇒ unknown,
       // so the display count uses the marker-compatible freshness rule.
       expect(confirm).toHaveBeenCalledTimes(1);
-      expect(confirm.mock.calls[0][0]).toEqual({ kind: 'audit', live: 1, max: 1 });
+      expect(confirm.mock.calls[0][0]).toEqual({
+        kind: 'audit',
+        live: 1,
+        max: 1,
+        trailPath: budgetAuditTrailPath(dir),
+      });
     });
   });
 });

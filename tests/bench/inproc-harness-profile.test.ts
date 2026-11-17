@@ -273,7 +273,7 @@ describe('harness phase instrumentation', () => {
 });
 
 describe('profiler end to end', () => {
-  it('measures the four AC scenarios with medians of at least three runs', async () => {
+  it('measures the profiled scenarios with medians of at least three runs', async () => {
     const previousCwd = process.cwd();
     const previousProfile = process.env.WL_INPROC_PROFILE;
     delete process.env.WL_INPROC_PROFILE;
@@ -283,10 +283,17 @@ describe('profiler end to end', () => {
 
       expect(result.scenarios.map((scenario) => scenario.name)).toEqual([
         'help',
+        'cold-open',
         'list-json',
         'create',
         'status',
       ]);
+      // The data-access scenarios measure the warm already-initialised regime;
+      // `cold-open` measures the first-open bootstrap path (WL-0MVWLBZG4003A803).
+      expect(result.scenarios.find((scenario) => scenario.name === 'cold-open')?.storeSetup).toBe('empty');
+      expect(result.scenarios.find((scenario) => scenario.name === 'list-json')?.storeSetup).toBe(
+        'initialised',
+      );
       expect(result.runs).toBe(3);
       // The first call in the process pays module-graph/JIT warm-up and is
       // recorded separately rather than averaged into the warm numbers.

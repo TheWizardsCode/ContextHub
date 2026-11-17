@@ -2,7 +2,7 @@
  * packages/herdr/src/hydrator.ts — Herdr hydrator (WL-0MSOJLZD9004P8PI)
  *
  * Self-heals the work queue: periodically fetches every `in-progress` work
- * item, matches each against the panes of the current workspace (every
+ * item, matches each against the panes of every workspace on the host (every
  * dispatched item gets an agent pane whose TITLE carries its work-item ID
  * as a preserved suffix), and DEMOTES any item with no matching pane so it
  * re-enters the dispatchable pool instead of lingering in `in-progress`
@@ -14,6 +14,8 @@
  *  - stage `in_review`                    → `status=completed`, stage `in_review`
  *  - an active outbound dependency blocker→ `status=blocked` (stage made compatible)
  *  - a live claim holder (lock held)      → untouched (pane-less driven session)
+ *  - a claim inside the grace window      → untouched (spawn→pane-title gap,
+ *                                            parent WL-0MWH56SWX004HSKQ AC5)
  *  - otherwise                            → `status=open`, stage `intake_complete`
  *
  * The two busy signals are independent and both are checked: the pane rule is
@@ -25,9 +27,19 @@
  * `blocked` transition.
  *
  * Active detection (WL-0MV1BWETT005GSUJ): a single simple rule — if there
- * is a pane in the current workspace whose title contains the work-item ID
+ * is a pane whose title contains the work-item ID
  * (e.g. `Downtime triggered implement … - WL-0MSOJLZD9004P8PI`) the item is
  * actively being worked on; if there is no such pane, the item is not.
+ *
+ * Workspace-agnostic demotion evidence (WL-0MWHBSWC20067SMY, parent AC1):
+ * "is this item being worked on ANYWHERE?" reads panes from EVERY workspace
+ * (the optional `listAllActivePanes` seam — one machine-wide `herdr pane
+ * list` per tick, no `--workspace` filter — so a live dispatch pane in the
+ * Dispatcher workspace keeps the claim it proves). The selection-list
+ * marker asks the opposite question — "does it have a pane in MY
+ * workspace?" — and keeps its workspace-scoped read (`applyActivePaneMarkers`
+ * / `markItemsActiveByPane`, `collectPaneWorkItemIds(panes, workspaceId)`
+ * unchanged). The two filters never share one pane set.
  *
  * The producer rejected an earlier tab-label formulation as unreliable
  * (workspace review, 2026-10-16): "It should be simple. Look for a pane in
@@ -98,6 +110,13 @@
  * assignee: implement`). A comment failure is tolerated — the demotion stands
  * and the cycle continues.
  *
+ * Prep-tier contract (WL-0MWHBSWC20067SMY, parent AC7): `/skill:intake`,
+ * `/skill:plan` and audit runs hold **no** per-child claim lock, so for
+ * those tiers pane evidence is the ONLY busy signal; the claim-holder probe
+ * is the second signal only where a lock exists (the implement tier).
+ * Ambiguity keeps the claim: a null/throwing/timed-out wider pane read
+ * aborts the cycle (fail-open) — never a release on uncertain evidence.
+ *
  * Non-goals (deliberate): no wall-clock TTL, no heartbeat, no new protocol, no
  * change to dispatch, the worklist selection marker, the drive orchestrator or
  * `implement.py`; orphaned-lock cleanup and hydrator log rotation are separate
@@ -146,6 +165,12 @@ import { probeClaimHolders, type ClaimHolderVerdict } from './claim-lock.js';
 // `import { isActiveBlocker } from './hydrator.js'` keeps working.
 export { isActiveBlocker };
 
+// Canonical pane-label parsing (WL-0MWHWH1HV009C46C AC4): the ID-extraction
+// scan and its shared regex now live in `pane-label.ts`; this module imports
+// them for its active-pane matching and re-exports them (see the
+// {@link WORK_ITEM_ID_REGEX} / {@link extractWorkItemIdsFromText} exports).
+import { extractWorkItemIdsFromText, WORK_ITEM_ID_REGEX } from './pane-label.js';
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 /** Hydration cadence (ms). Runs inside the worklist pane's TaskScheduler. */
@@ -174,6 +199,52 @@ export const HYDRATOR_STEP_TIMEOUT_MS = 5_000;
 export const HYDRATOR_EXEC_TIMEOUT_MS = 10_000;
 
 /**
+ * Claim grace window (ms) — bounded spawn→pane-title gap budget
+ * (parent WL-0MWH56SWX004HSKQ AC5, impl WL-0MWHBSX81003M0EM).
+ *
+ * A dispatched item's pane title is set at spawn time, but a hydrator tick
+ * can land in the gap between the dispatch claim and the pane title becoming
+ * readable. An item claimed within this window is NEVER released even with
+ * NO pane visible yet; past the window, today's rule applies. The claim age
+ * rides the EXISTING recency signals (`wl list --json` returns `updatedAt`/
+ * `activityAt`; the claim write `wl update --assignee` moves `updatedAt`);
+ * claim age = `now − max(updatedAt, activityAt)` (max = fail-open toward
+ * "recently active"). Absent/unparseable recency degrades toward keeping the
+ * claim (documented fail-open, pinned by test). The grace branch behaves
+ * like `held` (WL-0MVWDB3IG004NRIU): evaluated AFTER `in_review → completed`
+ * and `blocked`, suppressing ONLY the release to `open`.
+ *
+ * Proposed default 120 s (parent open question); overridable via
+ * `HydratorDeps.claimGraceMs` / the `hydratorClaimGraceMs` plugin settings
+ * key. Kept as ONE named constant so a confirmed default is a one-line
+ * change.
+ */
+export const HYDRATOR_CLAIM_GRACE_MS = 120_000;
+
+/** Floor for the claim grace window (ms). 0 disables the window (today's
+ *  rule always applies) — the operator's explicit "no grace" choice. */
+export const HYDRATOR_CLAIM_GRACE_FLOOR_MS = 0;
+/** Ceiling for the claim grace window (ms). 10 min is far above any
+ *  realistic spawn→pane-title gap, so a runaway value can never pin items
+ *  in `in-progress` for hours. */
+export const HYDRATOR_CLAIM_GRACE_MAX_MS = 600_000;
+
+/**
+ * Clamp the claim grace window (`hydratorClaimGraceMs`) like the
+ * neighbouring window settings (`clampDowntimeMarkerStaleWindowMs`):
+ * non-finite/negative values fall back to the default, everything else is
+ * rounded and clamped to [HYDRATOR_CLAIM_GRACE_FLOOR_MS,
+ * HYDRATOR_CLAIM_GRACE_MAX_MS].
+ */
+export function clampHydratorClaimGraceMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return HYDRATOR_CLAIM_GRACE_MS;
+  return Math.min(
+    Math.max(Math.round(value), HYDRATOR_CLAIM_GRACE_FLOOR_MS),
+    HYDRATOR_CLAIM_GRACE_MAX_MS,
+  );
+}
+
+/**
  * Hard-kill bound for the best-effort release audit comment spawn (ms).
  *
  * The comment is a tolerated side effect of a demotion that has ALREADY been
@@ -183,6 +254,14 @@ export const HYDRATOR_EXEC_TIMEOUT_MS = 10_000;
  * child is killed and the rejection is caught inside `applyDemotion`.
  */
 export const HYDRATOR_RELEASE_COMMENT_TIMEOUT_MS = 2_000;
+
+/**
+ * Cap on the distinct workspace ids listed in a release evidence suffix
+ * (parent WL-0MWHBSY6Q00760H9 AC8). Keeps the comment bounded: beyond this
+ * many distinct workspaces the list shows the first `MAX` sorted ids plus a
+ * `+N` overflow marker instead of unbounded growth.
+ */
+export const HYDRATOR_RELEASE_EVIDENCE_MAX_WORKSPACES = 6;
 
 /**
  * Default cap on candidates processed per hydrate tick. Bounds the number
@@ -195,8 +274,13 @@ export const HYDRATOR_MAX_ITEMS_PER_TICK = 50;
  * Work-item ID matcher: an uppercase project prefix, a dash, then the
  * base36 id (e.g. `WL-0MSOJLZD9004P8PI`, `AH-0MTVYBL2L0085G6G`,
  * `CG-0MT5Y1X5T001M4S6`).
+ *
+ * Canonical home is `pane-label.ts` (WL-0MWHWH1HV009C46C AC4) — the
+ * shared regex constant keeps the extract-every-ID scan (different
+ * granularity than the single trailing-suffix parse) honest; re-exported
+ * here so existing importers keep resolving it through the hydrator.
  */
-export const WORK_ITEM_ID_REGEX = /[A-Z][A-Z0-9]*-[0-9A-Z]{6,}/g;
+export { WORK_ITEM_ID_REGEX } from './pane-label.js';
 /**
  * Status → allowed stages, mirroring the project's status/stage
  * compatibility rules (`src/config.ts`, `deriveStageStatusCompatibility`).
@@ -231,6 +315,15 @@ export interface HydratorItem {
    * holder in the audit comment (WL-0MVWDB7F2003SORI).
    */
   assignee?: string;
+  /**
+   * Recency signals propagated from `wl list --json` (ISO 8601 strings) — no
+   * new timestamp field (parent WL-0MWH56SWX004HSKQ AC5). The claim age is
+   * `now − max(updatedAt, activityAt)`; a missing/invalid value degrades to
+   * the documented fail-open direction (treated as a fresh claim still
+   * inside the grace window, kept).
+   */
+  updatedAt?: string;
+  activityAt?: string;
 }
 
 /**
@@ -246,6 +339,32 @@ export interface DemotionOptions {
   previousAssignee?: string;
   /** Human-readable deciding signal, used in the release audit comment. */
   reason?: string;
+  /**
+   * Compact evidence justifying this release (parent AC8): panes seen by
+   * the demotion read, distinct workspace ids scanned, the claim age and
+   * the configured grace window. Rendered into the audit comment's evidence
+   * suffix by {@link buildReleaseComment} when present; optional so the
+   * pre-existing comment shape stays byte-for-byte for old callers.
+   */
+  evidence?: ReleaseEvidence;
+}
+
+/**
+ * Compact evidence appended to a release audit comment (parent AC8,
+ * WL-0MWHBSY6Q00760H9) so a future mis-release is diagnosable from the
+ * comment/log alone — no need to read pane state by hand.
+ */
+export interface ReleaseEvidence {
+  /** Panes seen by the demotion (wider) read — count, never the titles. */
+  paneCount: number;
+  /** Distinct workspace ids scanned, sorted and capped at render time. */
+  workspaceIds: string[];
+  /** Claim age in ms at release time; null when unknowable (fail-open keep). */
+  claimAgeMs: number | null;
+  /** Configured claim grace window (ms). */
+  graceMs: number;
+  /** The released item id (abbreviated in the "none titled WL-…" clause). */
+  itemId: string;
 }
 
 /** The subset of a `herdr pane list` entry the hydrator needs. */
@@ -308,6 +427,20 @@ export interface HydratorDeps {
    * panes outside it (WL-0MUY1CYV6008BQWX).
    */
   listActivePanes: (workspaceId?: string) => Promise<HydratorPane[] | null>;
+  /**
+   * Optional workspace-agnostic pane read (WL-0MWHBSWC20067SMY): `herdr pane
+   * list` with NO `--workspace` scope — the panes of EVERY workspace on the
+   * host, or null when unavailable.
+   *
+   * The demotion evidence — "is this item being worked on anywhere?" — must
+   * not be scoped to the plugin's own workspace: a live dispatch pane in the
+   * Dispatcher workspace keeps the claim it proves. Mirrors the
+   * `hasLiveClaimHolder` optional-seam pattern: optional so existing test
+   * fakes keep compiling byte-for-byte; when the seam is absent
+   * `runHydrationOnce` falls back to the workspace-scoped {@link
+   * listActivePanes} read exactly as today.
+   */
+  listAllActivePanes?: () => Promise<HydratorPane[] | null>;
   /** `wl dep list <id>` → outbound targets, or null when unavailable. */
   listOutboundDeps: (itemId: string) => Promise<HydratorDepTarget[] | null>;
   /**
@@ -363,6 +496,14 @@ export interface HydratorDeps {
   stepTimeoutMs?: number;
   /** Max candidates per tick; defaults to `HYDRATOR_MAX_ITEMS_PER_TICK`. */
   maxItemsPerTick?: number;
+  /**
+   * Claim grace window override (ms); defaults to `HYDRATOR_CLAIM_GRACE_MS`
+   * (parent AC5). An item claimed within this window is never released even
+   * with no pane visible yet. Wired from the `hydratorClaimGraceMs` plugin
+   * settings key (worklist.ts) and overridable via `createHydratorRunner`
+   * opts.
+   */
+  claimGraceMs?: number;
 }
 
 /** Stable labels for the bounded hydrate steps (logs / diagnostics). */
@@ -379,13 +520,13 @@ export type HydratorStepLabel =
  * Extract every work-item ID appearing in `text` (e.g. a shell command line
  * or tab/window title). Always returns a fresh array; no shared regex state.
  *
- * Retained for `ship-guard.ts`; also used for active-pane-title matching
- * (see `collectPaneWorkItemIds`).
+ * Canonical implementation is `pane-label.ts::extractWorkItemIdsFromText`
+ * (WL-0MWHWH1HV009C46C AC4 — the different-granularity full-text scan over
+ * the shared {@link WORK_ITEM_ID_REGEX}); re-exported here so the hydrator
+ * and its importers (`ship-guard.ts`) resolve one parse. Used for
+ * active-pane-title matching (see `collectPaneWorkItemIds`).
  */
-export function extractWorkItemIdsFromText(text: string): string[] {
-  if (typeof text !== 'string' || text.length === 0) return [];
-  return text.match(WORK_ITEM_ID_REGEX) ?? [];
-}
+export { extractWorkItemIdsFromText } from './pane-label.js';
 
 /**
  * Collect the set of work-item IDs whose pane title carries the ID
@@ -587,6 +728,11 @@ export function compatibleStage(stage: string, status: string): string {
   return allowed[0] ?? stage;
 }
 
+/** Deciding signal for a pane-less release (shared by the release comment and the evidence formatter). */
+export const RELEASE_REASON_NO_MATCHING_PANE = 'released because no matching pane';
+/** Deciding signal for a pane-less release whose claim holder probe came back dead. */
+export const RELEASE_REASON_NO_PANE_DEAD_HOLDER = 'released because no pane and claim holder dead';
+
 /**
  * Build the body of a release audit comment (WL-0MVWDB7F2003SORI).
  *
@@ -596,41 +742,151 @@ export function compatibleStage(stage: string, status: string): string {
  * An item with no holder records `previous assignee: (none)` — never an
  * ambiguous empty suffix.
  *
+ * When `evidence` is passed (parent AC8), a compact evidence suffix is
+ * appended AFTER today's text, so existing exact-prefix assertions keep
+ * passing, e.g.:
+ *
+ * ```
+ * released because no matching pane; previous assignee: dispatcher;
+ * evidence: 14 panes in 3 workspaces (w5M,w6B,w7C) none titled WL-…; claim age 240s (grace 120s)
+ * ```
+ *
+ * The deciding-signal clause (`none titled WL-…`) is dropped for the
+ * dead-holder variant — the signal is named ONCE by the reason itself, so
+ * the evidence never duplicates it (parent AC8).
+ *
  * @param reason            The deciding signal (e.g. `released because no
  *                          matching pane`).
  * @param previousAssignee  The holder observed this cycle, if any.
+ * @param evidence          Compact release evidence (pane count, workspace
+ *                          ids, claim age, grace); absent ⇒ legacy shape.
  */
 export function buildReleaseComment(
   reason: string,
   previousAssignee?: string,
+  evidence?: ReleaseEvidence,
 ): string {
   const holder =
     typeof previousAssignee === 'string' && previousAssignee.length > 0
       ? previousAssignee
       : '(none)';
   const signal = reason.length > 0 ? reason : 'released';
-  return `${signal}; previous assignee: ${holder}`;
+  const base = `${signal}; previous assignee: ${holder}`;
+  if (evidence === undefined) return base;
+  return `${base}; ${formatReleaseEvidence(reason, evidence)}`;
+}
+
+/**
+ * Format the compact evidence suffix for a release (parent AC8). Kept as its
+ * own pure function so the comment and the log line share one rendering.
+ *
+ * Bounded by design: workspace ids are distinct, sorted and capped at
+ * {@link HYDRATOR_RELEASE_EVIDENCE_MAX_WORKSPACES} with a `+N` overflow
+ * marker, so the suffix cannot grow with the host's pane count.
+ *
+ * @param reason    The deciding signal; the dead-holder variant drops the
+ *                  `none titled …` clause so the signal is named once.
+ * @param evidence  Panes seen, workspace ids scanned, claim age, grace.
+ */
+export function formatReleaseEvidence(
+  reason: string,
+  evidence: ReleaseEvidence,
+): string {
+  const distinct = [...new Set(evidence.workspaceIds)].sort();
+  const cap = HYDRATOR_RELEASE_EVIDENCE_MAX_WORKSPACES;
+  const listed = distinct.slice(0, cap);
+  const overflow = distinct.length - listed.length;
+  const listText =
+    distinct.length > 0
+      ? ` (${listed.join(',')}${overflow > 0 ? `,+${overflow}` : ''})`
+      : '';
+  const noneTitled =
+    reason === RELEASE_REASON_NO_PANE_DEAD_HOLDER
+      ? ''
+      : ` none titled ${abbreviateItemId(evidence.itemId)}`;
+  const age =
+    typeof evidence.claimAgeMs === 'number'
+      ? `${Math.round(evidence.claimAgeMs / 1000)}s`
+      : 'unknown';
+  const grace = `${Math.round(evidence.graceMs / 1000)}s`;
+  const panesWord = evidence.paneCount === 1 ? 'pane' : 'panes';
+  const wsWord = distinct.length === 1 ? 'workspace' : 'workspaces';
+  return (
+    `evidence: ${evidence.paneCount} ${panesWord} in ${distinct.length} ${wsWord}${listText}${noneTitled}; ` +
+    `claim age ${age} (grace ${grace})`
+  );
+}
+
+/**
+ * Abbreviate a work-item id for compact evidence (`WL-0MWHBSY6Q00760H9` →
+ * `WL-…`): the project prefix up to and including the first dash, plus an
+ * ellipsis. The full id lives on the item itself, so the comment only needs
+ * the distinguishing prefix.
+ */
+function abbreviateItemId(itemId: string): string {
+  const dash = itemId.indexOf('-');
+  if (dash <= 0) return `${itemId}…`;
+  return `${itemId.slice(0, dash + 1)}…`;
+}
+
+/**
+ * Parse an ISO 8601 timestamp to epoch ms; `null` when absent/unparseable.
+ * A timestamp-less item has NO usable recency data (legacy payload).
+ */
+function parseTimestampMs(iso: string | undefined): number | null {
+  if (typeof iso !== 'string' || iso.length === 0) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * Claim age (ms) as `now − max(updatedAt, activityAt)` (parent AC5). The
+ * max fails open toward "recently active": a single readable timestamp
+ * dominates; when BOTH `updatedAt` and `activityAt` are absent/unparseable
+ * the age is unknowable and `null` is returned — the caller then treats the
+ * claim as fresh (inside the grace window), the documented fail-open
+ * direction ("keep the claim on ambiguity": a stuck claim is recoverable, a
+ * released claim under a live agent is not).
+ */
+function claimAgeMs(item: HydratorItem, nowMs: number): number | null {
+  const updated = parseTimestampMs(item.updatedAt);
+  const activity = parseTimestampMs(item.activityAt);
+  const known = [updated, activity].filter((t): t is number => t !== null);
+  if (known.length === 0) return null;
+  return Math.max(0, nowMs - Math.max(...known));
 }
 
 /**
  * Pure demotion decision. Returns `null` when the item must be left alone
  * (not `in-progress`, a matching ACTIVE pane exists — F1 — or a live claim
- * holder keeps the item busy).
+ * holder / in-window claim keeps the item busy).
  *
  * The `hasActivePane` context key is retained for source compatibility; its
  * value now comes from the pane-title check `isActivePaneMatch`.
  *
- * Branch precedence (WL-0MVWDB3IG004NRIU, AC3 of the parent): `held` is
- * evaluated AFTER the `in_review` and `blocked` branches, so a held claim
- * only suppresses the final release-to-`open` branch and never overrides the
- * audit-tier `in_review → completed` or the dependency `blocked` transition:
- * `not in-progress → null` · `hasActivePane → null` · `stage in_review →
- * completed` · `blocked → blocked` · `held → null` · `else → open/
- * intake_complete`.
+ * Branch precedence (WL-0MVWDB3IG004NRIU, AC3; parent WL-0MWH56SWX004HSKQ
+ * AC5): `held` AND the claim grace window are evaluated AFTER the
+ * `in_review` and `blocked` branches, so a held/in-window claim only
+ * suppresses the final release-to-`open` branch and never overrides the
+ * audit-tier `in_review → completed` or the dependency `blocked`
+ * transition: `not in-progress → null` · `hasActivePane → null` · `stage
+ * in_review → completed` · `blocked → blocked` · `held → null` ·
+ * `withinGraceWindow → null` · `else → open/intake_complete`.
  */
 export function decideDemotion(
   item: HydratorItem,
-  ctx: { hasActivePane: boolean; blocked: boolean; held: boolean },
+  ctx: {
+    hasActivePane: boolean;
+    blocked: boolean;
+    held: boolean;
+    /**
+     * Claim is still inside the configured grace window (or its age is
+     * unknowable — fail-open toward keeping, parent AC5). Optional so the
+     * pre-existing `decideDemotion` tests keep compiling byte-for-byte; the
+     * orchestrator always supplies it.
+     */
+    withinGraceWindow?: boolean;
+  },
 ): DemotionDecision | null {
   const status = (item.status ?? '').toLowerCase();
   if (status !== 'in-progress' && status !== 'in_progress') return null;
@@ -644,6 +900,11 @@ export function decideDemotion(
     return { status: 'blocked', stage: compatibleStage(stage, 'blocked') };
   }
   if (ctx.held) return null;
+  // Parent AC5 grace window: a claim inside the window is kept even with no
+  // pane visible yet (a tick in the spawn→pane-title gap must not release a
+  // live claim). Same precedence slot as `held` above — it suppresses ONLY
+  // the release to `open`.
+  if (ctx.withinGraceWindow) return null;
   // AC3 else-branch as written: release to `open` at `intake_complete`
   // (per WL-0MTF5WO2Q008B8US AC3; the stage is valid for `open` in
   // ALLOWED_STAGES_BY_STATUS / config.defaults.yaml).
@@ -721,11 +982,23 @@ async function runStep<T>(
  */
 export function createHydratorRunner(
   deps: HydratorDeps,
-  opts: { workspaceId?: string; isVisible: () => Promise<boolean> },
+  opts: {
+    workspaceId?: string;
+    isVisible: () => Promise<boolean>;
+    /** Claim grace window override (ms); defaults to HYDRATOR_CLAIM_GRACE_MS. */
+    claimGraceMs?: number;
+  },
 ): () => Promise<HydrationResult | null> {
+  // `claimGraceMs` rides the deps (like `now`/`stepTimeoutMs`/`maxItemsPerTick`),
+  // so the same override is visible to `runHydrationOnce` without a new
+  // parameter (parent AC5). An absent option leaves the deps untouched.
+  const runnerDeps =
+    opts.claimGraceMs !== undefined
+      ? { ...deps, claimGraceMs: opts.claimGraceMs }
+      : deps;
   return async () => {
     if (!(await opts.isVisible())) return null;
-    return runHydrationOnce(deps, opts.workspaceId);
+    return runHydrationOnce(runnerDeps, opts.workspaceId);
   };
 }
 
@@ -745,6 +1018,8 @@ export async function runHydrationOnce(
   const now = deps.now ?? (() => Date.now());
   const stepTimeoutMs = deps.stepTimeoutMs ?? HYDRATOR_STEP_TIMEOUT_MS;
   const maxItemsPerTick = deps.maxItemsPerTick ?? HYDRATOR_MAX_ITEMS_PER_TICK;
+
+  const claimGraceMs = deps.claimGraceMs ?? HYDRATOR_CLAIM_GRACE_MS;
 
   const inProgressStep = await runStep(
     'in-progress-list',
@@ -779,7 +1054,12 @@ export async function runHydrationOnce(
     stepTimeoutMs,
     now,
     log,
-    () => deps.listActivePanes(workspaceId),
+    // WL-0MWHBSWC20067SMY: the demotion evidence is workspace-agnostic — the
+    // wider seam (`listAllActivePanes`, machine-wide `herdr pane list`, no
+    // `--workspace`) replaces the scoped read for demotion, still exactly ONE
+    // pane spawn per tick (AC10). When the seam is absent (legacy fakes) the
+    // scoped read is used byte-for-byte.
+    () => (deps.listAllActivePanes ? deps.listAllActivePanes() : deps.listActivePanes(workspaceId)),
   );
   if (tabStep.status === 'timeout') {
     return {
@@ -801,9 +1081,37 @@ export async function runHydrationOnce(
   }
   const panes = tabStep.value;
 
+  // Parent AC8 evidence: distinct workspace ids scanned by the demotion read
+  // (sorted; the formatter caps the list with +N overflow). The wider seam's
+  // panes carry workspace ids; for the legacy scoped read the scanned
+  // workspace id is recorded explicitly so the evidence is truthful even
+  // when the CLI-scoped payload omits the field.
+  const evidenceWorkspaceIds = [
+    ...new Set(
+      panes
+        .map((pane) => pane.workspace_id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    ),
+  ].sort();
+  if (
+    !deps.listAllActivePanes &&
+    typeof workspaceId === 'string' &&
+    workspaceId.length > 0 &&
+    !evidenceWorkspaceIds.includes(workspaceId)
+  ) {
+    evidenceWorkspaceIds.push(workspaceId);
+    evidenceWorkspaceIds.sort();
+  }
+
   // F4 (WL-0MVJV2ORY002MNFF): resolve every pane match once — the loop used
   // to recompute `collectPaneWorkItemIds` per item (O(panes) per item).
-  const paneIds = collectPaneWorkItemIds(panes, workspaceId);
+  // Workspace-agnostic demotion: with the wider seam the machine-wide pane
+  // set needs NO workspace filter (a pane in the Dispatcher workspace is
+  // evidence); with the legacy scoped read keep today's workspace filter
+  // byte-for-byte (WL-0MWHBSWC20067SMY).
+  const paneIds = deps.listAllActivePanes
+    ? collectPaneWorkItemIds(panes)
+    : collectPaneWorkItemIds(panes, workspaceId);
 
   // F4 batched dependency read: when the seam exists, ONE `dep-list` step
   // reads every candidate's outbound edges (production wiring: in-process,
@@ -944,7 +1252,20 @@ export async function runHydrationOnce(
       held = verdict === undefined || verdict.held;
     }
 
-    const decision = decideDemotion(item, { hasActivePane: hasActivePane, blocked, held });
+    // Parent AC5: claim age = now − max(updatedAt, activityAt); an item
+    // claimed inside the configured window is kept even with no pane visible
+    // yet. `claimAgeMs` returns null for absent/unparseable recency — treated
+    // as a fresh claim inside the window (documented fail-open, pinned by
+    // test).
+    const claimAge = claimAgeMs(item, now());
+    const withinGraceWindow = claimAge === null || claimAge < claimGraceMs;
+
+    const decision = decideDemotion(item, {
+      hasActivePane,
+      blocked,
+      held,
+      withinGraceWindow,
+    });
     if (decision === null) {
       skipped += 1;
       if (held) {
@@ -964,8 +1285,20 @@ export async function runHydrationOnce(
     const deadClaimHolder =
       verdict !== undefined && !verdict.held && verdict.reason === 'stale';
     const releaseReason = deadClaimHolder
-      ? 'released because no pane and claim holder dead'
-      : 'released because no matching pane';
+      ? RELEASE_REASON_NO_PANE_DEAD_HOLDER
+      : RELEASE_REASON_NO_MATCHING_PANE;
+
+    // Parent AC8: the release evidence (panes seen, workspaces scanned, claim
+    // age, grace window) rides the demotion seam so the audit comment and the
+    // log line can both carry it. A release past the grace window always has
+    // a knowable claim age (a null age stays inside the fail-open keep path).
+    const releaseEvidence: ReleaseEvidence = {
+      paneCount: panes.length,
+      workspaceIds: evidenceWorkspaceIds,
+      claimAgeMs: claimAge,
+      graceMs: claimGraceMs,
+      itemId: item.id,
+    };
 
     const applyStep = await runStep(
       'demotion-apply',
@@ -976,6 +1309,7 @@ export async function runHydrationOnce(
         deps.applyDemotion(item.id, decision.status, decision.stage, {
           previousAssignee: item.assignee,
           reason: releaseReason,
+          evidence: releaseEvidence,
         }),
     );
     if (applyStep.status === 'timeout') {
@@ -989,8 +1323,14 @@ export async function runHydrationOnce(
     }
     if (applyStep.status === 'ok' && applyStep.value === true) {
       demoted += 1;
+      // Parent AC5: a release allowed past the window names the claim age and
+      // the window on the log line, so the grace decision is operator-visible.
+      const graceNote =
+        claimAge !== null
+          ? ` claim age ${claimAge}ms past grace window ${claimGraceMs}ms`
+          : '';
       log(
-        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (${deadClaimHolder ? 'no pane, claim holder dead' : 'no matching pane'})`,
+        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (${deadClaimHolder ? 'no pane, claim holder dead' : 'no matching pane'})${graceNote} ${formatReleaseEvidence(releaseReason, releaseEvidence)}`,
       );
     } else {
       skipped += 1;
@@ -1015,6 +1355,12 @@ function normaliseItem(raw: unknown): HydratorItem | null {
     status: typeof o.status === 'string' ? o.status : undefined,
     stage: typeof o.stage === 'string' ? o.stage : undefined,
     assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
+    // Parent AC5: recency rides the EXISTING `wl list --json` fields (ISO
+    // 8601 strings) — no new timestamp field. A missing/non-string value
+    // stays undefined and degrades to the documented fail-open direction
+    // (kept as a fresh claim inside the grace window).
+    updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : undefined,
+    activityAt: typeof o.activityAt === 'string' ? o.activityAt : undefined,
   };
 }
 
@@ -1164,6 +1510,28 @@ export function createProductionHydratorDeps(
       }));
     },
 
+    // WL-0MWHBSWC20067SMY: workspace-agnostic demotion evidence — `herdr
+    // pane list` with NO `--workspace` scope (one machine-wide pane spawn per
+    // tick, AC10): a live dispatch pane in the Dispatcher workspace keeps the
+    // claim it proves. Same shared machine parser as the scoped read — no
+    // second parser. The selection-list marker path keeps using {@link
+    // listActivePanes} (workspace-scoped) untouched.
+    listAllActivePanes: async () => {
+      const args = ['pane', 'list'];
+      const { stdout } = await getExecFileAsync()(
+        herdrBin(),
+        args,
+        hydratorExecOptions(8 * 1024 * 1024),
+      );
+      const parsed = parseMachinePaneListOutput(stdout);
+      if (parsed === null) return null;
+      return parsed.map((pane) => ({
+        pane_id: pane.paneId,
+        label: pane.label ?? '',
+        workspace_id: pane.workspaceId,
+      }));
+    },
+
     listOutboundDeps: async (itemId: string) => {
       const { stdout } = await getExecFileAsync()(
         'wl',
@@ -1289,7 +1657,7 @@ export function createProductionHydratorDeps(
             'add',
             itemId,
             '--comment',
-            buildReleaseComment(opts.reason ?? 'released', previousAssignee),
+            buildReleaseComment(opts.reason ?? 'released', previousAssignee, opts.evidence),
             '--author',
             HYDRATOR_COMMENT_AUTHOR,
             '--json',

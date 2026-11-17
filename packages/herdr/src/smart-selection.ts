@@ -19,6 +19,17 @@
  * status=blocked in_review item is release-blocking and must never be hidden
  * by ranking or the browseItemCount window (WL-0MV71WBHB007D8ZE).
  *
+ * Blocker pinning (WL-0MW7YJYS5009H7WC) — DEFAULT VIEW ONLY: a visible
+ * `status=blocked` item's ACTIVE blockers are always shown too (the blocker
+ * itself when it is a root, its ROOT ancestor when it is a child — "show
+ * parents, not children" unchanged), grouped with the blocked item, first
+ * (lowest) group wins for multi-block. The pin pass runs downstream in
+ * `fetcher.root-substitution.ts` (selection tail) and `grouping.ts` (group
+ * override); this module's purview is the mandatory-set guarantee the pin
+ * preserves. The guarantee does NOT extend to the stage-filtered views
+ * (`fetchItemsByStage`/`fetchItemsByPriority`), which stay strictly
+ * root-only and never synthesise dependency rows.
+ *
  * This function is intentionally duplicated per TUI (decision Q2c in
  * WL-0MS8W5LTW006YZ4B); the Pi TUI Worklog extension copy was removed by
  * WL-0MSGI7PV9004UD0N, so the Herdr plugin copy (and the core `wl next`

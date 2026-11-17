@@ -116,6 +116,9 @@ export function buildOrchestratorContext(opts: DowntimeWorkerConfig): Orchestrat
     // Pane-close reaper cadence gate (WL-0MUJL1NAH0042GOS): timestamp of the
     // last scheduled reaper pass. 0 forces a pass on the first tick.
     lastPaneCloseReaperAt: 0,
+    // Host-budget ledger reconciliation (WL-0MWFJDEY5002FBRE): 0 forces a pass
+    // on the first tick, then the bounded cadence takes over.
+    lastBudgetReconcileAt: 0,
     // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
     // worker is fully paused (no poll, no idle tracking, no dispatch) after a
     // genuine empty backlog OR three consecutive CLI errors. Cancelled early

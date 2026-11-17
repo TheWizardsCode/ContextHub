@@ -13,14 +13,22 @@
  * This suite pins the corrected prose so docs and behaviour cannot drift
  * silently again:
  *
- *  - the corrected representation paragraph is present (offer list, at most one
- *    offer per `instanceId`, zero entries while the window is empty, the
- *    `leader` block as the liveness record),
+ *  - the corrected representation paragraph is present (offer list, a bounded
+ *    `offers` array per entry since v2, zero entries while the window is empty,
+ *    the `leader` block as the liveness record),
  *  - the stale "exactly one machine entry" claim is absent from every section
  *    of the page (it also appeared in the leader-election bullet and the
  *    migration section),
  *  - the identifiers the page names still exist in the module it points at, so
  *    a rename cannot rot the reference.
+ *
+ * v2 update (parent WL-0MWDDHQON0015T3P): the file still holds at most one
+ * entry per instance, but that entry now carries up to three bucket offers, so
+ * the prose assertions were widened from "one offer per instance" to "one
+ * entry with a bounded offers array". The anti-stale-claim guard keeps the
+ * "exactly one machine entry" prohibition; the v1-era "stores one entry per
+ * instance" pattern is dropped because one entry per instance remains the v2
+ * shape (the count of OFFERS is what changed).
  *
  * Behaviour itself is covered by `packages/herdr/src/coordination-leader.test.ts`;
  * this suite covers only the operator-facing half.
@@ -59,20 +67,23 @@ const coordinationModule = read(COORDINATION_MODULE);
 const flatDoc = dispatcherDoc.replace(/\s+/g, ' ');
 
 describe('downtime-dispatcher documents the coordination representation', () => {
-  it('states that `entries` is an offer list with at most one offer per instance', () => {
+  it('states that `entries` is an offer list with a bounded per-bucket offers array', () => {
     expect(flatDoc).toContain(
       'The machine file does **not** carry "exactly one entry per instance"',
     );
     expect(flatDoc).toContain('`entries` is an OFFER list');
-    expect(flatDoc).toContain('an `instanceId` holds **at most one** offer');
+    // v2: one entry per instance, carrying at most three offers.
+    expect(flatDoc).toContain('an `instanceId` holds **at most one entry**');
     expect(flatDoc).toContain('(upsert, never a duplicate)');
+    expect(flatDoc).toContain('carries a bounded `offers` array');
   });
 
   it('states that an instance may hold no entry and that the leader block records liveness', () => {
     // The behaviour the stale claim contradicted: no entry while the window is
-    // empty or the offer was just dispatched.
+    // empty, and an entry that survives a single offer dispatch until drained.
+    expect(flatDoc).toContain('or **no** entry at all while its window is empty');
     expect(flatDoc).toContain(
-      "**no** entry at all while its window is empty or its offer was just dispatched",
+      'a dispatched offer no longer drops the whole entry',
     );
     expect(flatDoc).toContain(
       "the top-level `leader` block, not an entry, is what records the lease holder's liveness",
@@ -103,9 +114,10 @@ describe('downtime-dispatcher documents the coordination representation', () => 
   });
 
   it('introduces the machine file as an offer list, not a per-instance entry table', () => {
-    expect(flatDoc).toContain('stores one offer per herdr instance');
+    expect(flatDoc).toContain('stores one entry per herdr instance');
+    expect(flatDoc).toContain('plus a bounded `offers` array');
     expect(flatDoc).toContain(
-      'and no offer at all for an instance whose window is empty',
+      'and no entry at all for an instance whose window is empty',
     );
   });
 
@@ -115,8 +127,10 @@ describe('downtime-dispatcher documents the coordination representation', () => 
     expect(dispatcherDoc).not.toMatch(/exactly one machine entry/i);
     expect(dispatcherDoc).not.toMatch(/single machine entry/i);
     expect(dispatcherDoc).not.toMatch(/one machine entry per/i);
-    expect(dispatcherDoc).not.toMatch(/stores one entry per (?:herdr )?instance/i);
     expect(dispatcherDoc).not.toMatch(/writes exactly one\b[^.]{0,40}\bentry/i);
+    // v2 guard: the old single-offer claim is gone too (an entry now advertises
+    // up to one nominee per bucket, never "exactly one offer").
+    expect(dispatcherDoc).not.toMatch(/exactly one offer per (?:herdr )?instance/i);
   });
 
   it('names only identifiers that still exist in the coordination module', () => {

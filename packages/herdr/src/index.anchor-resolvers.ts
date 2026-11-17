@@ -31,20 +31,59 @@ import {
 import { resolveHerdrBin } from './herdr-bin.js';
 
 /**
+ * Placement-failure detail vocabulary (WL-0MWHCUZ5C000I7S6): structurally
+ * identical to the family-local alias in `dispatcher-anchor.contract.ts` and
+ * the local unions in the deps contracts — the default resolvers forward the
+ * report callback untyped through to the tab-anchors resolvers' own
+ * structural type.
+ */
+type PlacementFailureDetail =
+  | 'persisted-workspace-missing'
+  | 'herdr-unreadable'
+  | 'dispatcher-workspace-unprovisionable'
+  | 'prefix-empty'
+  | 'item-tab-unavailable'
+  | 'project-workspace-mismatch';
+
+/**
+ * Why the project-workspace resolver returned `null` (WL-0MWHW3PKX0048ZYL
+ * AC3) — structurally identical to the contract's
+ * `ProjectWorkspaceFallbackReason`; the barrel exports neither, so each
+ * module declares its own copy.
+ */
+type ProjectWorkspaceFallbackReason =
+  | 'project-workspace-mismatch'
+  | 'project-workspace-missing'
+  | 'no-project-workspace'
+  | 'herdr-unreadable';
+
+/**
  * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
  * (C0 WL-0MTR01EU7005SYZG): resolves the machine-wide dedicated Dispatcher
  * anchor pane via the herdr CLI (F1 WL-0MTR2CD4X006XI7U), provisioning the
  * Dispatcher workspace idempotently on first dispatch. Null on any
  * failure — dispatch degrades to "no dispatch this cycle". Injectable for
  * tests that build real deps without a live herdr session.
+ *
+ * The optional trailing `report` callback (WL-0MWHCUZ5C000I7S6) is forwarded
+ * to the underlying resolver so a fail-closed `null` carries the boundary
+ * detail to the placement collector; the catch-all reports the generic
+ * unreadable boundary (the underlying resolver reports its own, more
+ * specific boundaries before returning `null`).
  */
 export async function defaultDispatcherAnchorResolver(
   cwd: string,
+  report?: (detail: PlacementFailureDetail) => void,
 ): Promise<DispatcherAnchor | null> {
   try {
     const herdrBin = resolveHerdrBin();
-    return await resolveDispatcherAnchor(cwd, createDispatcherAnchorDeps(cwd, herdrBin));
+    return await resolveDispatcherAnchor(
+      cwd,
+      createDispatcherAnchorDeps(cwd, herdrBin),
+      report,
+    );
   } catch {
+    report?.('herdr-unreadable');
     return null;
   }
 }
@@ -53,12 +92,36 @@ export async function defaultDispatcherAnchorResolver(
  * Default project-workspace resolver used by {@link createDowntimeDeps}
  * (WL-0MU321YK70035AYT): resolves the herdr plugin pane/workspace whose
  * logical root (`HERDR_RESOLVED_CWD`) equals the worklog root `cwd`, via the
- * herdr CLI. Null on any failure — dispatch falls back to the retained
- * Dispatcher anchor (AC4). Injectable for tests that build real deps without
- * a live herdr session.
+ * herdr CLI — falling back to the DURABLE per-root project-workspace map when
+ * no live plugin pane advertises the root (WL-0MWHW3PKX0048ZYL AC1/AC2). Null
+ * on any failure — dispatch falls back to the retained Dispatcher anchor
+ * (AC3, rare + logged). Injectable for tests that build real deps without a
+ * live herdr session.
+ *
+ * The optional trailing `reportNearMiss` callback (WL-0MWHCV3PR002WSQM) is
+ * forwarded to the underlying resolver: when it returns `null` and a plugin
+ * pane reported a DIFFERENT non-empty `HERDR_RESOLVED_CWD`, each near-miss
+ * record (expected vs actual root, pane/workspace ids) is reported so the
+ * placement collector can record the mismatch on the decision entry.
+ * Diagnostic-only — the exact-root matching rule is unchanged.
+ *
+ * The optional trailing `reportFallbackReason` callback
+ * (WL-0MWHW3PKX0048ZYL AC3) is forwarded to the underlying resolver: when it
+ * returns `null`, the reason the primary path failed
+ * (`no-project-workspace` / `project-workspace-mismatch` /
+ * `project-workspace-missing` / `herdr-unreadable`) is reported so a
+ * `Dispatcher`-workspace fallback placement is attributable from the dispatch
+ * log. Never invoked when the primary path resolves.
  */
 export async function defaultProjectWorkspaceResolver(
   cwd: string,
+  reportNearMiss?: (nearMiss: {
+    expectedRoot: string;
+    actualRoot: string;
+    paneId: string;
+    workspaceId: string;
+  }) => void,
+  reportFallbackReason?: (reason: ProjectWorkspaceFallbackReason) => void,
 ): Promise<ProjectWorkspaceTarget | null> {
   try {
     const herdrBin = resolveHerdrBin();
@@ -66,8 +129,11 @@ export async function defaultProjectWorkspaceResolver(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),
       cwd,
+      reportNearMiss,
+      reportFallbackReason,
     );
   } catch {
+    reportFallbackReason?.('herdr-unreadable');
     return null;
   }
 }
@@ -86,6 +152,7 @@ export async function defaultProjectWorkspaceResolver(
 export async function defaultDispatcherTabAnchorResolver(
   cwd: string,
   prefix: string,
+  report?: (detail: PlacementFailureDetail) => void,
 ): Promise<DispatcherPrefixTabAnchor | null> {
   try {
     const herdrBin = resolveHerdrBin();
@@ -93,8 +160,10 @@ export async function defaultDispatcherTabAnchorResolver(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),
       prefix,
+      report,
     );
   } catch {
+    report?.('herdr-unreadable');
     return null;
   }
 }

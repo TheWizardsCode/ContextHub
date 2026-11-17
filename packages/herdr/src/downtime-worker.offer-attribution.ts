@@ -78,6 +78,13 @@ export type DispatchGateToken =
   | 'in-flight-pane'
   /** No slot can host a pane this cycle (single-pane tier minimum unmet). */
   | 'slots-unavailable'
+  /**
+   * The proxy-derived AUDIT budget refused the audit offer
+   * (`audit-budget-saturated` / `audit-budget-unknown`, or the legacy
+   * `host-budget-audit` / `audit-host-saturated`) — the per-offer counterpart
+   * of the `auditBudgetHold` terminal hold (WL-0MWDDHVF2004PTYX AC5).
+   */
+  | 'audit-budget'
   /** The item could not be read (wl/CLI failure) — entry kept, fail-open. */
   | 'wl-error';
 

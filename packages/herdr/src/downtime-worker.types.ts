@@ -15,7 +15,13 @@
 
 import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 import type { EmptyOfferAttribution } from './downtime-worker.offer-attribution.js';
-import type { HerdrAgentSession } from './pane-close-herdr.js';
+// Canonical homes (WL-0MWHWH6XL0025YX2): the discovery-facing pane record
+// and the raw `agent_session` shape live in `pane-discovery.ts` (one
+// discovery module — parse, predicates, in-flight set, safe-close,
+// blocking filter). Imported for local use and re-exported so every existing
+// consumer keeps resolving them from the types module.
+import type { HerdrPaneRecord, HerdrAgentSession } from './pane-discovery.js';
+export type { HerdrPaneRecord, HerdrAgentSession } from './pane-discovery.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -674,16 +680,28 @@ export interface DowntimeItemInfo {
 export type DowntimeItemResult =
   | { ok: true; info: DowntimeItemInfo }
   | { ok: false; error?: string };
+/** v2 per-bucket nominee (parent AC2/AC3): canonical first offerable item of a dispatch bucket; mirrors `CoordinationOffer` (types.ts cannot import the coordination module). */
+export interface CoordinationNominee { kind: 'implement' | 'audit' | 'prep'; workItemId: string }
+
 /**
  * Outcome of the check-in most-important-item computation. `{ok:true,
- * kind/candidate}` — a dispatchable item was found; `{ok:true,
- * noCandidate:true}` — the instance genuinely has nothing dispatchable
- * (its own entry may be removed); `{ok:false}` — wl/CLI errors occurred
- * during the computation (fail-open: keep the existing entry, retry at
- * the next check-in).
+ * kind/candidate}` — a dispatchable item was found (plus `nominees`, the
+ * per-bucket candidates); `{ok:true, noCandidate:true}`
+ * — nothing dispatchable (the own entry may be removed); `{ok:false}` —
+ * wl/CLI errors (fail-open: keep the entry, retry at the next check-in).
  */
 export type MostImportantItemResult =
-  | { ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate }
+  | {
+      ok: true;
+      kind: DowntimeSkillKind;
+      candidate: DowntimeCandidate;
+      /** Per-bucket nominees (canonical first offerable item of each bucket, bucket order; buckets fill from the whole ranked backlog since WL-0MWFJ8R1P005G1H1). Widening: buckets filled beyond the window + items read; absent when window-sourced (byte-identical). */
+      nominees: CoordinationNominee[];
+      filledBeyondWindow?: {
+        buckets: Array<'implement' | 'audit' | 'prep'>;
+        itemsRead: number;
+      };
+    }
   /**
    * `attribution` (WL-0MVR8FKMU009XTED AC1) names WHY nothing was offered —
    * `empty-window` / `all-window-items-held` (+ sentinels) /
@@ -756,10 +774,10 @@ export type DowntimeClaimResult =
  * `audit-budget-saturated` (verdict `available:false`) or
  * `audit-budget-unknown` (absent/unreachable/unparsable read, fail-closed) —
  * never the legacy `host-budget-audit` / `audit-host-saturated` tokens. On the
- * retained host-wide source the legacy tokens are unchanged. `detail` records
- * the failing exchange on a fail-closed proxy read (`timeout` / `network` /
- * `http-<status>` / `bad-body` / `seam-absent`) for the decision log. Absent on
- * a per-worklog skip.
+ * retained host-wide source the legacy tokens are unchanged (`host-budget-corrupt`
+ * = the ledger exists but is untrustworthy; no read repairs it). `detail`
+ * records the failing exchange on a fail-closed proxy read for the decision
+ * log. Absent on a per-worklog skip.
  */
 export type DowntimeActiveAuditResult =
   | {
@@ -770,6 +788,7 @@ export type DowntimeActiveAuditResult =
         | 'audit-host-saturated'
         | 'host-budget-audit'
         | 'host-budget-unknown'
+        | 'host-budget-corrupt'
         | 'audit-budget-saturated'
         | 'audit-budget-unknown';
       budget?: { live: number; max: number };
@@ -794,17 +813,6 @@ export type DowntimeActiveAuditResult =
 export type RunningPanesResult =
   | { ok: true; count: number; paneIds?: string[]; records?: HerdrPaneRecord[] }
   | { ok: false; error?: string };
-/** One parsed `herdr pane list` record (only the fields liveness needs). */
-export interface HerdrPaneRecord {
-  paneId: string;
-  label?: string;
-  agent?: string;
-  agentStatus?: string;
-  /** Pane working directory (worklog-root hint for cross-root resume). */
-  cwd?: string;
-  /** Raw `agent_session` field (session log path + agent metadata). */
-  agentSession?: HerdrAgentSession;
-}
 /**
  * Item-scoped in-flight state, resolved ONCE per idle cycle and threaded into
  * the dispatch loops (WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO).

@@ -40,11 +40,16 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  repairBudgetLedgerFromPanes,
+} from './host-dispatch-budget.repair.js';
+import {
   admitHostDispatch,
   confirmHostDispatch,
   decideAuditAvailability,
+  decideAuditLeaseAdmission,
   HOST_BUDGET_AUDIT_REFUSAL,
   HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+  HOST_BUDGET_CORRUPT_REFUSAL,
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
   readAuditBudgetState,
@@ -55,8 +60,10 @@ import {
 import {
   AUDIT_BUDGET_SATURATED_REASON,
   AUDIT_BUDGET_UNKNOWN_REASON,
+  AUDIT_BUDGET_UNAVAILABLE_REASON,
 } from './downtime-worker.audit-availability.contract.js';
 import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js';
 import { AUDIT_BUDGET_DIVERGENCE_REASON, AUDIT_BUDGET_LEGACY_REASON } from './downtime-log-budget.js';
 import { HOST_BUDGET_CONFIG_FILE, isLegacyAuditBudgetEnabled } from './host-dispatch-budget.js';
 import {
@@ -119,16 +126,18 @@ describe('host dispatch budget — machine admission (F3)', () => {
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2 });
 
-      // Instance A reserves WL-A with pane-1 live; instance B reserves WL-B
-      // with pane-2 live. Each admission counts the OTHER's entry too.
-      const first = admit(INSTANCE_A, 'WL-A', makeLivePaneList(['WL-A']));
+      // Instance A reserves WL-A; pane-1 then goes live. Instance B reserves
+      // WL-B, whose pane does not exist yet — so the list it counts holds only
+      // A's dispatch (WL-0MWFJDD8R005F5BV counts LIVE panes, and a dispatch
+      // that has not spawned has none).
+      const first = admit(INSTANCE_A, 'WL-A', makeLivePaneList([]));
       expect(first).toMatchObject({ admitted: true, live: 0, max: 2 });
       confirm(INSTANCE_A, 'WL-A', 'pane-1');
 
       const second = admit(
         INSTANCE_B,
         'WL-B',
-        makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-A' }, 'WL-B']),
+        makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-A' }]),
       );
       expect(second).toMatchObject({ admitted: true, live: 1, max: 2 });
       confirm(INSTANCE_B, 'WL-B', 'pane-2');
@@ -192,10 +201,11 @@ describe('host dispatch budget — machine admission (F3)', () => {
       ]);
     }));
 
-  it('AC6: an unreadable ledger fails closed, is repaired from live panes, then dispatch resumes', () =>
+  it('AC6 (WL-0MWFJD8ZO000J1R8): an unreadable ledger fails closed and is NEVER rewritten by a read', () =>
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2 });
-      writeRawBudgetLedger(dir, '{ this is not json');
+      const corrupt = '{ this is not json';
+      writeRawBudgetLedger(dir, corrupt);
 
       const livePanes = makeLivePaneList(['WL-RUNNING']);
       const refused = admit(INSTANCE_A, 'WL-NEW', livePanes);
@@ -204,16 +214,27 @@ describe('host dispatch budget — machine admission (F3)', () => {
         admitted: false,
         live: 0,
         max: 2,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-        repaired: true,
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
-      // The ledger was rewritten from live state: the running pane is now an
-      // entry (never a silent zero, which would under-count).
-      const repaired = readBudgetLedger(dir);
-      expect(repaired?.entries.map((entry) => entry.itemId)).toEqual(['WL-RUNNING']);
-      expect(repaired?.entries[0]).toMatchObject({ kind: 'implement', paneId: 'pane-1' });
+      // The bytes are untouched: an admission read never repairs. The old
+      // automatic repair reconstructed only `Downtime …` panes, silently
+      // dropping decorated and manually-triggered ones.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(corrupt);
+      expect(readBudgetLedger(dir)).toBeNull();
 
-      // A subsequent tick against the healed ledger dispatches normally.
+      // A second tick is refused identically — still no rewrite, still corrupt.
+      expect(admit(INSTANCE_A, 'WL-NEW', livePanes)).toMatchObject({
+        admitted: false,
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
+      });
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(corrupt);
+
+      // The EXPLICIT operator repair is the recovery, and dispatch resumes.
+      const repaired = repairBudgetLedgerFromPanes(livePanes, {
+        instanceId: 'operator',
+        root: INSTANCE_A,
+      });
+      expect(repaired.ok).toBe(true);
       const healed = admit(INSTANCE_A, 'WL-NEW', livePanes);
       expect(healed).toMatchObject({ admitted: true, live: 1, max: 2 });
       expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId).sort()).toEqual([
@@ -243,7 +264,7 @@ describe('host dispatch budget — machine admission (F3)', () => {
       { kind: 'implement', itemId: 'WL-A', instanceId: INSTANCE_A, root: '/repo/test' },
       { livePanes: makeLivePaneList(['WL-OTHER']), dir: null },
     );
-    expect(admission).toEqual({ admitted: true, live: 0, max: 2 });
+    expect(admission).toMatchObject({ admitted: true, live: 0, max: 2 });
   });
 
   it('honours an operator-written budget.json and counts only fresh, live-pane entries', () =>
@@ -312,7 +333,7 @@ describe('host dispatch budget — audit tier (F2)', () => {
 
       // The first audit reserves the slot. No pane confirmation is needed: the
       // audit tier counts a fresh reservation immediately (marker semantics).
-      expect(auditAdmit('WL-A', panes)).toEqual({ admitted: true, live: 0, max: 1 });
+      expect(auditAdmit('WL-A', panes)).toMatchObject({ admitted: true, live: 0, max: 1 });
 
       // The second audit is refused at the cap, with the retired marker's reason
       // token (existing consumers keep working) and the observed evidence.
@@ -334,8 +355,8 @@ describe('host dispatch budget — audit tier (F2)', () => {
         auditPane('pane-2', 'WL-B'),
       ]);
 
-      expect(auditAdmit('WL-A', panes)).toEqual({ admitted: true, live: 0, max: 2 });
-      expect(auditAdmit('WL-B', panes)).toEqual({ admitted: true, live: 1, max: 2 });
+      expect(auditAdmit('WL-A', panes)).toMatchObject({ admitted: true, live: 0, max: 2 });
+      expect(auditAdmit('WL-B', panes)).toMatchObject({ admitted: true, live: 1, max: 2 });
       expect(auditAdmit('WL-C', panes)).toEqual({
         admitted: false,
         live: 2,
@@ -402,29 +423,44 @@ describe('host dispatch budget — audit tier (F2)', () => {
       );
 
       expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
-      expect(auditAdmit('WL-NEW', [])).toEqual({ admitted: true, live: 0, max: 1 });
+      expect(auditAdmit('WL-NEW', [])).toMatchObject({ admitted: true, live: 0, max: 1 });
       expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-NEW']);
       // Retirement: the stale file is neither counted nor deleted (an operator
       // or the older instance owns it).
       expect(readActiveAuditMarker(dir)).not.toBeNull();
     }));
 
-  it('AC5: every release point (pane close, dispatch failure, claim rollback) frees the slot by item id', () =>
+  it('AC5: every release point (pane close, dispatch failure, claim rollback) frees the slot by identity', () =>
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
 
       // All three abort paths in the claim pipeline call the same release seam
-      // (`releaseHostDispatch` / `releaseHostBudgetForFailure`), so a
-      // release-by-item-id assertion covers each of them; the per-path CALL
-      // SITES are asserted individually in `downtime-worker.dispatch.test.ts`
-      // (marker-write failure, spawn failure, admission refusal) and
-      // `index.test.ts` (pane close).
+      // (`releaseHostDispatch` / `releaseHostBudgetForFailure`), so one release
+      // assertion covers each of them; the per-path CALL SITES are asserted
+      // individually in `downtime-worker.dispatch.test.ts` (marker-write
+      // failure, spawn failure, admission refusal) and `index.test.ts` (pane
+      // close). Since WL-0MWFJD5T4003OM91 the identity is the attempt token the
+      // admission returned, never the item id alone.
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        expect(auditAdmit('WL-AUD', [])).toEqual({ admitted: true, live: 0, max: 1 });
-        expect(releaseHostDispatch('WL-AUD')).toBe(true);
+        const admission = auditAdmit('WL-AUD', []);
+        expect(admission).toMatchObject({ admitted: true, live: 0, max: 1 });
+        expect(typeof admission.attemptId).toBe('string');
+        expect(
+          releaseHostDispatch({
+            itemId: 'WL-AUD',
+            kind: 'audit',
+            attemptId: admission.attemptId,
+          }),
+        ).toBe(true);
         expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
         // Idempotent: a second release for the same dispatch is a no-op success.
-        expect(releaseHostDispatch('WL-AUD')).toBe(true);
+        expect(
+          releaseHostDispatch({
+            itemId: 'WL-AUD',
+            kind: 'audit',
+            attemptId: admission.attemptId,
+          }),
+        ).toBe(true);
       }
     }));
 
@@ -445,27 +481,31 @@ describe('host dispatch budget — audit tier (F2)', () => {
       expect(readBudgetLedger(dir)?.entries).toEqual([]);
     }));
 
-  it('AC6: an unreadable ledger fails closed and is repaired from the live audit panes', () =>
+  it('AC6 (WL-0MWFJD8ZO000J1R8): an unreadable ledger fails closed and the pre-check NEVER rewrites it', () =>
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
-      writeRawBudgetLedger(dir, '{ this is not json');
+      const corrupt = '{ this is not json';
+      writeRawBudgetLedger(dir, corrupt);
       const livePanes = makeLivePaneList([auditPane('pane-1', 'WL-RUNNING')]);
 
-      expect(readAuditBudgetState({ livePanes })).toEqual({
+      expect(readAuditBudgetState({ livePanes })).toMatchObject({
         atCap: true,
         live: 0,
         max: 1,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-        repaired: true,
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
-      // Self-healing: the running audit pane is now a ledger entry (a silent
-      // zero would under-count and admit a second audit).
-      const repaired = readBudgetLedger(dir);
-      expect(repaired?.entries.map((entry) => entry.itemId)).toEqual(['WL-RUNNING']);
-      expect(repaired?.entries[0]).toMatchObject({ kind: 'audit', paneId: 'pane-1' });
+      // An admission read never repairs: the bytes are untouched, so a repair
+      // is always a deliberate, reported operator action.
+      expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(corrupt);
+      expect(readBudgetLedger(dir)).toBeNull();
 
-      // The next tick reads the healed ledger: still at cap, now with the real
-      // single-flight token.
+      // The explicit repair is the recovery: the running audit pane becomes an
+      // entry and the pre-check reports the real single-flight token.
+      const repaired = repairBudgetLedgerFromPanes(livePanes, {
+        instanceId: 'operator',
+        root: '/repo/test',
+      });
+      expect(repaired.ok).toBe(true);
       expect(readAuditBudgetState({ livePanes })).toMatchObject({
         atCap: true,
         live: 1,
@@ -496,11 +536,18 @@ const proxySaturated = (cap: number, live = cap): AuditAvailabilityOutcome => ({
   availability: { cap, live, available: false },
 });
 
+/** A held-proxy-lease acquire outcome the helper defaults to (AC2). */
+const LEASE_OK = (itemId: string): AuditLeaseAcquireOutcome => ({
+  status: 'ok',
+  lease: { sessionId: `herdr-audit-${itemId}` },
+});
+
 /** One audit asking the PROXY-derived path for a slot. */
 function proxyAuditAdmit(
   itemId: string,
   availability: AuditAvailabilityOutcome | undefined,
   onAuditBudgetEvent?: (event: AuditBudgetLogEvent) => void,
+  auditLease?: AuditLeaseAcquireOutcome,
 ): HostBudgetAdmission {
   return admitHostDispatch(
     { kind: 'audit', itemId, instanceId: INSTANCE_A, root: '/repo/test' },
@@ -509,6 +556,15 @@ function proxyAuditAdmit(
       env: {},
       ...(availability !== undefined ? { auditAvailability: availability } : {}),
       ...(onAuditBudgetEvent !== undefined ? { onAuditBudgetEvent } : {}),
+      // Lease discipline (WL-0MWFJH3NW006F5GN AC2): admission only admits an
+      // AUDIT on a 200 acquire, so the pre-change helper defaults to a held
+      // lease — a refused availability never reaches the lease gate, so the
+      // existing saturation/unknown assertions are untouched, while AVOIDING
+      // the fail-closed `lease-seam-absent` refusal that availability-only
+      // admission now correctly produces.
+      ...(auditLease !== undefined
+        ? { auditLease }
+        : { auditLease: LEASE_OK(itemId) }),
     },
   );
 }
@@ -764,11 +820,10 @@ describe('unknown pane state in admission (WL-0MW9VQX5T001GCUP)', () => {
         admitted: false,
         live: 0,
         max: 2,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-        repaired: false,
+        // The corruption is named (WL-0MWFJD8ZO000J1R8) and nothing is
+        // rewritten — a read never repairs, whatever the pane state.
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
-      // The corrupt ledger is left untouched — the next pane-carrying tick
-      // self-heals it instead of a failed pane read deleting everything.
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
     }));
 
@@ -811,13 +866,126 @@ describe('unknown pane state in admission (WL-0MW9VQX5T001GCUP)', () => {
 
       // `livePanes` absent/undefined already means "cannot repair now" on the
       // audit pre-check; a failed pane read must select exactly that arm.
-      expect(readAuditBudgetState({ livePanes: undefined })).toEqual({
+      expect(readAuditBudgetState({ livePanes: undefined })).toMatchObject({
         atCap: true,
         live: 0,
         max: 1,
-        reason: HOST_BUDGET_UNKNOWN_REFUSAL,
-        repaired: false,
+        reason: HOST_BUDGET_CORRUPT_REFUSAL,
       });
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
+    }));
+});
+
+// ── Audit-LEASE admission (WL-0MWFJH3NW006F5GN AC2) ────────────────────
+//
+// The availability read is the PRE-CHECK: its result alone can never admit.
+// The admission decision is the proxy's atomic lease acquire — only a `200`
+// admits, and every refusal maps to the shared token with the proxy's
+// `retry_after_s` honoured as the cooldown.
+
+describe('audit-lease admission (WL-0MWFJH3NW006F5GN)', () => {
+  it('a held lease (200) admits and carries the session for the release discipline', () => {
+    expect(
+      decideAuditLeaseAdmission({
+        status: 'ok',
+        lease: { sessionId: 's-1', expiresAt: Date.now() + 60_000 },
+      }),
+    ).toEqual({
+      admitted: true,
+      lease: { sessionId: 's-1', expiresAt: expect.any(Number) },
+    });
+  });
+
+  it('a 429 maps to audit-budget-saturated and carries the proxy retry_after_s as the cooldown', () => {
+    expect(decideAuditLeaseAdmission({ status: 'saturated', reason: 'audit-budget-saturated', retryAfterS: 30 })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_SATURATED_REASON,
+      retryAfterS: 30,
+    });
+    // A payload without retry_after_s still refuses (429 is saturation by
+    // status) — it simply carries no deferral advice.
+    expect(decideAuditLeaseAdmission({ status: 'saturated', reason: 'audit-budget-saturated' })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_SATURATED_REASON,
+    });
+  });
+
+  it('a 503 maps to audit-budget-unavailable (proxy registry fault), NOT the local unknown token', () => {
+    expect(
+      decideAuditLeaseAdmission({ status: 'unavailable', reason: 'audit-budget-unavailable' }),
+    ).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNAVAILABLE_REASON,
+    });
+  });
+
+  it('a transport failure fails CLOSED as audit-budget-unknown with the failing exchange', () => {
+    expect(decideAuditLeaseAdmission({ status: 'endpoint-absent', reason: 'http-404' })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'http-404',
+    });
+    expect(decideAuditLeaseAdmission({ status: 'unreachable', reason: 'timeout' })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'timeout',
+    });
+    expect(decideAuditLeaseAdmission({ status: 'unreachable', reason: 'network' })).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'network',
+    });
+  });
+
+  it('a missing lease seam fails CLOSED as audit-budget-unknown/lease-seam-absent — availability alone can never admit', () => {
+    expect(decideAuditLeaseAdmission(undefined)).toEqual({
+      admitted: false,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'lease-seam-absent',
+    });
+    // The demotion pin (AC4): even a fully ADMITTING availability read cannot
+    // admit through admission without a lease hold.
+    const availabilityAdmitting = {
+      status: 'ok',
+      availability: { cap: 1, live: 0, available: true },
+    } as const;
+    expect(decideAuditAvailability(availabilityAdmitting)).toEqual({
+      active: false,
+      budget: { live: 0, max: 1 },
+    });
+    const admission = admitHostDispatch(
+      { kind: 'audit', itemId: 'WL-DEMOTED', instanceId: INSTANCE_A, root: '/repo/test' },
+      { livePanes: [], env: {}, auditAvailability: availabilityAdmitting },
+    );
+    expect(admission).toEqual({
+      admitted: false,
+      live: 0,
+      max: 1,
+      reason: AUDIT_BUDGET_UNKNOWN_REASON,
+      detail: 'lease-seam-absent',
+    });
+  });
+
+  it('admission passes both gates: availability pre-check AND the lease 200', () =>
+    withMachineDir((dir) => {
+      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
+      const admission = admitHostDispatch(
+        { kind: 'audit', itemId: 'WL-BOTH', instanceId: INSTANCE_A, root: '/repo/test' },
+        {
+          livePanes: [],
+          env: {},
+          auditAvailability: {
+            status: 'ok',
+            availability: { cap: 1, live: 0, available: true },
+          },
+          auditLease: { status: 'ok', lease: { sessionId: 'herdr-audit-WL-BOTH' } },
+        },
+      );
+      expect(admission).toMatchObject({
+        admitted: true,
+        live: 0,
+        max: 1,
+        lease: { sessionId: 'herdr-audit-WL-BOTH' },
+      });
     }));
 });

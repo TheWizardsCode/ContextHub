@@ -109,18 +109,25 @@ describe('update priority cascade', () => {
   describe('trigger conditions', () => {
     it('should NOT cascade when parent priority changes between non-critical values', async () => {
       const parentId = await createItem('-p high');
-      const child = await createItem(`-p critical --parent ${parentId}`);
+      // A non-critical child keeps the parent non-critical. Creating a
+      // `critical` child now promotes its ancestor chain to critical (the
+      // create-side promotion cascade, WL-0MWETWWBE005CJEL), so the former
+      // "non-critical parent of a critical child" state is no longer
+      // constructible through the CLI — the parent would already be critical
+      // by the time this update runs, making it a critical→non-critical
+      // change that legitimately cascades.
+      const child = await createItem(`-p medium --parent ${parentId}`);
 
       const { stdout } = await execAsync(
-        `tsx ${cliPath} --json update ${parentId} --priority medium`
+        `tsx ${cliPath} --json update ${parentId} --priority low`
       );
       const result = JSON.parse(stdout);
 
       expect(result.success).toBe(true);
-      expect(result.workItem.priority).toBe('medium');
+      expect(result.workItem.priority).toBe('low');
       expect(result.downgradedChildren).toBeUndefined();
       const showChild = JSON.parse((await execAsync(`tsx ${cliPath} --json show ${child}`)).stdout).workItem;
-      expect(showChild.priority).toBe('critical'); // untouched
+      expect(showChild.priority).toBe('medium'); // untouched
     });
 
     it('should NOT cascade when parent is set to critical (critical to critical is a no-op)', async () => {

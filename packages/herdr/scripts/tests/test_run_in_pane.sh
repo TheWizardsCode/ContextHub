@@ -349,6 +349,39 @@ else
   fail "without --pane-id-file no file should be written"
 fi
 
+# ── Canonical shared-parser convergence (WL-0MWHWGZI4007D911) ────────
+# run-in-pane.sh now shares the canonical option parser with send-to-pi.sh;
+# every value flag accepts BOTH --flag <value> and --flag=<value> forms
+# (previously --cwd=/--pane-name= fell through into the command — documented
+# convergence), and send-to-pi-only flags stay command text.
+
+echo ""
+echo "=== Test: canonical --flag=<value> forms (shared parser) ==="
+
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --cwd=/tmp/eq-form "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane split --current --direction right --no-focus --cwd /tmp/eq-form" "$HERDR_LOG" 2>/dev/null; then
+  pass "--cwd=<path> is consumed (split --cwd /tmp/eq-form)"
+else
+  fail "--cwd=<path> should be parsed as the cwd option (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --pane-name=Eq-Name --cwd=/tmp/eq-form "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane rename .* Eq-Name" "$HERDR_LOG" 2>/dev/null; then
+  pass "--pane-name=<name> is consumed (rename to Eq-Name)"
+else
+  fail "--pane-name=<name> should be parsed as the pane name (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --model code "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane run" "$HERDR_LOG" 2>/dev/null && grep -q -- "--model" "$HERDR_LOG" 2>/dev/null; then
+  pass "--model is not an accepted option: it starts the command"
+else
+  fail "--model should reach the command, not be parsed as an option (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
 rm -rf "$SANDBOX"
 
 echo ""

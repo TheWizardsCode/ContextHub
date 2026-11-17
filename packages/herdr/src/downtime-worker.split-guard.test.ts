@@ -15,6 +15,12 @@
  * public surface, one `dispatchInFlightCount`, no new/barrel runtime imports,
  * no oversized modules). These tests are that enforcement.
  *
+ * Canonical pane modules note (WL-0MWHWHBSW005KG13): the pane-spawn argv and
+ * discovery logic extracted from this family delegate to the non-family
+ * canonical modules `pane-argv.ts` / `pane-discovery.ts` / `pane-title.ts` /
+ * `pane-label.ts` — documented in the single
+ * `docs/dev/downtime-dispatcher.md` → *Pane creation architecture* map.
+ *
  * The gates are **additive** and read-only: they scan the module tree with the
  * TypeScript parser (via `../test/split-guard/scan.js`) and assert. Nothing
  * here modifies the tree, the barrel or any other test file.

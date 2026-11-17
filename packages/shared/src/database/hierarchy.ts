@@ -11,14 +11,15 @@
  * beyond it: `getChildren` and `getChildCounts` (direct children),
  * `getNonClosedChildren` (open subtree frontier), `getDescendants` /
  * `isLeafNode` / `getLeafDescendants` / `getDepth` (recursive traversal), and
- * the three lifecycle transitions that fix a parent's state when the subtree
+ * the four lifecycle transitions that fix an item's chain when the subtree
  * changes — `cascadePriorityDowngrade` (critical children of a demoted
- * parent), `demoteParentOnChildAdded` (completed/in_review parent gets a new
+ * parent), `cascadePriorityPromote` (non-critical ancestors of a critical
+ * item), `demoteParentOnChildAdded` (completed/in_review parent gets a new
  * child), `revertToPlanComplete` (post-audit not-ready reversion).
  *
  * ## Boundary
  *
- * **Belongs here.** Tree-shape queries and the three parent-state
+ * **Belongs here.** Tree-shape queries and the four parent-state
  * transitions. Reads the store through `WorklogDatabaseContext`; traversal
  * results are computed here, never by the caller.
  *
@@ -91,6 +92,52 @@ export function cascadePriorityDowngrade(
     }
   }
   return downgraded;
+}
+
+/**
+ * Cascade a priority promotion up the ancestor chain.
+ *
+ * When a work item is `critical`, every non-critical ancestor is promoted to
+ * `critical`, transitively to the root, so a critical subtask can never be
+ * buried under a non-critical parent (operator answer Q1-B on parent
+ * WL-0MWDD2JE6006CL7I). Ancestors already at `critical` are skipped but do
+ * **not** stop the walk: legacy chains that hold a critical ancestor under a
+ * non-critical grandparent are still promoted all the way to the root.
+ * Unrelated branches are never touched.
+ *
+ * A non-critical item, or a critical item without a parent, is a no-op.
+ *
+ * @param itemId - id of the work item that became (or already is) `critical`
+ * @returns the promoted ancestors in walk order — direct parent first, then
+ *   each successive ancestor up to the root (empty when none was promoted)
+ */
+export function cascadePriorityPromote(
+  ctx: WorklogDatabaseContext,
+  hooks: ItemHooks,
+  itemId: string,
+): WorkItem[] {
+  const item = get(ctx, itemId);
+  if (!item || item.priority !== 'critical') {
+    return [];
+  }
+
+  const promoted: WorkItem[] = [];
+  let ancestorId: string | null = item.parentId ?? null;
+  while (ancestorId) {
+    const ancestor: WorkItem | null = get(ctx, ancestorId);
+    if (!ancestor) {
+      break;
+    }
+    if (ancestor.priority !== 'critical') {
+      const updated = update(ctx, hooks, ancestor.id, { priority: 'critical' });
+      if (updated) {
+        promoted.push(updated);
+      }
+    }
+    ancestorId = ancestor.parentId ?? null;
+  }
+
+  return promoted;
 }
 
 /**

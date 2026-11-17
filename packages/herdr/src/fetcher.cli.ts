@@ -2,6 +2,10 @@
  * packages/herdr/src/fetcher.cli.ts — `wl` CLI execution: spawn, timeout,
  * retry and the in-flight read memo.
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*
+ * (fetcher spawns are the "no pane" row of the map).
+ *
  * Single responsibility: every `wl` process spawn the fetcher family issues —
  * the CLI binary probe order, the bounded per-call timeout (including the
  * queue-time budget inherited by a capped read), the read-command in-flight
@@ -10,8 +14,9 @@
  * the only declaration of the in-flight memo (`inflightFetchMemo`).
  *
  * Leaf module: it imports only `node:`-free concrete siblings
- * (`./fetcher.args.js` for the exec seam/argument builder/worklog dir and
- * `./fetcher.spawn-cap.js` for the bounded spawn slots) and never the
+ * (`./fetcher.args.js` for the exec seam/argument builder/worklog dir,
+ * `./fetcher.spawn-cap.js` for the bounded spawn slots and `./cli-spawn.js`
+ * for the shared CLI spawn/exec/error primitive) and never the
  * `./fetcher.js` barrel (parent AC4 of WL-0MVGKH47T007GKN1). The
  * worklist-bundle snapshot that also has to drop on a write lives in a module
  * layered ABOVE this leaf, so it registers its invalidation through
@@ -20,29 +25,34 @@
  * Moved verbatim out of `fetcher.ts` (parent WL-0MVGKH47T007GKN1; extraction
  * WL-0MW08VVC0007L28M). No behaviour change: the 60 s default timeout, the
  * memoizable-command set, the memo entry cap, the in-flight dedup key and the
- * timeout arithmetic are unchanged.
+ * timeout arithmetic are unchanged. The binary probe order and the spawn/error
+ * plumbing moved to the shared `cli-spawn.ts` (WL-0MWHWHB3X004H9VG AC1) —
+ * this module re-exports {@link CLI_BINARIES} unchanged so its consumers keep
+ * resolving the same value through the same name.
  */
 
 import { buildWlArgs, getExecFileAsync, getWorklogDir } from './fetcher.args.js';
 import { acquireWlSpawnSlot, releaseWlSpawnSlot } from './fetcher.spawn-cap.js';
+import {
+  CLI_BINARIES,
+  DEFAULT_CLI_TIMEOUT_MS,
+  spawnCliStdout,
+} from './cli-spawn.js';
+
+export { CLI_BINARIES } from './cli-spawn.js';
 
 // ── CLI execution ─────────────────────────────────────────────────────
 
 /**
  * Default timeout (in milliseconds) for all wl CLI spawns in the refresh/
- * sync fetch path. 60_000 ms — matches the auto-sync safety timeout and the
- * Pi TUI extension convention (auto-sync.ts:227). A hung wl spawn (e.g.
- * waiting on a lock during a long `wl sync`) will reject after this period
- * instead of blocking the `refreshInFlight` guard forever (WL-0MSJNJXX2001NMHS).
+ * sync fetch path. Binds the canonical CLI spawn timeout
+ * (`cli-spawn.ts::DEFAULT_CLI_TIMEOUT_MS`, WL-0MWHWHB3X004H9VG AC1), which
+ * matches the auto-sync safety timeout and the Pi TUI extension convention
+ * (auto-sync.ts:227). A hung wl spawn (e.g. waiting on a lock during a long
+ * `wl sync`) will reject after this period instead of blocking the
+ * `refreshInFlight` guard forever (WL-0MSJNJXX2001NMHS).
  */
-export const DEFAULT_WL_TIMEOUT_MS = 60_000;
-
-/**
- * CLI binaries probed in order: the npm-installed `wl` shim first, then the
- * legacy `worklog` binary name. Shared with the barrel's `checkWlAvailable`
- * probe (`wl --version`), which keeps its own public-API responsibility there.
- */
-export const CLI_BINARIES = ['wl', 'worklog'];
+export const DEFAULT_WL_TIMEOUT_MS = DEFAULT_CLI_TIMEOUT_MS;
 
 // ── In-process fetch memoization (F4 — WL-0MSGAEPOJ002824S) ───────────
 
@@ -120,22 +130,6 @@ export function setFetchMemoInvalidationHandler(handler: () => void): void {
   fetchMemoInvalidation = handler;
 }
 
-/**
- * True when a `wl` spawn error came from the bounded execFile timeout (the
- * child was killed because it hung) rather than from the CLI rejecting the
- * invocation. A hung `wl` must not trigger the consolidated-read fail-open
- * path: retrying with the per-subset spawns would double the hang instead of
- * surfacing it (WL-0MSJNJXX2001NMHS).
- */
-function isWlTimeoutError(error: unknown): boolean {
-  const e = error as { killed?: boolean; signal?: string; code?: string; message?: string } | null;
-  if (!e) return false;
-  if (e.killed === true) return true;
-  if (e.signal === 'SIGTERM' || e.signal === 'SIGKILL') return true;
-  if (e.code === 'ETIMEDOUT') return true;
-  return /timed? ?out/i.test(e.message ?? '');
-}
-
 async function runWlInner(
   args: string[],
   includeJson: boolean,
@@ -187,50 +181,36 @@ async function runWlInnerUncapped(
   timeoutMs?: number,
   dirOverride?: string,
 ): Promise<string> {
-  let lastError: unknown;
-  const execFileAsync = getExecFileAsync();
-
-  for (const binary of CLI_BINARIES) {
-    try {
-      let fullArgs: string[];
-      if (includeJson) {
-        fullArgs = [...args, '--json'];
-      } else {
-        fullArgs = args;
-      }
-
-      // Prepend --worklog-dir when set (per-call override first, then the
-      // module override — global option before the subcommand).
-      fullArgs = buildWlArgs(fullArgs, dirOverride);
-
-      // Bounded timeout: use the caller's override if supplied, otherwise
-      // apply DEFAULT_WL_TIMEOUT_MS so a hung wl process cannot block the
-      // refreshInFlight guard forever (WL-0MSJNJXX2001NMHS).
-      const timeout = timeoutMs ?? DEFAULT_WL_TIMEOUT_MS;
-
-      const result = await execFileAsync(binary, fullArgs, {
-        maxBuffer: 1024 * 1024 * 5,
-        timeout,
-      });
-      return result.stdout;
-    } catch (error: any) {
-      if (error?.code === 'ENOENT') {
-        lastError = error;
-        continue;
-      }
-      const stderr = typeof error?.stderr === 'string' ? error.stderr.trim() : '';
-      const stdout = typeof error?.stdout === 'string' ? error.stdout.trim() : '';
-      const message = stderr || stdout || error?.message || String(error);
-
-      // Re-throw with a clean message, preserving the timeout classification
-      // so callers can distinguish "hung wl" from "wl rejected the command".
-      const wrapped = new Error(message) as Error & { wlTimeout?: boolean };
-      if (isWlTimeoutError(error)) wrapped.wlTimeout = true;
-      throw wrapped;
-    }
+  let fullArgs: string[];
+  if (includeJson) {
+    fullArgs = [...args, '--json'];
+  } else {
+    fullArgs = args;
   }
 
-  throw new Error(`wl CLI not found: ${String(lastError)}`);
+  // Prepend --worklog-dir when set (per-call override first, then the
+  // module override — global option before the subcommand).
+  fullArgs = buildWlArgs(fullArgs, dirOverride);
+
+  // Bounded timeout: use the caller's override if supplied, otherwise
+  // apply DEFAULT_WL_TIMEOUT_MS so a hung wl process cannot block the
+  // refreshInFlight guard forever (WL-0MSJNJXX2001NMHS).
+  try {
+    return await spawnCliStdout(getExecFileAsync(), CLI_BINARIES, fullArgs, {
+      timeoutMs: timeoutMs ?? DEFAULT_WL_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024 * 5,
+    });
+  } catch (error) {
+    // Map the shared hung-child classification (`cliTimedOut`, from
+    // `cli-spawn.ts::wrapCliSpawnError`) onto the caller-visible `wlTimeout`
+    // flag: the consolidated-read fail-open path in `fetcher.api.ts` must
+    // distinguish "hung wl" from "wl rejected the invocation" — the flag
+    // contract is unchanged (WL-0MSJNJXX2001NMHS).
+    if ((error as { cliTimedOut?: boolean } | null)?.cliTimedOut === true) {
+      (error as { wlTimeout?: boolean }).wlTimeout = true;
+    }
+    throw error;
+  }
 }
 
 /**

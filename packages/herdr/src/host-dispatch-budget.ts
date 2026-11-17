@@ -21,7 +21,7 @@
  * For the **audit tier** this ledger's audit entries and `budget.json`
  * `maxAudit` are **observability only**: the authoritative audit budget and
  * live audit-lease registry are the PROXY's, read by herdr over HTTP
- * (`GET {proxyUrl}/llama/local/audit/status`). The ledger still records audit
+ * (`GET {proxyUrl}/llama/local/audit/availability`). The ledger still records audit
  * entries so the header, the interactive dialog, the dead-pane sweep and the
  * release paths work, but an audit entry can never refuse an audit. `maxAudit`
  * is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local
@@ -32,6 +32,11 @@
  * ## `HERDR_COORDINATION_DIR`, see `machine-coordination.ts`)
  *
  *  - `dispatch-budget.json` — the ledger (this module's only write target).
+ *  - `dispatch-budget.log` — the append-only audit trail of every mutation
+ *    (reserve/confirm/release/reap/sweep/repair), written by
+ *    `host-dispatch-budget.audit.ts` from inside the ledger lock. Bounded by
+ *    the coordination-log retention policy; fail-open, so it can never block
+ *    a dispatch or change a decision (WL-0MWFJDGXQ001OXP8).
  *  - `budget.json` — the per-tier caps (read-only here; the operator writes it):
  *    `{ "maxImplement": 2, "maxAudit": 1 }`. `maxImplement` governs the
  *    implement tier; `maxAudit` is the legacy/observability figure only (see
@@ -49,10 +54,29 @@
  *                      "heartbeatAt": "<ISO-8601>",
  *                      "override": { "by": "user" }? } ] }
  *
- * `itemId` is the entry key: `reserve` upserts (and preserves the original
- * `startedAt`), `release(itemId)` removes. Entries are written by this module
- * only; a hand-edited or future-format document is `unknown`, never silently
- * reinterpreted (a dropped entry would under-count and admit too much work).
+ * `itemId` + `kind` is the entry key (WL-0MWFJD5T4003OM91): an implement and an
+ * audit dispatch of the same work item are two distinct entries, so neither can
+ * overwrite or release the other. `reserve` upserts within that key (preserving
+ * the entry's `startedAt`/`paneId`/`attemptId`), and `release` removes ONLY the
+ * entry the caller's identity names — `itemId` + `kind` plus either the
+ * `attemptId` minted by `reserve` or the confirmed `paneId`. A release whose
+ * identity does not match the stored entry is REFUSED (`refused: true`,
+ * `reason: 'identity-mismatch'`) instead of deleting someone else's slot:
+ * keying release on the item id alone is what let an aborted attempt, a sibling
+ * pane close or a kind change destroy a still-running dispatch's entry.
+ * Entries are written by this module only; a hand-edited or future-format
+ * document is `unknown`, never silently reinterpreted (a dropped entry would
+ * under-count and admit too much work).
+ *
+ * ## Audit trail (WL-0MWFJDGXQ001OXP8)
+ *
+ * Every mutation writes one JSONL line to `dispatch-budget.log` (`at`, `op`,
+ * `kind`, `itemId`, `paneId`, `instanceId`, `reason`, `actor`, `liveBefore`,
+ * `liveAfter`) — one line per removed entry for `reap`/`sweep`, so a
+ * disappeared entry is attributable to the operation, item, pane and instance
+ * that removed it. The write happens inside the ledger lock after the document
+ * write succeeds and is fail-open: a broken trail never changes a ledger
+ * result. See `host-dispatch-budget.audit.ts` for the line contract.
  *
  * ## Concurrency (no new locking scheme)
  *
@@ -173,6 +197,11 @@ import * as path from 'node:path';
 
 import { withCoordLock } from './coordination.js';
 import {
+  appendBudgetAuditLine,
+  type BudgetAuditKind,
+  type BudgetAuditOp,
+} from './host-dispatch-budget.audit.js';
+import {
   DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS,
   ensureMachineCoordinationDir,
   getMachineCoordinationDir,
@@ -238,8 +267,14 @@ export type HostBudgetKind = 'implement' | 'audit';
 /** One in-flight dispatch, exactly the on-disk shape. */
 export interface HostBudgetEntry {
   kind: HostBudgetKind;
-  /** Entry key — one entry per work item. */
+  /** Entry key, with `kind` — one entry per (work item, tier). */
   itemId: string;
+  /**
+   * Attempt token minted by {@link reserve} (WL-0MWFJD5T4003OM91): the release
+   * identity that proves the caller owns THIS entry. Absent on entries written
+   * by an older version; such a legacy entry is only releasable by pane id.
+   */
+  attemptId?: string;
   /** herdr instance that owns the dispatch. */
   instanceId: string;
   /** herdr pane id, once a pane exists. */
@@ -306,6 +341,19 @@ export interface HostBudgetOptions {
   staleWindowMs?: number;
   /** Environment view for the config env overrides. */
   env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Audit-trail `actor` — who performed the mutation
+   * (`host-dispatch-budget.audit.ts`, WL-0MWFJDGXQ001OXP8). Defaults to
+   * `herdr:<pid>`; the dispatcher passes its own label so a deletion can be
+   * attributed to the process that made it.
+   */
+  actor?: string;
+  /**
+   * Audit-trail `reason` — why this mutation happened (`pane-close`,
+   * `anchor-unavailable`, …). Defaults to a per-operation reason, so a caller
+   * with nothing to add still gets a meaningful line.
+   */
+  reason?: string;
 }
 
 /** Inputs to {@link reserve}. */
@@ -316,7 +364,48 @@ export interface HostBudgetReserveInput {
   root: string;
   paneId?: string;
   override?: { by: 'user' };
+  /**
+   * Which audit-trail operation this write is: a first reservation or the
+   * post-spawn `confirm` that writes the pane id back
+   * (`host-dispatch-budget.audit.ts`). Defaults to `reserve`.
+   */
+  op?: 'reserve' | 'confirm';
+  /**
+   * Attempt token the caller already owns. Omitted for a NEW reservation (one
+   * is minted), supplied when a caller must keep or prove an existing attempt's
+   * identity (WL-0MWFJD5T4003OM91).
+   */
+  attemptId?: string;
 }
+
+/**
+ * A release request's identity (WL-0MWFJD5T4003OM91).
+ *
+ * `itemId` alone is NOT an identity: it names *what* was dispatched, not *which
+ * attempt* owns the entry. The caller must also prove ownership with either the
+ * `attemptId` returned by {@link reserve}/{@link reserve} or the `paneId` the
+ * dispatch confirmed. A request that proves neither is refused
+ * (`incomplete-identity`), and one that proves a DIFFERENT identity is refused
+ * (`identity-mismatch`) rather than deleting another dispatch's slot.
+ */
+export interface HostBudgetReleaseInput {
+  itemId: string;
+  /**
+   * Dispatch kind. Optional ONLY for the pane-close path, which knows the pane
+   * it just closed but not the tier; the pane id still restricts the removal to
+   * the entry that owns that pane.
+   */
+  kind?: HostBudgetKind;
+  /** The confirmed pane the caller owns. */
+  paneId?: string;
+  /** The attempt token {@link reserve} returned to the caller. */
+  attemptId?: string;
+}
+
+/** Why a release was refused (never thrown, never silent). */
+export type HostBudgetReleaseRefusalReason =
+  | 'incomplete-identity'
+  | 'identity-mismatch';
 
 /** Why a budget operation could not complete. */
 export type HostBudgetFailureReason =
@@ -325,7 +414,8 @@ export type HostBudgetFailureReason =
   | 'unreadable'
   | 'lock-contention'
   | 'io-error'
-  | 'invalid-input';
+  | 'invalid-input'
+  | 'identity-mismatch';
 
 /** Shared failure arm. `unknown` distinguishes "cannot tell" from "no ledger". */
 export interface HostBudgetFailure {
@@ -344,7 +434,17 @@ export type BudgetReadout =
 export type ReserveResult = { ok: true; entry: HostBudgetEntry } | HostBudgetFailure;
 
 /** Result of {@link release}. */
-export type ReleaseResult = { ok: true; removed: boolean } | HostBudgetFailure;
+export type ReleaseResult =
+  | {
+      ok: true;
+      /** True when an entry was removed. */
+      removed: boolean;
+      /** True when an entry matched the item but NOT the caller's identity. */
+      refused: boolean;
+      /** Present only on a refusal. */
+      reason?: HostBudgetReleaseRefusalReason;
+    }
+  | HostBudgetFailure;
 
 /** Result of {@link replaceBudget} (`count` = entries written). */
 export type ReplaceBudgetResult = { ok: true; count: number } | HostBudgetFailure;
@@ -798,6 +898,12 @@ function normalizeLedgerEntry(raw: unknown): HostBudgetEntry | null {
   ) {
     return null;
   }
+  if (
+    o.attemptId !== undefined &&
+    (typeof o.attemptId !== 'string' || o.attemptId.length === 0)
+  ) {
+    return null;
+  }
   let override: { by: 'user' } | undefined;
   if (o.override !== undefined) {
     if (typeof o.override !== 'object' || o.override === null) return null;
@@ -808,6 +914,7 @@ function normalizeLedgerEntry(raw: unknown): HostBudgetEntry | null {
   return {
     kind: o.kind,
     itemId: o.itemId,
+    ...(typeof o.attemptId === 'string' ? { attemptId: o.attemptId } : {}),
     instanceId: o.instanceId,
     ...(typeof o.paneId === 'string' ? { paneId: o.paneId } : {}),
     root: o.root,
@@ -907,6 +1014,104 @@ function withLedgerLock<T extends object>(
   return outcome;
 }
 
+// ── Attempt identity (WL-0MWFJD5T4003OM91) ────────────────────────────
+
+/**
+ * Monotonic counter so two attempts minted inside the same millisecond (a
+ * re-dispatch right after an abort) still get distinct tokens.
+ */
+let attemptCounter = 0;
+
+/**
+ * Mint a fresh attempt token.
+ *
+ * The token is the release identity that proves a caller owns the entry it is
+ * about to delete: `reserve` returns it, `release` must present it. It carries
+ * the pid and a timestamp/counter so a ledger read by an operator shows which
+ * process and which attempt owns each slot.
+ */
+export function newAttemptId(): string {
+  attemptCounter += 1;
+  return `att-${process.pid}-${Date.now().toString(36)}-${attemptCounter.toString(36)}`;
+}
+
+// ── Audit trail (WL-0MWFJDGXQ001OXP8) ──────────────────────────────────
+
+/**
+ * Default audit-trail `reason` per operation, used when the caller supplied
+ * none. Deliberately operation-shaped rather than prose: the trail is grepped
+ * by reason during an RCA.
+ */
+const DEFAULT_AUDIT_REASON: Readonly<Record<BudgetAuditOp, string>> = {
+  reserve: 'dispatch-reserve',
+  confirm: 'dispatch-confirm',
+  release: 'dispatch-release',
+  reap: 'reap-stale',
+  sweep: 'sweep-closed-pane',
+  repair: 'repair-from-live-panes',
+};
+
+/** Entries of `kind` (or the whole document for `all`) — the trail's evidence. */
+function auditCountOf(
+  entries: readonly HostBudgetEntry[],
+  kind: BudgetAuditKind,
+): number {
+  if (kind === 'all') return entries.length;
+  return entries.filter((entry) => entry.kind === kind).length;
+}
+
+/** One audit-trail line to write for a completed mutation. */
+interface BudgetAuditEmission {
+  op: BudgetAuditOp;
+  kind: BudgetAuditKind;
+  itemId: string;
+  paneId?: string;
+  instanceId: string;
+  liveBefore: number;
+  liveAfter: number;
+}
+
+/**
+ * Write the audit-trail lines for one completed mutation
+ * (WL-0MWFJDGXQ001OXP8).
+ *
+ * Fail-open by contract: the trail writer never throws and a failure here
+ * never turns into a ledger failure, so a broken/read-only/unwritable
+ * `dispatch-budget.log` can never block a dispatch or change an admission
+ * decision. Called from INSIDE the ledger lock, after the ledger write
+ * succeeded, so the trail and the document cannot disagree about what
+ * happened.
+ */
+function emitBudgetAudit(
+  dir: string,
+  opts: HostBudgetOptions,
+  emissions: readonly BudgetAuditEmission[],
+): void {
+  if (emissions.length === 0) return;
+  try {
+    const at = new Date(opts.now ?? Date.now()).toISOString();
+    const actor = opts.actor ?? `herdr:${process.pid}`;
+    for (const emission of emissions) {
+      appendBudgetAuditLine(dir, {
+        at,
+        op: emission.op,
+        kind: emission.kind,
+        itemId: emission.itemId,
+        ...(emission.paneId !== undefined && emission.paneId !== ''
+          ? { paneId: emission.paneId }
+          : {}),
+        instanceId: emission.instanceId,
+        reason: opts.reason ?? DEFAULT_AUDIT_REASON[emission.op],
+        actor,
+        liveBefore: emission.liveBefore,
+        liveAfter: emission.liveAfter,
+      });
+    }
+  } catch {
+    // logging is not a gate (fail-open, belt-and-suspenders)
+  }
+}
+
 // ── Public ledger API ──────────────────────────────────────────────────
 
 /**
@@ -944,12 +1149,33 @@ export function reserve(
   if (dir === null) return noDir();
   const nowIso = new Date(opts.now ?? Date.now()).toISOString();
   return withLedgerLock(dir, (ledger) => {
-    const existing = ledger.entries.find((entry) => entry.itemId === input.itemId);
+    // Entry key is (itemId, kind) since WL-0MWFJD5T4003OM91: an implement and an
+    // audit dispatch of the same item are distinct entries and can never
+    // overwrite each other.
+    const existing = ledger.entries.find(
+      (entry) => entry.itemId === input.itemId && entry.kind === input.kind,
+    );
     const paneId = input.paneId ?? existing?.paneId;
     const override = input.override ?? existing?.override;
+    // Attempt identity. A `confirm` is the SAME attempt writing its pane id
+    // back, so it keeps the reservation's token; a fresh `reserve` mints one.
+    // An explicit token must agree with the stored entry, otherwise the caller
+    // is a different attempt and the write is refused (never a silent takeover).
+    let attemptId: string;
+    if (input.attemptId !== undefined) {
+      if (existing?.attemptId !== undefined && existing.attemptId !== input.attemptId) {
+        return { ok: false as const, unknown: false, reason: 'identity-mismatch' as const };
+      }
+      attemptId = input.attemptId;
+    } else if (input.op === 'confirm' && existing?.attemptId !== undefined) {
+      attemptId = existing.attemptId;
+    } else {
+      attemptId = newAttemptId();
+    }
     const entry: HostBudgetEntry = {
       kind: input.kind,
       itemId: input.itemId,
+      attemptId,
       instanceId: input.instanceId,
       ...(paneId !== undefined ? { paneId } : {}),
       root: input.root,
@@ -960,31 +1186,115 @@ export function reserve(
     const next: HostBudgetLedger = {
       version: DISPATCH_BUDGET_VERSION,
       entries: [
-        ...ledger.entries.filter((candidate) => candidate.itemId !== input.itemId),
+        ...ledger.entries.filter(
+          (candidate) => !(candidate.itemId === input.itemId && candidate.kind === input.kind),
+        ),
         entry,
       ],
     };
     if (!writeBudgetAt(dir, next)) return ioError();
+    emitBudgetAudit(dir, opts, [
+      {
+        op: input.op === 'confirm' ? 'confirm' : 'reserve',
+        kind: input.kind,
+        itemId: input.itemId,
+        ...(paneId !== undefined ? { paneId } : {}),
+        instanceId: input.instanceId,
+        liveBefore: auditCountOf(ledger.entries, input.kind),
+        liveAfter: auditCountOf(next.entries, input.kind),
+      },
+    ]);
     return { ok: true as const, entry };
   });
 }
 
 /**
- * Release `itemId`'s entry (pane close, dispatch failure, failed claim).
- * Idempotent: `removed: false` when it was not present. A missing ledger is
- * a successful no-op.
+ * Does `entry` match the caller's release identity?
+ *
+ * `attemptId` is the primary proof (it names one specific attempt); `paneId` is
+ * the fallback for a confirmed dispatch and for the pane-close path, which
+ * knows the closed pane but not the attempt token. A legacy entry (written
+ * before the token existed) can only be matched by pane id.
  */
-export function release(itemId: string, opts: HostBudgetOptions = {}): ReleaseResult {
-  if (itemId.length === 0) return { ok: false, unknown: false, reason: 'invalid-input' };
+function entryMatchesReleaseIdentity(
+  entry: HostBudgetEntry,
+  identity: HostBudgetReleaseInput,
+): boolean {
+  if (identity.attemptId !== undefined) return entry.attemptId === identity.attemptId;
+  if (identity.paneId !== undefined) {
+    return entry.paneId !== undefined && entry.paneId === identity.paneId;
+  }
+  return false;
+}
+
+/**
+ * Release ONE entry by full identity (pane close, dispatch failure, failed
+ * claim, `anchor-unavailable`).
+ *
+ * Since WL-0MWFJD5T4003OM91 the caller must name what it owns: the entry key
+ * (`itemId` + optional `kind`) plus the `attemptId` returned by {@link reserve}
+ * or the confirmed `paneId`. Outcomes:
+ *
+ *  - no entry for that item (and kind) ⇒ `{ removed: false, refused: false }`:
+ *    an idempotent no-op, so every release path may call unconditionally;
+ *  - an entry exists but the identity does not match it ⇒
+ *    `{ removed: false, refused: true, reason: 'identity-mismatch' }` — the
+ *    slot belongs to another attempt/kind/pane and is LEFT ALONE;
+ *  - the caller proves nothing (`paneId` and `attemptId` both absent) ⇒
+ *    `{ refused: true, reason: 'incomplete-identity' }` — an identity-less
+ *    release could delete any entry for the item, which is exactly the defect
+ *    this replaces;
+ *  - a matching entry ⇒ removed.
+ */
+export function release(
+  identity: HostBudgetReleaseInput,
+  opts: HostBudgetOptions = {},
+): ReleaseResult {
+  if (identity.itemId.length === 0) {
+    return { ok: false, unknown: false, reason: 'invalid-input' };
+  }
+  if (identity.attemptId === undefined && identity.paneId === undefined) {
+    // Refused BEFORE touching the ledger: an identity-less release is the
+    // item-id-keyed primitive that deleted live entries on 2026-11-13.
+    return { ok: true, removed: false, refused: true, reason: 'incomplete-identity' };
+  }
   const dir = resolveBudgetDir(opts);
   if (dir === null) return noDir();
   return withLedgerLock(dir, (ledger) => {
-    const next = ledger.entries.filter((entry) => entry.itemId !== itemId);
-    if (next.length === ledger.entries.length) return { ok: true as const, removed: false };
+    const candidates = ledger.entries.filter(
+      (entry) =>
+        entry.itemId === identity.itemId &&
+        (identity.kind === undefined || entry.kind === identity.kind),
+    );
+    const removedEntry = candidates.find((entry) =>
+      entryMatchesReleaseIdentity(entry, identity),
+    );
+    if (removedEntry === undefined) {
+      // Idempotent no-op when nothing was there; a refusal (reported, never
+      // silent) when someone else's entry occupies the key.
+      return candidates.length === 0
+        ? { ok: true as const, removed: false, refused: false }
+        : ({ ok: true, removed: false, refused: true, reason: 'identity-mismatch' } as const);
+    }
+    const next = ledger.entries.filter((entry) => entry !== removedEntry);
     if (!writeBudgetAt(dir, { version: DISPATCH_BUDGET_VERSION, entries: next })) {
       return ioError();
     }
-    return { ok: true as const, removed: true };
+    // The trail line names the REMOVED entry's own identity (kind, item, pane,
+    // owning instance, attempt): an unattributable deletion is exactly what the
+    // RCA could not resolve (WL-0MWFJDGXQ001OXP8).
+    emitBudgetAudit(dir, opts, [
+      {
+        op: 'release',
+        kind: removedEntry.kind,
+        itemId: removedEntry.itemId,
+        ...(removedEntry.paneId !== undefined ? { paneId: removedEntry.paneId } : {}),
+        instanceId: removedEntry.instanceId,
+        liveBefore: auditCountOf(ledger.entries, removedEntry.kind),
+        liveAfter: auditCountOf(next, removedEntry.kind),
+      },
+    ]);
+    return { ok: true as const, removed: true, refused: false };
   });
 }
 
@@ -1017,10 +1327,27 @@ export function replaceBudget(
   }
   if (!ensureMachineCoordinationDir(dir)) return ioError();
   const outcome = withCoordLock(dir, (): ReplaceBudgetResult => {
+    // The pre-write count is best-effort: a repair exists precisely because the
+    // document may be unreadable, so `-1` (unknown) is the honest evidence
+    // (WL-0MWFJDGXQ001OXP8).
+    const before = readBudgetAt(dir);
+    const liveBefore = before.ok ? before.ledger.entries.length : -1;
     const written = writeBudgetAt(dir, {
       version: DISPATCH_BUDGET_VERSION,
       entries: normalized,
     });
+    if (written) {
+      emitBudgetAudit(dir, opts, [
+        {
+          op: 'repair',
+          kind: 'all',
+          itemId: '',
+          instanceId: opts.actor ?? `herdr:${process.pid}`,
+          liveBefore,
+          liveAfter: normalized.length,
+        },
+      ]);
+    }
     return written ? { ok: true as const, count: normalized.length } : ioError();
   });
   if (outcome === null) return { ok: false, unknown: false, reason: 'lock-contention' };
@@ -1056,6 +1383,19 @@ export function reap(
     ) {
       return ioError();
     }
+    emitBudgetAudit(
+      dir,
+      opts,
+      reduction.reaped.map((entry) => ({
+        op: 'reap' as const,
+        kind: entry.kind,
+        itemId: entry.itemId,
+        ...(entry.paneId !== undefined ? { paneId: entry.paneId } : {}),
+        instanceId: entry.instanceId,
+        liveBefore: auditCountOf(ledger.entries, entry.kind),
+        liveAfter: auditCountOf(reduction.retained, entry.kind),
+      })),
+    );
     return { ok: true as const, reaped: reduction.reaped.length, counts: reduction.counts };
   });
 }
@@ -1093,6 +1433,19 @@ export function sweepClosedPanes(
     ) {
       return ioError();
     }
+    emitBudgetAudit(
+      dir,
+      opts,
+      reduction.reaped.map((entry) => ({
+        op: 'sweep' as const,
+        kind: entry.kind,
+        itemId: entry.itemId,
+        ...(entry.paneId !== undefined ? { paneId: entry.paneId } : {}),
+        instanceId: entry.instanceId,
+        liveBefore: auditCountOf(ledger.entries, entry.kind),
+        liveAfter: auditCountOf(reduction.retained, entry.kind),
+      })),
+    );
     return { ok: true as const, reaped: reduction.reaped.length, counts: reduction.counts };
   });
 }

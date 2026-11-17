@@ -41,8 +41,30 @@ export interface CoordinationLogEntry {
   instanceId?: string;
   /** Work item id offered at a check-in (or null/absent when emptied). */
   workItemId?: string | null;
-  /** Number of entries removed by a prune operation. */
+  /**
+   * Number of entries removed by a prune operation: `1` on each PER-ENTRY
+   * prune record (a tick's tally is its number of `prune` records — one
+   * record per pruned entry, never one per tick).
+   */
   prunedCount?: number;
+  /**
+   * Dead-entry prune attribution (WL-0MWFJTKGM006BHLQ): the pruned entry's
+   * worklog root — recorded so the log names the dead instance's root.
+   * Additive/optional: every earlier entry shape is unchanged.
+   */
+  worklogRoot?: string;
+  /**
+   * Dead-entry prune attribution (WL-0MWFJTKGM006BHLQ): the pruned entry's
+   * last-seen ISO timestamp (its `lastUpdated` at prune time). Additive/
+   * optional: every earlier entry shape is unchanged.
+   */
+  lastSeen?: string;
+  /**
+   * Dead-entry prune attribution (WL-0MWFJTKGM006BHLQ): the staleness
+   * window (ms) the leader applied when it pruned the entries. Additive/
+   * optional: every earlier entry shape is unchanged.
+   */
+  staleWindowMs?: number;
   /**
    * No-dispatch decision fields (WL-0MU8808ZY0091JIA): recorded on a
    * `kind: 'decision'` / `operation: 'no-dispatch'` entry so the reason a
@@ -147,6 +169,23 @@ export interface CoordinationLogEntry {
    */
   budget?: HostBudgetEvidence;
   /**
+   * Failing exchange on a fail-closed AUDIT-budget refusal
+   * (WL-0MWDDHVF2004PTYX AC3): `http-404` (endpoint-absent), `timeout` /
+   * `network` / `http-<status>` (unreachable), `bad-body` (unparsable) or
+   * `seam-absent` (no client wired), copied from the dispatch outcome so the
+   * decision entry names the broken proxy contract without reading code.
+   * Absent on every other entry (additive/optional schema).
+   *
+   * Since WL-0MWHCUZ5C000I7S6 it also carries the placement fail-closed
+   * boundary on an `anchor-unavailable` decision (a `PlacementFailureDetail`
+   * token such as `herdr-unreadable` / `prefix-empty` / `item-tab-unavailable`),
+   * copied from the outcome so a genuine refusal is diagnosable from the log
+   * alone — the reported incident showed 124 identical `anchor-unavailable`
+   * entries with no way to tell a vanished workspace from a broken CLI.
+   * `reason` stays `anchor-unavailable` (additive/optional schema).
+   */
+  detail?: string;
+  /**
    * Proxy/local audit-budget divergence evidence (WL-0MWAMSK9H005BOHD, parent
    * AC2): recorded on a `kind: 'decision'` entry whose `reason` is
    * `audit-budget-divergence`, carrying both the proxy's verdict/figures and
@@ -156,6 +195,19 @@ export interface CoordinationLogEntry {
   auditBudget?: AuditBudgetDivergence;
   /** The wl/CLI error that caused an entry-kept check-in (`reason: 'wl-error'`). */
   error?: string;
+  /**
+   * Per-bucket widening signal (WL-0MWFJ8R1P005G1H1): recorded on a
+   * successful `operation: 'checkin'` entry whose computation filled at
+   * least one bucket from beyond the visible window. `buckets` names those
+   * buckets (canonical `COORDINATION_OFFER_BUCKETS` order) and `itemsRead`
+   * counts the extra ranked items read to fill them, so an operator can see
+   * a root being reached past its visible list. Absent on window-only
+   * check-ins (additive/optional schema — every earlier entry is unchanged).
+   */
+  filledBeyondWindow?: {
+    buckets: Array<'implement' | 'audit' | 'prep'>;
+    itemsRead: number;
+  };
   /**
    * Panes the long-running detector flagged when the starvation signal fired
    * (WL-0MVKNC2N50025HXE AC2/AC3): each entry names the pane, item, kind and
@@ -200,6 +252,43 @@ export async function appendCoordinationLogEntry(
     );
   } catch {
     // fail-closed: coordination logging must never crash the worker
+  }
+}
+
+/**
+ * Append one `operation: 'prune'` coordination-log record PER pruned entry
+ * (WL-0MWFJTKGM006BHLQ), in order, through the configured rolling policy —
+ * the prune AND its log complete before the leader's own check-in append
+ * starts, so no read-modify-write race loses a record. The caller composes
+ * this with {@link pruneDeadEntries} (the purely-logging split keeps the
+ * log module free of a coordination runtime import cycle). Fail-open
+ * end-to-end: an append failure never throws and never blocks a dispatch.
+ */
+export async function logPrunedEntries(
+  cwd: string,
+  pruned: readonly { instanceId: string; worklogRoot: string; lastSeen: string }[],
+  staleWindowMs: number,
+  at: string,
+  policy?: CoordinationLogPolicyInput,
+): Promise<void> {
+  for (const removed of pruned) {
+    // One record PER pruned entry (never one per tick) — a tick's tally is
+    // its number of prune records, so the coordination log stays bounded.
+    await appendCoordinationLogEntry(
+      cwd,
+      {
+        kind: 'coordination',
+        operation: 'prune',
+        instanceId: removed.instanceId,
+        worklogRoot: removed.worklogRoot,
+        lastSeen: removed.lastSeen,
+        prunedCount: 1,
+        reason: 'staleness-window',
+        staleWindowMs,
+        at,
+      },
+      policy,
+    );
   }
 }
 

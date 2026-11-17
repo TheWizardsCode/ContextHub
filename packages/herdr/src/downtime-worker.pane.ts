@@ -2,33 +2,39 @@
  * packages/herdr/src/downtime-worker.pane.ts — Herdr pane identity, in-flight
  * resolution, spawn invocation and the pane-lifecycle monitor.
  *
+ * Map pointer: the single pane-creation architecture map + naming contract
+ * lives in `docs/dev/downtime-dispatcher.md` → *Pane creation architecture*.
+ *
  * Single responsibility: everything the downtime dispatcher knows about Herdr
- * panes — the downtime label prefix and record parsing, the safe-close and
- * item-scoped in-flight predicates, the `send-to-pi.sh` invocation (pane args,
- * spawn options/env) and the dispatched-pane lifecycle monitor.
+ * panes — the deps-wiring in-flight resolution, the `send-to-pi.sh` invocation
+ * (spawn options/env — the pane argv itself is canonical in `pane-argv.ts`)
+ * and the dispatched-pane lifecycle monitor. The pane-discovery surface
+ * (parse, live/working predicates, item-scoped in-flight set, safe-close
+ * predicate, blocking-pane filter) is delegated to the canonical
+ * `pane-discovery.ts` module (WL-0MWHWH6XL0025YX2) and re-exported here for
+ * backward compatibility.
  *
  * Moved verbatim out of `downtime-worker.ts` (parent WL-0MVF3F9A7000HKP7;
  * child WL-0MVLIHZBT006B1UI). No behaviour change: the pane label prefix,
  * spawn flags (`--pane-name`, `--no-focus`, `--cwd`, `--model`, `--anchor`,
  * `--reservation-ticket`, `--local-preference`), the detached/unref'd spawn
  * semantics, the `AUDIT_PHASE2_PARALLELISM=1` audit fan-out bound and the
- * pane-close safety rules are all unchanged. Every work-item provenance
- * comment below travels with the code it documents.
+ * pane-close safety rules are all unchanged; the argv assembly itself moved
+ * to the canonical `pane-argv.ts` module (WL-0MWHWGZI4007D911). Every
+ * work-item provenance comment below travels with the code it documents.
  *
  * Layering: this module imports only concrete siblings (constants, types,
- * `downtime-log`, `pane-lifecycle`, `pane-close-herdr`, `pane-title`,
- * `request-priority`, `local-preference`), never `./downtime-worker.js` — the
- * barrel re-exports it, so an edge back would invert the layering. It also
- * performs no value import of `./stalled-work.js` (the pre-existing
- * `stalled-work ↔ downtime-worker` cycle stays type-only), so no runtime cycle
- * can form.
+ * `downtime-log`, `pane-lifecycle`, `pane-argv`, `pane-discovery`,
+ * `request-priority`, `local-preference`), never
+ * `./downtime-worker.js` — the barrel re-exports it, so an edge back would
+ * invert the layering. It also performs no value import of `./stalled-work.js`
+ * (the pre-existing `stalled-work ↔ downtime-worker` cycle stays type-only),
+ * so no runtime cycle can form.
  */
 
 import { spawn } from 'node:child_process';
 import { LOCAL_RESERVATION_TICKET_ENV } from './downtime-worker.constants.js';
 import type {
-  DowntimeSkillKind,
-  HerdrPaneRecord,
   InFlightPanes,
   RunningPanesResult,
 } from './downtime-worker.types.js';
@@ -39,8 +45,7 @@ import {
   type PaneLifecycleKind,
 } from './downtime-log.js';
 import { LOCAL_PREFERENCE_ENV_VAR, type LocalPreference } from './local-preference.js';
-import { parseHerdrPaneCloseList } from './pane-close-herdr.js';
-import { buildDowntimePaneTitle } from './pane-title.js';
+import { runningDowntimePaneItemIds } from './pane-discovery.js';
 import {
   classifyPaneLifecycle,
   collectDispatchedPanes,
@@ -83,142 +88,46 @@ export interface DowntimePaneDeps {
 // ── Pane records, labels and item-scoped in-flight resolution ──────────
 // Moved from the dispatch section of `downtime-worker.ts`; consumed by the
 // dispatch loops (in-flight guard), the pane-close paths and `stalled-work.ts`.
+// Canonical home of the whole discovery surface is `pane-discovery.ts`
+// (WL-0MWHWH6XL0025YX2) — one list→filter→classify pipeline instead of four
+// partial copies; re-exported here so the barrel and every existing call site
+// keep resolving these names through this module.
 
 /**
  * Prefix of every downtime dispatched pane label (`buildDowntimePaneTitle`
  * produces `Downtime triggered <kind> …` / `Downtime <kind>`). Pane labels
  * are set by send-to-pi.sh via `herdr pane rename`.
+ *
+ * Canonical home is `pane-label.ts` (WL-0MWHWH1HV009C46C) — re-exported
+ * here for backward compatibility with callers that import the prefix from
+ * the pane module; prefix matching itself goes through
+ * {@link isDowntimePaneLabel}.
  */
-export const DOWNTIME_PANE_LABEL_PREFIX = 'Downtime';
+export { DOWNTIME_PANE_LABEL_PREFIX } from './pane-label.js';
 
 /**
- * Parse `herdr pane list` JSON output into records. Thin adapter over the
- * shared {@link parseHerdrPaneCloseList} contract (WL-0MUYMBMCG000Z4WP): the
- * reaper and the dispatcher must never drift into two parsers. Tolerates log
- * lines/prefixes before the JSON envelope, the `{result:{panes:[…]}}` /
- * `{panes:[…]}` shapes and a bare array. Returns `null` when no pane array can
- * be found (the caller treats this as a failed liveness query → fail-closed).
- *
- * Records carry the pane's `cwd` and raw `agent_session` alongside
- * `paneId`/`label`/`agent`/`agentStatus` so a stalled pane for an item in
- * another worklog root can be resumed against that root.
+ * The pane-discovery surface (WL-0MWHWH6XL0025YX2): the `herdr pane list`
+ * parse (`parseHerdrPaneListOutput`), the shared live/working predicates
+ * (`hasPaneAgent`, `isTerminalAgentStatus`, `isPaneAgentLive`, `isPaneWorking`),
+ * the live-pane count (`countRunningDowntimePanes`), the safe-close predicate
+ * (`isSafeDowntimePaneToClose`), the item-scoped in-flight set
+ * (`runningDowntimePaneItemIds`) and the blocking-pane filter
+ * (`findBlockingPanes` / `BlockingPane`) — all canonical in `pane-discovery.ts`
+ * and re-exported so the barrel and existing call sites resolve them through
+ * this module unchanged.
  */
-export function parseHerdrPaneListOutput(raw: string): HerdrPaneRecord[] | null {
-  const parsed = parseHerdrPaneCloseList(raw);
-  if (parsed === null) return null;
-  return parsed.map((pane) => ({
-    paneId: pane.paneId,
-    label: pane.label,
-    agent: pane.agent,
-    agentStatus: pane.agentStatus,
-    cwd: pane.cwd,
-    agentSession: pane.agentSession,
-  }));
-}
-
-/**
- * Count LIVE downtime dispatched panes in a `herdr pane list` record set: a
- * pane is a running downtime pane when its label starts with the downtime
- * prefix AND it currently hosts a live agent (`agent` present, status not
- * terminal). Terminal agent statuses (`done` / `exited`) and panes whose
- * agent has already left are NOT counted.
- *
- * IMPORTANT (WL-0MU2EP6JL006A1U3): this count is NOT a dispatch limit. It
- * feeds only the owner-lease qualifier (`slotOwned` — "does this worker have
- * a pane of its own?") so an operator's own lease does not block
- * spare-capacity dispatch. Dispatched panes stay open until an operator
- * closes them, so gating dispatch on this count stalls the dispatcher
- * permanently (one dispatch per pane-close). Capacity is limited by the local
- * LLM idle / free-slot check alone.
- */
-export function countRunningDowntimePanes(panes: HerdrPaneRecord[]): string[] {
-  const running: string[] = [];
-  for (const pane of panes) {
-    if (typeof pane.label !== 'string') continue;
-    if (!pane.label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) continue;
-    if (typeof pane.agent !== 'string' || pane.agent.length === 0) continue;
-    const status = (pane.agentStatus ?? '').toLowerCase();
-    if (status === 'done' || status === 'exited') continue;
-    running.push(pane.paneId);
-  }
-  return running;
-}
-
-/**
- * Trailing work-item id in a downtime pane label (WL-0MUBEZ6PE002WLP4).
- *
- * `buildDowntimePaneTitle` preserves the item id as a SUFFIX
- * (`Downtime triggered <kind> <title> - <ITEM-ID>`, via
- * `truncatePaneTitlePreservingSuffix`), so the id is the token after the last
- * ` - `. A manually-named pane (`Downtime <kind>`) has no id → `null`.
- *
- * Exported (not module-private) so the coordination offer path (F4,
- * WL-0MUBVKYH5009CGBI) reuses exactly this parse — no logic duplication.
- */
-export function paneLabelItemId(label: string | undefined): string | null {
-  if (typeof label !== 'string' || label === '') return null;
-  const idx = label.lastIndexOf(' - ');
-  if (idx < 0) return null;
-  const id = label.slice(idx + 3).trim();
-  return id === '' ? null : id;
-}
-
-/**
- * Safe-close predicate (WL-0MU4US5MP001JFEN AC7): true ONLY when a LIVE herdr
- * pane record exists for `paneId`, its label is a downtime pane label
- * (`DOWNTIME_PANE_LABEL_PREFIX`) AND its item-id suffix equals `itemId`.
- *
- * Guarding the close with this predicate means a stale dispatch-log entry can
- * never close an unrelated/operator pane whose pane id happens to collide with
- * the recorded dispatched pane (pane ids may be reused after a pane closes).
- * A missing record (the pane is already gone) returns false — there is nothing
- * to close.
- */
-export function isSafeDowntimePaneToClose(
-  records: HerdrPaneRecord[],
-  paneId: string,
-  itemId: string,
-): boolean {
-  const rec = records.find((p) => p.paneId === paneId);
-  if (rec === undefined) return false;
-  const label = rec.label ?? '';
-  if (!label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) return false;
-  return paneLabelItemId(label) === itemId;
-}
-
-/**
- * Item ids that currently have a LIVE `working` downtime pane
- * (WL-0MUBEZ6PE002WLP4, the in-flight guard).
- *
- * This is the ITEM-SCOPED counterpart of {@link countRunningDowntimePanes},
- * which answers a different question ("does THIS worker own a pane?" for the
- * owner-lease qualifier) and is explicitly NOT a dispatch limit
- * (WL-0MU2EP6JL006A1U3). A pane counts as in-flight for an item when:
- *
- *  - its label starts with the downtime prefix (`Downtime`),
- *  - it hosts a live agent (agent present, status not `done`/`exited`),
- *  - its agent status is `working` — the agent is actively running the
- *    dispatch. Idle/blank/unknown statuses are NOT treated as working: a
- *    pane that spawned but whose agent has not yet started (or has finished
- *    but not exited) must never deadlock the item's next tier,
- *  - and its label suffix parses to a work-item id.
- *
- * Consumed ONLY by the critical-first in-flight guard: it prevents a duplicate
- * dispatch for an item whose pane is already working — never a capacity gate.
- */
-export function runningDowntimePaneItemIds(panes: HerdrPaneRecord[]): Set<string> {
-  const inFlight = new Set<string>();
-  for (const pane of panes) {
-    if (typeof pane.label !== 'string') continue;
-    if (!pane.label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) continue;
-    if (typeof pane.agent !== 'string' || pane.agent.length === 0) continue;
-    const status = (pane.agentStatus ?? '').toLowerCase();
-    if (status !== 'working') continue;
-    const itemId = paneLabelItemId(pane.label);
-    if (itemId !== null) inFlight.add(itemId);
-  }
-  return inFlight;
-}
+export {
+  countRunningDowntimePanes,
+  findBlockingPanes,
+  hasPaneAgent,
+  isPaneAgentLive,
+  isPaneWorking,
+  isSafeDowntimePaneToClose,
+  isTerminalAgentStatus,
+  parseHerdrPaneListOutput,
+  runningDowntimePaneItemIds,
+  type BlockingPane,
+} from './pane-discovery.js';
 
 /**
  * Resolve the item-scoped in-flight set for one dispatch cycle.
@@ -251,70 +160,23 @@ export async function resolveInFlightPanes(
 // ── Pane spawn (send-to-pi.sh) ─────────────────────────────────────────
 
 /**
- * Argument vector for spawning `send-to-pi.sh`: visible pane named
- * `Downtime <kind>` (`paneName` overrides it — the scheduled-prompts tier
- * passes `Downtime <entryId>`, WL-0MSS1Q5ER007QDKX), `--no-focus` (visible but
- * never steals focus), `--cwd <wlRoot>`, `--model <downtimeModel>`, then the
- * prompt.
+ * Canonical downtime `send-to-pi.sh` argument builder — assembled in
+ * `pane-argv.ts` (WL-0MWHWGZI4007D911) so one canonical builder serves every
+ * pane-spawn path; this module re-exports it under its public name. Visible
+ * pane named `Downtime <kind>` (`paneName` overrides it — the
+ * scheduled-prompts tier passes `Downtime <entryId>`, WL-0MSS1Q5ER007QDKX),
+ * `--no-focus` (visible but never steals focus), `--cwd <wlRoot>`, `--model
+ * <downtimeModel>`, then the prompt — with the optional `--anchor`,
+ * `--reservation-ticket` and `--local-preference` flags defined by the
+ * canonical module.
  *
  * When `opts.itemTitle`/`opts.itemId` are present (dispatch tiers,
  * WL-0MSJ4E8UA005KG9Y), the pane is named in the full format
  * `Downtime triggered <kind> <title> - <id>` so downtime panes follow the
  * same descriptive convention as manually-triggered panes. Titles are
- * bounded by {@link MAX_PANE_TITLE_LENGTH}.
+ * bounded by `MAX_PANE_TITLE_LENGTH`.
  */
-export function buildDowntimePaneArgs(
-  kind: DowntimeSkillKind,
-  prompt: string,
-  opts: {
-    model: string;
-    cwd: string;
-    paneName?: string;
-    itemTitle?: string;
-    itemId?: string;
-    anchorId?: string;
-    /**
-     * Granted local-reservation ticket id (parent WL-0MVIKRFP0005JDL8 AC1,
-     * slice C2): forwarded as `--reservation-ticket <id>` so send-to-pi.sh
-     * passes `PI_LOCAL_RESERVATION_TICKET` into the pane process. Absent on
-     * a fail-open dispatch — the launch args stay byte-identical to today.
-     */
-    reservationTicketId?: string;
-    /**
-     * Per-turn locality preference (parent AC4, slice C4): forwarded as
-     * `--local-preference <local-preferred|remote-ok>` so send-to-pi.sh passes
-     * `HERDR_LOCAL_PREFERENCE` into the pane process. Absent leaves the launch
-     * args byte-identical (fail-open C4-AC3).
-     */
-    localPreference?: LocalPreference;
-  },
-): string[] {
-  const paneName =
-    opts.paneName ??
-    buildDowntimePaneTitle(kind, opts.itemTitle, opts.itemId);
-  const args = ['--pane-name', paneName, '--no-focus'];
-  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): when the caller resolved the
-  // dedicated Dispatcher anchor pane id (F1 WL-0MTR2CD4X006XI7U), forward it
-  // as `--anchor <id>` so send-to-pi.sh splits from THAT pane instead of the
-  // leader's current pane. Absent → legacy `pane current` behavior.
-  if (opts.anchorId) {
-    args.push('--anchor', opts.anchorId);
-  }
-  // Local reservation ticket (slice C2 AC1): the pane's first request must
-  // carry `X-Local-Reservation`, so the id is forwarded explicitly (an env
-  // var set on the launching script does NOT reach the herdr pane process).
-  if (opts.reservationTicketId) {
-    args.push('--reservation-ticket', opts.reservationTicketId);
-  }
-  // Per-turn locality preference (slice C4 AC1): forwarded explicitly for the
-  // same reason as the reservation ticket — an env var set on the launching
-  // script does NOT reach the herdr pane process.
-  if (opts.localPreference) {
-    args.push('--local-preference', opts.localPreference);
-  }
-  args.push('--cwd', opts.cwd, '--model', opts.model, prompt);
-  return args;
-}
+export { buildDowntimePaneArgs } from './pane-argv.js';
 
 /**
  * Minimal spawn handle: the caller unrefs so the parent can exit first, and

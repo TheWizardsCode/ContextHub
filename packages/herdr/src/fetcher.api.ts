@@ -34,7 +34,11 @@ import { regroupWorkItems } from './grouping.js';
 import { getExecFileAsync } from './fetcher.args.js';
 import { extractItems, extractJson } from './fetcher.json.js';
 import { CLI_BINARIES, DEFAULT_WL_TIMEOUT_MS, runWl } from './fetcher.cli.js';
-import { enrichInProcessItems, withInProcessDb } from './fetcher.inprocess.js';
+import {
+  enrichInProcessItems,
+  readOutboundDepsInProcess,
+  withInProcessDb,
+} from './fetcher.inprocess.js';
 import { fetchWorklistBundle } from './fetcher.worklist-bundle.js';
 import { fetchReviewQueueState, reviewQueueArgs } from './fetcher.review-queue.js';
 import { isActiveBlocker } from './fetcher.blockers.js';
@@ -353,6 +357,12 @@ export async function fetchItemDetails(
  * as today. A refresh scope shares the refresh's ONE connection; scope-less
  * callers open one fresh connection per call (bounded, batched — never one
  * per item).
+ *
+ * The reader body is shared: it lives in `./fetcher.inprocess.js`
+ * (`readOutboundDepsInProcess`) so the blocker-pin pass in the worklist
+ * assembly leaf (`./fetcher.root-substitution.js`) applies the identical
+ * field semantics without importing this module — that would close the
+ * `api → root-substitution → api` cycle the split guard rejects.
  */
 export async function fetchOutboundDepsForItems(
   itemIds: string[],
@@ -360,26 +370,8 @@ export async function fetchOutboundDepsForItems(
 ): Promise<Map<string, DependencyTargetRef[]> | undefined> {
   const unique = [...new Set(itemIds)];
   if (unique.length === 0) return new Map();
-  const read = (db: InProcessDb): Map<string, DependencyTargetRef[]> => {
-    const byItem = new Map<string, DependencyTargetRef[]>();
-    for (const id of unique) {
-      const targets: DependencyTargetRef[] = [];
-      for (const edge of db.listDependencyEdgesFrom(id)) {
-        const target = db.get(edge.toId);
-        const ref: DependencyTargetRef = {
-          id: edge.toId,
-          status: typeof target?.status === 'string' ? target.status : 'deleted',
-          title: typeof target?.title === 'string' ? target.title : '(missing)',
-        };
-        if (typeof target?.stage === 'string' && target.stage.length > 0) {
-          ref.stage = target.stage;
-        }
-        targets.push(ref);
-      }
-      byItem.set(id, targets);
-    }
-    return byItem;
-  };
+  const read = (db: InProcessDb): Map<string, DependencyTargetRef[]> =>
+    readOutboundDepsInProcess(db, unique);
   return scope ? await scope.read(read) : await withInProcessDb(read);
 }
 

@@ -906,3 +906,106 @@ describe('reaper — host dispatch-budget release and dead-pane sweep', () => {
     expect(deps.sweepBudgetLedger).not.toHaveBeenCalled();
   });
 });
+
+// ── Proxy audit lease release on the ACTIVE close path (WL-0MWJ7QONS0052HXX) ─
+// The success-path pane-close release (`recordPaneClose`) is reachable only
+// from the DISABLED pane-lifecycle monitor, so a completed audit never freed
+// its proxy lease in production — the reaper is the only active auto-close
+// path and must hand the shared GPU back there instead.
+
+describe('reaper — proxy audit lease release on the active close path (WL-0MWJ7QONS0052HXX)', () => {
+  /** A closable AUDIT pane (marker + dead agent + idle). */
+  function auditPane(overrides: Partial<PaneStatus> = {}): PaneStatus {
+    return pane({
+      kind: 'audit',
+      lastAssistantText: 'Done\n\n</end_session>',
+      agentProcessAlive: false,
+      idleMs: 120_000,
+      ...overrides,
+    });
+  }
+
+  it('AC1: releases the proxy audit lease for a closed audit pane via the reaper close path', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [auditPane({ id: 'p-audit', itemId: 'WL-AUDIT' })];
+    const deps = {
+      ...makeDeps(panes),
+      releaseAuditLease: vi.fn().mockResolvedValue(undefined),
+    };
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(deps.releaseAuditLease).toHaveBeenCalledTimes(1);
+    expect(deps.releaseAuditLease).toHaveBeenCalledWith(panes[0]);
+  });
+
+  it('AC1: does NOT touch the proxy audit lease for closed non-audit panes', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [
+      pane({ id: 'p-plan', itemId: 'WL-P', kind: 'plan', lastAssistantText: 'Done\n\n</end_session>', agentProcessAlive: false, idleMs: 120_000 }),
+      pane({ id: 'p-intake', itemId: 'WL-I', kind: 'intake', lastAssistantText: 'Done\n\n</end_session>', agentProcessAlive: false, idleMs: 120_000 }),
+    ];
+    const deps = {
+      ...makeDeps(panes),
+      releaseAuditLease: vi.fn().mockResolvedValue(undefined),
+    };
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.closePane).toHaveBeenCalledTimes(2);
+    expect(deps.releaseAuditLease).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a throwing lease release never blocks, crashes or un-closes a pane (fail-open)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [auditPane({ id: 'p-audit', itemId: 'WL-AUDIT' })];
+    const deps = {
+      ...makeDeps(panes),
+      releaseAuditLease: vi.fn().mockRejectedValue(new Error('proxy unreachable')),
+    };
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    // The close loop completed and the pane is still reported closed; the
+    // failure is contained by the reaper (proxy expiry remains the backstop).
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(results[0].success).toBe(true);
+  });
+
+  it('AC2/AC4: does NOT release on a dry run or a failed close (mirrors releasePaneBudget)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [auditPane({ id: 'p-audit', itemId: 'WL-AUDIT' })];
+
+    const dryDeps = {
+      ...makeDeps(panes),
+      releaseAuditLease: vi.fn().mockResolvedValue(undefined),
+    };
+    await runReaper(dryDeps, { idleThresholdMs: THRESHOLD_MS, dryRun: true });
+    expect(dryDeps.releaseAuditLease).not.toHaveBeenCalled();
+
+    const failDeps = {
+      ...makeDeps(panes, { success: false }),
+      releaseAuditLease: vi.fn().mockResolvedValue(undefined),
+    };
+    await runReaper(failDeps, { idleThresholdMs: THRESHOLD_MS });
+    expect(failDeps.releaseAuditLease).not.toHaveBeenCalled();
+  });
+
+  it('AC4: is idempotent — a reaper run that revisits an already-closed audit pane cannot double-release or error', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [auditPane({ id: 'p-audit', itemId: 'WL-AUDIT' })];
+    const deps = {
+      ...makeDeps(panes),
+      releaseAuditLease: vi.fn().mockResolvedValue(undefined),
+    };
+    // Run 1 closes the audit pane (one release).
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.releaseAuditLease).toHaveBeenCalledTimes(1);
+
+    // Run 2 revisits the SAME pane: the dispatch monitor already recorded it
+    // closed (alreadyClosedPaneIds), so the reaper skips it entirely — no
+    // second close, no second release, no error.
+    const results2 = await runReaper(deps, {
+      idleThresholdMs: THRESHOLD_MS,
+      alreadyClosedPaneIds: new Set(['p-audit']),
+    });
+    expect(results2).toHaveLength(0); // the already-closed pane is skipped outright
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(deps.releaseAuditLease).toHaveBeenCalledTimes(1); // unchanged
+  });
+});

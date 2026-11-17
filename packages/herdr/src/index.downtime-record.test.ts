@@ -18,6 +18,7 @@ import {
   freshCount,
   HOST_BUDGET_CONFIG_FILE,
   liveCount,
+  readBudget,
   reserve,
   type HostBudgetLivePane,
 } from './host-dispatch-budget.js';
@@ -388,6 +389,55 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     // The machine-wide slot is given back: the pane is still live but the
     // ledger no longer holds the reservation.
     expect(liveCount('implement', livePanes)).toMatchObject({ ok: true, count: 0 });
+  });
+
+  it('recordPaneClose leaves a same-item dispatch entry whose pane is still live (WL-0MWFJD5T4003OM91 AC3)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    const cwd = makeTempDir();
+    // TWO entries for ONE item: the running implement dispatch and the item's
+    // audit pane. Closing the audit pane must not delete the implement slot.
+    expect(
+      reserve({
+        kind: 'implement',
+        itemId: 'WL-BOTH',
+        instanceId: 'this-instance',
+        root: cwd,
+        paneId: 'w1:p9',
+      }).ok,
+    ).toBe(true);
+    expect(
+      reserve({
+        kind: 'audit',
+        itemId: 'WL-BOTH',
+        instanceId: 'this-instance',
+        root: cwd,
+        paneId: 'w1:p7',
+      }).ok,
+    ).toBe(true);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
+    await deps.recordPaneClose(
+      {
+        entryType: 'pane-close',
+        timestamp: new Date().toISOString(),
+        itemId: 'WL-BOTH',
+        itemTitle: 'Both tiers',
+        paneId: 'w1:p7',
+        kind: 'audit',
+        outcome: 'audit-passed',
+        reasonCode: 'none',
+        closed: true,
+      },
+      cwd,
+    );
+
+    const read = readBudget();
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    // Only the audit entry (the closed pane) is gone.
+    expect(read.ledger.entries.map((entry) => entry.kind)).toEqual(['implement']);
+    expect(read.ledger.entries[0].paneId).toBe('w1:p9');
   });
 
   it('recordDispatchFailure never removes a legacy marker file (AC2)', async () => {

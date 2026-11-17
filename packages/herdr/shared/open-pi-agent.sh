@@ -52,57 +52,16 @@ herdr_bin="$(resolve_herdr_bin)"
 grid_bin="${HERDR_GRID_BIN:-$script_dir/grid.py}"
 
 # ── Parse arguments ─────────────────────────────────────────────────────
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --pane-name)
-      pane_name="$2"
-      shift 2
-      ;;
-    --pane-name=*)
-      pane_name="${1#*=}"
-      shift
-      ;;
-    --focus)
-      focus=true
-      shift
-      ;;
-    --no-focus)
-      focus=false
-      shift
-      ;;
-    --resize)
-      resize=true
-      shift
-      ;;
-    --no-resize)
-      resize=false
-      shift
-      ;;
-    --cwd)
-      cwd_arg="$2"
-      shift 2
-      ;;
-    --cwd=*)
-      cwd_arg="${1#*=}"
-      shift
-      ;;
-    -h|--help)
-      show_help
-      ;;
-    --)
-      shift
-      break
-      ;;
-    -*)
-      echo "Error: Unknown option: $1" >&2
-      echo "Usage: $(basename "$0") [options]" >&2
-      exit 1
-      ;;
-    *)
-      break
-      ;;
-  esac
-done
+# Canonical shared parser (WL-0MWHWGZI4007D911): one option-parser
+# implementation across send-to-pi.sh / open-pi-agent.sh / run-in-pane.sh;
+# only the accepted option set differs per script.
+# shellcheck source=./pane-options.sh
+. "$script_dir/pane-options.sh"
+parse_pane_options "pane-name focus no-focus resize no-resize cwd help -- strict" "$@"
+if [ "$PANE_OPTIONS_SHOW_HELP" = 1 ]; then
+  show_help
+fi
+set -- "${PANE_OPTIONS_REMAINDER[@]}"
 
 # ── Resolve the target CWD for the new pane ─────────────────────────
 # Priority: --cwd arg > HERDR_RESOLVED_CWD > $PWD.  The new pane must

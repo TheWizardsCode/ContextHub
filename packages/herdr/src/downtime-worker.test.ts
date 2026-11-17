@@ -1228,7 +1228,31 @@ describe('stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2)', () 
     const deps = makeDeps({
       scanStalledPanes: vi.fn().mockResolvedValue([]),
       resumeStalledPane: vi.fn(),
-      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+      // A three-bucket window (implement/audit/prep) fills EVERY bucket from
+      // the visible list, so the normal computation serves the offer from the
+      // window alone — exactly one read (WL-0MWFJ8R1P005G1H1 test d: no
+      // widening when the window already fills every bucket).
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          implementHead('WL-1'),
+          {
+            id: 'WL-AUD-1',
+            title: 'Audit WL-AUD-1',
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: new Date(Date.now() - 60_000).toISOString(),
+            sortIndex: 20,
+          },
+          {
+            id: 'WL-PREP-1',
+            title: 'Prep WL-PREP-1',
+            status: 'open',
+            stage: 'intake_complete',
+            sortIndex: 30,
+          },
+        ],
+      }),
     });
 
     const result = await computeMostImportantItem(
@@ -1628,7 +1652,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
       const coordinationDir = makeDir('dt-oov-inflight-');
       const cwd = makeDir('dt-oov-inflight-root-');
       const deps = makeDeps({
-        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOV-CRIT', { priority: 'critical' })]),
+        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOVCRIT', { priority: 'critical' })]),
         getRunningDowntimePanes: vi.fn().mockResolvedValue({
           ok: true,
           count: 1,
@@ -1636,7 +1660,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
           records: [
             {
               paneId: 'w1:p1',
-              label: 'Downtime triggered implement Backlog - WL-OOV-CRIT',
+              label: 'Downtime triggered implement Backlog - WL-OOVCRIT',
               agent: 'pi',
               agentStatus: 'working',
             },

@@ -227,6 +227,9 @@ case "$*" in
     if [ -f "${stateDir}/tab_created" ]; then echo '{"result":{"tabs":[{"tab_id":"wC:tWL-ABC","label":"WL-ABC"}]}}'; else echo '{"result":{"tabs":[]}}'; fi ;;
   "tab create --workspace"*) touch "${stateDir}/tab_created"; echo '{"result":{"tab":{"tab_id":"wC:tWL-ABC","label":"WL-ABC"},"root_pane":{"pane_id":"wC:tWL-ABC:p1"}}}' ;;
   "workspace create"*) echo '{"result":{"workspace":{"workspace_id":"wD"},"root_pane":{"pane_id":"wD:p1"}}}' ;;
+  # Durability probe (WL-0MWHW3PKX0048ZYL): the recorded project workspace
+  # w77 still exists, so a durable-map lookup validates as alive.
+  "workspace list"*) echo '{"result":{"workspaces":[{"workspace_id":"w77"}]}}' ;;
   "pane get"*| "pane move"*) echo '{}' ;;
   *) echo '{}' ;;
 esac
@@ -305,5 +308,24 @@ exit 0
     const deps = createDispatcherAnchorDeps(intTmp, fakeHerdr);
     const target = await resolveProjectWorkspace(intTmp, deps, '/home/op/proj');
     expect(target).toBeNull();
+  });
+
+  it('AC1/AC2: no live plugin pane but a durable entry resolves the project workspace (integration)', async () => {
+    const fakeHerdr = writeProjectFakeHerdr({ malformedPaneList: true });
+    // Seed the durable per-root map with the project workspace (as a previous
+    // live match's write-through would have done). The fake herdr's
+    // `workspace list` answers w77 alive, so the on-read probe accepts it.
+    writeFileSync(
+      join(stateDir, 'downtime-project-workspaces.json'),
+      JSON.stringify({ byRoot: { '/home/op/proj': { workspaceId: 'w77' } } }),
+      'utf-8',
+    );
+    const deps = createDispatcherAnchorDeps(intTmp, fakeHerdr);
+
+    // The machine pane list is malformed (no live advertisement), yet the
+    // item's project workspace resolves from the durable map — never a
+    // Dispatcher-workspace fallback for a known root (AC1).
+    const target = await resolveProjectWorkspace(intTmp, deps, '/home/op/proj');
+    expect(target).toEqual({ workspaceId: 'w77' });
   });
 });

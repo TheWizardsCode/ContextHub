@@ -143,57 +143,23 @@ fi
 
 # ── Main mode: split, run, rename ────────────────────────────────────────
 pane_name="${RUN_IN_PANE_NAME:-Command Output}"
-# The command is everything after the leading options. Only --cwd,
-# --focus, --no-focus, --pane-name and --anchor are parsed as options at the
-# head of argv; everything else (including commands whose first token begins
-# with --) is the command.
-target_cwd=""
-no_focus=false
-anchor=""
+# Options are parsed only at the head of argv; everything else — including
+# commands whose first token begins with `--` — is the command. Parsing uses
+# the canonical shared parser (WL-0MWHWGZI4007D911) so there is exactly ONE
+# option-parser implementation across send-to-pi.sh / open-pi-agent.sh /
+# run-in-pane.sh; only the accepted option set differs per script.
+# shellcheck source=../shared/pane-options.sh
+. "$script_dir/../shared/pane-options.sh"
+# Defaults the canonical parser leaves alone unless the flag is given.
+focus=true
+cwd_arg=""
+anchor_arg=""
 pane_id_file=""
-while [ $# -gt 0 ]; do
-  case "${1:-}" in
-    --cwd)
-      target_cwd="$2"
-      shift 2
-      ;;
-    --focus)
-      # Explicit focus: the default. Consuming it here is essential — an
-      # unrecognised --focus would fall through to the command and the pane
-      # would run `--focus --cwd …` instead of the real command
-      # (WL-0MURJ0LFH002O95I).
-      no_focus=false
-      shift
-      ;;
-    --no-focus)
-      no_focus=true
-      shift
-      ;;
-    --pane-name)
-      pane_name="$2"
-      shift 2
-      ;;
-    --anchor)
-      anchor="$2"
-      shift 2
-      ;;
-    --anchor=*)
-      anchor="${1#*=}"
-      shift
-      ;;
-    --pane-id-file)
-      pane_id_file="$2"
-      shift 2
-      ;;
-    --pane-id-file=*)
-      pane_id_file="${1#*=}"
-      shift
-      ;;
-    *)
-      break
-      ;;
-  esac
-done
+parse_pane_options "cwd focus no-focus pane-name anchor pane-id-file" "$@"
+set -- "${PANE_OPTIONS_REMAINDER[@]}"
+no_focus=false
+[ "$focus" = false ] && no_focus=true
+anchor="$anchor_arg"
 COMMAND="$*"
 
 if [ -z "$COMMAND" ]; then
@@ -214,7 +180,7 @@ fi
 # --anchor <paneId> splits THAT pane instead of the current one (an item-ID
 # tab's root pane for an ID-carrying interactive dispatch); without it the
 # legacy `--current` split is kept (backward compatible).
-target_cwd="${target_cwd:-${HERDR_RESOLVED_CWD:-$PWD}}"
+target_cwd="${cwd_arg:-${HERDR_RESOLVED_CWD:-$PWD}}"
 if [ -n "$anchor" ]; then
   split_out="$("$herdr_bin" pane split --pane "$anchor" --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
 else

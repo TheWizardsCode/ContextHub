@@ -5,23 +5,17 @@
  * Single responsibility: drive ONE tick — the enabled/disable-marker gates,
  * leader election + coordination check-in, the pane-lifecycle/reaper
  * maintenance passes, the no-candidate cooldown gate and the poll/evaluate
- * phase — applying the decision/starvation/strike helpers the dispatch module
- * owns.
- *
- * Extracted from `downtime-worker.ts` by WL-0MVLII2080074S5L (extract the
- * downtime-worker orchestrator modules). Every tick phase now takes the
- * shared `OrchestratorContext` as its first argument (plan option A): the
- * `createDowntimeWorker` closure vars it used to capture became explicit
- * context fields, so the tick is readable without the enclosing closure.
- * Moved blocks are verbatim (a refusal returns the same
- * `{ polled, dispatched, idle }` shape); no decision, threshold, ordering or
- * log message changed.
+ * phase. Extracted from `downtime-worker.ts` by WL-0MVLII2080074S5L; every
+ * tick phase takes the shared `OrchestratorContext` (plan option A); the
+ * moved blocks are verbatim — no decision, threshold, ordering or log
+ * message changed.
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  */
 
-import { getEntry, hasPeerOffer, readCoordinationFile, upsertLeader } from './coordination.js';
+import { getEntry, hasPeerOffer, pruneDeadEntries, readCoordinationFile, upsertLeader } from './coordination.js';
 import { appendCoordinationLogEntry, coordinationLogPolicyFromConfig } from './downtime-log.js';
+import { logPrunedEntries } from './downtime-log-coordination.js';
 import { DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS } from './capacity-starvation.js';
 import { disableMarkerExists } from './downtime-disable-marker.js';
 import { cleanupStaleElection } from './leader-election.js';
@@ -54,6 +48,7 @@ import {
   type LeafAuditAdmission,
 } from './downtime-worker.gates.js';
 import { paneCloseReaperDue } from './pane-close-scheduler.js';
+import { maybeRunBudgetReconcilePass } from './downtime-worker.budget-reconcile.js';
 import {
   admitDispatch,
   batchMetadata,
@@ -296,6 +291,13 @@ export async function runLeaderElectionAndCheckIn(
       }
     }
 
+    // Dead-entry prune (WL-0MWFJTKGM006BHLQ): leader-only, before check-in.
+    // Window = live `downtimeCoordinationEntryStaleMs` (WL-0MWFJTULD005DTQI); absent → the default constant.
+    if (ctx.leaderState) {
+      const { pruned, staleWindowMs } = pruneDeadEntries(ctx.opts.coordinationDir!, { nowMs: tickNow, leaderInstanceId: ctx.instanceId, staleWindowMs: cfg.coordinationEntryStaleMs });
+      await logPrunedEntries(cfg.cwd, pruned, staleWindowMs, new Date(tickNow).toISOString(), coordinationLogPolicyFromConfig(cfg));
+    }
+
     // Coordination check-in (parent AC3 — first on startup, then every
     // 5 min, WL-0MTMPSCL8000O45H): recompute THIS instance's most-
     // important item and verify/update its entry in the shared
@@ -305,12 +307,11 @@ export async function runLeaderElectionAndCheckIn(
     // (WL-0MTOCBP1D009P4U3); clamp ≥ 60 s.
     //
     // Leader visibility (WL-0MW1VINII003IL7R): the elected leader's identity
-    // and latest decision token are recorded in a separate `leader` block
+    // and decision token are recorded in a separate `leader` block
     // (`upsertLeader`). The check-in removes the leader's OWN offer whenever
     // its window is empty ("no dead offers"), so before this the one instance
-    // permitted to dispatch could be absent from the file entirely — the
-    // 2026-11-04 outage showed five healthy offers and no dispatcher for eight
-    // hours. The block is evidence only; `entries` semantics are untouched.
+    // permitted to dispatch could be absent entirely — the 2026-11-04 outage
+    // showed five offers and no dispatcher for eight hours. Evidence only.
     //
     // The check-in cycle itself (reOfferDue probe, cadence gate, the
     // `runCoordinationCheckIn` call and the cooldown-cancel semantics) now
@@ -399,18 +400,15 @@ export function runPaneMaintenance(
   // active auto-close path. The block is retained (and the pure
   // classifier + its tests kept) so the design can be revisited.
   //
-  // When enabled it would run on the LEADER (legacy mode: always) and
-  // BEFORE the cooldown
-  // gate, so completed dispatched panes are tidied even while dispatch
-  // is paused in a no-candidate cooldown. Cadence-bounded (default 30 s)
-  // so the ~10 s tick does not re-query the worklog for every open pane
-  // on every tick.
+  // When enabled it would run on the LEADER, BEFORE the cooldown gate, so
+  // completed panes are tidied even while dispatch is paused. Cadence-bounded
+  // (default 30 s) so the ~10 s tick does not re-query per open pane.
   //
   // FIRE-AND-FORGET (deliberately NOT awaited): the single-flight
   // dispatch guard relies on the first in-flight tick setting
   // `dispatching` before a second concurrent tick reaches its check — an
-  // extra await on the pre-dispatch path lets the second tick win that
-  // race and double-dispatch (pinned by the worker single-flight test).
+  // an extra pre-dispatch await would let a second tick win the race
+  // (pinned by the worker single-flight test).
   // The monitor is internally fail-closed and idempotent, so running it
   // concurrently is safe; the `.catch` is belt-and-braces.
   const paneMonitorIntervalMs =
@@ -435,6 +433,8 @@ export function runPaneMaintenance(
   // so the worker continues. A pane already handled by the dispatch
   // monitor above is skipped by the reaper (shared classifier +
   // already-closed set), so the two mechanisms never double-close.
+  // Host-budget ledger reconciliation pass (WL-0MWFJDEY5002FBRE). 
+  maybeRunBudgetReconcilePass(ctx, cfg, tickNow, paneLifecycleWarn);
   if (paneCloseReaperDue(cfg.paneClose, ctx.lastPaneCloseReaperAt, tickNow)) {
     ctx.lastPaneCloseReaperAt = tickNow;
     const paneClose = cfg.paneClose!;

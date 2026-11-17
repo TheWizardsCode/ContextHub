@@ -37,6 +37,8 @@ import type {
   ItemTabAnchor,
   ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
+// Anchor-resolver fail-closed boundary reporter (WL-0MWHCUZ5C000I7S6) + primary-path near-miss record (WL-0MWHCV3PR002WSQM; structural copies) + fallback-reason token (WL-0MWHW3PKX0048ZYL AC3).
+import type { AnchorFailureReport, ProjectWorkspaceFallbackReason, ProjectWorkspaceMismatch } from './downtime-worker.dispatch-contract.js';
 import type {
   DowntimeDispatchEnrichmentEvent,
   DowntimeDispatchFailureEvent,
@@ -44,8 +46,10 @@ import type {
   DowntimeErrorEvent,
   DowntimeHostBudgetAdmission,
   DowntimeHostBudgetAdmissionInput,
+  DowntimeHostBudgetRelease,
 } from './downtime-worker.dispatch-contract.js';
 import type { AuditAvailabilityClient } from './downtime-worker.audit-availability.js';
+import type { AuditLeaseClient } from './downtime-worker.audit-lease.js';
 import type {
   DowntimeActiveAuditResult,
   DowntimeCandidate,
@@ -366,6 +370,30 @@ export interface DowntimeWorkerDeps {
    */
   readAuditAvailability?: AuditAvailabilityClient;
   /**
+   * The proxy audit-lease client (WL-0MWFJH3NW006F5GN AC1/AC2): the ATOMIC
+   * cross-host arbiter for the shared audit budget. The audit admission
+   * acquires a lease (session id derived from the dispatched item) once the
+   * availability pre-check admits; dispatch proceeds only on a 200 and
+   * every terminal path releases. Production wires `createAuditLeaseClient(`
+   * `runSettings.downtimeProxyUrl)` beside `readAuditAvailability` (main()).
+   * The client never throws; only `ok` admits, a MISSING seam fails closed
+   * as `audit-budget-unknown`/`lease-seam-absent` — never open, because
+   * availability-only admission is the race this item removes. Optional: a
+   * proxy path wired without a lease seam is refused (fail closed).
+   */
+  auditLeaseClient?: AuditLeaseClient;
+  /**
+   * Release a dispatched audit's PROXY LEASE (WL-0MWFJH3NW006F5GN AC3),
+   * re-deriving the session id from the item id (`auditLeaseSessionId`).
+   * Called on every terminal path after an audit ADMITTED with a held lease;
+   * idempotent, never throws (the proxy's expiry bounds a leak).
+   */
+  releaseAuditLease?(
+    itemId: string,
+    cwd: string,
+    release?: { reason?: string },
+  ): Promise<void>;
+  /**
    * Resolve the dedicated machine-wide Dispatcher anchor pane (C0
    * WL-0MTR01EU7005SYZG, F1 WL-0MTR2CD4X006XI7U): the persisted anchor pane
    * id in the 'Dispatcher' workspace, provisioning it idempotently on first
@@ -379,7 +407,7 @@ export interface DowntimeWorkerDeps {
    * (`createDowntimeDeps`) always provides it, so downtime dispatch is
    * always anchored.
    */
-  getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
+  getDispatcherAnchor?(cwd: string, report?: AnchorFailureReport): Promise<DispatcherAnchor | null>;
   /**
    * Resolve the project workspace hosting the worklog plugin pane for the
    * worklog root `cwd` (WL-0MU321YK70035AYT, AC1/AC3). When it resolves, the
@@ -392,7 +420,7 @@ export interface DowntimeWorkerDeps {
    * compatibility with pre-change callers/tests; production wiring
    * (`createDowntimeDeps`) always provides it.
    */
-  resolveProjectWorkspace?(cwd: string): Promise<ProjectWorkspaceTarget | null>;
+  resolveProjectWorkspace?(cwd: string, reportNearMiss?: (nearMiss: ProjectWorkspaceMismatch) => void, reportFallbackReason?: (reason: ProjectWorkspaceFallbackReason) => void): Promise<ProjectWorkspaceTarget | null>;
   /**
    * Ensure/reuse the tab labelled with the exact work-item id `itemId` inside
    * the resolved project `workspaceId`, returning its anchor (root) pane
@@ -417,12 +445,10 @@ export interface DowntimeWorkerDeps {
    * degrades to 'anchor-unavailable' — the caller NEVER falls back to the
    * legacy Dispatcher anchor or the leader's pane when this dep is wired.
    * Optional for test callers that inject mocks; production wiring provides
-   * it.
+   * it. The optional trailing `report` callback (WL-0MWHCUZ5C000I7S6)
+   * carries the fail-closed boundary detail before a `null` return; additive.
    */
-  getDispatcherTabAnchor?(
-    cwd: string,
-    prefix: string,
-  ): Promise<DispatcherPrefixTabAnchor | null>;
+  getDispatcherTabAnchor?(cwd: string, prefix: string, report?: AnchorFailureReport): Promise<DispatcherPrefixTabAnchor | null>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -572,8 +598,18 @@ export interface DowntimeWorkerDeps {
    * closes. Must be idempotent and never throw — a missing entry is a
    * successful no-op, and stale entries are additionally reaped by the ledger's
    * own staleness rule.
+   *
+   * `release` carries the identity the caller owns — the entry `kind` plus the
+   * admission `attemptId`, or the closed `paneId`
+   * (WL-0MWFJD5T4003OM91) — and the `reason` recorded in the ledger's audit
+   * trail (WL-0MWFJDGXQ001OXP8). Releasing by item id alone could delete
+   * another dispatch's entry.
    */
-  releaseHostDispatch?(itemId: string, cwd: string): Promise<void>;
+  releaseHostDispatch?(
+    itemId: string,
+    cwd: string,
+    release?: DowntimeHostBudgetRelease,
+  ): Promise<void>;
   /**
    * Flag an item for producer review (`needsProducerReview = true`) after its
    * automatic dispatch budget is exhausted (WL-0MUKYEXMK0033MFK AC3). Called
@@ -738,6 +774,8 @@ export interface DowntimeWorkerConfig {
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
      */
     markerStaleWindowMs?: number;
+    /** Dead-coordination-entry staleness window, ms (WL-0MWFJTULD005DTQI); defaults to `DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS` (2 × the check-in cadence, 10 min); re-read live each leader tick and passed to the dead-entry prune. */
+    coordinationEntryStaleMs?: number;
     /**
      * Stalled-work scan enable (WL-0MUYMBSA90092QV2): read live on every tick.
      * Optional for backward compat — defaults to enabled.
@@ -793,14 +831,12 @@ export interface DowntimeWorkerConfig {
      * `coordinationLogMaxEntries × (1 + coordinationLogMaxRotatedFiles)`
      * entries and never falls below
      * `coordinationLogMaxEntries × coordinationLogMaxRotatedFiles + 1`.
-     * Defaults (500/file, 3 rotated: always 1,501–2,000 entries ≈ ≥ 25 h at
-     * the observed ≥ 60 decisions/hour) come from
+     * Defaults (500/file, 3 rotated: always 1,501–2,000 entries ≈ ≥ 25 h at the observed ≥ 60 decisions/hour) come from
      * `COORDINATION_LOG_MAX_ENTRIES` / `COORDINATION_LOG_MAX_ROTATED_FILES`
      * in `downtime-log.ts`, and values are clamped by
      * `resolveCoordinationLogPolicy` (10–10,000 entries, 0–20 siblings;
      * 0 siblings = no rotation, single-file trim). Read live on every tick.
-     * The dispatch log is NOT affected (its 100-entry bound keeps the
-     * dispatched-marker readers' contract).
+     * The dispatch log is NOT affected (its 100-entry bound keeps the dispatched-marker readers' contract).
      */
     coordinationLogMaxEntries?: number;
     coordinationLogMaxRotatedFiles?: number;

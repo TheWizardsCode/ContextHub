@@ -64,16 +64,17 @@ import {
   livePaneIdSet,
   readBudget,
   readBudgetConfig,
-  reduceLedgerCounts,
   type HostBudgetConfig,
   type HostBudgetCounts,
   type HostBudgetLivePane,
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
+import { countLiveWork } from './host-dispatch-budget.counting.js';
 import { getMachineCoordinationDir } from './machine-coordination.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
   HOST_BUDGET_IMPLEMENT_REASON,
+  HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
   isHostBudgetDecisionReason,
   type HostBudgetDecisionReason,
@@ -145,6 +146,9 @@ const TIER_LABEL_BY_REASON: Readonly<Record<HostBudgetDecisionReason, string>> =
   // `host-budget-unknown` can come from either tier (the ledger could not be
   // trusted), so the line names the budget itself rather than guessing a tier.
   [HOST_BUDGET_UNKNOWN_REASON]: 'budget',
+  // A corrupt ledger is a whole-budget failure: the line names the budget, not
+  // a tier (WL-0MWFJD8ZO000J1R8).
+  [HOST_BUDGET_CORRUPT_REASON]: 'budget',
 };
 
 /**
@@ -209,12 +213,11 @@ export function readHostBudgetStatus(
   // freshness rule (fresh entries count) instead of folding unknown into an
   // empty set and reporting zero implements. An authoritative empty list still
   // reads as zero.
-  const implement = reduceLedgerCounts(
-    read.ledger.entries,
-    opts.livePanes === undefined ? undefined : livePaneIdSet(opts.livePanes),
-    now,
-    windowMs,
-  );
+  // The ONE in-flight rule (WL-0MWFJDD8R005F5BV): the ledger's own count
+  // PLUS live dispatcher panes no entry accounts for, so the header and the
+  // admission decision always quote the same figure. Non-mutating: a render
+  // never reaps or rewrites the ledger.
+  const implement = countLiveWork(read.ledger.entries, opts.livePanes, 'implement', now, windowMs);
   // Pane-aware audit DISPLAY rule (WL-0MW8D4UQH002TWJV), shared with the
   // interactive over-quota dialog so the two surfaces cannot disagree
   // (WL-0MW8IQNY7003JIOL). A confirmed entry whose pane is gone is a dead
@@ -232,7 +235,7 @@ export function readHostBudgetStatus(
   );
   const { config } = readBudgetConfig(ledgerOptions);
   return summariseHostBudget(
-    { implement: implement.counts.implement, audit },
+    { implement: implement.live, audit },
     config,
   );
 }

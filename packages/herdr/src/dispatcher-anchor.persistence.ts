@@ -26,11 +26,14 @@ import * as path from 'node:path';
 import { getMachineCoordinationDir } from './machine-coordination.js';
 import {
   DISPATCHER_ANCHOR_FILE,
+  DISPATCHER_PROJECT_WORKSPACES_FILE,
   DISPATCHER_TAB_ANCHORS_FILE,
 } from './dispatcher-anchor.contract.js';
 import type {
   DispatcherAnchor,
   DispatcherTabAnchors,
+  ProjectWorkspaceRecord,
+  ProjectWorkspacesByRoot,
 } from './dispatcher-anchor.contract.js';
 
 // ── Persistence helpers ────────────────────────────────────────────────
@@ -146,6 +149,14 @@ export function readDispatcherWorkspaceId(): string | null {
  * Always writes (even when the entry is unchanged) so a stale entry whose
  * pane was superseded in herdr is corrected rather than left to be
  * re-resolved on every dispatch.
+ *
+ * Self-pruning (WL-0MWHCUX6A002W8ZG): herdr ids are workspace-scoped with a
+ * `<workspaceId>:` prefix, so on every rewrite each carried-over `byPrefix`
+ * entry is kept only when BOTH ids start with the workspace being written —
+ * an entry pointing into a superseded/dead workspace (or holding an
+ * ill-formed id) can never resolve and is dropped, keeping the persisted map
+ * truthful without any `wl`/herdr call. The upserted ids are validated the
+ * same way: an ill-formed id fails closed with `false` and nothing written.
  */
 export function persistPrefixTab(
   dir: string,
@@ -157,8 +168,119 @@ export function persistPrefixTab(
   const current = readTabAnchors(dir);
   const anchors: DispatcherTabAnchors = {
     workspaceId,
-    byPrefix: { ...(current?.byPrefix ?? {}) },
+    byPrefix: {},
   };
+  const wsPrefix = `${workspaceId}:`;
+  if (current !== null) {
+    for (const [p, entry] of Object.entries(current.byPrefix)) {
+      if (entry.tabId.startsWith(wsPrefix) && entry.paneId.startsWith(wsPrefix)) {
+        anchors.byPrefix[p] = entry;
+      }
+    }
+  }
+  if (!tabId.startsWith(wsPrefix) || !paneId.startsWith(wsPrefix)) return false;
   anchors.byPrefix[prefix] = { tabId, paneId };
   return writeTabAnchors(dir, anchors);
+}
+
+// ── Per-root project-workspace map (WL-0MWHW3PKX0048ZYL, AC2) ─────────
+
+/** Path to the per-root project-workspaces persistence file. */
+function projectWorkspacesFilePath(dir: string): string {
+  return path.join(dir, DISPATCHER_PROJECT_WORKSPACES_FILE);
+}
+
+/**
+ * Read the per-root project-workspace map. Returns `null` when absent,
+ * empty, or structurally invalid (caller treats as "no durable mapping").
+ *
+ * The map is the DURABLE source for root→workspace resolution: it keeps a
+ * root's project workspace resolvable when the plugin pane that advertised
+ * it is no longer alive at dispatch time, and it survives the pruning of
+ * dead coordination entries (it is not the coordination file).
+ */
+export function readProjectWorkspaces(dir: string): ProjectWorkspacesByRoot | null {
+  try {
+    const raw = fs.readFileSync(projectWorkspacesFilePath(dir), 'utf-8');
+    if (!raw.trim()) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const o = parsed as Record<string, unknown>;
+    const byRoot = o.byRoot;
+    if (
+      byRoot === undefined ||
+      byRoot === null ||
+      typeof byRoot !== 'object' ||
+      Array.isArray(byRoot)
+    ) {
+      return null;
+    }
+    const out: ProjectWorkspacesByRoot = { byRoot: {} };
+    for (const [root, entry] of Object.entries(byRoot as Record<string, unknown>)) {
+      if (entry === null || typeof entry !== 'object') continue;
+      const rec = entry as Record<string, unknown>;
+      const workspaceId = rec.workspaceId ?? rec.workspace_id;
+      if (typeof workspaceId !== 'string' || workspaceId === '') continue;
+      const record: ProjectWorkspaceRecord = { workspaceId };
+      const paneId = rec.paneId ?? rec.pane_id;
+      if (typeof paneId === 'string' && paneId !== '') record.paneId = paneId;
+      const tabId = rec.tabId ?? rec.tab_id;
+      if (typeof tabId === 'string' && tabId !== '') record.tabId = tabId;
+      if (typeof rec.updatedAt === 'string' && rec.updatedAt !== '') {
+        record.updatedAt = rec.updatedAt;
+      }
+      out.byRoot[root] = record;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Atomically persist the per-root project-workspace map (tmp + rename). */
+function writeProjectWorkspaces(dir: string, map: ProjectWorkspacesByRoot): boolean {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const fp = projectWorkspacesFilePath(dir);
+    const tmp = `${fp}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(map), 'utf-8');
+    fs.renameSync(tmp, fp);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Upsert one root → workspace record in the per-root map (write-through on
+ * a live plugin-pane match). Atomic tmp+rename; existing roots are kept.
+ * Best-effort: a missing machine dir or an I/O failure returns `false` and
+ * never throws — the durable map is a hint, never a hard dependency.
+ */
+export function upsertProjectWorkspace(
+  dir: string,
+  root: string,
+  record: ProjectWorkspaceRecord,
+): boolean {
+  if (root === '' || record.workspaceId === '') return false;
+  const current = readProjectWorkspaces(dir);
+  const byRoot: Record<string, ProjectWorkspaceRecord> = current !== null
+    ? { ...current.byRoot }
+    : {};
+  byRoot[root] = record;
+  return writeProjectWorkspaces(dir, { byRoot });
+}
+
+/**
+ * Remove one root from the per-root map (a durable entry probed MISSING
+ * from live herdr state is dropped so it can never route into a dead
+ * workspace again). Best-effort: returns `true` when the write happened,
+ * `false` on a missing entry / I/O failure — never throws.
+ */
+export function removeProjectWorkspace(dir: string, root: string): boolean {
+  const current = readProjectWorkspaces(dir);
+  if (current === null || current.byRoot[root] === undefined) return false;
+  const byRoot: Record<string, ProjectWorkspaceRecord> = { ...current.byRoot };
+  delete byRoot[root];
+  return writeProjectWorkspaces(dir, { byRoot });
 }

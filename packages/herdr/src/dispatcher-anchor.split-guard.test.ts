@@ -2,6 +2,11 @@
  * packages/herdr/src/dispatcher-anchor.split-guard.test.ts — automated gate
  * for the `packages/herdr/src/dispatcher-anchor.ts` split invariants.
  *
+ * Map pointer (WL-0MWHWHBSW005KG13): the single pane-creation architecture
+ * map + naming contract lives in `docs/dev/downtime-dispatcher.md` →
+ * *Pane creation architecture*; the placement strategies this family
+ * implements are the map's *placement* column.
+ *
  * Parent: WL-0MVGKHCP9005SJPZ (decompose the `dispatcher-anchor.ts` god class).
  * Work item: WL-0MW0JH7TK008UP0M (test-first guard, lands before any code
  * moves).

@@ -210,7 +210,16 @@ describe('integration: leader election → coordination → dispatch', () => {
       // following check-in.
       const depsB = baseDeps({
         getHerdrListHead: vi.fn()
+          // Check-in 1: window = WL-B1 (prep bucket); the widening read sees
+          // the SAME head (nothing beyond the window → extended = []), so the
+          // entry offers ONLY WL-B1 — the leader can dispatch and the entry
+          // is removed (WL-0MWFJ8R1P005G1H1: a widening that adds nothing
+          // leaves the window-only result byte-identical).
           .mockResolvedValueOnce({ ok: true, items: [{ id: 'WL-B1', title: 'B one', status: 'open', stage: 'intake_complete' }] })
+          .mockResolvedValueOnce({ ok: true, items: [{ id: 'WL-B1', title: 'B one', status: 'open', stage: 'intake_complete' }] })
+          // Check-in 2 (after the dispatch): the NEXT head WL-B2, whose
+          // widening read again sees nothing new.
+          .mockResolvedValueOnce({ ok: true, items: [{ id: 'WL-B2', title: 'B two', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }] })
           .mockResolvedValue({ ok: true, items: [{ id: 'WL-B2', title: 'B two', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }] }),
       });
       const depsA = baseDeps({

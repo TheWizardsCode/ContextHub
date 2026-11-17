@@ -22,7 +22,7 @@
  *  6. A stale block (crashed leader) is not reported as a live leader.
  */
 
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,6 +34,7 @@ import {
   getLeader,
   removeLeader,
   removeEntry,
+  getEntry,
   hasPeerOffer,
   COORDINATION_FILE,
   COORDINATION_FILE_VERSION,
@@ -311,5 +312,116 @@ describe('fail-safe', () => {
     // A directory where the file should be is unwritable → false, never throws.
     rmSync(testDir, { recursive: true, force: true });
     expect(() => upsertLeader(testDir, makeLeader('leader-1'))).not.toThrow();
+  });
+});
+
+// ── Legacy v1 dispatch by a v2-aware leader (parent WL-0MWDDHQON0015T3P AC9, test-first slice WL-0MWDVMK48002NIHO) ──
+//
+// A pre-upgrade instance writes a v1 entry (single top-level `workItemId`, NO
+// `offers` payload). The v2-aware leader must dispatch it UNCHANGED (parent
+// AC9 legacy compatibility): the legacy offer is re-fetched and re-validated
+// through the same sequential filter chain, claimed against its OWN worklog
+// root and removed from the file, exactly as a v1-only leader did; and
+// `removeEntry(coordinationDir, instanceId)` keeps its v1 semantics for
+// stale/invalid offers. These specs are GREEN on the v1 implementation and
+// MUST stay green after the v2 upgrade — they are the backward-compatibility
+// regression guard F1 flips nothing in.
+
+import { dispatchFromCoordination, type CoordinationLeaderDeps } from './downtime-worker.coordination-leader.js';
+import type { DowntimeItemInfo } from './downtime-worker.types.js';
+import {
+  LEGACY_V1_ENTRY,
+  LEGACY_V1_INSTANCE_ID,
+  LEGACY_V1_ITEM,
+  LEGACY_V1_WORK_ITEM_ID,
+} from './__fixtures__/coordination-v1-entry.js';
+
+/** Minimal deps surface for a legacy v1 offer through the leader dispatch path. */
+function legacyDeps(
+  item: Partial<DowntimeItemInfo> & { id: string },
+): CoordinationLeaderDeps {
+  const info: DowntimeItemInfo = {
+    id: item.id,
+    title: item.title ?? `Item ${item.id}`,
+    status: item.status,
+    stage: item.stage,
+    priority: item.priority,
+    risk: item.risk,
+    effort: item.effort,
+    auditedAt: item.auditedAt,
+    updatedAt: item.updatedAt,
+    sortIndex: item.sortIndex,
+    needsProducerReview: item.needsProducerReview,
+    assignee: item.assignee,
+    deletedBy: item.deletedBy,
+  };
+  return {
+    fetchItem: vi.fn().mockResolvedValue({ ok: true, info }),
+    claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    recordDispatch: vi.fn().mockResolvedValue(true),
+    spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+    getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
+    getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+  } as unknown as CoordinationLeaderDeps;
+}
+
+/** Leader-dispatch options for the fixture file in the CURRENT `testDir` (built per test — a module-level const would freeze `testDir` at load time, before `beforeEach` assigns it). */
+function leaderOpts(): {
+  model: string;
+  cwd: string;
+  coordinationDir: string;
+  freeSlots: number;
+  browseItemCount: number;
+} {
+  return {
+    model: 'plan',
+    cwd: '/repo/leader',
+    coordinationDir: testDir,
+    freeSlots: 2,
+    browseItemCount: 5,
+  };
+}
+
+/** Persist a v1-shaped coordination file (version 1, entries without `offers`). */
+function writeV1File(entries: CoordinationEntry[]): void {
+  writeFileSync(coordPath(), JSON.stringify({ version: 1, entries }), 'utf-8');
+}
+
+describe('legacy v1 dispatch by a v2-aware leader (parent AC9)', () => {
+  it('dispatches a legacy v1 fixture entry unchanged — re-fetch, classify, claim against its own root, remove from the file', async () => {
+    writeV1File([LEGACY_V1_ENTRY]);
+    const deps = legacyDeps(LEGACY_V1_ITEM);
+    const outcome = await dispatchFromCoordination(deps, [{ ...LEGACY_V1_ENTRY }], leaderOpts());
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    // The legacy offer was re-validated against the item's CURRENT state in
+    // its OWN worklog root.
+    expect(deps.fetchItem).toHaveBeenCalledWith(LEGACY_V1_WORK_ITEM_ID, '/repo/legacy-root');
+    // The CAS claim lands in the offered item's root (never the leader's cwd).
+    expect(deps.claimItem).toHaveBeenCalledWith(expect.anything(), expect.anything(), '/repo/legacy-root');
+    // The dispatch pane names the legacy offered item.
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(spawnCall[0])).toContain(LEGACY_V1_WORK_ITEM_ID);
+    // The dispatched entry is removed so the owner re-offers at its check-in.
+    expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+  });
+
+  it('removeEntry still drops a stale/invalid legacy offer with v1 semantics — the classified-null drop removes the entry, no pane, no claim', async () => {
+    const stale = { ...LEGACY_V1_ENTRY, workItemId: 'WL-LEGACY-STALE' };
+    writeV1File([stale]);
+    // in_progress = already claimed elsewhere → the dispatch-time classifier
+    // rejects the offer before any gate, exactly as it did on v1.
+    const deps = legacyDeps({ id: 'WL-LEGACY-STALE', status: 'in_progress', stage: 'in_progress' });
+    const outcome = await dispatchFromCoordination(deps, [stale], leaderOpts());
+
+    expect(outcome.dispatched).toBe(false);
+    // The stale/invalid offer is removed exactly as a v1 leader removed it.
+    expect(getEntry(testDir, LEGACY_V1_INSTANCE_ID)).toBe(null);
+    // No pane, no claim for a dropped offer.
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });

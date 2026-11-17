@@ -1,5 +1,57 @@
 import { defineConfig } from 'vitest/config'
 
+/**
+ * The measured startup-cost suite.
+ *
+ * It spawns real `wl` processes and compares their peak RSS with a 25 % budget,
+ * so it must not share the host with the rest of the run: the ~6 concurrent fork
+ * workers inflated that child RSS by ~25 % (starved V8 collects less often) and
+ * failed the dev-push gate on an unchanged tree (WL-0MWIF616V008380O →
+ * WL-0MWIGCK0E009GGLG). It therefore runs in its own serialised project that is
+ * sequenced **after** every other project, so a plain `vitest run` isolates it
+ * without any extra flags (the agent-side test runner is not modifiable here).
+ */
+/** Measured suites: serialised, sequenced after everything else. */
+const MEASURED_STARTUP_SUITE = 'tests/cli/startup-import-budget.test.ts'
+/**
+ * The in-process harness cost budget re-measures four/five short in-process
+ * calls and compares the medians with a checked-in baseline
+ * (`tests/cli/inproc-harness-budget.test.ts`). It is a *measured* guard: with
+ * six sibling fork workers a ~2–4 ms call loses up to a few milliseconds to
+ * scheduling, which inflated the cold-open median to 3.9x its baseline and
+ * failed the ratchet on an unchanged tree (WL-0MVWLBZG4003A803). It therefore
+ * runs in the same isolated, serialised group as the startup-cost suite.
+ */
+const INPROC_HARNESS_BUDGET_SUITE = 'tests/cli/inproc-harness-budget.test.ts'
+/**
+ * The large-DB refresh budget measured ratchet measures the pane's own RSS
+ * delta (`process.resourceUsage().maxRSS` across the refresh samples) plus the
+ * largest concurrent spawned `wl` child. Inside the parallel fork pool the ~6
+ * sibling workers starve V8's GC, so the pane RSS delta stays inflated and
+ * `paneAggregateRssMb` breached its 25 % headroom on an unchanged tree
+ * (140.7 vs a 137.9 MB limit — WL-0MWJAHK3J0026P68). It therefore joins the
+ * startup/inproc measured suites in the isolated, serialised project.
+ *
+ * Only the measured ratchet describe block needs the isolation; the policy and
+ * fixture unit tests in the same file are deterministic, but the established
+ * measured-suite convention isolates whole files (as the other two do), so this
+ * file runs in its entirety in the serialised project.
+ */
+const LARGE_DB_REFRESH_BUDGET_SUITE = 'packages/herdr/src/large-db-refresh-budget.test.ts'
+const MEASURED_SUITES = [
+  MEASURED_STARTUP_SUITE,
+  INPROC_HARNESS_BUDGET_SUITE,
+  LARGE_DB_REFRESH_BUDGET_SUITE,
+]
+
+/** Excluded from discovery — worktrees hold duplicate copies of the suite. */
+const EXCLUDE = [
+  '**/node_modules/**',
+  '**/__snapshots__/**',
+  '**/{dist,build,.cache}/**',
+  '**/.worklog/worktrees/**',
+]
+
 export default defineConfig({
   test: {
     // Increase default timeout to reduce intermittent test timeouts in CI.
@@ -55,11 +107,37 @@ export default defineConfig({
     // Exclude worktree test files from discovery — worktrees share the
     // same git objects but have separate working directories, so vitest
     // would otherwise pick up duplicate copies of test files.
-    exclude: [
-      '**/node_modules/**',
-      '**/__snapshots__/**',
-      '**/{dist,build,.cache}/**',
-      '**/.worklog/worktrees/**',
+    exclude: EXCLUDE,
+    // Two projects, both extending this config (WL-0MWIGCK0E009GGLG):
+    //
+    //   suite                    — everything else, maxWorkers 6, parallel.
+    //   startup-budget-measured  — the measured suites only (startup cost,
+    //                              in-process harness, large-DB refresh
+    //                              ratchet), one worker, sequenced after
+    //                              `suite`.
+    //
+    // `sequence.groupOrder` is what makes the isolation real: vitest runs
+    // groups from the lowest order to the highest, waiting for each group to
+    // finish, so the benchmark never competes with a sibling fork worker for
+    // the host. Plain `vitest run` needs no flags for this — a requirement,
+    // because the agent-side test runner invokes vitest verbatim.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'suite',
+          exclude: [...EXCLUDE, ...MEASURED_SUITES],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'startup-budget-measured',
+          include: MEASURED_SUITES,
+          maxWorkers: 1,
+          sequence: { groupOrder: 1 },
+        },
+      },
     ],
   },
 })

@@ -2,10 +2,13 @@
  * packages/herdr/src/downtime-worker.coordination.ts — the coordination OFFER
  * computation.
  *
- * Single responsibility: compute the ONE item an instance OFFERS to the
- * coordination leader — the tier rank, the candidate shape and the sequential
- * safety filters over the instance's own Herdr list head — without dispatching
- * anything.
+ * Single responsibility: compute the items an instance OFFERS to the
+ * coordination leader — the single most-important item (the tier rank, the
+ * candidate shape and the sequential safety filters over the instance's own
+ * Herdr list head) PLUS the per-bucket nominees of the same window
+ * (parent WL-0MWDDHQON0015T3P AC2/AC3: one nominee per dispatch bucket,
+ * partitioned from the SAME single `getHerdrListHead` read) — without
+ * dispatching anything.
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  * Extracted verbatim from `downtime-worker.ts` by WL-0MVLII1AO007TTRK (extract
@@ -20,6 +23,11 @@
 
 import { DEFAULT_BROWSE_ITEM_COUNT, resolveSprintViewWindow } from './browse-window.js';
 import { DEFAULT_DOWNTIME_CPU_GATE_PERCENT } from './host-cpu.js';
+import {
+  COORDINATION_OFFER_BUCKETS,
+  toOfferBucket,
+  type CoordinationOfferKind,
+} from './coordination.js';
 import {
   COORDINATION_TIER_ORDER,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
@@ -60,6 +68,7 @@ import {
 import { resolveInFlightPanes } from './downtime-worker.pane.js';
 import { resumeStalledWorkIfAble } from './downtime-worker.stalled-resume.js';
 import type {
+  CoordinationNominee,
   DowntimeCandidate,
   DowntimeHerdrItem,
   DowntimeItemInfo,
@@ -113,6 +122,20 @@ export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandida
  * exactly its current Herdr list head, so the leader never has to
  * re-rank an offer against a second ordering (see
  * `dispatchFromCoordination`).
+ *
+ * Tier-aware offers (parent WL-0MWDDHQON0015T3P AC2/AC3): the SAME single
+ * sprint-view window is also partitioned into the three dispatch buckets
+ * (`implement` / `audit` / `prep`), producing one `nominees` entry per
+ * bucket — the canonical FIRST offerable item of that bucket — from the
+ * single `getHerdrListHead` read (no per-bucket `wl` spawn, no second
+ * ranking: window order IS the ranking, and only the existing sequential
+ * filters are applied per bucket). The visible window is a RENDERING bound,
+ * not a dispatch bound (WL-0MWFJ8R1P005G1H1): a bucket the window leaves
+ * empty is filled from beyond the window by the whole-backlog widening
+ * below — same ranking, same filters, one read path (supersedes AC3's
+ * "the window is never widened to fill a bucket"). The critical-escalation
+ * path keeps today's single-offer shape (`nominees` empty) — the check-in
+ * write path falls back to a single-offer `offers` payload for it.
  *
  * The filters mirror the direct dispatch path (`dispatchFromHerdrList`)
  * but WITHOUT dispatching:
@@ -327,19 +350,70 @@ export async function computeMostImportantItem(
       priority: criticalFirst.item.priority,
       sortIndex: criticalFirst.item.sortIndex,
     };
-    return { ok: true, kind: criticalFirst.kind, candidate };
+    // The escalation path offers the critical item directly, WITHOUT running
+    // the window partition (per-bucket nominees, parent AC2/AC3): the
+    // critical offer must not wait, and it deliberately bypasses the
+    // sequential filters, so a "canonical first of bucket" nominee would be
+    // misleading here. An empty `nominees` makes the check-in write a
+    // single-offer `offers` payload, byte-identical to the pre-tier-aware
+    // entry for this path.
+    return { ok: true, kind: criticalFirst.kind, candidate, nominees: [] };
   }
 
   /**
-   * Scan one ordered candidate window for the first offerable item (the
-   * sequential filters mirror `dispatchFromHerdrList`). Returns null when
-   * nothing in the window is offerable; `heldByReviewQueue` records whether
-   * the only reason was the deep-queue hold of a non-critical implement.
+   * Per-bucket nominee surface (parent WL-0MWDDHQON0015T3P AC2/AC3,
+   * widened per-bucket by WL-0MWFJ8R1P005G1H1): the canonical FIRST
+   * offerable item of each dispatch bucket, partitioned from the SAME
+   * sprint-view window + geometric widening the single-offer path reads —
+   * one `getHerdrListHead` read path serves every bucket (the widening is a
+   * window extension of that same ranking, never a second ranking and never
+   * a per-bucket `wl` spawn). The single offer (the window-first offerable
+   * item) and the per-bucket nominees are produced by ONE sequential pass
+   * over the window, reusing the exact per-item filters the single-offer
+   * path applies today; an unfilled bucket is then filled from the widened
+   * tail by the same unchanged scan (`withNominees: true`).
+   *
+   * The pass is deliberately term-limited: an item whose bucket already has
+   * a nominee can only serve as the single offer, so once that is found it
+   * is skipped BEFORE the filters run — the side-effectful seams
+   * (attempt-budget producer-review flags, the review-queue gate) stay
+   * untouched for items behind the window-first offerable item, exactly as
+   * the single-offer path behaves today. (A notify of the widening scan: the
+   * bucket-skip applies per item, so a widened candidate in an already-
+   * filled bucket is also skipped — its bucket is resolved; only still-open
+   * buckets run the filters on the fresh tail.)
    */
-  const findOfferIn = async (
+  const offerState: {
+    singleOffer: { kind: DowntimeSkillKind; candidate: DowntimeCandidate } | null;
+    nomineesByBucket: Map<CoordinationOfferKind, CoordinationNominee>;
+  } = { singleOffer: null, nomineesByBucket: new Map() };
+
+  /**
+   * Scan one ordered candidate batch through the sequential filters
+   * (mirror `dispatchFromHerdrList`), accumulating the single offer and —
+   * when `withNominees` is set — one nominee per bucket. The whole-backlog
+   * extension passes `withNominees: true` too (WL-0MWFJ8R1P005G1H1): it is a
+   * WINDOW WIDENING of the same ranking, so a deep candidate fills its
+   * bucket exactly like an in-window one — the same filters, the same order,
+   * never a second ranking and never a per-bucket read.
+   * `heldByReviewQueue` records whether the only reason was the deep-queue
+   * hold of a non-critical implement.
+   *
+   * Accumulates into `state` (a const object, so the type-checker keeps the
+   * declared union across the closure assignments).
+   */
+  const scanOfferable = async (
     items: DowntimeHerdrItem[],
-  ): Promise<{ ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate } | null> => {
+    withNominees: boolean,
+    state: typeof offerState,
+  ): Promise<void> => {
+    const { nomineesByBucket } = state;
     for (const item of items) {
+      // Early stop: the single offer is found AND (for the window) every
+      // bucket has a nominee — no later item can render new service.
+      if (state.singleOffer !== null && (!withNominees || nomineesByBucket.size === COORDINATION_OFFER_BUCKETS.length)) {
+        return;
+      }
       const classification = classifyItemForDispatchDetail(item, now);
       if (classification.kind === null) {
         // review-gate + freshness/recency + caps — record WHICH gate.
@@ -347,6 +421,13 @@ export async function computeMostImportantItem(
         continue;
       }
       const k = classification.kind;
+      const bucket = toOfferBucket(k);
+      // An item whose bucket already has a nominee can only become the
+      // single offer — skip it entirely (and its filter side effects) once
+      // that is found.
+      if (state.singleOffer !== null && bucket !== null && nomineesByBucket.has(bucket)) {
+        continue;
+      }
       // Dispatched-marker exclusion per kind, staleness-aware
       // (WL-0MU6UL0RJ008IHGT): exclude only while the item is STILL at the
       // marker's dispatched-at stage AND the marker is fresh; a stale marker
@@ -370,6 +451,15 @@ export async function computeMostImportantItem(
       // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3):
       // flag the item for producer review and do not offer it once its
       // attempts at the current stage reach the cap. Neutral hold (AC5).
+      //
+      // WL-0MWFJ8R1P005G1H1 (accepted side-effect amplification): widening
+      // the bucket scan into the whole backlog can now FLAG an attempt-
+      // exhausted item that was previously never visited. Gating the flag by
+      // scan depth would make the filter chain depth-dependent (contradicting
+      // "same filters, unchanged order"), and the legacy single-offer
+      // extension already exhibits this behaviour — the flag is a producer-
+      // review marker, never a dispatch decision, so the amplification is
+      // accepted and documented here (see also docs/dev/downtime-dispatcher.md).
       if (isAttemptBudgetExhausted(entries, item.id, k, item.stage, maxAttempts)) {
         if (!flaggedForBudget.has(item.id)) {
           flaggedForBudget.add(item.id);
@@ -414,41 +504,128 @@ export async function computeMostImportantItem(
           continue;
         }
       }
-      const candidate: DowntimeCandidate = {
-        id: item.id,
-        title: item.title,
-        stage: k === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
-        status: item.status,
-        priority: item.priority,
-        sortIndex: item.sortIndex,
-      };
-      return { ok: true, kind: k, candidate };
+      // The item is OFFERABLE: it becomes the single (window-first)
+      // offerable item unless an earlier one already holds that slot, and it
+      // becomes its bucket's nominee (the canonical FIRST offerable item of
+      // that bucket) unless the bucket already has one.
+      if (state.singleOffer === null) {
+        state.singleOffer = {
+          kind: k,
+          candidate: {
+            id: item.id,
+            title: item.title,
+            stage: k === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
+            status: item.status,
+            priority: item.priority,
+            sortIndex: item.sortIndex,
+          },
+        };
+      }
+      if (bucket !== null && !nomineesByBucket.has(bucket)) {
+        nomineesByBucket.set(bucket, { kind: bucket, workItemId: item.id });
+      }
     }
-    return null;
   };
 
-  const offer = await findOfferIn(head.items);
-  if (offer !== null) return offer;
+  /** Emit the per-bucket nominees in canonical bucket order (COORDINATION_OFFER_BUCKETS). */
+  const emitNominees = (
+    byBucket: ReadonlyMap<CoordinationOfferKind, CoordinationNominee>,
+  ): CoordinationNominee[] =>
+    COORDINATION_OFFER_BUCKETS.flatMap((bucket) => {
+      const nominee = byBucket.get(bucket);
+      return nominee === undefined ? [] : [nominee];
+    });
 
-  // ── Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH) ──
+  // The WINDOW scan produces the single offer AND the per-bucket nominees
+  // (parent AC2/AC3): one partitioned pass over the SAME sprint-view read.
+  await scanOfferable(head.items, true, offerState);
+  // Window-only early return (test d of WL-0MWFJ8R1P005G1H1): when the window
+  // already fills every bucket no widening read happens at all — the result is
+  // byte-identical to the pre-widening entry.
+  if (
+    offerState.singleOffer !== null &&
+    offerState.nomineesByBucket.size === COORDINATION_OFFER_BUCKETS.length
+  ) {
+    return {
+      ok: true,
+      kind: offerState.singleOffer.kind,
+      candidate: offerState.singleOffer.candidate,
+      nominees: emitNominees(offerState.nomineesByBucket),
+    };
+  }
+
+  // ── Whole-backlog dispatch window (WL-0MW9XS0XR007K1TH; per-bucket
+  // widening WL-0MWFJ8R1P005G1H1) ──
   // The head is windowed to the rendered sprint view, so the only offerable
-  // item can lie beyond it. Re-read the SAME ranking path with a growing
-  // window and scan only the newly visible items; a window extension, never a
-  // second ranking. Both critical and non-critical offers are eligible
-  // (supersedes WL-0MUNS8X97007C9H9), and the walk stops at the first offer so
-  // the extra reads are paid only when the visible window yields nothing.
-  // Runs for every filtered-exhaustion reason (plan/intake offers remain valid
-  // under a code-freeze); the terminal result below is unchanged when the
-  // extension adds nothing.
+  // item — or an unfilled bucket's first offerable item — can lie beyond it.
+  // Re-read the SAME ranking path with a growing window and scan only the
+  // newly visible items; a window extension, never a second ranking. Both
+  // critical and non-critical offers are eligible (supersedes
+  // WL-0MUNS8X97007C9H9). The walk runs while the single offer is missing OR
+  // at least one bucket is unfilled, and stops as soon as every bucket is
+  // filled, so the extra reads are paid only when the visible window leaves a
+  // bucket empty. Runs for every filtered-exhaustion reason (plan/intake
+  // offers remain valid under a code-freeze); the terminal result below is
+  // unchanged when the extension adds nothing.
+  const unfilledAfterWindow = COORDINATION_OFFER_BUCKETS.filter(
+    (bucket) => !offerState.nomineesByBucket.has(bucket),
+  );
   let seenItems = head.items;
   let extendedTotal = 0;
+  let extensionItemsRead = 0;
+  const bucketedBeyondWindow: CoordinationOfferKind[] = [];
   for (let round = 0; round < DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS; round += 1) {
+    if (
+      offerState.singleOffer !== null &&
+      offerState.nomineesByBucket.size === COORDINATION_OFFER_BUCKETS.length
+    ) {
+      break;
+    }
     const extendedItems = await fetchExtendedHerdrItems(deps, cwd, seenItems);
     if (extendedItems.length === 0) break;
-    const extendedOffer = await findOfferIn(extendedItems);
-    if (extendedOffer !== null) return extendedOffer;
+    // The extension is a WINDOW WIDENING — the SAME canonical ranking, with
+    // the nominee pass enabled so an unfilled bucket is filled from beyond
+    // the visible list (no second ranking, no per-bucket read).
+    await scanOfferable(extendedItems, true, offerState);
+    // Count the widened reads BEFORE the early break so the round that
+    // filled the last bucket is included in the observability signal.
+    extensionItemsRead += extendedItems.length;
+    for (const bucket of unfilledAfterWindow) {
+      if (offerState.nomineesByBucket.has(bucket) && !bucketedBeyondWindow.includes(bucket)) {
+        bucketedBeyondWindow.push(bucket);
+      }
+    }
+    if (
+      offerState.singleOffer !== null &&
+      offerState.nomineesByBucket.size === COORDINATION_OFFER_BUCKETS.length
+    ) {
+      break;
+    }
     extendedTotal += extendedItems.length;
     seenItems = [...seenItems, ...extendedItems];
+  }
+  // Control-flow narrowing cannot see the closure's writes through
+  // `offerState`, so re-read with the declared union before the check.
+  const extOffer = offerState.singleOffer as
+    | { kind: DowntimeSkillKind; candidate: DowntimeCandidate }
+    | null;
+  if (extOffer !== null) {
+    // The offer exists (window or widening). `nominees` carries the
+    // per-bucket nominees — window-sourced AND, when the widening filled a
+    // bucket, extended-sourced. The `filledBeyondWindow` signal names the
+    // buckets the widening first filled plus how many extra ranked items were
+    // read, so an operator can see a root being reached past its visible
+    // list; it is ABSENT when every nominee is window-sourced (byte-identical
+    // window-only entry, AC backwards compatibility).
+    return {
+      ok: true,
+      kind: extOffer.kind,
+      candidate: extOffer.candidate,
+      nominees: emitNominees(offerState.nomineesByBucket),
+      ...(bucketedBeyondWindow.length > 0
+        ? { filledBeyondWindow: { buckets: bucketedBeyondWindow, itemsRead: extensionItemsRead } }
+        : {}),
+    };
   }
 
   // Herdr list was non-empty but every item was filtered by a safety gate
