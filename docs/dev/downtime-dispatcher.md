@@ -32,9 +32,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.poller.ts` | One `GET {proxyUrl}/llama/local/status` poll (fail-closed parse) | `parseLlamaStatus`, `fetchLocalStatus`, `createDowntimePoller` |
 | `downtime-worker.parsers.ts` | Raw `wl` CLI stdout → typed candidates/results | `parseNextCandidatesOutput`, `parseAuditCandidatesOutput`, `parseShowItemOutput`, `skillKindFromPrompt` |
 | `downtime-worker.selection.ts` | Per-tier candidate selection, rotation, critical-first, dependency frontier | `selectNextCandidate`, `selectAuditCandidate`, `selectWithRotation`, `resolveDependencyFrontier` |
-| `downtime-worker.pane.ts` | Pane spawn invocation (argv canonical in `pane-argv.ts`), the deps-wiring in-flight resolution (`resolveInFlightPanes`) and the (disabled) pane-lifecycle monitor. The discovery surface (parse, live/working predicates, item-scoped in-flight set, safe-close predicate, blocking filter) is re-exported from `pane-discovery.ts` | `buildDowntimePaneArgs` (re-export), `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` (re-export) |
-| `pane-discovery.ts` | Canonical dispatched-pane discovery (WL-0MWHWH6XL0025YX2): the `herdr pane list` parse (`parseHerdrPaneCloseList` / `parseHerdrPaneListOutput`), the shared live/working predicates (`hasPaneAgent`, `isTerminalAgentStatus`, `isPaneAgentLive`, `isPaneWorking` — the ONE liveness vocabulary shared with the reaper, AC3), the live-pane count, the safe-close predicate, the item-scoped in-flight set and the blocking-pane filter (`findBlockingPanes`). Consumers: `downtime-worker.pane.ts`, `pane-close-herdr.ts`, `ship-guard.ts`, `long-running-panes.ts` | `parseHerdrPaneListOutput`, `isPaneAgentLive`, `isPaneWorking`, `countRunningDowntimePanes`, `runningDowntimePaneItemIds`, `isSafeDowntimePaneToClose`, `findBlockingPanes` |
-| `pane-argv.ts` | Canonical pane-spawn argv builders: ONE builder per script (`send-to-pi.sh` agent panes, `run-in-pane.sh` shell panes, plus the downtime dispatcher's `send-to-pi.sh` invocation). The three public builders (`buildDowntimePaneArgs`, `buildSendToPiArgs`, `buildRunInPaneArgs`) delegate here — a new pane flag is added once and applied to every spawn path (WL-0MWHWGZI4007D911) | `buildSendToPiArgs`, `buildRunInPaneArgs`, `buildDowntimePaneArgs` |
+| `downtime-worker.pane.ts` | Pane identity, in-flight resolution, spawn invocation, pane-lifecycle monitor | `buildDowntimePaneArgs`, `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` |
 | `downtime-worker.gates.ts` | Every "may the worker dispatch X?" decision (holds, depth, attempt budget, classification) | `classifyItemForDispatch`, `evaluateCriticalFirstGuard`, `readReviewQueueGate`, `isAttemptBudgetExhausted` |
 | `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
 | `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
@@ -47,7 +45,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.audit-availability.contract.ts` | The proxy audit-availability read's WIRE types + fail-closed parser (shipped path + numeric `0`/`1` verdict, sibling proxy item `LP-0MW95FYMH006XYNK`) | `parseAuditAvailabilityResponse`, `AuditAvailability`, `AUDIT_BUDGET_SATURATED_REASON`, `AUDIT_BUDGET_UNKNOWN_REASON` |
 | `downtime-worker.audit-availability.ts` | The fail-closed audit-availability `GET` client — one bounded call, one typed outcome; consumed by the audit pre-check and admission (WL-0MWAMSDNW000SL0E) | `createAuditAvailabilityClient` |
 | `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
-| `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees — buckets fill from the whole ranked backlog, window-visible and beyond) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
+| `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch (per-offer iteration), own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
 | `downtime-worker.offer-selection.ts` | The leader's drain-aware tie-break over one entry's ADMISSIBLE offers (pure ordering arithmetic — never a gate, never a cross-root ranking) | `entryOffers`, `drainAwareRank`, `orderAdmissibleOffers` |
 | `downtime-worker.terminal-reason.ts` | The neutral terminal-reason precedence chain for a tick that dispatched nothing | `resolveTerminalOutcome` |
@@ -58,9 +56,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
 | `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota`, `reduceAuditDisplayCounts` |
-| `host-dispatch-budget.audit.ts` | Append-only audit trail for ledger mutations: one JSONL line per reserve/confirm/release/reap/sweep/repair, bounded by the coordination-log retention policy, fail-open (WL-0MWFJDGXQ001OXP8) | `appendBudgetAuditLine`, `budgetAuditTrailPath`, `readBudgetAuditTrail`, `budgetAuditRotatedFiles` |
 | `host-dispatch-budget.admission.ts` | The dispatcher's single host-budget admission read for both tiers (proxy-derived audit admission, fail closed + self-heal repair) (F2/F3) | `admitHostDispatch`, `decideAuditAvailability`, `detectAuditDivergence`, `readAuditBudgetState` (legacy only), `confirmHostDispatch`, `releaseHostDispatch` |
-| `host-dispatch-budget.repair.ts` | Explicit operator repair of a damaged ledger from the live pane list: decoration-stripping label decode for every dispatcher form, conservative tier fallback, all-or-nothing reconstruction (WL-0MWFJD8ZO000J1R8) | `decodeBudgetPaneLabel`, `planBudgetRepair`, `repairBudgetLedgerFromPanes` |
 | `host-dispatch-budget.interactive.ts` | User-fired over-quota gate half: tier detection and prompt-then-claim (F4) | `budgetKindForAgentCommand`, `prepareInteractiveAgentDispatch` |
 | `host-budget-dialog.ts` | Pure bottom-anchored over-quota dialog + the renderer↔awaiter prompt host (F4) | `formatHostBudgetDialog`, `overlayHostBudgetDialog`, `createHostBudgetPromptHost` |
 | `host-budget-status.ts` | Read-only host-budget status for the worklist `n/max` counter and the stderr skip line (F5) | `readHostBudgetStatus`, `hostBudgetStatusText`, `hostBudgetSkipLine` |
@@ -85,7 +81,7 @@ single responsibility, and no family module exceeds 1,000 lines (enforced by
 | `dispatcher-anchor.cli-parsers.ts` | Decode raw `herdr` JSON envelopes and `/proc/<pid>/environ` blobs into the contract types | `parseTabListOutput`, `parseTabCreateOutput`, `parsePaneListOutput`, `parseMachinePaneListOutput`, `parsePaneProcessInfoOutput`, `parseProcEnviron` |
 | `dispatcher-anchor.herdr-cli.ts` | Run the `herdr` binary, read pane process environments, and build the production deps object | `createDispatcherAnchorDeps`, `listMachinePanes`, `getPaneProcessInfo`, `readProcEnvironFile`, `listTabsInWorkspace`, `listPanesInWorkspace`, `createTabInWorkspace` |
 | `dispatcher-anchor.persistence.ts` | Atomic anchor and per-prefix tab-anchor file persistence (fail-closed reads) | *(internal to the family — not re-exported by the barrel)* |
-| `dispatcher-anchor.tab-anchors.ts` | Strategies 2 and 3: per-prefix tabs and the machine-wide Dispatcher anchor, including the coordination lock, persisted-workspace validation with one-time recovery and stale-pane re-provision | `getDispatcherAnchor`, `getDispatcherTabAnchor` |
+| `dispatcher-anchor.tab-anchors.ts` | Strategies 2 and 3: per-prefix tabs and the machine-wide Dispatcher anchor, including the coordination lock and stale-pane re-provision | `getDispatcherAnchor`, `getDispatcherTabAnchor` |
 | `dispatcher-anchor.placement.ts` | Strategy 1: project-workspace resolution and the item-ID tab anchor (ambiguity rules, create-vs-reuse) | `resolveProjectWorkspace`, `getItemTabAnchor` |
 
 Layering: extracted modules import concrete siblings (and the coordination
@@ -117,137 +113,6 @@ Layering: `downtime-log-storage.ts` and `downtime-log-budget.ts` are leaves;
 `downtime-log-recent.ts` build on entries. No family module imports the
 `downtime-log.js` barrel, so the import graph is acyclic (asserted by
 `downtime-log.split-guard.test.ts`).
-
-## Pane creation architecture (WL-0MWHWHBSW005KG13)
-
-The **single map** of every pane spawn/management path — spawn path → argv
-builder → shell script → placement strategy → lifecycle/close path — plus the
-workspace/tab/pane **naming contract**. It reflects the post-refactor
-structure landed by the *Refactor dispatched pane creation* epic
-(WL-0MWHUMOHJ006ZMBQ) children: one canonical argv builder (`pane-argv.ts`),
-one unified discovery module (`pane-discovery.ts`), one label parser
-(`pane-label.ts`), one title builder (`pane-title.ts`), one close classifier
-and reaper (`pane-close*.ts`) and deterministic placement
-(`dispatcher-anchor.placement.ts`). The README and module-header doc comments
-point here instead of retriplicating path descriptions (epic AC5), and the
-refactoring child per opportunity is cross-referenced in
-[the map table](#the-map) below (epic AC7). This section is the index;
-landing children update it in lockstep with each structural change.
-
-### The map
-
-| Spawn path | Argv builder | Shell script | Placement strategy | Lifecycle / close path |
-|---|---|---|---|---|
-| **Downtime dispatch (automated)** — `downtime-worker.dispatch-claims.ts::dispatchClaimedTier` → `downtime-worker.pane.ts::spawnDowntimePane` | `pane-argv.ts::buildDowntimePaneArgs` | `packages/herdr/scripts/send-to-pi.sh` (→ `shared/send-to-pi.sh`) | `downtime-worker.dispatch-placement.ts::resolveDispatchPlacement` → primary **project workspace + item-ID tab** (`dispatcher-anchor.placement.ts`), fallback **per-prefix tab** in the `Dispatcher` workspace (`dispatcher-anchor.tab-anchors.ts`), legacy single anchor — see [Pane placement](#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn) | reaper (`pane-close-scheduler.ts` → `pane-close-reaper.ts` → `pane-close.ts` classifier + `pane-close-herdr.ts` deps); dispatched-pane monitor (`pane-lifecycle.ts`) DISABLED — see [Pane-closure reaper](#pane-closure-reaper-wl-0mujl1nah0042gos) |
-| **Interactive agent dispatch** — `index.ts` command routing → `index.commands.ts::buildSendToPiArgs` | `pane-argv.ts::buildSendToPiArgs` | `packages/herdr/scripts/send-to-pi.sh` | invoking workspace + item-ID tab via the shared `dispatcher-anchor.placement.ts::getItemTabAnchor` (fail-open) — see [Interactive dispatch pane placement](#interactive-dispatch-pane-placement-wl-0muyi3jao002btnl) | reaper; pane-capture (`index.pane-capture.ts`, `--pane-id-file`) |
-| **Interactive shell dispatch (`!!`/`!`)** — `index.ts` command routing → `index.commands.ts::buildRunInPaneArgs` | `pane-argv.ts::buildRunInPaneArgs` | `packages/herdr/scripts/run-in-pane.sh` | same item-ID tab (fail-open) | reaper; pane-capture |
-| **Scheduled prompts** — downtime scheduled-prompt tier → `spawnDowntimePane` | `pane-argv.ts::buildDowntimePaneArgs` | send-to-pi.sh | `Dispatcher` anchor (`getDispatcherAnchor`) — no work-item id | reaper |
-| **Ship release (`S`)** — worklist `S` shortcut → `/skill:ship release` via the agent route | `pane-argv.ts::buildSendToPiArgs` | send-to-pi.sh | current-tab split today; own **`Ship` tab** planned (WL-0MW6FIZYI0003QEU) | reaper; ship guard (`ship-guard.ts`) |
-| **Fetcher `wl` spawns** — `fetcher.cli.ts::runWl` → `cli-spawn.ts::spawnCliStdout` | n/a (execFile with bounded spawn slots — not a herdr pane) | n/a | n/a | n/a (timeout/retry, never the reaper) |
-
-### Refactoring opportunities → children (epic AC2/AC7)
-
-| Drift closed (opportunity) | Unified module | Child work item | Type / priority |
-|---|---|---|---|
-| Two `send-to-pi.sh` argv builders (downtime vs interactive) diverged | `pane-argv.ts` | WL-0MWHWGZI4007D911 | task / **critical** (every pane-spawn path takes its argv from this module) |
-| Pane-label item-ID/kind parsing duplicated across consumers | `pane-label.ts` | WL-0MWHWH1HV009C46C | task / high |
-| Discovery/close pipeline existed in four partial copies | `pane-discovery.ts`, `pane-close*.ts` | WL-0MWHWH6XL0025YX2 | task / **critical** (four consumers share the discovery/close decision) |
-| Three placement strategies + CLI helpers alongside each other | `dispatcher-anchor.placement.ts` / `.tab-anchors.ts` | WL-0MWHWH68L007L7IO | task / high |
-| Project-workspace placement depended on a live pane | deterministic resolver + durable map (WL-0MWHW3PKX0048ZYL) | WL-0MWHW3PKX0048ZYL | task / high |
-| Forked spawn/env wiring and pane-close herdr CLI seams | `cli-spawn.ts` | WL-0MWHWHB3X004H9VG | task / **critical** (fetch/wl spawn management touches every CLI boundary) |
-| Spawn argv/env/placement behaviour unpinned | `dispatched-pane-spawn.pin.test.ts` | WL-0MWHWGN23001KMQW | task / high |
-
-### Naming contract (AC2; WL-0MWHTT2XY005XX3B)
-
-Pinned by the producer decision folded in from WL-0MWHTT2XY005XX3B
-(2026-11-15). The canonical implementation lives in
-`packages/herdr/src/pane-title.ts` (`MAX_PANE_TITLE_LENGTH`,
-`truncatePaneTitle`, `truncatePaneTitlePreservingSuffix`,
-`buildDowntimePaneTitle`, `buildManuallyTriggeredPaneTitle`,
-`buildShellPaneTitle`) and `packages/herdr/src/pane-label.ts`:
-
-- **"Project ID"** = the work-item id prefix (`WL`, `TCE`, `AH`, `SA`, …) —
-  the value that used to name the per-prefix `Dispatcher` tabs.
-- **One workspace per project** — the project's herdr workspace, identified
-  by its project id. Dispatch creates or reuses it; the machine-wide
-  `Dispatcher` workspace is the fail-closed fallback only.
-- **Tabs labelled by the full work-item id** — exact `WL-0MWH…` labels,
-  create-or-reuse, never a duplicate.
-- **Applies to dispatch-created workspaces/tabs only** — existing project
-  workspace labels (e.g. `ContextHub`) remain under operator control.
-- **Per-prefix `Dispatcher` tabs are retired** (the `WL`/`TCE` tab
-  convention).
-
-**Workspace labels:**
-
-| Label | Created by | Notes |
-|---|---|---|
-| `Dispatcher` | automated fallback | machine-wide, one workspace; per-prefix tabs inside it are retired |
-| project workspace | the project's herdr workspace | identified by project id; label under operator control (e.g. `ContextHub`) |
-
-**Tab labels:**
-
-| Label | Used for | Notes |
-|---|---|---|
-| full work-item id (`WL-0MWH…`) | any dispatched pane carrying an item id | primary automated + interactive placement; create-or-reuse |
-| per-prefix (`WL`, `TCE`) | automated fallback | retired by this contract |
-| `Downtime` | fallback anchor root tab | best-effort adoption of the fallback anchor's placeholder root pane |
-| `Ship` | ship release pane | planned (WL-0MW6FIZYI0003QEU) |
-| `Worklog` | plugin's own tab (`prefix+l`) | operator-opened |
-
-**Pane title formats (`pane-title.ts`):**
-
-| Builder | Format |
-|---|---|
-| `buildDowntimePaneTitle` | `Downtime triggered <kind> <title> - <id>` (no item context: `Downtime <kind>`) |
-| `buildManuallyTriggeredPaneTitle` | `Manually triggered <skill> [<title>] - <id>`; free-form prompt: `Manually triggered prompt <first words> - <id>` |
-| `buildShellPaneTitle` | `Shell: <cmd> [(<title>)] <id>` |
-
-**Truncation / suffix rules (`pane-title.ts`):**
-
-- `MAX_PANE_TITLE_LENGTH = 60` — every pane title is bounded to fit the herdr
-  UI.
-- `truncatePaneTitle` — plain truncation, appending `…` when over the bound.
-- `truncatePaneTitlePreservingSuffix` — truncates the prefix but keeps the
-  trailing ` - <work-item-id>` suffix, so the ID survives long titles. This is
-  load-bearing for the hydrator's active-pane detection and the selection
-  list's green-circle icon (WL-0MV1BWETT005GSUJ): both match an `in_progress`
-  item to a live pane by extracting the work-item ID from the title.
-
-### Open in-flight naming needs (AC4)
-
-These open items carry naming/placement needs that land against this map;
-each names its interface with the map:
-
-- **WL-0MW6FIZYI0003QEU** *Ship opens in own pane* — a dedicated tab labelled
-  `Ship` in the invoking workspace (create-on-first-use, reuse, placed left of
-  the extensions tab; reject a second Ship while one is active).
-- **WL-0MWHD0V41007ESWR** *Adopt-or-clean orphaned Dispatcher workspaces* —
-  recovery should prefer adopting a dormant `Dispatcher` workspace instead of
-  provisioning a fresh one per herdr restart, with a documented safe cleanup
-  of the accumulated orphans.
-- **WL-0MWH56SWX004HSKQ** *Hydrator demotion evidence is workspace-scoped* —
-  landed (`in_review`): the demotion scan is machine-wide so a fallback-placed
-  pane in the `Dispatcher` workspace keeps its claim; display markers stay
-  workspace-scoped.
-- **WL-0MWHBSTM1004KQ49** *Prep-tier busy contract* — landed: intake/plan/audit
-  hold no per-child claim lock, so pane evidence is the only busy signal for
-  those tiers (documents why the hydrator must see every pane).
-- **WL-0MWAM5N75004ROSW** *Host-wide release barrier* — closed at intake: a
-  dispatch **pause**, not a pane-placement change; recorded here so the map is
-  not silently re-scoped.
-
-### Review coverage & child quality bar (AC6/AC8)
-
-The epic review covers ALL pane spawn/management paths (epic AC1): downtime
-dispatcher (`downtime-worker.pane.ts`), interactive dispatch
-(`index.commands.ts` → `send-to-pi.sh` / `run-in-pane.sh`), scheduled prompts,
-ship-in-own-pane, fetcher spawns, anchor/placement (`dispatcher-anchor*.ts`),
-lifecycle/close (`pane-lifecycle.ts`, `pane-close*.ts`) and pane-capture
-(`index.pane-capture.ts`). Every refactoring child has a clear goal, testable
-ACs and predicted key files referencing the specific code locations
-duplicated/drifted (epic AC4); no child changes runtime behaviour and the full
-project test suite must pass with the changes (epic AC6).
 
 ## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
 
@@ -293,7 +158,7 @@ Contract:
   offerable item of its bucket in the same window order the single-offer path
   uses; no priority/age/scoring logic is added and `classifyItemForDispatch`
   stays the single classifier (no bucket logic lives in it).
-- **One read path.** All three nominees are partitioned from the SAME single
+- **One head read.** All three nominees are partitioned from the SAME single
   `getHerdrListHead(cwd, sprintWindow)` read — no per-bucket `wl` list spawn.
 - **Filters preserved per bucket.** The same sequential filter chain the
   single-offer path applies (classifier gates, dispatched marker, attempt
@@ -302,34 +167,15 @@ Contract:
   window. The pass stops as soon as both the single offer and every bucket are
   resolved, so filter side effects never extend past the window-first offerable
   item.
-- **Buckets are filled from the whole ranked backlog (parent
-  WL-0MWFJ8R1P005G1H1).** The visible window is a RENDERING bound, not a
-  dispatch bound. A bucket with no offerable item in the window is filled from
-  beyond it by the same geometric whole-backlog widening the single-offer path
-  uses — one read path, the same canonical ranking, the same filters, in the
-  same order — until the bucket has a nominee or the tail is exhausted. The
-  walk runs only when a bucket is unfilled and stops as soon as every bucket
-  is filled, so the extra reads are bounded (`DOWNTIME_DISPATCH_EXTEND_MAX`
-  growth, `DOWNTIME_DISPATCH_EXTEND_MAX_ROUNDS` cap) and only paid when the
-  visible window leaves a bucket empty. (This supersedes the previous AC3
-  wording "the window is never widened to fill a bucket".) The stall-scan
-  short-circuit and the `{ok:false}` fail-open contract are unchanged, and
-  a widened scan flags attempt-budget-exhausted items for producer review
-  exactly like the window scan does (accepted side-effect amplification,
-  see `downtime-worker.coordination.ts`).
-- **The widening is observable.** When at least one bucket is filled beyond
-  the visible window, the check-in result carries
-  `filledBeyondWindow: { buckets, itemsRead }` — which buckets the extension
-  first filled and how many extra ranked items were read — and the check-in
-  log line records it, so an operator can see a root being reached past its
-  visible list (the `tce-the-rising` 13 Nov 2026 evidence).
-- **Window-only entries stay byte-identical.** An entry whose nominees are
-  all window-sourced (the window already fills every bucket → no widening
-  read at all, or a widening that adds nothing) carries no `filledBeyondWindow`
-  and the same `offers` payload as before.
-- **Escalation keeps the single offer.** A critical item escalated ahead of
-  the window walk returns `nominees: []`; the check-in then writes a
-  single-offer `offers` payload, exactly the pre-tier-aware entry.
+- **Nothing is widened to fill a bucket.** A bucket with no offerable item in
+  the window nominates nothing (the window is never extended per bucket), and
+  the stall-scan short-circuit plus the `{ok:false}` fail-open contract are
+  unchanged.
+- **Escalation and extension paths keep the single offer.** A critical item
+  escalated ahead of the window walk, and an offer found only by the
+  whole-backlog extension (see *Whole-backlog dispatch window* below), return
+  `nominees: []`; the check-in then writes a single-offer `offers` payload,
+  exactly the pre-tier-aware entry.
 
 The check-in writes the nominees as the v2 `offers` array (canonical bucket
 order `implement` → `audit` → `prep`) with `workItemId` mirroring the first
@@ -449,10 +295,7 @@ exhausted.
 
 **The TUI worklist is unchanged**: it keeps rendering exactly
 `browseItemCount` items (plus the mandatory set). The window bounds only
-*rendering*; it no longer bounds *dispatch* — and, since
-WL-0MWFJ8R1P005G1H1, it no longer bounds the *per-bucket nominees* either:
-`computeMostImportantItem` fills a bucket left empty by the visible window
-from the same ranked tail (see *Per-bucket nominees from one head read*).
+*rendering*; it no longer bounds *dispatch*.
 
 **Prioritisation is unchanged.** Ordering remains
 `fetchNextItems` → `selectWorkItems` → `regroupWorkItems`: priority
@@ -588,26 +431,17 @@ WL-0MWDVN2HN004CQ1O):** the shared coordination file holds ONE entry per
 instance — each entry advertises that instance's own Herdr list head at its
 check-in (`computeMostImportantItem`, which walks the same Herdr sequence with
 the same filters) as up to one nominee per dispatch bucket. The leader
-orders ENTRIES by **least-recently-dispatched root**
-(`selectLeastRecentlyServed`, a pure read that writes nothing), iterating the
-offers inside each entry
+dispatches ENTRIES in **file order**, iterating the offers inside each entry
 (see *Leader: iterating an entry's offers* above), and re-validates each offer
 at dispatch time (`fetchItem` + `classifyItemForDispatch` as sequential
-filters; live offers get no wall-clock age prune — only *dead entries* whose
-instances stopped checking in are pruned, see Lifecycle 3). The cross-root **tier priority** (audit → critical → implement → plan → intake) and the
-**global critical override** are
+filters, no wall-clock prune). The cross-root **tier priority** (audit → critical → implement → plan → intake), the
+**global critical override** and the per-`worklogRoot` **round-robin cursor ordering** are
 **retired** from the leader dispatch path — they were a second ranking and are removed by
-WL-0MTK1ILM2009QYB2 AC1–2; the per-`worklogRoot` **round-robin cursor ordering** is LIVE
-(see *Fair scheduling* below — the ``selectLeastRecentlyServed`` selection and the
-dispatch-driven charge are not part of that retirement). Per-root "critical first" is preserved *by construction*: the
+WL-0MTK1ILM2009QYB2 AC1–2. Per-root "critical first" is preserved *by construction*: the
 Herdr list (smart-selection) orders critical items first, so a root's critical head is what
-its check-in offers. The retired per-tier ranking helpers
-(`COORDINATION_TIER_ORDER`, `coordinationTierRank`) remain exported only for
-module tests; the dead per-tier cursor sort `sortEntriesByRoundRobin` is
-deleted (WL-0MWFIZ8H5005FVNN). The root-level round-robin cursor ordering is
-LIVE: `selectLeastRecentlyServed` picks the least-recently-dispatched root
-(pure read) and a consumed offer charges its root via `advanceRoundRobinCursor`
-(see *Fair scheduling: global cross-project round-robin*).
+its check-in offers. The retired cursor helpers (`sortEntriesByRoundRobin`,
+`advanceRoundRobinCursor`, `COORDINATION_TIER_ORDER`, `coordinationTierRank`) remain
+exported for the module tests only — nothing on the dispatch path calls them.
 
 **This is a deliberate, scoped reversal of WL-0MTK1ILM2009QYB2's single-offer
 contract (parent WL-0MWDDHQON0015T3P).** The tier-aware offers change **what**
@@ -682,17 +516,14 @@ owner offering its head, so the sweep scans the **whole** window (head plus
 extension); the own-backlog fallback still scans only the extension, because
 in-view items belong to the offer path.
 
-**Round-robin fairness (AC4).** The sweep starts at the least-recently-
-DISPATCHED registry root, selected with the existing `selectLeastRecentlyServed`
-cursor from `downtime-round-robin-by-root.ts` (WL-0MTJDX4M4007YH5U) — the same
-cursor the offer path uses for cross-root ordering. Selection is a **pure
-read**: it advances nothing (WL-0MWFIZ8H5005FVNN). A root is charged ONLY when
-the sweep consumes one of its items (`dispatched` / `spawn-failed` /
-`marker-write-failed`, via the shared `isConsumedDispatchOutcome` predicate); a
-visit that dispatches nothing charges no root. The remaining roots follow in
-**registry order** (the cursor is a tie break, never a re-ranking). A root with
-nothing dispatchable does not end the sweep: the next root is tried, and a
-dispatch anywhere in the sweep ends the tick.
+**Round-robin fairness (AC4).** The sweep starts at the least-recently-served
+registry root, selected with the existing `selectLeastRecentlyServed` cursor
+from `downtime-round-robin-by-root.ts` (WL-0MTJDX4M4007YH5U) — the same cursor
+the offer path uses for cross-root ordering; it advances atomically for the
+selected root. The remaining roots follow in **registry order** (the cursor is
+a tie break, never a re-ranking). A root with nothing dispatchable does not
+end the sweep: the next root is tried, and a dispatch anywhere in the sweep
+ends the tick.
 
 **No gate bypass (AC2).** Every swept candidate passes the **full sequential
 filter chain** in `dispatchFromOwnHead`, evaluated against **its own root's**
@@ -733,9 +564,7 @@ stated once, in the canonical composition block under
 sweep runs only when the offer list yielded nothing dispatchable, it runs
 *before* the leader's own out-of-view backlog (AC4), and the v2 offer change
 never moves it (the offer-list rung is the only changed rung — still between
-scheduled prompts and the sweep, still walking entries in least-recently-
-dispatched root order via the pure `selectLeastRecentlyServed` read (the
-charge moved to a consumed offer — WL-0MWFIZ8H5005FVNN), with the
+scheduled prompts and the sweep, still walking entries in file order, with the
 change *within* an entry).
 
 **Liveness-aware peer predicate (AC7).** Independent of the registry, the
@@ -744,7 +573,10 @@ change *within* an entry).
 older than `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h) — a crashed
 instance can no longer masquerade as a live peer. Treating a stale entry as an
 **absent** peer makes the leader *more* willing to sweep/arm the probe, never
-less, so the worst case is one extra idle tick polling the offer list. Wall-clock entry expiry remains a deliberate no-op (`pruneStaleEntries` stays a no-op returning `0`, WL-0MTMPIQBE001J41P) and liveness lives only in this 24 h **read** predicate — distinct from the leader's **write-side** dead-entry prune (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ, Lifecycle 3), which removes entries whose instances stopped checking in on the cadence-based staleness window (default 10 min). The two never conflict: this predicate treats a stale entry as an absent peer, while the prune eventually deletes it from the file. See *No-candidate cooldown & the empty offer file* for the full
+less, so the worst case is one extra idle tick polling the offer list. Entry
+expiry remains a deliberate no-op (`pruneStaleEntries` returns `0` and never
+mutates the file, WL-0MTMPIQBE001J41P); liveness lives only in the read
+predicate. See *No-candidate cooldown & the empty offer file* for the full
 pause contract.
 
 **Constraints preserved.** The sweep remains a **bounded window over an
@@ -1026,13 +858,8 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    (or removing their own entry via `removeEntry` on a genuinely empty backlog / `wl` error fail-open — entry retained). A **dispatch-disabled** instance with `downtimeOfferOnly: true`
    also checks in on the follower cadence (WL-0MWDDHOK6009GJCC — see *Offer-only mode*
    below), so a passive root still contributes an offer to the leader. When the leader removes an entry's last offer on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
-2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**, for **each offer** of an entry. A non-dispatchable offer (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via **`removeOffer`** — only that offer, never its entry's siblings — **without** charging the round-robin cursor (the cursor advances only when an
-offer is CONSUMED — `dispatched`, `spawn-failed` or `marker-write-failed`, via
-the shared `isConsumedDispatchOutcome` predicate — never at selection and
-never on a filter-chain drop; WL-0MWFIZ8H5005FVNN), without spawning a pane or
-writing a dispatched marker, and the offer loop **continues to the next
-offer**. An entry whose last offer is removed is dropped whole, exactly as before. A **live** entry's offers do **not** expire by wall-clock age (see Lifecycle 3 — only entries whose instances stopped checking in are pruned).
-3. **Pruning — dead entries only (WL-0MWFJTKGM006BHLQ)** — wall-clock TTL pruning on `lastUpdated` is retired (`WL-0MTMPIQBE001J41P`): `pruneStaleEntries` stays a no-op returning `0`, and a **live** instance's offers still never expire by age (the dispatcher validates eligibility at dispatch time instead). What IS removed is the entry of an instance that **stopped checking in**: on its check-in path the leader calls `pruneDeadEntries` (`packages/herdr/src/coordination.ts`) once per tick, **before** the dispatch walk reads the file, so `entryRoots`, the least-recently-served ordering and the offer scan all see the pruned set in the same tick. The staleness window defaults to **2 × the check-in cadence — 10 min** (`DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS = 2 × DEFAULT_COORDINATION_CHECK_IN_MS`, so one missed check-in is tolerated), is clamped to **[1 × cadence, 24 h]** (`DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS` / `..._MAX_MS`), and is overridable via the **`downtimeCoordinationEntryStaleMs`** settings key (WL-0MWFJTULD005DTQI). The leader's own entry is exempt (it is live by definition — its check-in refreshes it in this same tick). The prune is **leader-only**, executes inside the existing `withCoordLock` read-modify-write (never a separate unlocked pass), writes the file **only when something was removed** (nothing stale ⇒ byte-identical no-op), and is **fail-open**: an unreadable/corrupt file, a lock-contended prune or a write failure skips the prune and retries next tick, never throwing out of the tick. Each pruned entry writes **one** `operation: 'prune'` coordination-log record (`logPrunedEntries`) carrying `instanceId`, `worklogRoot`, `lastSeen` (the entry's `lastUpdated`), `prunedCount: 1`, `reason: 'staleness-window'` and the `staleWindowMs` applied — so a tick's prune tally is its number of records and the rolling coordination log stays bounded. Coordination operations (check-ins, elections/takeovers, eligibility drops, prunes) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
+2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**, for **each offer** of an entry. A non-dispatchable offer (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via **`removeOffer`** — only that offer, never its entry's siblings — **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the offer loop **continues to the next offer**. An entry whose last offer is removed is dropped whole, exactly as before. Entries do **not** expire by wall-clock age.
+3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
 ### Leader-only dispatch
 
@@ -1041,13 +868,12 @@ offer**. An entry whose last offer is removed is dropped whole, exactly as befor
    below).
 2. When a **scheduled prompt** is due, it dispatches immediately
    (WL-0MSS1Q5ER007QDKX).
-3. Otherwise the leader reads the coordination OFFER list, orders the entries
-   by **least-recently-dispatched root** (`selectLeastRecentlyServed` — pure
-   read) and dispatches the first offer that passes the dispatch-time filters
+3. Otherwise the leader reads the coordination OFFER list and dispatches the
+   first offer in **file order** that passes the dispatch-time filters
    (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` +
    producer-review gate + code-freeze split-by-skill + free-slot minimums;
    see *Ranking contract* above — the cross-root tier priority / critical
-   override are retired by WL-0MTK1ILM2009QYB2).
+   override / round-robin ordering are retired by WL-0MTK1ILM2009QYB2).
    Each entry is eligibility re-checked at dispatch time; stale entries are
    dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
    opens the first passing offer dispatches in the entry's `worklogRoot`. If
@@ -1435,48 +1261,16 @@ symbols are re-exported from the `downtime-worker.ts` barrel.
 dispatcher's lease-derived availability signal". It **observes** leases; it
 neither creates nor reserves one, so two hosts that both read
 `live: 0, available: 1` in the same window can both dispatch (the 2026-11-03
-two-audits-on-one-GPU failure). Since **WL-0MWFJH3NW006F5GN** the atomic
-cross-host arbiter — the proxy's lease protocol — is the DISPATCH gate:
-`POST /llama/local/audit/lease` (`200` acquired/ renewed,
+two-audits-on-one-GPU failure). The atomic cross-host arbiter is the proxy's
+lease protocol — `POST /llama/local/audit/lease` (`200` acquired/ renewed,
 `429 audit-budget-saturated` with a bounded `retry_after_s` when a *different
-session* holds the budget, `503 audit-budget-unavailable` on registry
-failure), plus `POST /llama/local/audit/lease/renew` and
-`DELETE /llama/local/audit/lease/{session_id}`. Herdr **calls it now**:
-admission acquires a lease (session id derived from the dispatched item) once
-the availability pre-check admits, dispatch proceeds **only** on `200`, and
-every terminal path releases. The pre-check therefore never suffices to admit
-— its only roles are gating how early an acquire is attempted and staying the
-divergence/evidence signal. Single-machine concurrency is already serialised
-by the machine-wide downtime leader plus the host-budget ledger, but the audit
-budget is **cross-machine**, so only the proxy can arbitrate it atomically.
-
-**The lease protocol, token mappings and release discipline.**
-`packages/herdr/src/downtime-worker.audit-lease.ts` is the bounded
-acquire/renew/release client (one call per verb, each with the poller's
-timeout; a call that expires is aborted). Session ids are `herdr-audit-<itemId>`
-(`auditLeaseSessionId`), so a retry of the same item re-acquires the SAME
-session — the proxy answers `200` (renew) rather than a competing `429`.
-Token mappings, pinned in captured payloads:
-
-| Acquire response | Admission token | Note |
-|---|---|---|
-| `200` | admit | carries the held lease (session id, expiry when served) for the release discipline; the unverified expiry shape is read through the same tolerant alias normaliser as the availability read |
-| `429` | `audit-budget-saturated` | the proxy's `retry_after_s` is carried as `retryAfterS` on the refusal and the decision entry — the cooldown |
-| `503` | `audit-budget-unavailable` | a proxy REGISTRY failure, distinct from the local fail-closed `audit-budget-unknown`; falls back per the documented bounded wait (the next idle tick re-checks) |
-| `404` / transport / bad body | `audit-budget-unknown` | fail closed with the failing exchange as `detail`; a missing lease seam fails closed as `lease-seam-absent` — availability-only admission is exactly the race this removes |
-
-**Release discipline** mirrors the host-budget ledger: the lease is held from
-admission until a terminal path. Refusal paths never acquire (a refused
-availability/lease reads nothing to release). Marker-write failure, spawn
-failure and anchor-unavailable release through the claim pipeline
-(`releaseDispatchSlotForFailure`); an audit pane closing releases through the
-pane-close REAPER seam (`ReaperDeps.releaseAuditLease`) — the only active
-auto-close path (the `recordPaneClose` release behind the DISABLED
-pane-lifecycle monitor is retained for a possible future re-enable, but never
-runs in production, WL-0MWJ7QONS0052HXX). AC3's "release guaranteed on every
-terminal path" therefore holds for the reaper path. Releases are idempotent
-and best-effort — an unheld session is a no-op, and a leaked lease is bounded
-by the proxy's own expiry (reported as `reclaimed` on the availability read).
+session* holds the budget, `503 audit-budget-unavailable` on registry failure),
+plus `POST /llama/local/audit/lease/renew` and
+`DELETE /llama/local/audit/lease/{session_id}`. Herdr does **not** call it yet:
+lease acquisition is deferred to **WL-0MWFJH3NW006F5GN**. Single-machine
+concurrency is already serialised by the machine-wide downtime leader plus the
+host-budget ledger, but the audit budget is **cross-machine**, so only the
+proxy can arbitrate it atomically.
 
 **The client** (`packages/herdr/src/downtime-worker.audit-availability.ts`,
 child `WL-0MWAMSCOP003R837`) is the counterpart of `createLocalReserver` and
@@ -1510,36 +1304,28 @@ every path (no open handle after a call). The audit gate maps `endpoint-absent`,
 (parent AC3).
 
 ### Proxy-derived audit admission — gate, vocabulary and the one-release flag
-### (WL-0MWAMSDNW000SL0E, WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN,
-### parent WL-0MW95GBEG005ERHS)
+### (WL-0MWAMSDNW000SL0E, WL-0MWAMSK9H005BOHD, parent WL-0MW95GBEG005ERHS)
 
 **The contract.** For the **audit tier only**, the capacity decision is the
-**proxy's** audit-lease arbitration — not the per-host `budget.json`
+**proxy's** audit-availability verdict — not the per-host `budget.json`
 `maxAudit` cap. The proxy owns the audit budget and the live audit-lease
 registry (sibling llm item `LP-0MW95FYMH006XYNK`), and every ContextHub host
-already talks to the proxy for model traffic, so the availability read is the
-single **cross-machine** serialisation of the resource an audit actually
-contends for (the one local `llama-server` GPU). Two hosts can no longer
-independently believe they are
+already talks to the proxy for model traffic, so
+`GET {proxyUrl}/llama/local/audit/availability` is the single **cross-machine**
+serialisation of the resource an audit actually contends for (the one local
+`llama-server` GPU). Two hosts can no longer independently believe they are
 under their own cap while contending for the same GPU — the 2026-11-03
 incident. The **implement tier is untouched** and keeps its per-host
 `budget.json` cap + local ledger.
 
-**The decision mapping (two steps, never one).** The availability read is the
-PRE-CHECK: both the dispatcher's pre-check (`getActiveAudit`) and admission
-map one read through the SAME helper (`decideAuditAvailability`), so a refusal
-before selection and a refusal at admission agree and quote the SAME token.
-Since **WL-0MWFJH3NW006F5GN** the availability verdict is NEVER the
-admission: after it admits, the admission maps the proxy lease ACQUIRE through
-`decideAuditLeaseAdmission` — dispatch proceeds only on a `200` held lease,
-`429`/`503`/transport map per the token table in the lease section above, and
-a missing lease seam fails closed (`lease-seam-absent`). Acquire happens only
-when the pre-check admits (no churn, no leak on a refused read). The proxy
-always wins:
+**The decision mapping.** Both the dispatcher's pre-check (`getActiveAudit`)
+and `admitHostDispatch` map one availability read through the SAME helper
+(`decideAuditAvailability`), so a refusal before selection and a refusal at
+admission agree and quote the SAME token. The proxy always wins:
 
 | Availability read | Audit decision | Decision-log reason | Header token |
 |---|---|---|---|
-| proxy `available: true` | ADMISSION still requires a held lease (200) — admit and reserve locally for observability only | — | — |
+| proxy `available: true` | admit (reserve locally for observability only) | — | — |
 | proxy `available: false` | skip that audit candidate and keep scanning (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) | `budget-audit` |
 | `endpoint-absent` (`404`, the proxy predates the endpoint) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'http-404'` | `budget-unknown` |
 | `unreachable` (`timeout` / `network` / `http-<status>`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + the failing exchange as `detail` | `budget-unknown` |
@@ -2405,34 +2191,6 @@ resolved anchor is forwarded as `--anchor <rootPaneId>` to `send-to-pi.sh`
 `workspace_id` is the project workspace (or `Dispatcher` fallback) and its
 `tab_id` equals the item-ID (or prefix) tab.
 
-**Persisted-anchor recovery semantics (WL-0MWH50EN4007C6YH).** Persisted
-anchors are **validated against live herdr state on every resolution** —
-never trusted verbatim off disk. The per-prefix fast path reuses a cached
-entry only when its pane is **positively alive** (`isPaneAlive` /
-`herdr pane get`) **and** its workspace id still agrees with the persisted
-single-anchor file (both files must name the same `Dispatcher` workspace);
-on any miss the resolver probes the persisted workspace id against `herdr
-workspace list` (`probeWorkspace`). The verdicts are strict:
-
-- **`alive`** — reuse the workspace (a healthy reuse issues no extra CLI
-  call).
-- **`missing`** — the workspace no longer exists (e.g. herdr restarted, the
-  workspace was closed): **re-provision exactly one replacement** under the
-  coordination lock, through the shared `provisionDispatcherAnchorUnderLock`
-  helper (lock → in-lock double-check → create workspace → adopt root pane →
-  write anchor — the same mechanism that heals a dead pane), then rewrite
-  **both** persisted files with the fresh id. Recovery is idempotent: the
-  recovered anchor is reused thereafter, never re-provisioned per tick.
-- **`unreadable`** — the herdr CLI could not be read/parsed (transient
-  error, unparseable output): **fails closed with nothing provisioned**
-  (`anchor-unavailable` this cycle, retried next tick). *Missing ≠
-  unreadable*: a transient herdr must never duplicate a live workspace.
-
-There is **no anchor TTL** — neither anchor file expires by age and no
-process periodically sweeps them; recovery is **on-read validation, not a
-reaper**. A stale anchor is replaced only by the resolution that reads it
-and finds it dead.
-
 #### Project workspace + item-ID tab (primary path, WL-0MU321YK70035AYT)
 
 Invariant: for a `dispatchClaimedTier` spawn of `<PREFIX>-<hash>` whose
@@ -2441,39 +2199,15 @@ and the host-budget admission, immediately before the marker write —
 WL-0MW5JE0SZ0057K30):
 
 1. **Project-workspace resolution** — `resolveProjectWorkspace(cwd, deps, R)`
-   resolves the project workspace for the root from TWO sources, in
-   precedence (WL-0MWHW3PKX0048ZYL AC1/AC2):
-
-   a. **Live scan (fast-path hint).** Enumerates the machine-wide `herdr
-      pane list`, keeps only plugin panes (`label == "Work Items"`), and
-      reads each candidate's logical project root from `HERDR_RESOLVED_CWD`
-      (via `herdr pane process-info --pane <id>` → `shell_pid` →
-      `/proc/<pid>/environ`). Matching is on the logical root ONLY — never
-      the pane's reported `cwd`, never the workspace label. Ambiguity (≥2
-      matching panes) is deterministic: the focused pane wins, else the
-      lowest pane id. On the first live match the root→workspace mapping is
-      persisted **write-through** into the durable per-root map
-      (`~/.herdr/downtime/downtime-project-workspaces.json`, atomic
-      tmp+rename), so the root stays resolvable while its plugin pane is
-      down.
-   b. **Durable map (AC1/AC2).** When the live scan yields no match (plugin
-      pane down, an unreadable boundary, or a `downtimeWorklogRoots` sweep
-      with no running instance), the resolver reads the persisted per-root
-      project-workspace map and validates the entry on read against live
-      herdr state (`probeWorkspace`, one `herdr workspace list`): `alive` →
-      resolve from it; positively `missing` → the entry is **dropped**
-      (self-healed — it can never route into the dead workspace again) and
-      the path fails closed; `unreadable` → fail closed (missing ≠
-      unreadable — a transient herdr must never wrongly drop a durable
-      entry). An absent probe seam (legacy/test callers) trusts the entry.
-      A durable hit is a match: no near-miss report, no fallback.
-
-   Fail-closed `null` on every boundary with **no** usable durable entry
+   enumerates the machine-wide `herdr pane list`, keeps only plugin panes
+   (`label == "Work Items"`), and reads each candidate's logical project root
+   from `HERDR_RESOLVED_CWD` (via `herdr pane process-info --pane <id>` →
+   `shell_pid` → `/proc/<pid>/environ`). Matching is on the logical root
+   ONLY — never the pane's reported `cwd`, never the workspace label.
+   Ambiguity (≥2 matching panes) is deterministic: the focused pane wins, else
+   the lowest pane id. Fail-closed `null` on any unreadable boundary
    (`pane list`/`process-info` failure, missing `shell_pid`, unreadable
-   `/proc`, missing `HERDR_RESOLVED_CWD`, no match, a durable entry probed
-   missing/unreadable). The null reason is reported through the resolver's
-   trailing `reportFallbackReason` callback so a fallback placement is
-   attributable (see the fallback-attribution section below).
+   `/proc`, missing `HERDR_RESOLVED_CWD`, no match).
 2. **Item-ID tab resolution** — `getItemTabAnchor(cwd, deps, workspaceId,
    itemId)` fast-paths an existing tab labelled exactly the work-item id
    whose root pane is alive, else creates it under the coordination lock with
@@ -2501,79 +2235,6 @@ WL-0MW5JE0SZ0057K30):
 When the workspace resolves but the item-ID tab cannot be provisioned, the
 dispatch fails closed with `anchor-unavailable` — it never places the pane in
 the `Dispatcher` workspace (WL-0MU321YK70035AYT).
-
-#### Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM)
-
-`resolveProjectWorkspace` matches the plugin pane's `HERDR_RESOLVED_CWD`
-**exactly** (trailing-slash tolerant, normalised) — never ancestor/descendant
-or prefix matching, so a pane reporting `…/packages/herdr` does NOT match the
-worklog root `…/ContextHub`, and neither does a related-but-different root.
-The matching rule is deliberately unchanged (parent AC8: broadening requires
-an unambiguous ambiguity resolution — two panes can legitimately claim
-ancestral roots). The ContextHub "Work Items" pane reports
-`HERDR_RESOLVED_CWD=/home/rgardler/projects/ContextHub/packages/herdr` (the
-plugin directory, not the worklog root), so ContextHub's own primary path
-can never resolve.
-
-To make that invisible failure visible, the resolver reports a
-**`project-workspace-mismatch` diagnostic** (diagnostic-only — never a
-wrong-workspace match): when it returns `null` because no pane matched, every
-plugin pane that reported a *different* non-empty `HERDR_RESOLVED_CWD` is
-recorded as a near-miss naming `expectedRoot` vs `actualRoot` plus the
-`paneId`/`workspaceId`. `resolveDispatchPlacement` forwards the first record
-onto the decision entry (`projectWorkspaceMismatch: { expectedRoot,
-actualRoot, paneId, workspaceId }`) — on the dispatch marker when the
-`Dispatcher` fallback then SUCCEEDS (a successful fallback placement still
-logs the mismatch), and on the `anchor-unavailable` outcome when it fails. No
-record is emitted when a match IS found, and an absent `HERDR_RESOLVED_CWD`
-is not a mismatch. The near-miss vocabulary token
-`project-workspace-mismatch` joins the placement-detail union in every copy.
-
-> **Durable-map note (WL-0MWHW3PKX0048ZYL).** The mismatch and the near-miss
-> report only surface when the resolution returns `null`. A root whose plugin
-> pane advertises the WRONG root can still resolve via the durable map when
-> an entry was learned earlier (a pane that previously advertised the root,
-> or the write-through of a later correct launch) — and a durable hit is a
-> match, so no mismatch is reported and no fallback happens. Once the operator
-> remedy below is applied, the durable map keeps the corrected root→workspace
-> mapping even while that pane is down (AC1/AC2).
-
-#### Fallback attribution (WL-0MWHW3PKX0048ZYL AC3)
-
-Every **successful** `Dispatcher`-workspace fallback placement — the per-prefix
-tab or the legacy anchor reached after `resolveProjectWorkspace` returned `null`
-— is recorded on the dispatch marker with the reason the primary path was not
-used (`placementFallbackReason`), so "separate dispatch worktree" placements
-become observable, rare and attributable from
-`.worklog/downtime-dispatches.log` alone:
-
-```json
-{"kind":"decision","operation":"dispatched","itemId":"WL-…",
- "placementFallbackReason":"project-workspace-missing", …}
-```
-
-| `placementFallbackReason` | Meaning |
-|---|---|
-| `project-workspace-mismatch` | The primary near-missed: no plugin pane matched the root, but one advertised a DIFFERENT non-empty root. Carries `projectWorkspaceMismatch` too. |
-| `project-workspace-missing` | The durable workspace entry was positively probed MISSING from `herdr workspace list` and was dropped (self-healed) before the fallback. |
-| `no-project-workspace` | Plain miss: no live match, no durable entry, no near-miss — the root has never resolved a project workspace (first-ever dispatch, or a swept root that never ran herdr). |
-| `herdr-unreadable` | The live scan or the durability probe could not be read (CLI error, unparseable output, unreadable `/proc`); nothing was provisioned. |
-
-The reason is reported by `resolveProjectWorkspace` through its trailing
-`reportFallbackReason` callback and forwarded onto the placement result by
-`resolveDispatchPlacement` — absent when the primary path resolved (live match
-or durable hit) and absent when no primary resolver is wired (legacy/test
-callers).
-
-**Operator remedy:** start the plugin pane from the worklog root (the
-project's parent directory, e.g. `cd /home/rgardler/projects/ContextHub &&
-herdr plugin launch …`), so the pane's `HERDR_RESOLVED_CWD` equals the worklog
-root — then the primary path resolves and ContextHub panes land in the
-ContextHub workspace under the exact item-ID tab instead of the `Dispatcher`
-workspace's `WL` tab. Verify with `herdr pane process-info --pane
-<pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`.
-Broadening the matching rule (ancestor/descendant) is deliberately out of
-scope and would need its own work item with the parent's AC8 ambiguity test.
 
 #### No orphaned placeholder pane (WL-0MW5JE0SZ0057K30)
 
@@ -2659,43 +2320,18 @@ the authority for reuse and has the shape:
 }
 ```
 
-Every persisted bit is **validated on read** (parent WL-0MWH50EN4007C6YH):
-the cache is the authority for *reuse*, never for *truth*.
-
-- **Fast path:** a persisted entry is reused directly — no `herdr tab list`
-  round-trip — only when its pane is **positively alive** (`isPaneAlive`)
-  **and** its workspace id still matches the persisted single-anchor file
-  (`downtime-dispatch-anchor.json`): both files must name the same
-  `Dispatcher` workspace. A cached entry for a different workspace belongs to
-  a superseded workspace and must never short-circuit past recovery.
+- **Fast path:** a persisted entry whose pane is alive is reused directly —
+  no `herdr tab list` round-trip.
 - **Stale entry:** a persisted entry whose pane is dead is ignored and
   re-provisioned on the next dispatch for that prefix.
-- **Disappeared workspace:** when the fast path misses, the persisted
-  workspace id is probed against live herdr state (`herdr workspace list` via
-  `probeWorkspace`). `missing` → **exactly one replacement workspace** is
-  provisioned under the coordination lock (shared
-  `provisionDispatcherAnchorUnderLock`, in-lock double-check) and **both**
-  persistence files are rewritten with the fresh id; `unreadable` → fail
-  closed with **nothing** provisioned (missing ≠ unreadable). Recovery is
-  on-read validation — **no anchor file has a TTL, no reaper**.
-- **Self-pruning on rewrite (WL-0MWHCUX6A002W8ZG):** rewriting the
-  tab-anchor map **prunes every `byPrefix` entry belonging to a superseded
-  workspace**. Herdr ids are workspace-scoped (`<workspaceId>:` prefix), so
-  on each write `persistPrefixTab` keeps a carried-over entry only when BOTH
-  its `tabId` and `paneId` start with the workspace being written; entries
-  pointing into the dead workspace — or holding an ill-formed id — are
-  dropped, and the recorded `workspaceId` is always the workspace being
-  written. Recovery therefore cannot leave dead-id stragglers behind to mask
-  a later wedge.
 - **Create-or-reuse:** on a cache miss the resolver lists tabs in the
   `Dispatcher` workspace and adopts a tab labelled exactly `prefix` whose root
   pane is alive.
 - **Concurrent first-dispatch:** tab creation runs under the coordination
   lock (`tryAcquireCoordLock` in `~/.herdr/downtime`) with a **double-check
-  inside the lock**, so two leaders racing on a previously unseen prefix — or
-  two recovery paths racing on a missing workspace — produce exactly one
-  tab/workspace. A holder that cannot acquire the lock re-checks once and
-  otherwise fails closed (never a duplicate tab).
+  inside the lock**, so two leaders racing on a previously unseen prefix
+  produce exactly one tab. A holder that cannot acquire the lock re-checks
+  once and otherwise fails closed (never a duplicate tab).
 - **CLI drift:** `tab list`/`tab create`/`pane list` parsers tolerate the
   `tab_id`/`tabId`/`id` and `pane_id`/`paneId`/`id` key variants and a nested
   `result` envelope; an unparseable response is **fail-closed** (`null`) and
@@ -2717,19 +2353,14 @@ fallback anchor: `packages/herdr/src/dispatcher-anchor.tab-anchors.ts`):
   which would include the anchor and suppress the close. `dispatchClaimedTier`
   consults this path first whenever both deps are wired.
 - **Per-prefix tab (fallback):** `getDispatcherTabAnchor(cwd, deps, prefix)`
-  ensures the `Dispatcher` workspace — **validating the persisted workspace
-  id against live herdr state** (`probeWorkspace`: `alive` reuse; `missing`
-  recover exactly once under the lock and rewrite both persisted files;
-  `unreadable` fail closed with nothing provisioned, WL-0MWH50EN4007C6YH) —
-  then fast-paths the persisted live anchor whose workspace still matches,
+  ensures the `Dispatcher` workspace, fast-paths the persisted live anchor,
   else lists tabs (`herdr tab list --workspace <id>`), else under the
   coordination lock (with a double-check) runs `herdr tab create --workspace
   <id> --label <prefix> --no-focus` and returns the new `tab_id` +
-  `root_pane.pane_id`. Every map rewrite self-prunes entries that cannot
-  belong to the workspace being written (WL-0MWHCUX6A002W8ZG). Consulted
-  only when no project workspace resolves. Its initial root pane is cleaned
-  up after the first dispatch by the same fail-safe rule as the project item
-  tab (step 4); the fallback `getDispatcherAnchor` pane is never closed.
+  `root_pane.pane_id`. Consulted only when no project workspace resolves. Its
+  initial root pane is cleaned up after the first dispatch by the same
+  fail-safe rule as the project item tab (step 4); the fallback
+  `getDispatcherAnchor` pane is never closed.
 - **Fallback anchor:** `getDispatcherAnchor(cwd, deps)` provisions one
   `Dispatcher` workspace + persisted anchor pane in the machine coordination
   dir (`~/.herdr/downtime/downtime-dispatch-anchor.json`, atomic tmp+rename,
@@ -2740,123 +2371,10 @@ fallback anchor: `packages/herdr/src/dispatcher-anchor.tab-anchors.ts`):
   move <id> --new-tab --tab-label Downtime --no-focus`, best-effort) so the
   workspace never shows a blank pane (WL-0MU2EOHK900425VU). `isPaneAlive`
   (`herdr pane get <id>`) detects a closed anchor and re-provisions.
-  Provisioning — pane-death re-provision here and the workspace-recovery path
-  alike — runs through the ONE shared `provisionDispatcherAnchorUnderLock`
-  helper (lock → in-lock double-check → create workspace → adopt root pane →
-  write anchor), so racing callers can never create two Dispatcher
-  workspaces (WL-0MWHCUTDM003B39Q).
 - **Wiring:** `createDowntimeDeps` wires `defaultProjectWorkspaceResolver` /
   `defaultItemTabAnchorResolver` (primary), `defaultDispatcherTabAnchorResolver`
   (per-prefix fallback), and `defaultDispatcherAnchorResolver` (final fallback
   + scheduled prompts).
-
-#### Diagnosing an `anchor-unavailable` wedge
-
-An `anchor-unavailable` refusal still means "no pane, no marker, claim rolled
-back" — but since WL-0MWHCUZ5C000I7S6 it is **diagnosable from the log
-alone**: the `no-dispatch` decision entry carries an additive `detail` token
-naming the exact fail-closed boundary. `reason` stays `anchor-unavailable`
-(every budget/starvation heuristic is unchanged); `detail` is what tells a
-vanished workspace from a broken CLI (the reported incident showed **124
-identical `anchor-unavailable` entries** with no way to tell — parent
-WL-0MWH50EN4007C6YH).
-
-```bash
-# Which boundary refused, this hour?
-grep 'anchor-unavailable' .worklog/downtime-coordination.log \
-  | tail -50 | jq -r '.detail'
-```
-
-### Hydrator demotion evidence is cross-workspace; display markers stay workspace-scoped
-
-Two different questions about a pane must not share one filter
-(WL-0MWH56SWX004HSKQ):
-
-- **"Is this item being worked on ANYWHERE?"** — the **demotion** question
-  answered by the hydrator's pane scan. Evidence is **workspace-agnostic**:
-  one machine-wide `herdr pane list` per hydrate tick (no `--workspace`
-  filter, the `listAllActivePanes` seam), so a live dispatch pane in the
-  `Dispatcher` workspace keeps the claim it proves. This is what closes the
-  duplicate-dispatch window: fallback placement (per-prefix tab, above) puts
-  ContextHub panes in the `Dispatcher` workspace while the worklist plugin
-  pane reports a different workspace, so a workspace-scoped scan would see
-  no pane and release a live claim seconds after its pane spawned.
-- **"Does this item have a pane in MY workspace?"** — the **display**
-  question answered by the selection-list's in-progress marker
-  (`applyActivePaneMarkers` / `markItemsActiveByPane`). It stays
-  **workspace-scoped** (`collectPaneWorkItemIds(panes, workspaceId)`): a
-  pane in another workspace never lights the marker or the green circle in
-  this workspace (WL-0MV1BWETT005GSUJ intent).
-
-Fail-open: an unavailable/unparseable wider read (null, throw or step
-budget) aborts the cycle WITHOUT releasing — ambiguity keeps the claim; only
-proven pane-absence (and no live claim holder) releases.
-
-**Claim grace window.** A freshly-claimed item gets a bounded grace window
-before today's no-pane rule applies, so a hydrate tick landing in the
-spawn→pane-title gap never releases a live claim: an item claimed within
-`hydratorClaimGraceMs` (default **120 s**, `HYDRATOR_CLAIM_GRACE_MS`
-= 120 000 ms, clamped to 0 ms – 10 min; `0` disables the window) is never
-released even with no pane visible yet. Claim age derives from the existing
-`updatedAt`/`activityAt` recency signals (`now − max(updatedAt, activityAt)`,
-max = fail-open toward "recently active"); absent/unparseable recency keeps
-the claim for the window. The grace branch is evaluated AFTER the
-`in_review → completed` and `blocked` branches and only suppresses the
-release to `open` — it never overrides the audit-tier completion or the
-dependency `blocked` transition.
-
-**Prep-tier contract (intake/plan/audit).** `/skill:intake`, `/skill:plan`
-and audit runs hold **no** per-child claim lock, so for those tiers pane
-evidence is the ONLY busy signal — the claim-holder probe is a second signal
-only where a lock exists (the implement tier). This is pinned by behaviour
-in `hydrator.test.ts` (prep-tier pane-only contract test) so nobody
-"fixes" the release by re-introducing a claim-lock for prep tiers.
-
-```json
-{"kind":"decision","operation":"no-dispatch","instanceId":"herdr:4145450",
- "reason":"anchor-unavailable","detail":"persisted-workspace-missing",
- "at":"2026-11-15T13:40:00.000Z"}
-```
-
-| `detail` | Meaning | Operator action |
-|---|---|---|
-| `persisted-workspace-missing` | The persisted `Dispatcher` workspace is **positively absent** from the parsed `herdr workspace list`; a replacement is provisioned exactly once under the coordination lock and both anchor files are rewritten. | Normally self-healing — the next tick dispatches. If it recurs every tick, the recovery itself failed (see `dispatcher-workspace-unprovisionable`). |
-| `herdr-unreadable` | The herdr CLI / a `tab list` / `pane list` could not be read or parsed (transient error, unparseable output, throwing aliveness probe). **Nothing is provisioned.** | Fix the herdr CLI/parse issue; the next idle window retries. Missing ≠ unreadable — an unreadable herdr must not duplicate a live workspace. |
-| `dispatcher-workspace-unprovisionable` | The replacement workspace (or its persistence) could not be provisioned — including a positively-missing workspace that could not be recovered, and any per-prefix provisioning failure. | Check `~/.herdr/downtime/` writability and `downtime-coordination.lock` contention. |
-| `prefix-empty` | No work-item id prefix could be extracted to route by. | Item id malformed/empty — a data issue, not herdr. |
-| `item-tab-unavailable` | A resolved project workspace's item-ID tab could not be provisioned (primary path). | Check `herdr tab create --workspace <id> --label <itemId> --no-focus` and the tab-list parse. |
-| `project-workspace-mismatch` | Primary path near-missed: no plugin pane matched the root, but one reported a different `HERDR_RESOLVED_CWD`. Carries `projectWorkspaceMismatch: { expectedRoot, actualRoot, paneId, workspaceId }`; recorded even when the `Dispatcher` fallback then succeeds. | See the [operator remedy](#primary-path-near-miss-diagnostic-wl-0mwhcv3pr002wsqm): start the plugin pane from the worklog root (matching rule deliberately unchanged — parent AC7/AC8). |
-
-**CLI evidence used for the classification (parent WL-0MWH50EN4007C6YH).**
-Against a missing workspace, `herdr tab list --workspace <id>` does **not**
-return a tab list — it answers with an error envelope
-`{"error":{"code":"workspace_not_found",…}}`, which the fail-closed parser
-treats as `null` → resolution `unknown` → `anchor-unavailable`. That is the
-*pre-fix* wedge's signal. The **positive existence source is `herdr workspace
-list`**: `probeWorkspace` issues exactly one such read and classifies the
-persisted id as `alive` (present), `missing` (list read and parsed, id
-absent), or `unreadable` (CLI error / unparseable output) — the `detail`
-tokens above mirror that verdict.
-
-**Historical/emergency note (parent WL-0MWH50EN4007C6YH).** Before the
-on-read validation landed, the *only* unblock was the manual mitigation:
-**delete both anchor files** (`~/.herdr/downtime/downtime-dispatch-anchor.json`
-and `~/.herdr/downtime/downtime-dispatch-tab-anchors.json`) so the next
-dispatch re-provisioned a fresh Dispatcher workspace from scratch. That is
-**no longer required** — recovery now happens automatically on read; the
-manual step is retained as a historical/emergency fallback only. Recorded
-evidence of that manual step: the backup directory
-`~/.herdr/downtime/backup-anchors-20261115T011052Z/` (2026-11-15T01:10:52Z)
-preserves the pre-fix state — `downtime-dispatch-anchor.json` naming the dead
-`w6A` workspace, and `downtime-dispatch-tab-anchors.json` carrying mixed
-`w6A`/`w34`/`w3V`/`w58`/`w4Z` entries (the cross-workspace accumulation the
-self-pruning addresses). Observed recovery timeline: 124
-`anchor-unavailable` decisions ran 2026-11-13T23:33Z → 2026-11-15T00:56Z
-(workspace `w6A` gone; `herdr workspace list` at filing reported `w52, w8,
-w4F, w3G, w5M, w50, w5S, w57`), the manual backup was taken 01:10:52Z, and
-the validate-on-read fix landed 2026-11-15T13:31Z (workspace probe +
-re-provision), followed by the map self-pruning (13:51Z) and the `detail`
-vocabulary (15:48Z) — since then recovery is automatic.
 
 #### Troubleshooting: pane landed in the wrong tab/workspace
 
@@ -2864,14 +2382,9 @@ vocabulary (15:48Z) — since then recovery is automatic.
    list` must include a pane labelled `Work Items` whose process environ has
    `HERDR_RESOLVED_CWD` equal to the item's worklog root (`herdr pane
    process-info --pane <id>` → `shell_pid` → `grep HERDR_RESOLVED_CWD
-   /proc/<pid>/environ`). If it does not, the root may still resolve from the
-   DURABLE per-root map (`~/.herdr/downtime/downtime-project-workspaces.json`
-   — validate the entry with `herdr workspace list`); only when neither the
-   live scan nor the durable map resolves does the dispatch intentionally
-   fall back to the `Dispatcher` workspace (per-prefix tab, recorded with
-   `placementFallbackReason`). To make the live path resolve directly, run
-   the plugin from the project root so the plugin pane reports the right
-   `HERDR_RESOLVED_CWD` — and the durable map then self-learns the mapping.
+   /proc/<pid>/environ`). If it does not, the dispatch intentionally falls
+   back to the `Dispatcher` workspace (per-prefix tab) — run the plugin from
+   the project root so the plugin pane reports the right `HERDR_RESOLVED_CWD`.
 2. **Project path** — `herdr tab list --workspace <project-workspace-id>` must
    show a tab labelled exactly the work-item id, and the `Downtime triggered …`
    pane's `tab_id` must equal that tab's `tab_id` (`herdr pane list --workspace
@@ -2880,24 +2393,13 @@ vocabulary (15:48Z) — since then recovery is automatic.
 3. **Dispatcher fallback path** — when the project workspace did not resolve,
    `herdr tab list --workspace <Dispatcher-workspace-id>` must show a tab
    labelled with the item's prefix, and the pane's `tab_id` must equal it.
-   Inspect `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` and
-   `~/.herdr/downtime/downtime-dispatch-anchor.json` — a dead `paneId`, or a
-   workspace id missing from `herdr workspace list`, is re-provisioned
-   automatically on the next dispatch (a positively-missing workspace exactly
-   once, under the coordination lock; an unreadable herdr fails closed); a
-   malformed file is treated as "no anchors yet" (tabs are rediscovered via
-   `herdr tab list`). A map rewrite prunes entries whose ids no longer belong
-   to the recorded workspace.
+   Inspect `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` — a stale
+   `paneId` (dead) is re-provisioned on the next dispatch; a malformed file is
+   treated as "no anchors yet" (tabs are rediscovered via `herdr tab list`).
 4. If a dispatch reports `anchor-unavailable`, the resolved path's anchor
    could not be provisioned this cycle — the resolver deliberately does **not**
-   fall back to the leader pane or (for the project path) a wrong tab. The
-   decision entry carries a machine-readable `detail` naming the boundary
-   (`persisted-workspace-missing` / `herdr-unreadable` / …) — see
-   [Diagnosing an `anchor-unavailable` wedge](#diagnosing-an-anchor-unavailable-wedge).
-   Most misses are now self-healing (a positively-missing workspace
-   re-provisions exactly once); a persistent `herdr-unreadable` /
-   `dispatcher-workspace-unprovisionable` means fix the herdr CLI/parse
-   failure and the next idle window retries.
+   fall back to the leader pane or (for the project path) a wrong tab; fix the
+   herdr CLI/parse failure and the next idle window retries.
 
 Duplicate `Dispatcher` workspaces are harmless — the persisted anchor file is
 the authority, not the label count; close surplus idle ones one at a time
@@ -2950,9 +2452,7 @@ Lifecycle (`packages/herdr/src/index.ts`; shared anchor helper in
    never leave an empty item tab behind; the shell/command-output routes have
    no admission gate and resolve the anchor directly in their branch.
 3. **Anchor forwarding** — the item-tab anchor is resolved once per dispatch
-   and forwarded to both channels by the canonical arg builders in
-   `pane-argv.ts` (WL-0MWHWGZI4007D911 — the public `buildSendToPiArgs` /
-   `buildRunInPaneArgs` / `buildDowntimePaneArgs` delegate to it):
+   and forwarded to both channels by the arg builders:
    `buildSendToPiArgs(..., anchor)` and `buildRunInPaneArgs(..., anchor)`
    append `--anchor <paneId>` when it is a non-empty string.
    `send-to-pi.sh` already supported `--anchor`; `run-in-pane.sh` gained it —
@@ -3351,7 +2851,10 @@ reads the block as work. Therefore:
   so the worst case is one extra idle tick polling the offer list — never a
   starved offer. Both orchestrator call sites (the tick-time pause-cancel and
   the dispatch-time pause-arm) pass an explicit `nowMs`, and the default
-  window applies to callers that omit the options object. Wall-clock entry expiry remains a deliberate no-op (`pruneStaleEntries` still returns 0 and never mutates the file, WL-0MTMPIQBE001J41P); this 24 h **read** predicate is distinct from the leader's **write-side** dead-entry prune (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ — Lifecycle 3), which deletes entries whose instances stopped checking in on the cadence-based staleness window (default 10 min, settings key `downtimeCoordinationEntryStaleMs`). The cooldown
+  window applies to callers that omit the options object. Entry expiry remains
+  a deliberate no-op (`pruneStaleEntries` still returns 0 and never mutates
+  the file, WL-0MTMPIQBE001J41P); liveness lives only in the read predicate.
+  The cooldown
   duration (`downtimeNoCandidateCooldownMs`, 60 min) is unchanged and still
   arms when there is genuinely nothing anywhere. The empty-leader step-down
   still fires on that cycle (see *Own-backlog fallback & leadership hand-off*
@@ -3432,108 +2935,6 @@ entered and the next idle tick re-checks (as with `audit-budget-saturated`).
 Beneath the table, existing capacity gates remain the inner limiter: free-slot
 minimums, the local reservation/prefill pacing, contention and the host-CPU
 gate all still apply, in their existing order.
-
-**Release identity (WL-0MWFJD5T4003OM91).** An entry is keyed by
-`(itemId, kind)` and released only by **full identity**: `itemId` + `kind` plus
-either the `attemptId` that `reserve` minted (returned by admission as
-`attemptId`) or the confirmed `paneId`. `release` removes at most that one
-entry and reports:
-
-| Request | Result | Why |
-|---|---|---|
-| identity matches the stored entry | `removed: true` | the caller owns it |
-| the item's entry exists but belongs to another attempt/kind/pane | `removed: false, refused: true, reason: 'identity-mismatch'` | another dispatch still holds the slot |
-| neither `attemptId` nor `paneId` supplied | `removed: false, refused: true, reason: 'incomplete-identity'` | the item-id-keyed primitive that deleted live entries is gone |
-| nothing stored for that item (and kind) | `removed: false, refused: false` | idempotent no-op, every release path may call it unconditionally |
-
-The four claim-pipeline aborts (`admission-refused`, `marker-write-failed`,
-`spawn-failed`, `anchor-unavailable`) and the pane-close paths
-(`recordPaneClose`, the pane-close reaper) all pass that identity; the
-`reason` and `actor` land in the ledger's audit trail, so a deletion names the
-operation that performed it. Every `kind` shares the same release point, so an
-implement abort can never remove an audit entry for the same item, and closing
-an item's finished `intake`/`plan`/`audit` pane can never remove its running
-`implement` entry.
-
-**A damaged ledger is never repaired by a read (WL-0MWFJD8ZO000J1R8).** An
-admission read (implement tier or the audit pre-check) never rewrites
-`dispatch-budget.json`. When the ledger exists but cannot be trusted the tick
-fails closed with **`host-budget-corrupt`**, the ledger stays **byte-identical**
-and the reason lands in the decision log, so the operator can act instead of
-silently losing slots. The previous behaviour — rewriting the whole document
-from the live pane list — reconstructed entries only from panes whose title
-started with `Downtime`, dropping herdr's `⚠️`/`🚫`-decorated panes and
-`Manually triggered` panes (6 of the 10 running implements on 2026-11-13).
-
-Repair is an **explicit operator action**:
-
-```bash
-node packages/herdr/dist/pane-close-cli.js --repair-budget-ledger
-```
-
-It decodes every dispatcher label form — `Downtime triggered …`,
-`Downtime <kind> …` and `Manually triggered …`, with leading emoji/status
-decoration and whitespace stripped first — and derives the tier from the token
-after the prefix. An unrecognised tier is counted against `implement`
-(over-counting refuses a dispatch; under-counting would admit work the operator
-capped). It then:
-
-| Situation | Behaviour |
-|---|---|
-| every live dispatcher pane yields a work-item id | rewrites the ledger from the live panes and prints `{ repaired: true, count, entries, accountedPaneIds }` |
-| a live dispatcher pane has no work-item id in its label | **refuses** (`repaired: false, reason: "incomplete"`), prints the blocking panes with their per-pane decode, and leaves the ledger untouched |
-| the pane list cannot be read or parsed | refuses — an unknown pane list must never be repaired as empty |
-
-A plan/intake/risk-effort/prompt pane is not dispatch evidence and is ignored
-by both the plan and the refusal check.
-
-#### The ledger's audit trail (WL-0MWFJDGXQ001OXP8)
-
-The ledger keeps current state only, so "the in-flight count is wrong" used to
-be undiagnosable: nothing recorded *which* operation removed an entry, for
-which item or pane, or why. Every mutation now writes one JSONL line to
-`~/.herdr/downtime/dispatch-budget.log` (`host-dispatch-budget.audit.ts`):
-
-```json
-{"at":"2026-11-13T19:40:02.114Z","op":"release","kind":"implement",
- "itemId":"AH-0MW0KSCU20096B02","paneId":"w50:p64",
- "instanceId":"herdr:2711","reason":"anchor-unavailable",
- "actor":"herdr:2711","liveBefore":5,"liveAfter":4}
-```
-
-- `op` — `reserve` | `confirm` | `release` | `reap` | `sweep` | `repair`.
-  `reap`/`sweep` emit **one line per removed entry**, so each deletion is
-  attributable (the RCA question). `repair` is one line with `kind: "all"`
-  and `itemId: ""`.
-- `reason` — the abort path that caused it (`anchor-unavailable`,
-  `admission-refused`, `marker-write-failed`, `spawn-failed`, `pane-close`) or
-  the operation default (`reap-stale`, `sweep-closed-pane`,
-  `dispatch-reserve`, `dispatch-confirm`, `dispatch-release`,
-  `repair-from-live-panes`).
-- `actor` — who performed the mutation (`herdr:<pid>` by default).
-- `liveBefore` / `liveAfter` — entries of that `kind` before and after the
-  mutation; `-1` means unknowable (a repair over unreadable bytes).
-
-Retention reuses the coordination-log policy (500 lines per file, 3 numbered
-siblings ⇒ 1 501–2 000 retained lines) through the shared rolling-write plan in
-`downtime-log-storage.ts`, so the trail cannot grow without bound. The write is
-**fail-open**: a read-only, full or malformed trail never throws, never blocks a
-dispatch and never changes an admission decision. The over-quota dialog names
-the trail path.
-
-**RCA procedure when the counter disagrees with reality.**
-
-1. `herdr pane list | jq -r '.result.panes[] | select(.label) | .label'` — the
-   panes actually running.
-2. `cat ~/.herdr/downtime/dispatch-budget.json` — the entries the counter
-   believes in.
-3. `grep -h . ~/.herdr/downtime/dispatch-budget.log* | jq -s` (the current file
-   **and** its `.1`…`.3` siblings) and filter by the item or pane in question:
-   every `release`/`reap`/`sweep`/`repair` line names the operation, the
-   reason, the actor and the count before/after, so the operation that removed
-   a live entry is identified by name.
-4. Compare `liveBefore`/`liveAfter` per line against the header figure to see
-   which tick moved the number.
 
 #### Continuable vs terminal outcomes (WL-0MWBT76WY00298AY)
 
@@ -3888,7 +3289,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 
 | Guard | Scope | Sees | Action |
 |---|---|---|---|
-| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS; lease-arbitrated WL-0MWFJH3NW006F5GN) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (availability read as PRE-CHECK; `POST /llama/local/audit/lease` as THE admission gate) | skip that audit candidate and keep scanning; reason `audit-budget-saturated` (429 lease or saturated availability); a `503` maps to `audit-budget-unavailable`; a non-`ok` read fails closed as `audit-budget-unknown` |
+| **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/availability`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
 | **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip that audit candidate and keep scanning; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
 | **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |
@@ -4373,12 +3774,7 @@ read and the full fail-closed matrix under ON.
 
 Every dispatch path excludes soft-deleted items — those with a non-empty
 `deletedBy` (set by `wl delete`, which may leave the item's `status`
-untouched). `wl delete --deleted-by <identity>` sets that attribution
-explicitly (matching the REST API's `deletedBy` query parameter); when the
-flag is omitted — or blank — the CLI falls back to the configured git
-identity, and a blank value is never written (a whitespace-only `deletedBy`
-would satisfy `isAttributedDelete()` while `isSoftDeleted()` trims it away).
-`isSoftDeleted()` (trim-aware) is applied in
+untouched). `isSoftDeleted()` (trim-aware) is applied in
 `classifyItemForDispatch` (the Herdr-head and coordination paths) and in every
 `select*` helper (audit, implement, plan/intake, critical). The parse helpers
 (`parseNextCandidatesOutput`, `parseImplementCandidatesOutput`,
@@ -4673,13 +4069,10 @@ through.
 > achieved by offer removal + re-offer: a dispatched offer is removed (only the
 > last offer drops its entry) and the owner re-offers its next head at the next
 > check-in, so the next cycle serves the next offer in the file. The cursor module
-> (`downtime-round-robin-by-root.ts`) is LIVE on the dispatch path (the per-tier
-> second ranking `sortEntriesByRoundRobin` is deleted — WL-0MWFIZ8H5005FVNN):
-> `selectLeastRecentlyServed` orders the offers (pure read, no write) and
-> `advanceRoundRobinCursor` charges the dispatching root on every consumed
-> offer (`dispatched` / `spawn-failed` / `marker-write-failed`), never at
-> selection. The historical description below is retained for the record,
-> updated to the dispatch-driven charge.
+> (`downtime-round-robin-by-root.ts`) and `sortEntriesByRoundRobin` /
+> `advanceRoundRobinCursor` remain exported only for module tests — nothing on
+> the dispatch path calls them. The historical description below is retained
+> for the record.
 
 Within each tier, non-critical entries are dispatched in **global
 cross-project round-robin** order, not file order. This prevents any single
@@ -4696,23 +4089,16 @@ have offers in the coordination list.
   project** among those with offers in the current tier.
 - **New/unknown roots sort first** — a project that has never been
   dispatched is never penalised; it is served before any known root.
-- After an offer is CONSUMED, the dispatching root's cursor entry is advanced
-  (via `advanceRoundRobinCursor`) and persisted atomically (tmp+rename);
-  selection itself advances nothing (WL-0MWFIZ8H5005FVNN).
-
-**Accounting identity:** the cursor file and `.worklog/downtime-dispatches.log`
-agree about who was served — every dispatch row in the log corresponds to
-exactly one charge of that root's cursor entry, and a charge never happens
-without a consumed offer (`dispatched` / `spawn-failed` /
-`marker-write-failed`).
+- After selection, the cursor is advanced: the chosen root's timestamp is
+  updated to the current time and persisted atomically (tmp+rename).
 
 **Fail-open:** a missing, corrupt, or unreadable cursor degrades to
 file order (the pre-refactor behaviour) — the cursor never blocks
-dispatch. Lock contention during cursor WRITES also degrades gracefully
-(selection is a lock-free read; WL-0MWFIZ8H5005FVNN).
+dispatch. Lock contention during cursor reads/writes also degrades
+gracefully.
 
 **Cursor persistence across restarts:** the cursor is written to disk
-whenever an offer is consumed, so a leader restart picks up the most-recently
+after every selection, so a leader restart picks up the most-recently
 served root from the persisted file. No cursor state is lost.
 
 **Critical override (global pre-tier):** the critical tier is evaluated
@@ -4744,10 +4130,8 @@ masquerade as "no critical work").
 ### Multi-worklog support (F4 cross-root + F5 single budget)
 
 Each machine-wide entry records `worklogRoot` (preferred) + `directory` alias.
-The single leader dispatches offers across **worklogRoots** in
-**least-recently-dispatched root order** (`selectLeastRecentlyServed` — a pure
-read; the cursor records last dispatch and a consumed offer charges it,
-WL-0MWFIZ8H5005FVNN) and spawns each pane in the entry's
+The single leader dispatches offers in **file order** (each offer is its root's
+Herdr list head) **across worklogRoots** and spawns each pane in the entry's
 `worklogRoot`. The slot budget is machine-wide: ONE leader poll →
 ONE `freeSlots` snapshot **derived from the per-slot array** — the only
 trusted availability source (fail-closed contract, WL-0MUXVPXAZ005RESW) —
@@ -4944,17 +4328,6 @@ as fallback — they are orphaned and ignored. Guarantees:
   `downtime-coordination.log`) remain per worklog root (retained location)
   for per-project observability; they are not migrated — stale per-worklog
   coordination files do not imply log migration.
-- **Test isolation** — the budget-ledger tick reconciliation
-  (`downtime-worker.budget-reconcile.ts`) resolves its ledger through the
-  SAME policy as the coordination file (`resolveEffectiveDir` in
-  `coordination.ts`): a tmp-root worker (every unit-test harness) reconciles
-  its OWN root ledger, never the shared machine ledger, so parallel vitest
-  workers and the real worker can neither contend on the machine-dir lock
-  (a contention failure wrote a `host-budget-reconcile-failed` decision
-  entry and flaked the paced-tick decision-count assertions —
-  WL-0MWJPVWB6002208H) nor have real confirmed ledger entries swept against
-  the test mocks' pane list. Production worklog roots still resolve to the
-  machine dir (WL-0MWJPVWB6002208H).
 
 ## Timing defaults (canonical)
 
@@ -4973,8 +4346,6 @@ status refresh unchanged at 30s.**
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.constants.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.constants.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT; the **same** window bounds the `hasPeerOffer` peer-entry liveness check, WL-0MVR8GDJ3008WY3Y AC7) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
-| Hydrator claim grace window | **120 s** (`hydratorClaimGraceMs`; clamped to 0 ms – 10 min, `0` disables; a claimed item is never released within the window even with no pane visible yet, closing the spawn→pane-title release gap, WL-0MWHBSX81003M0EM) | `HYDRATOR_CLAIM_GRACE_MS` (`hydrator.ts`), `clampHydratorClaimGraceMs` (`hydrator.ts`), wired in `settings.ts` |
-| Dead-coordination-entry staleness window | **10 min** (`downtimeCoordinationEntryStaleMs`; derived as 2 × the check-in cadence, so one missed check-in is tolerated; clamped to 1 × cadence – 24 h, so a cadence-refreshing follower can never be pruned at the floor; the leader applies it to the dead-entry prune each tick, WL-0MWFJTULD005DTQI) | `DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS` / `DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS` / `DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS` (`downtime-worker.constants.ts`), `clampDowntimeCoordinationEntryStaleMs` (`downtime-worker.clamps.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS` (`downtime-worker.constants.ts`), `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.clamps.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (`downtime-worker.constants.ts`), `clampDowntimeMaxAttempts` (`downtime-worker.clamps.ts`), `countAttempts` (`downtime-log.ts`) |
 | Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (`downtime-worker.constants.ts`), `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.clamps.ts`) |
@@ -4996,14 +4367,7 @@ slot-exhaustion cooldown so that existing sessions have a chance to reclaim
 the slot before a new work item is dispatched. The success-marker staleness
 window (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped
 on load
-(`clampDowntimeMarkerStaleWindowMs`). The hydrator's claim grace window
-(`hydratorClaimGraceMs`) is likewise configurable and clamped on load
-(`clampHydratorClaimGraceMs`), with `0` disabling it. The dead-coordination-entry staleness
-window (`downtimeCoordinationEntryStaleMs`) is likewise configurable and
-clamped on load (`clampDowntimeCoordinationEntryStaleMs`): its clamped floor
-is exactly one full check-in interval, so an operator can never widen or
-tighten the window into pruning a live follower that refreshes on the
-cadence (WL-0MWFJTULD005DTQI). The non-terminal pane-close cooldown
+(`clampDowntimeMarkerStaleWindowMs`). The non-terminal pane-close cooldown
 (`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
 (`clampDowntimeNonTerminalCooldownMs`). The per-item/per-kind attempt cap
 (`downtimeMaxAttempts`) is likewise configurable and clamped on load
@@ -5035,16 +4399,14 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |
 | `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` and injects `HERDR_REQUEST_PRIORITY` from `--request-priority` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
-| `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher fallback anchor `{ paneId, workspaceId }` (machine dir; AC4 fallback + scheduled prompts only). Validated on read: a dead pane re-provisions under the coordination lock (WL-0MWH50EN4007C6YH) |
-| `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` | Persisted per-prefix tab map `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }` (machine dir, C1). Validated on read — pane liveness plus a workspace probe against `herdr workspace list`; a positively-missing workspace is recovered exactly once under the lock, and every rewrite prunes `byPrefix` entries whose `<workspaceId>:`-prefixed ids do not belong to the workspace being written (WL-0MWHCUTDM003B39Q, WL-0MWHCUX6A002W8ZG) |
-| `~/.herdr/downtime/downtime-project-workspaces.json` | Persisted per-root project-workspace map `{ byRoot: { "<normalised root>": { workspaceId, paneId?, tabId?, updatedAt? } } }` (machine dir, WL-0MWHW3PKX0048ZYL AC2). Learned write-through on every live plugin-pane match; consulted when the live scan yields no match (plugin pane down or a `downtimeWorklogRoots` sweep with no running instance), so every dispatched pane lands in the item's project workspace deterministically. Validated on read via `probeWorkspace` (one `herdr workspace list`): `alive` → used; positively `missing` → the entry is dropped (self-healed); `unreadable` → fail closed, entry kept |
+| `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher fallback anchor `{ paneId, workspaceId }` (machine dir; AC4 fallback + scheduled prompts only) |
+| ~~`~/.herdr/downtime/downtime-dispatch-tab-anchors.json`~~ | **Retired** (per-prefix map). Item tabs are discovered via `herdr tab list`; a leftover file is no longer read. |
 | `~/.herdr/downtime/downtime-leader.lock` | Leader lock file (machine dir, `O_CREAT\|O_EXCL`) |
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
-| `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — records each root's LAST DISPATCH; the least-recently-dispatched root starts the offer ordering and the registered-root sweep. Selection is a pure read; only a consumed offer charges the cursor (WL-0MTJDX4M4007YH5U, WL-0MWFIZ8H5005FVNN; fail-open) |
-| `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, attemptId?, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `(implement OR audit)` dispatch of a work item (WL-0MVXY0WQF0069YDJ; key `(itemId, kind)` since WL-0MWFJD5T4003OM91, so an implement and an audit dispatch of one item coexist). `attemptId` is the release identity `reserve` mints and `release` must present, together with the confirmed `paneId`. Audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
-| `~/.herdr/downtime/dispatch-budget.log` | **Append-only audit trail** of every ledger mutation (WL-0MWFJDGXQ001OXP8): one JSONL line per reserve/confirm/release/reap/sweep/repair carrying `at`, `op`, `kind`, `itemId`, `paneId`, `instanceId`, `reason`, `actor`, `liveBefore`, `liveAfter`. Bounded by the coordination-log retention policy (500 lines/file × 4 files). Fail-open — a broken trail never blocks a dispatch. Rotated siblings are `dispatch-budget.log.1`…`.3` |
+| `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — the least-recently-served root starts the offer ordering and the registered-root sweep (WL-0MTJDX4M4007YH5U; fail-open) |
+| `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `implement`/`audit` dispatch (WL-0MVXY0WQF0069YDJ); audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
 | `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
 | `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired** (WL-0MVXY0XPF006YUHA F2): a non-stale file written by an older instance is still read as ONE synthetic audit entry; this version never creates or removes it |
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
@@ -5056,19 +4418,8 @@ likewise re-read live every tick and clamped on load
 ## Troubleshooting / operations
 
 - **Pane landed in the project workspace but not under the item tab:** the item-ID tab invariant is anchor-by-ID — every automated pane must split the item tab's root pane. Check (a) `herdr tab list --workspace <workspaceId>` shows a tab labelled exactly the work-item id and `herdr pane get <tabRootPaneId>` is alive; (b) the resolved project workspace is the one whose `Work Items` plugin pane has `HERDR_RESOLVED_CWD` equal to the item's worklog root (`herdr pane process-info --pane <pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`); (c) the running plugin loads this repo's code — `herdr plugin list` must show `worklog-selection-list` → `local:/…/packages/herdr` (stale `dist/` or a dangling worktree link breaks resolution; rebuild with `npm run build` in `packages/herdr`). To reset an item tab, close it (`herdr tab close <tabId>`) — the next dispatch re-creates it under the coordination lock.
-- **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** neither the project workspace/item tab nor the Dispatcher fallback anchor could be provisioned (fail-closed, never the leader's pane). Read the decision entry's machine-readable `detail` first — see [Diagnosing an `anchor-unavailable` wedge](#diagnosing-an-anchor-unavailable-wedge): `persisted-workspace-missing` is self-healing (one replacement under the lock), so a repeating wedge means the recovery itself failed. For the project path check the `pane list` / `process-info` / `/proc/<pid>/environ` reads (no `Work Items` pane for the root, missing `HERDR_RESOLVED_CWD`, or unreadable `/proc` on non-Linux); for the fallback check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock`), and the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <itemId> --no-focus` JSON parse (shape drift across herdr versions). The worker degrades to “no dispatch this cycle” and retries next idle tick; a positively-`missing` workspace self-heals, while an `unreadable` herdr fails closed (never a duplicate workspace, never a crash).
+- **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** neither the project workspace/item tab nor the Dispatcher fallback anchor could be provisioned (fail-closed, never the leader's pane). For the project path check the `pane list` / `process-info` / `/proc/<pid>/environ` reads (no `Work Items` pane for the root, missing `HERDR_RESOLVED_CWD`, or unreadable `/proc` on non-Linux); for the fallback check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock`), and the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <itemId> --no-focus` JSON parse (shape drift across herdr versions). The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty/missing anchor file or unreadable machine dir is treated as missing (never a crash).
 - **Pane landed in the wrong project's workspace:** resolution is fail-closed — it never selects another root's workspace. Check (a) the item's `cwd` (worklog root) matches exactly the plugin pane's `HERDR_RESOLVED_CWD` (trailing-slash tolerant); (b) when ≥2 `Work Items` panes resolve to the same root the focused pane wins, else the lowest pane id — close the surplus plugin pane to remove the ambiguity; (c) stale `dist/` in the running plugin (rebuild with `npm run build` in `packages/herdr`). If no plugin pane resolves, panes intentionally fall back to the `Dispatcher` workspace — that is AC4, not a misroute.
-- **`project-workspace-mismatch` on the decision entry (`projectWorkspaceMismatch: { expectedRoot, actualRoot, paneId, workspaceId }`, including on a `Dispatcher`-fallback dispatch):** the primary path could not match the item's worklog root, but the named plugin pane reported a DIFFERENT non-empty `HERDR_RESOLVED_CWD` (`actualRoot`). This is the ContextHub situation — its "Work Items" pane reports `…/ContextHub/packages/herdr`, the plugin directory, not the worklog root — and it is a diagnostic, never a wrong-workspace placement: the pane falls back to the `Dispatcher` workspace's per-prefix tab until the mismatch is fixed. **Remedy:** start/restart the plugin pane from the worklog root (`cd <worklog-root> && herdr plugin launch …` / reopen the project, so `HERDR_RESOLVED_CWD` equals `expectedRoot`), then the primary path resolves and future panes land in the project workspace's item-ID tab. Confirm with `herdr pane process-info --pane <pluginPane>` → `shell_pid` → `grep HERDR_RESOLVED_CWD /proc/<pid>/environ`. The matching rule itself is exact-root only by design (widening is out of scope — see [primary-path near-miss diagnostic](#primary-path-near-miss-diagnostic-wl-0mwhcv3pr002wsqm)).
-- **`host-budget-corrupt` in the decision log / the worklist counter
-  disappears:** the machine ledger exists but cannot be read as a valid
-  document (a partial write from an older version, a hand edit, a byte-level
-  truncation). Admission fails closed and never rewrites it, so every budgeted
-  tier stays refused until it is repaired. Inspect
-  `~/.herdr/downtime/dispatch-budget.json`, keep a copy, then rebuild it from
-  the running panes with `node packages/herdr/dist/pane-close-cli.js
-  --repair-budget-ledger` (it refuses rather than writing a partial
-  reconstruction — close or rename any listed pane whose label carries no
-  work-item id, then re-run).
 - **No dispatches happening:** confirm a leader is elected (lease file
   present + recent `lastUpdated` refresh), the proxy reports idle for ≥ 75 s
   continuously, and the coordination list has offers. Check
@@ -5409,19 +4760,6 @@ removed on failure before the error is rethrown and the target is left
 untouched; trimming/rotation and the throw-on-I/O-failure (fail-closed)
 contract are unchanged, and the JSONL format stays human-readable.
 
-**Serialised appends (WL-0MWI5ZA2D0081RDA).** Atomic replacement fixes the
-reader side, but the append itself is a whole-file read-modify-write: two
-**concurrent writers** (e.g. the leader tick's fire-and-forget
-`operation: 'election'` append racing its awaited `operation: 'prune'` append)
-could interleave — the later-finishing append's `readFile` resolved against a
-pre-first-write snapshot and its `rename` silently dropped the other append's
-record (observed as "the leader tick logged no `operation: prune`
-coordination-log record", load-flaky under parallel vitest). `appendRollingJsonl`
-therefore serialises every append to the same `(cwd, file)` strictly in start
-order (a per-file promise chain), so each read-modify-write observes the
-previous append's snapshot and no record is ever lost; a failed append never
-blocks the next one, and the fail-closed contract is unchanged.
-
 **Operator summary recipe (WL-0MVKNC28B003UOLX AC3) — per-hour no-dispatch
 reason tally for a given night.** The decision log is the only forensic
 evidence of capacity-saturation starvation, so a post-mortem must be able to
@@ -5580,29 +4918,12 @@ trace.
   the `downtimeWorklogRoots` setting + validation, the registered-root
   sweep, and the liveness-aware `hasPeerOffer`
 - Work item: **WL-0MTJDX4M4007YH5U** *global round-robin cursor module
-  (`downtime-round-robin-by-root`)* — the least-recently-DISPATCHED cursor the
+  (`downtime-round-robin-by-root`)* — the least-recently-served cursor the
   sweep reuses for root-level fairness
 - Work item: **WL-0MTMPIQBE001J41P** *stale coordination entry pruning
-  (deliberate no-op)* — wall-clock TTL entry expiry stays a no-op; liveness
-  lives only in the `hasPeerOffer` read predicate; **dead-entry** pruning
-  (instances that stopped checking in) is implemented by `pruneDeadEntries`
-  (WL-0MWFJTKGM006BHLQ, Lifecycle 3)
-- Work item: **WL-0MWFJTKGM006BHLQ** *Prune dead coordination entries
-  end-to-end* — leader-only `pruneDeadEntries` on the check-in path,
-  one `operation: 'prune'` log record per pruned entry (Lifecycle 3)
-- Work item: **WL-0MWFJTULD005DTQI** *Settings key for coordination entry
-  staleness* — `downtimeCoordinationEntryStaleMs`, default 2 × check-in
-  cadence (10 min), clamped [1 × cadence, 24 h] (Lifecycle 3, timing table)
+  (deliberate no-op)* — entry expiry stays a no-op; liveness lives only in
+  the `hasPeerOffer` read predicate
 - Work item: **WL-0MST3OJ8S0001ROL** *Refactor Downtime Dispatcher: leader
   election with shared coordination file* — the coordination/offer
   architecture the registered-root sweep composes with
-- Epic: **WL-0MWHUMOHJ006ZMBQ** *Refactor dispatched pane creation* (+ its
-  unification children WL-0MWHWGZI4007D911 / WL-0MWHWH1HV009C46C /
-  WL-0MWHWH6XL0025YX2 / WL-0MWHWH68L007L7IO / WL-0MWHW3PKX0048ZYL /
-  WL-0MWHWHB3X004H9VG / WL-0MWHWGN23001KMQW — documented in *Pane creation
-  architecture* above; each child references the docs child
-  WL-0MWHWHBSW005KG13 so the map updates once per structural change)
-- Docs work item: **WL-0MT76H3Z900908TV** (this page); docs child
-  **WL-0MWHWHBSW005KG13** *single pane-creation architecture map + naming
-  contract* (added *Pane creation architecture*, *Naming contract* and the
-  refactoring-opportunity cross-reference above)
+- Docs work item: **WL-0MT76H3Z900908TV** (this page)

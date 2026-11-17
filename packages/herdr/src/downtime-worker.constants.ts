@@ -15,7 +15,6 @@ import type { LlamaSlot, LlamaStatus } from './downtime-worker.types.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
   HOST_BUDGET_IMPLEMENT_REASON,
-  HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
   type HostBudgetEvidence,
 } from './downtime-log.js';
@@ -49,10 +48,8 @@ export const LOCAL_RESERVE_PATH = '/llama/local/reserve';
  * answers `404`). Note the shipped `available` verdict is the NUMBER `0`/`1`,
  * not a boolean; the fail-closed parser coerces exactly those two values.
  * {@link resolveAuditAvailabilityPath} keeps the path a config change rather
- * than a code edit. The availability read is a PRE-CHECK (WL-0MWFJH3NW006F5GN):
- * admission arbitrates the shared GPU through the audit-lease protocol
- * ({@link AUDIT_LEASE_PATH} / {@link AUDIT_LEASE_RENEW_PATH}), so this read
- * alone can never admit an audit.
+ * than a code edit. Lease acquisition is out of scope here and deferred to
+ * WL-0MWFJH3NW006F5GN, so this item reads availability only.
  *
  * Override with {@link AUDIT_AVAILABILITY_PATH_ENV}, so a future proxy path
  * change is a config change rather than a code edit.
@@ -79,24 +76,6 @@ export function resolveAuditAvailabilityPath(
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : AUDIT_AVAILABILITY_PATH;
 }
-/**
- * Proxy audit-lease endpoint path (WL-0MWFJH3NW006F5GN): `POST
- * {proxyUrl}/llama/local/audit/lease`, the atomic cross-host arbiter for the
- * shared audit budget. A `200` answers a new idempotent acquire (or renew of
- * the caller's own session), `429` with `reason: audit-budget-saturated` and a
- * bounded `retry_after_s` when a *different* session holds the budget, `503`
- * with `audit-budget-unavailable` on a registry failure. The release verb is
- * `DELETE {proxyUrl}/llama/local/audit/lease/{session_id}` — the client builds
- * it from this constant plus the session id (see
- * {@link audit-lease|downtime-worker.audit-lease.ts}).
- */
-export const AUDIT_LEASE_PATH = '/llama/local/audit/lease';
-/**
- * Proxy audit-lease RENEW path (WL-0MWFJH3NW006F5GN): `POST
- * {proxyUrl}/llama/local/audit/lease/renew` extends the caller's held lease
- * (the proxy answers `200`/`404` for a foreign/expired session).
- */
-export const AUDIT_LEASE_RENEW_PATH = '/llama/local/audit/lease/renew';
 /**
  * Request/response header carrying the granted reservation ticket id
  * (`X-Local-Reservation: <ticketId>`), sent on the pane's FIRST request
@@ -258,9 +237,6 @@ export function decisionHeaderToken(reason: string): string {
     case 'audit-budget-saturated':
       return 'budget-audit';
     case HOST_BUDGET_UNKNOWN_REASON:
-    // A corrupt/unreadable ledger is a ledger-trust failure like the lock/I-O
-    // arm, so it quotes the same header segment (WL-0MWFJD8ZO000J1R8).
-    case HOST_BUDGET_CORRUPT_REASON:
     case 'audit-budget-unknown':
       // `audit-budget-unknown` (a fail-closed proxy read) is a budget stop
       // like `host-budget-unknown`, so both quote `budget-unknown`.
@@ -867,58 +843,6 @@ export const DEFAULT_COORDINATION_CHECK_IN_MS = 5 * 60 * 1000;
  * DEFAULT_COORDINATION_CHECK_IN_MS (5 min, WL-0MTMPSCL8000O45H).
  */
 export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
-/**
- * Default dead-coordination-entry staleness window (settings key
- * `downtimeCoordinationEntryStaleMs`, WL-0MWFJTULD005DTQI): twice the
- * coordination check-in cadence (2 × 5 min = 10 min), so ONE missed
- * check-in is tolerated while an instance that stopped checking in is
- * removed on the leader's next leader tick.
- *
- * Derived from {@link DEFAULT_COORDINATION_CHECK_IN_MS}, NEVER a hard-coded
- * 10-minute literal, so tightening/loosening the check-in cadence retunes
- * the default with it.
- *
- * WHY THE CADENCE AND NOT THE LEASE TTL: dead-entry pruning decides whether
- * a Follower stopped checking in. Followers hold NO dispatch lease — the
- * 5-minute lease TTL belongs to the elected leader only — so the lease TTL
- * says nothing about a follower's liveness. The check-in cadence is the one
- * interval every instance (leader and follower alike) promises to refresh
- * within, so staleness is measured against it: one missed check-in is
- * tolerated, a second one is a dead instance.
- */
-export const DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS =
-  2 * DEFAULT_COORDINATION_CHECK_IN_MS;
-/**
- * Hard floor for the dead-entry staleness window: ONE full check-in interval
- * ({@link DEFAULT_COORDINATION_CHECK_IN_MS}). A follower that refreshes on
- * the cadence is never older than the floor, and `pruneDeadEntries` keeps an
- * entry whose age is ≤ the window (boundary inclusive), so a window clamped
- * down to the floor can never prune a live, cadence-refreshing follower —
- * anything below the floor would prune the very followers the leader needs
- * before their next check-in lands.
- */
-export const DOWNTIME_COORDINATION_ENTRY_STALE_FLOOR_MS =
-  DEFAULT_COORDINATION_CHECK_IN_MS;
-/**
- * Hard ceiling for the dead-entry staleness window (24 h): above this a
- * crashed instance's ghost offer could linger for days, defeating the whole
- * purpose of dead-entry pruning.
- */
-export const DOWNTIME_COORDINATION_ENTRY_STALE_MAX_MS = 24 * 60 * 60 * 1000;
-/**
- * Default dead-entry staleness window (WL-0MWFJTKGM006BHLQ): twice the
- * coordination check-in cadence (2 × 5 min = 10 min), so ONE missed
- * check-in is tolerated while an instance that stopped checking in is
- * removed on the leader's next leader tick. Landed hard-coded in that
- * child; the settings key and clamp arrived in the sibling settings child
- * (WL-0MWFJTULD005DTQI), so this is now an alias of
- * {@link DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS} — the configurable
- * default that the leader tick resolves before calling
- * {@link pruneDeadEntries} — keeping `pruneDeadEntries`' own fallback a
- * single source of truth.
- */
-export const DEFAULT_COORDINATION_STALE_WINDOW_MS =
-  DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS;
 /**
  * Maximum local DISPATCH-lease TTL (seconds) the llama-proxy can hold a
  * local slot — the cross-repo contract from `llm-manager`

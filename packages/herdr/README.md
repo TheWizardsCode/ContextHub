@@ -391,21 +391,14 @@ dispatches; the other herdr instances coordinate instead of polling:
   migration — stale files orphaned, ignored).
 - **Shared coordination file** — machine-wide
   `~/.herdr/downtime/downtime-coordination.json` (or
-  `HERDR_COORDINATION_DIR`): a **live** instance's entry does **not** expire by age (it re-checks in on the cadence, so its entry never reaches the staleness window) — only entries whose instances **stopped checking in** are pruned by the leader (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ; default window 2 × the check-in cadence = 10 min, settings key `downtimeCoordinationEntryStaleMs` — see the dispatcher doc's Lifecycle 3); every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 5 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — offering its most-important item as
+  `HERDR_COORDINATION_DIR`): entries **do not expire by age**; every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 5 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — offering its most-important item as
   `{instanceId, workItemId, worklogRoot/directory, assignedAt, lastUpdated}`
   (`worklogRoot` lets the single leader dispatch across roots — F4). When the leader dispatches an entry and removes it, the owning instance **re-offers immediately on its next tick** (coordination-file observation — no extra poll). Re-offer also refreshes leadership every tick from the lease file.
-  **Schema v2 (tier-aware offers, parent WL-0MWDDHQON0015T3P, per-bucket
-  widening WL-0MWFJ8R1P005G1H1):** the offer
+  **Schema v2 (tier-aware offers, parent WL-0MWDDHQON0015T3P):** the offer
   payload is a bounded `offers` array — at most one nominee per dispatch
   bucket (`implement` / `audit` / `prep`, where `prep` unions the classifier's
   `plan`/`intake`/`risk-effort`), at most three total, duplicate
-  `(kind, workItemId)` pairs collapsed. The visible window bounds only
-  *rendering*: a bucket the visible list leaves empty is filled from the root's
-  ranked backlog beyond the window by the same geometric whole-backlog
-  extension the single-offer path uses (same ranking, same filters, one read
-  path; see *Whole-backlog dispatch window* in
-  [`docs/dev/downtime-dispatcher.md`](../../docs/dev/downtime-dispatcher.md)).
-  `workItemId` mirrors the FIRST offer so
+  `(kind, workItemId)` pairs collapsed. `workItemId` mirrors the FIRST offer so
   an old leader reads one offer and ignores the rest. **Migration:** a v1 file
   (single `workItemId`, no `offers`) is read as a one-offer entry (kind derived
   by the classifier) and rewritten as v2 on the next check-in — no v1 file is
@@ -416,21 +409,16 @@ dispatches; the other herdr instances coordinate instead of polling:
   [*Which cross-root mechanism applies when*](../../docs/dev/downtime-dispatcher.md#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots)
   (a due scheduled prompt dispatches immediately on its own cadence —
   WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*). The offer rung reads the
-  machine-wide offer list and orders ENTRIES by **least-recently-dispatched
-  root** (`selectLeastRecentlyServed` — a pure read that writes nothing),
+  machine-wide offer list and dispatches ENTRIES in **file order**,
   iterating the **offers inside each entry** (each entry advertises up to one
   nominee per bucket — see *Shared coordination file* above). Every offer is
   re-validated **at dispatch time**
   (`fetchItem` → `classifyItemForDispatch`/stage+status as the sole gate;
-  live offers get no wall-clock age prune — only *dead entries* whose
-  instances stopped checking in are pruned by the leader, WL-0MWFJTKGM006BHLQ) and the same sequential
+  no wall-clock prune — WL-0MTMPIQBE001J41P) and the same sequential
   safety filters (producer-review gate, code-freeze split-by-skill,
-  free-slot minimums) are applied **per offer**, unchanged. The cross-root **tier priority** is **retired**
-  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); the root-level
-  round-robin cursor is LIVE — `selectLeastRecentlyServed` orders offers by
-  least-recently-*dispatched* root (pure read) and only a CONSUMED offer charges
-  its root via `advanceRoundRobinCursor`, never at selection
-  (WL-0MWFIZ8H5005FVNN). The v2 bucket
+  free-slot minimums) are applied **per offer**, unchanged. The cross-root **tier priority** and the **global
+  cross-project round-robin cursor** ordering are **retired**
+  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); the v2 bucket
   offers are a scoped reversal of that item's single-offer *contract* (what is
   offered, and how the leader walks it), never of that retirement —
   `COORDINATION_TIER_ORDER` stays retired and the classifier remains the single
@@ -463,9 +451,7 @@ dispatches; the other herdr instances coordinate instead of polling:
   [cross-root mechanism section](../../docs/dev/downtime-dispatcher.md#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots).
   The dispatched entry is
   **removed**; its owner re-offers its next Herdr head at the next
-  check-in. There is **no TTL-based pruning of a live entry's offers** —
-  the only age-based removal is the leader's **dead-entry** prune of
-  instances that stopped checking in (`pruneDeadEntries`, WL-0MWFJTKGM006BHLQ). **Cost (parent AC10):** the
+  check-in. There is **no TTL-based pruning**. **Cost (parent AC10):** the
   per-offer re-validation adds **one `fetchItem` per offered item per tick** —
   up to **3× the pre-v2 single-offer cost**. Measured at 7 instances
   (`npm run benchmark:leader-tick-cost`): 21 fetches, ≈ 4.0–5.8 s tick with a
@@ -502,17 +488,12 @@ dispatches; the other herdr instances coordinate instead of polling:
   `~/.herdr/downtime/downtime-dispatch-tab-anchors.json`, shape
   `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }`; tab
   provisioning runs under the coordination lock with a double-check, and a
-  dead persisted pane **or a workspace missing from `herdr workspace list`
-  is validated on read and re-provisioned exactly once** — an unreadable
-  herdr still fails closed (missing ≠ unreadable), no anchor file has a TTL
-  (recovery is on-read validation, never a reaper), and every map rewrite
-  **prunes entries belonging to a superseded workspace**); when neither
-  yields an anchor the retained single `Dispatcher` anchor is used
+  dead persisted pane is re-provisioned); when neither yields an anchor the
+  retained single `Dispatcher` anchor is used
   (`~/.herdr/downtime/downtime-dispatch-anchor.json`). Resolution is
   fail-closed (never another project's tab, never the leader's pane): a
   null/failed resolution reports `anchor-unavailable` (no dispatch this
-  cycle — with a machine-readable `detail` on the decision entry naming the
-  failing boundary) and rolls the CAS claim back. **Placement is resolved late**
+  cycle) and rolls the CAS claim back. **Placement is resolved late**
   (WL-0MW5JE0SZ0057K30): after the CAS claim, the reservation gate and the
   host-budget admission, immediately before the marker write — provisioning
   the item tab any earlier left an orphaned empty pane whenever a gate
@@ -522,10 +503,7 @@ dispatches; the other herdr instances coordinate instead of polling:
   so a dispatch that never runs a command leaves no pane behind. Scheduled
   prompts (no work-item id) keep the `Dispatcher` anchor.
   See
-  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn),
-  and the [single pane-creation architecture map + naming
-  contract](../../docs/dev/downtime-dispatcher.md#pane-creation-architecture-wl-0mwhwhbsw005kg13)
-  (one workspace per project, item-ID tabs, create-or-reuse).
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn).
 - **Stalled-work scan and resume (WL-0MUYMBSA90092QV2)** — before selecting a
   new item on an idle cycle, the dispatcher scans the machine-wide
   `herdr pane list` and resumes a stalled pane **in place** (reusing its
@@ -592,17 +570,14 @@ dispatches; the other herdr instances coordinate instead of polling:
     (the fail-open admission rationale is preserved).
   - **Audit tier is proxy-derived (cross-machine)** — the audit budget and the
     live audit-lease registry are **owned by the proxy** (the one local
-    `llama-server` GPU every ContextHub host shares). herdr reads
-    `GET {proxyUrl}/llama/local/audit/availability` as a PRE-CHECK and — since
-    WL-0MWFJH3NW006F5GN — acquires `POST /llama/local/audit/lease` as THE
-    admission gate (dispatch proceeds only on `200`; `429` maps to
-    `audit-budget-saturated` with the proxy's `retry_after_s`, `503` maps to
-    `audit-budget-unavailable`, transport fails closed as `audit-budget-unknown`;
-    every terminal path releases). A proxy/local disagreement is logged with
-    both sides' evidence (`audit-budget-divergence`). The local ledger's audit
-    entries are **observability only** (header/dialog/sweep) and can never
-    refuse an audit; `budget.json` `maxAudit` /
-    `HERDR_HOST_MAX_AUDIT` are
+    `llama-server` GPU every ContextHub host shares), and herdr queries
+    `GET {proxyUrl}/llama/local/audit/availability` (URL from `downtimeProxyUrl`),
+    mapping the verdict to a refusal with the proxy's own tokens
+    (`audit-budget-saturated`; or `audit-budget-unknown` when the read fails
+    closed). A proxy/local disagreement is logged with both sides' evidence
+    (`audit-budget-divergence`). The local ledger's audit entries are
+    **observability only** (header/dialog/sweep) and can never refuse an
+    audit; `budget.json` `maxAudit` / `HERDR_HOST_MAX_AUDIT` are
     implement-tier-only for admission. The one-release
     `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
     decision for a single release.
@@ -656,8 +631,8 @@ to the first dispatchable item deeper in the same sequence (never a re-ranking).
 selection feeds the coordination check-in offer (`computeMostImportantItem`), so the
 leader's dispatch and each root's check-in agree on the ranking by construction
 (the leader dispatches ENTRIES in file order and the offers inside each in
-bucket order; the cross-root tier priority is retired and the root-level
-round-robin cursor ordering is live — see the *Leader dispatch* bullet above).
+bucket order; the cross-root tier priority / round-robin
+cursor ordering are retired — see the *Leader dispatch* bullet above).
 Per-root "critical first" is preserved inside the ranking: smart-selection always places
 critical items at the Herdr head, so a critical item dispatches as soon as it is the
 first classifyable list item (WL-0MSI8H3HP000K0RG audit, WL-0MSMAYPQP001FLR6 implement,
@@ -704,10 +679,9 @@ nothing dispatchable — before its own out-of-view backlog. Each root is read
 through the **same canonical ranking window** (`getHerdrListHead` plus the
 bounded extension) with the **full sequential filter chain** applied against
 that root's own state (freeze, review queue, in-flight panes, cooldown log,
-claim target). The sweep starts at the least-recently-DISPATCHED registry root
-via the `downtime-round-robin-by-root` cursor (selection is a pure read — only
-a sweep CONSUMPTION charges its root, WL-0MWFIZ8H5005FVNN) and visits the rest
-in registry order, so no single root can monopolise the leader. An unreadable/missing root
+claim target). The sweep starts at the least-recently-served registry root via
+the `downtime-round-robin-by-root` cursor and visits the rest in registry
+order, so no single root can monopolise the leader. An unreadable/missing root
 is skipped without a strike, and a swept dispatch is recorded with
 `selectionPath: registered-root-sweep` and does **not** hand off leadership.
 An **absent or empty registry is a no-op** — the candidate universe stays
@@ -1198,19 +1172,15 @@ Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
 makes the item dispatchable again on the next idle poll.
 
 > **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV; host-wide cap
-> generalised by WL-0MVXY0XPF006YUHA F2; proxy-derived by WL-0MW95GBEG005ERHS;
-> lease-arbitrated by WL-0MWFJH3NW006F5GN):**
+> generalised by WL-0MVXY0XPF006YUHA F2; proxy-derived by WL-0MW95GBEG005ERHS):**
 > exactly one audit is dispatched at a time during downtime dispatch by
 > **default** — strictly sequential, never fan-out across candidates. The
 > **proxy-owned audit budget** is the outermost audit-concurrency gate
 > (see *Host-wide dispatch budget* above): the proxy owns the cap and the live
-> audit-lease registry; herdr reads its verdict from
-> `GET {proxyUrl}/llama/local/audit/availability` as a PRE-CHECK and acquires
-> the ATOMIC lease (`POST /llama/local/audit/lease`) as the admission gate,
-> refusing with
+> audit-lease registry, and herdr reads its verdict from
+> `GET {proxyUrl}/llama/local/audit/availability`, refusing with
 > `audit-budget-saturated` (or `audit-budget-unknown` when the read fails
-> closed), and releasing on every terminal path. The local ledger's audit
-> entries are **observability only** — they
+> closed). The local ledger's audit entries are **observability only** — they
 > can never refuse an audit; `budget.json` `maxAudit` is only the one-release
 > legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`). Beneath the proxy gate, before the
 > audit tier selects a candidate, the worker runs the host-wide audit-budget
@@ -1387,11 +1357,6 @@ jitter factor is clamped to `[0.5×, 1.5×]` of the configured interval.
 
 ### Interactive pane placement (work-item-ID tabs)
 
-(Cross-reference: the single [pane-creation architecture map + naming
-contract](../../docs/dev/downtime-dispatcher.md#pane-creation-architecture-wl-0mwhwhbsw005kg13)
-— one workspace per project, tabs labelled by the full work-item id,
-create-or-reuse.)
-
 Interactive dispatch from the worklist — an agent command (`/skill:*`,
 `/intake`, `/plan`, `/prompt:`) or a shell/command-output command (`!!`/`!`
 or a plain command) that carries a work-item ID — opens its pane in a **tab
@@ -1512,14 +1477,7 @@ row carries the decision's `reasonSnapshot` alongside the decision and
 timestamp. I/O is injected via `ReaperDeps` (`listPanes`, `closePane`,
 `terminateProcessGroup`) so the orchestration is fully testable.
 `runReaperCli(deps, argv)` is the CLI entrypoint and accepts `--dry-run`,
-`--threshold-minutes <n>` and `--ledger <path>`. After a successful close
-the reaper releases the pane's machine-wide dispatch-budget entry
-(`releasePaneBudget`) and — for a closed **audit** pane — the proxy audit
-lease (`releaseAuditLease`, WL-0MWJ7QONS0052HXX): the reaper is the only
-ACTIVE auto-close path, so the audit tier gets its shared GPU slot back the
-moment a completed audit's pane closes instead of after the proxy's ~1 h
-lease TTL. Both releases are idempotent and best-effort (fail-open, the
-proxy/host expiry remains the backstop).
+`--threshold-minutes <n>` and `--ledger <path>`.
 
 **Scheduling (`pane-close-scheduler.ts`).** The downtime worker runs the
 reaper on its tick at most once per `PANE_CLOSE_REAPER_INTERVAL_MS`
