@@ -453,9 +453,10 @@ export async function dispatchFromRegisteredRoots(
   const roots = normaliseRegisteredRoots(opts.registeredRoots);
   // AC6: an empty or unresolvable registry leaves today's behaviour unchanged.
   if (roots.length === 0) return null;
-  // AC4: the least-recently-served root starts the sweep (the cursor advances
-  // for it here, exactly as the offer path does); the rest follow in registry
-  // order. A root found with nothing dispatchable is skipped, not charged.
+  // AC4: the least-recently-DISPATCHED root starts the sweep (selection is a
+  // pure read — it charges nothing; only a consumed item charges its root
+  // below, WL-0MWFIZ8H5005FVNN); the rest follow in registry order. A root
+  // found with nothing dispatchable is skipped, not charged.
   const first = selectLeastRecentlyServed(opts.coordinationDir, [...roots], now);
   const ordered = first === null ? roots : [first, ...roots.filter(root => root !== first)];
   for (const root of ordered) {
