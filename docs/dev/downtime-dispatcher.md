@@ -149,9 +149,9 @@ landing children update it in lockstep with each structural change.
 
 | Drift closed (opportunity) | Unified module | Child work item | Type / priority |
 |---|---|---|---|
-| Two `send-to-pi.sh` argv builders (downtime vs interactive) diverged | `pane-argv.ts` | WL-0MWHWGZI4007D911 | task / high |
+| Two `send-to-pi.sh` argv builders (downtime vs interactive) diverged | `pane-argv.ts` | WL-0MWHWGZI4007D911 | task / **critical** (every pane-spawn path takes its argv from this module) |
 | Pane-label item-ID/kind parsing duplicated across consumers | `pane-label.ts` | WL-0MWHWH1HV009C46C | task / high |
-| Discovery/close pipeline existed in four partial copies | `pane-discovery.ts`, `pane-close*.ts` | WL-0MWHWH6XL0025YX2 | task / high |
+| Discovery/close pipeline existed in four partial copies | `pane-discovery.ts`, `pane-close*.ts` | WL-0MWHWH6XL0025YX2 | task / **critical** (four consumers share the discovery/close decision) |
 | Three placement strategies + CLI helpers alongside each other | `dispatcher-anchor.placement.ts` / `.tab-anchors.ts` | WL-0MWHWH68L007L7IO | task / high |
 | Project-workspace placement depended on a live pane | deterministic resolver + durable map (WL-0MWHW3PKX0048ZYL) | WL-0MWHW3PKX0048ZYL | task / high |
 | Forked spawn/env wiring and pane-close herdr CLI seams | `cli-spawn.ts` | WL-0MWHWHB3X004H9VG | task / **critical** (fetch/wl spawn management touches every CLI boundary) |
