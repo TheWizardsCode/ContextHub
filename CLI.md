@@ -301,7 +301,14 @@ Update fields on one or more existing work items. Accepts multiple IDs. Options 
 
 > **Reparenting demotion:** when `--parent <id>` attaches an item to a `completed`/`in_review` parent, the parent is demoted to `open`/`plan_complete` so a finished parent never silently gains uncompleted work. Automation-authored telemetry children (tagged `test-failure`, titled `[test-failure]…`, or created by a known bot identity) are exempt and do not rewind the parent (WL-0MTWU4XUD0001ALR). A demotion records an audit-trail comment on the parent naming the attached child, the actor, and the transition (WL-0MTWU4Y82001B3UH).
 
-> **Detach:** pass `--parent null` (case-insensitive; also accepted: `none`, `nil`, `-`, or `""`) to detach an item, setting its `parentId` to `null`. Use `wl doctor dangling-parents` to detect and optionally fix orphaned parent references (e.g. the legacy `WL-NULL` artifact).
+> **Detach:** pass `--parent null` (case-insensitive; also accepted: `none`, `nil`, `-`, or `""`) to detach an item, setting its `parentId` to `null` — this *promotes* the item to top-level. Use `wl doctor dangling-parents` to detect and optionally fix orphaned parent references (e.g. the legacy `WL-NULL` artifact).
+
+> **Detach attribution (R2):** a `--parent null` detach records a comment on the item naming the **previous parent** and the decision rationale, so the promoted item's lineage is never silently lost:
+>
+> - `promote-because-live` — the child's subject is still live, so it was promoted to a top-level item rather than retired.
+> - `retire-because-stale` — the previous parent no longer resolves to a live item (hard-deleted, soft-deleted or an unresolvable sentinel), so the stale link was retired and the live child promoted.
+>
+> The same attribution comment is written by `wl doctor dangling-parents --apply` and `wl doctor --fix`. See [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#orphan-retention-and-remediation) for the retention rule and remediation path.
 
 Automatic re-sort:
 
@@ -516,7 +523,7 @@ Every id is processed independently. A failure for one id (for example, not foun
 Options:
 
 - `--prefix <prefix>` — Operate on a specific prefix (optional; applies uniformly to every id in the batch).
-- `--no-recursive` — Delete only the specified items, leaving children orphaned (applies to every id).
+- `--no-recursive` — Delete only the specified items, leaving children orphaned (applies to every id). This is the explicit orphaning opt-in — the default is recursive.
 - `--no-sync` — Skip the automatic post-delete sync for the whole batch.
 
 JSON mode returns a per-id `results` array plus an overall `success`/`deleted`/`failed` summary. When exactly one id is supplied, the legacy single-id fields (`deletedId`, `deletedWorkItem`, `recursive`) are preserved for backward compatibility. Duplicate ids, and ids already removed as a descendant earlier in the same batch, are reported as `skipped` (`already deleted`) rather than failing the command.
@@ -529,6 +536,14 @@ wl delete WL-ABC123 --no-recursive        # delete only the parent, leaving chil
 wl delete WL-ABC123 WL-DEF456 --no-sync   # delete a batch without syncing
 wl --json delete WL-ABC123                # single-id machine-readable confirmation
 ```
+
+#### Orphan guard and attribution (`--no-recursive`, R2)
+
+`wl delete` is recursive by default, so deleting a parent removes its descendants and no child is left pointing at a vanished parent. `--no-recursive` is the **explicit orphaning opt-in**: only the named items are deleted and their children survive as top-level items.
+
+When orphaning is applied, `wl delete --no-recursive` records a comment on **each surviving child** naming the **previous parent** and the explicit decision (plus the delete `--reason`, when given), so the survivorship is traceable back to the deleted parent through `wl show` and the TUI. Children that are already soft-deleted are skipped — they are not live orphans.
+
+After an explicit orphaning, apply the retention rule to each survivor (see [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#orphan-retention-and-remediation)): **promote** it when its subject is still live (`wl update <id> --parent null`, or `wl doctor dangling-parents --apply`), and **retire** it when it is superseded, its target is gone, or the abandoned parent's feature was never delivered (`wl close <id>` or `wl delete <id>`).
 
 ### `comment` (subcommands)
 
@@ -1490,9 +1505,10 @@ Options:
 Subcommands:
 
 - `upgrade [options]` — Preview or apply pending database schema migrations. Options: `--dry-run` (preview without applying), `--confirm` (apply non-interactively).
-- `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
+- `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned), `--cascade-children` (destructive opt-in: also hard-delete the live children of a pruned parent; without it a candidate that still has live children is **refused**, reported in `refusedIds`).
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
-- `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
+- `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--cascade-children` (with `--apply`: also hard-delete own-prefix children of a removed foreign item; without it a foreign item still referenced by an own-prefix live child is **protected**, reported in `protectedIds`), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
+- `dangling-parents [options]` — Detect items whose `parentId` references a non-existent (hard-deleted, soft-deleted or bogus sentinel) work item and optionally promote them to top-level. Options: `--dry-run` (report only — the default), `--apply` (detach each orphan by setting `parentId` to `null` and record an attribution comment). See [`doctor dangling-parents`](#doctor-dangling-parents-options).
 - `prefix [options]` — Preview (default, read-only) or apply a rename of the project's ID prefix, rewriting every ID-bearing record in the SQLite store plus the `prefix:` entry in `.worklog/config.yaml` and writing a revertible rename map. Options: `--to <prefix>` (target prefix; ASCII letters and digits only), `--apply` (request the rename and prompt for an explicit `y`; fails closed without a TTY), `--confirm` (apply without prompting; required for non-interactive runs), `--prefix <prefix>` (override the source prefix). See [`doctor prefix`](#doctor-prefix-options).
 - `audit-gaps [options]` — Read-only report of every `completed`/`in_review` item with **no audit record**, showing root vs `child of <parent-id>`, age (from `activityAt`/`updatedAt`), and coverage/waiver status (`uncovered` / `covered` / `waived`). Omits items with a fresh audit; a child covered by a fresh-audited direct parent is reported as `covered`, not flagged. Options: `--prefix <prefix>`. No `--apply` (read-only).
 - `cache [options]` — Report or prune the bounded read-cache **state directory** (`<cache-dir>/state`, one small counter file per worklog dir ever seen; see `CONFIG.md`). Options: `--prune` (remove stale counters and enforce the file bound; default is report-only), `--dry-run` (report-only; always wins when combined with `--prune`), `--max-files <n>` (counter bound, default 1000), `--ttl-days <n>` (remove counters untouched for this many days, default 7). Works without a worklog (pure cache hygiene).
@@ -1555,6 +1571,45 @@ When the read-cache state directory holds pruneable counters, a synthetic
 finding with `checkId: "read-cache.state"` and `type: "maintenance"` is appended
 the same additive way (`itemId: null`); its `message` names the counts and points
 at `wl doctor cache` / `wl doctor cache --prune`.
+
+### `doctor dangling-parents` [options]
+
+Detect work items whose `parentId` no longer resolves to a **live** row — a hard-deleted parent, a **soft-deleted** parent (`status: deleted` / non-empty `deletedBy`), or a legacy sentinel such as `WL-NULL` — and optionally promote the stranded children to top-level.
+
+```sh
+# Report dangling references (default, read-only)
+wl doctor dangling-parents --dry-run
+
+# Machine-readable report
+wl --json doctor dangling-parents --dry-run
+
+# Detach every orphan (promote to top-level) and record attribution
+wl doctor dangling-parents --apply
+```
+
+Options:
+
+- `--dry-run` — Report dangling references without modifying them. This is the default when neither `--dry-run` nor `--apply` is given.
+- `--apply` — Detach each orphan by setting its `parentId` to `null` (promotion) and record an attribution comment naming the previous parent and the rationale (`promote-because-live` or `retire-because-stale`).
+- `--prefix <prefix>` — Override the default prefix (optional).
+
+Children of a **soft-deleted** parent are reported too: a soft-deleted parent is as unreachable as a hard-deleted one for every rollup and report, so its live children are orphans (R3b). A soft-deleted *child* is already retired and is not re-reported.
+
+**Grouped output.** Alongside the per-child list, the report summarises orphans **grouped by the id of the lost parent** (the child count and child ids), so one lost parent reads as one row instead of N unrelated findings:
+
+```text
+Doctor dangling-parents: found 3 work item(s) with dangling parent references.
+  - WL-CHILD1: "…" (parentId = WL-GONE)
+  - WL-CHILD2: "…" (parentId = WL-GONE)
+  - WL-CHILD3: "…" (parentId = WL-GONE)
+
+Grouped orphan summary (children per lost parent):
+  - WL-GONE: 3 child(ren) [WL-CHILD1, WL-CHILD2, WL-CHILD3]
+```
+
+In `--json` mode the payload carries `items` (per child), `count` and `groups` (`{ parentId, count, childIds }`). `--apply` returns `fixed` (the detached ids with their previous parent) and writes the attribution comment on each.
+
+**Retention and remediation.** Detaching is only the mechanical repair; the operator then applies the retention rule — **promote** when the child's subject is still live, **retire** when it is superseded, its target is gone, or the abandoned parent's feature was never delivered. See [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#orphan-retention-and-remediation).
 
 ### `doctor prefix` [options]
 

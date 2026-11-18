@@ -14,6 +14,7 @@ This document describes the `wl doctor` command and the migration policy for Wor
 - **Pending migrations** — the top-level `wl doctor` reports pending schema migrations and outdated git hooks (read-only) and instructs you to run `wl doctor upgrade`; the `upgrade` subcommand detects and applies them.
 - **Outdated git hooks** — the top-level `wl doctor` reports worklog-managed hooks whose committed content differs from the installed hook, alongside pending migrations.
 - **Stale deleted items** — the `prune` subcommand removes soft-deleted items older than a configurable threshold.
+- **Orphaned children** — a `parent.missing-endpoint` finding for every live item whose `parentId` no longer resolves to a live row — including a **soft-deleted** parent (R3b) — summarised by lost-parent id (see [Orphan retention and remediation](#orphan-retention-and-remediation)).
 - **Audit gaps** — the `audit-gaps` subcommand reports `completed`/`in_review` items with no audit record (read-only).
 
 ## Running `wl doctor`
@@ -205,6 +206,56 @@ Cascade-or-refuse (R1, WL-0MWGRK52Z0078SJJ):
 See [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) for the full usage guide, recommended workflow, and the pollution-source sweep findings.
 
 Adding `--push` rewrites the project's remote worklog ref (`origin refs/worklog/data`, or the configured `syncBranch`) so it contains only the project's own items, bypassing the polluted remote history entirely (a fresh orphan commit is force-pushed and the local tracking ref is updated to match). `--push` requires `--apply` — rewriting the ref without cleaning the DB would publish foreign items. After the push, a subsequent `wl sync` pulls the clean ref and cannot re-import foreign items.
+
+### Orphan retention and remediation
+
+A child **survives** its parent — it becomes an orphan — whenever its `parentId` no longer resolves to a live row. That happens through an explicit `wl delete --no-recursive`, a hard delete that bypassed descendants (`wl doctor prune`, `wl doctor foreign-items --apply` before their cascade-or-refuse guards), or a soft-deleted parent (a soft-deleted parent is as unreachable as a hard-deleted one for every rollup and report).
+
+A stranded child belongs in no rollup, is never closed by its parent's closure path, and is invisible to every parent-level report, so an operator has to decide what it is for. That decision is the **retention rule**:
+
+- **Promote** when the child's subject is **still live** — the work is still worth doing, so it is promoted to a top-level item and stays reachable.
+- **Retire** when the child is **superseded** (a newer item already covers it), when its **target is gone** (the code/feature it pointed at no longer exists), or when the abandoned parent's **feature was never delivered** and the child has no standalone value.
+
+#### Reporting orphans (grouped by lost parent)
+
+`wl doctor` emits a per-item `parent.missing-endpoint` finding (type `missing-parent`) for every live item whose `parentId` does not resolve, carrying the lost parent id in `context.parentId` and a safe `parentId: null` proposed fix. Because orphans are inherently a **group** problem — one lost parent strands N children — the report also prints an **orphan summary grouped by the lost parent id**, with the child count and the child ids:
+
+```text
+Orphan summary (children grouped by lost parent):
+  - WL-GONE: 3 child(ren) [WL-CHILD1, WL-CHILD2, WL-CHILD3]
+```
+
+`wl doctor dangling-parents --dry-run` (the default) reports the same grouping — per-child rows plus one grouped row per lost parent, with the JSON `groups` array (`{ parentId, count, childIds }`) for automation. A soft-deleted **parent** is treated as unresolvable, so its live children appear in the report (R3b); a soft-deleted **child** is already retired and is not re-reported. `wl doctor --fix` detaches the safe findings, which empties the grouped summary once the repair is applied.
+
+#### Remediation path
+
+Detaching is only the mechanical repair; the retention rule decides what the child is for.
+
+**Promotion** (keep a live child) clears `parentId` so the item becomes top-level and stays reachable:
+
+```sh
+wl update WL-CHILD --parent null                 # detach a single item
+wl doctor dangling-parents --apply               # detach every orphan
+wl doctor --fix                                  # apply the safe parentId: null fixes
+```
+
+**Retirement** (drop a stale child) uses the normal lifecycle paths:
+
+```sh
+wl close WL-CHILD -r "Superseded by WL-NEW"      # resolve/retire
+wl delete WL-CHILD -r "Target removed"           # remove it outright
+```
+
+#### Attribution and rationale
+
+Every orphaning and promotion is recorded so the history is never lost:
+
+- `wl delete --no-recursive` records a comment on **each surviving child** naming the **previous parent** and the explicit decision (plus the delete reason, when given).
+- Promotion (`parentId -> null`, via `wl update --parent null`, `wl doctor dangling-parents --apply` or `wl doctor --fix`) records a comment naming the previous parent and the rationale token:
+  - `promote-because-live` — the child's subject is still live, so it was promoted rather than retired.
+  - `retire-because-stale` — the previous parent no longer resolves to a live item, so the stale link was retired and the live child promoted.
+
+The comments are best-effort: a comment-write failure never undoes the orphaning/promotion or aborts the command. See [`wl doctor dangling-parents`](CLI.md#doctor-dangling-parents-options) and the `delete`/`update` entries in [CLI.md](CLI.md) for the exact console and JSON output.
 
 ### Renaming the project prefix (`wl doctor prefix`)
 
