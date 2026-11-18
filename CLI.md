@@ -239,6 +239,7 @@ Options:
 - `--created-by <createdBy>` — Interoperability: created by (optional).
 - `--deleted-by <deletedBy>` — Interoperability: deleted by (optional).
 - `--delete-reason <deleteReason>` — Interoperability: delete reason (optional).
+- `--start-on <ISO-8601>` — Earliest instant at which the item may be worked on (optional; default: the item's `createdAt`). A **full** ISO-8601 timestamp with an explicit timezone is required, e.g. `2026-11-19T10:25:00Z` or `2026-11-19T11:25:00+01:00`; an offset is accepted and normalised to UTC `Z` form before storage. A bare date (`2026-11-19`) or a time with no timezone is rejected because its instant would be ambiguous. Pass `--start-on ""` to keep the `createdAt` default. See *Scheduling with `startOn`* below.
 - `--needs-producer-review <true|false>` — Set needsProducerReview flag (true|false|yes|no) (optional).
 - `--audit-text <text>` — Set structured audit text when creating an item. The audit result is stored in the `audit_results` table (the sole source of truth for audit state). Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
 - `--audit-file <file>` — Read audit text from a file (recommended for large or shell-sensitive content).
@@ -293,7 +294,9 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--start-on <ISO-8601>` (set the earliest start instant — same validation as `create`; `--start-on ""` clears it back to the item's `createdAt`), `--needs-producer-review <true|false>` (set needsProducerReview flag).
+
+> **`--start-on` validation is global (WL-0MWMGEREG002L2YA):** the value is parsed once, before any id is written, so an invalid value fails the whole command with a non-zero exit and leaves **every** id in a batch update untouched. The rejection is a JSON object with `error: "invalid-start-on"` and a `message` that names the flag, the received value and an accepted example.
 
 > **Soft-delete guard (SA-0MUJBLZC60085DI9):** a soft-deleted item (non-empty `deletedBy`) cannot be updated — `wl update` rejects it per-id with error `deleted-item` and a message naming the item, and exits non-zero. This prevents a stale status/stage update from resurrecting a deleted item for the dispatcher to re-select. An explicit change to the delete-attribution fields themselves (`--deleted-by` / `--delete-reason`) is still permitted.
 
@@ -360,6 +363,42 @@ Conditional updates (compare-and-swap guards):
 
 - `--if-assignee ""` is a meaningful expected value: it matches an item that is currently **unassigned** (empty assignee). It is distinguishable from omitting the flag (which applies no assignee guard), so an empty-string guard is a valid exclusive-claim token.
 - The guarded status values are normalized (e.g. `in_progress` matches a stored `in-progress`). `--if-assignee` matches the stored assignee exactly.
+
+### Scheduling with `startOn`
+
+Every work item carries a `startOn` instant — the earliest date/time at which it may
+be worked on (WL-0MWM0FDZK007BAD0). It defaults to the item's `createdAt`, so
+existing items behave exactly as before: a defaulted item is always "started".
+
+```sh
+# Schedule an item for a specific instant (offset accepted, stored as UTC)
+wl create -t "Re-measure cache hit rate" --start-on 2026-11-19T11:25:00+01:00
+wl update WL-ABC123 --start-on 2026-11-19T10:25:00Z
+
+# Clear the schedule back to the item's createdAt
+wl update WL-ABC123 --start-on ""
+```
+
+Validation rules:
+
+- The value must be a **full** ISO-8601 timestamp with an explicit timezone —
+  `Z` or an offset such as `+01:00` — e.g. `2026-11-19T10:25:00Z`. An offset is
+  accepted and normalised to UTC `Z` form before storage, so the same instant
+  always reads back identically.
+- A **bare date** (`2026-11-19`) is rejected: it is not a date/time, and the
+  midnight it would imply is ambiguous across timezones. A time with **no**
+  timezone designator is rejected for the same reason, and an unparseable value
+  is rejected outright.
+- A rejected value fails with a non-zero exit and a message naming the flag, the
+  received value and an accepted example (JSON: `error: "invalid-start-on"` plus
+  `message`, `flag`, `value` and `reason` fields). Nothing is written.
+- `--start-on ""` on `wl update` clears the value back to the item's
+  `createdAt`; on `wl create` it keeps the `createdAt` default.
+
+`wl show <id>` is **never** filtered by `startOn`: an item is always retrievable
+by id, and a scheduled item shows its `Starts` instant in human output (the JSON
+surface always carries `startOn`). Default filtering of not-yet-started items in
+`list`/`search`/`next` and the claim guard are separate slices of the same epic.
 
 ### `reviewed` <id> [value]
 

@@ -28,6 +28,8 @@ export interface CreateOptions {
   createdBy?: string;
   deletedBy?: string;
   deleteReason?: string;
+  /** Earliest instant the item may proceed (full ISO-8601; offset accepted, normalised to UTC). Omit for the `createdAt` default; "" keeps the default. */
+  startOn?: string;
   /** Accepts true|false|yes|no to set needsProducerReview flag for the new item */
   needsProducerReview?: string;
   /** Legacy audit flag (kept for compatibility) */
@@ -114,6 +116,8 @@ export interface UpdateOptions {
   createdBy?: string;
   deletedBy?: string;
   deleteReason?: string;
+  /** Earliest instant the item may proceed (full ISO-8601; offset accepted, normalised to UTC); "" clears back to createdAt */
+  startOn?: string;
   /** Legacy audit flag (kept for compatibility) */
   audit?: string;
   /** Preferred audit flag for structured writes */

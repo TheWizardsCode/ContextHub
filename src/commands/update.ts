@@ -16,6 +16,7 @@ import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMe
 import { computeContentFingerprint } from '../audit-fingerprint.js';
 import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rules.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
+import { parseStartOnOption, START_ON_FLAG, START_ON_TIMEZONE_EXAMPLE, START_ON_UTC_EXAMPLE } from '../validators/start-on.js';
 import { downgradeCriticalIfTerminal, isTerminalState } from '../terminal-priority.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
 // Shared soft-delete predicate (WL-0MW7S20IC001F3AP): the write-side guard must
@@ -46,6 +47,7 @@ export default function register(ctx: PluginContext): void {
     .option('--created-by <createdBy>', 'New created by (interoperability field)')
     .option('--deleted-by <deletedBy>', 'New deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'New delete reason (interoperability field)')
+    .option('--start-on <ISO-8601>', `New earliest instant the item may be worked on (WL-0MWM0FDZK007BAD0): a full ISO-8601 timestamp with an explicit timezone, e.g. ${START_ON_UTC_EXAMPLE} or ${START_ON_TIMEZONE_EXAMPLE}; an offset is accepted and normalised to UTC. Pass "" to clear it back to the item's createdAt.`)
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
@@ -59,14 +61,14 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','startOn','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync'
+        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','startOn','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync'
       ];
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
@@ -185,6 +187,27 @@ export default function register(ctx: PluginContext): void {
       const createdByCandidate = hasProvided('createdBy') ? options.createdBy : undefined;
       const deletedByCandidate = hasProvided('deletedBy') ? options.deletedBy : undefined;
       const deleteReasonCandidate = hasProvided('deleteReason') ? options.deleteReason : undefined;
+      // `--start-on` (WL-0MWMGEREG002L2YA): validated once, globally, before
+      // any id is written — an invalid value must fail the whole command with
+      // a non-zero exit and leave every id untouched (AC2). The clear form
+      // (`""`) is a meaningful value: the store turns it into the item's
+      // `createdAt`.
+      let startOnCandidate: string | undefined;
+      if (hasProvided('startOn')) {
+        const parsedStartOn = parseStartOnOption(String(options.startOn ?? ''));
+        if (!parsedStartOn.ok) {
+          output.error(parsedStartOn.message, {
+            success: false,
+            error: 'invalid-start-on',
+            message: parsedStartOn.message,
+            flag: START_ON_FLAG,
+            value: parsedStartOn.value,
+            reason: parsedStartOn.reason,
+          });
+          process.exit(1);
+        }
+        startOnCandidate = parsedStartOn.value;
+      }
       const auditCandidate = hasProvided('auditText') ? options.auditText : (hasProvided('audit') ? options.audit : undefined);
       let auditWritten = false;
       let auditEntryForOutput: {
@@ -272,6 +295,7 @@ export default function register(ctx: PluginContext): void {
         if (createdByCandidate !== undefined) updates.createdBy = createdByCandidate;
         if (deletedByCandidate !== undefined) updates.deletedBy = deletedByCandidate;
         if (deleteReasonCandidate !== undefined) updates.deleteReason = deleteReasonCandidate;
+        if (startOnCandidate !== undefined) updates.startOn = startOnCandidate;
         if (needsProducerReviewCandidate !== undefined) updates.needsProducerReview = needsProducerReviewCandidate;
 
         // Soft-delete guard (SA-0MUJBLZC60085DI9 AC1): a soft-deleted work

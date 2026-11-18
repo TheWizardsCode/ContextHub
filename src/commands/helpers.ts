@@ -549,6 +549,14 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   ];
   frontmatter.push(['Risk', item.risk || '—']);
   frontmatter.push(['Effort', item.effort || '—']);
+  // A scheduled item shows the instant it becomes eligible. An unscheduled
+  // item's `startOn` is its `createdAt`, so the row is omitted to keep the
+  // output stable for every pre-existing item (WL-0MWMGEREG002L2YA). The
+  // comparison is by instant, not by string, so a legacy `createdAt` written
+  // in a non-canonical form is still recognised as "no schedule".
+  if (item.startOn && Date.parse(item.startOn) !== Date.parse(item.createdAt)) {
+    frontmatter.push(['Starts', item.startOn]);
+  }
   if (item.assignee) frontmatter.push(['Assignee', item.assignee]);
   if (item.parentId) frontmatter.push(['Parent', item.parentId]);
   if (item.tags && item.tags.length > 0) frontmatter.push(['Tags', item.tags.join(', ')]);
