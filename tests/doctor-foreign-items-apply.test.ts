@@ -196,6 +196,87 @@ describe('applyForeignItemCleanup', () => {
   });
 });
 
+describe('applyForeignItemCleanup cascade-or-refuse (R1)', () => {
+  let tempDir: string;
+  let dbPath: string;
+  let jsonlPath: string;
+  let db: WorklogDatabase;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    dbPath = createTempDbPath(tempDir);
+    jsonlPath = createTempJsonlPath(tempDir);
+    db = new WorklogDatabase('TEST', dbPath, jsonlPath, true, true);
+  });
+
+  afterEach(() => {
+    db.close();
+    cleanupTempDir(tempDir);
+  });
+
+  function seedForeignParentWithOwnChild(): void {
+    db.import(
+      [
+        makeItem('WL-101'),
+        makeItem('TEST-KID', { parentId: 'WL-101' }),
+        makeItem('WL-102'),
+        makeItem('TEST-OWN'),
+      ],
+      [],
+      [],
+    );
+  }
+
+  it('protects a foreign parent referenced by an own-prefix live child by default', () => {
+    seedForeignParentWithOwnChild();
+    const report = buildForeignItemReport(db.getAll(), 'TEST', false);
+
+    const result = applyForeignItemCleanup(db, report);
+
+    // The referenced foreign parent is protected; the unreferenced one is removed.
+    expect(result.protectedIds).toEqual(['WL-101']);
+    expect(result.removedIds).toEqual(['WL-102']);
+    expect(result.cascadedIds).toEqual([]);
+    expect(result.success).toBe(true);
+
+    const ids = db.getAll().map(i => i.id);
+    expect(ids).toEqual(expect.arrayContaining(['WL-101', 'TEST-KID', 'TEST-OWN']));
+    expect(ids).not.toContain('WL-102');
+    // The own child keeps a resolvable parent.
+    expect(db.get('TEST-KID')?.parentId).toBe('WL-101');
+  });
+
+  it('hard-deletes the foreign parent and its own-prefix children with cascadeChildren', () => {
+    seedForeignParentWithOwnChild();
+    const report = buildForeignItemReport(db.getAll(), 'TEST', false);
+
+    const result = applyForeignItemCleanup(db, report, { cascadeChildren: true });
+
+    expect(result.removedIds.sort()).toEqual(['WL-101', 'WL-102']);
+    expect(result.cascadedIds).toEqual(['TEST-KID']);
+    expect(result.success).toBe(true);
+
+    // Both foreign items and the cascaded own child are physically removed;
+    // the unrelated own item survives.
+    expect(db.getAll().map(i => i.id)).toEqual(['TEST-OWN']);
+  });
+
+  it('does not protect a foreign parent whose own-prefix child is itself deleted', () => {
+    db.import(
+      [makeItem('WL-101'), makeItem('TEST-KID', { parentId: 'WL-101', status: 'deleted' })],
+      [],
+      [],
+    );
+    const report = buildForeignItemReport(db.getAll(), 'TEST', false);
+
+    const result = applyForeignItemCleanup(db, report);
+
+    // A deleted child is not live; the foreign item is removed normally.
+    expect(result.protectedIds).toEqual([]);
+    expect(result.removedIds).toEqual(['WL-101']);
+  });
+});
+
 describe('applyForeignItemCleanup with FTS availability check', () => {
   let tempDir: string;
   let dbPath: string;

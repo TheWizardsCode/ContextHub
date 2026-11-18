@@ -3,13 +3,11 @@
  *
  * Serves WL-0MWGRJCXO006A9ZV (fixture slice of WL-0MWFMKWZA005ZT4T) and pins
  * the AC1 / R1 contract implemented by the sibling slice
- * WL-0MWGRK52Z0078SJJ. The specs below are **RED-pinned with
- * `it.fails(...)`** by this test-first child: their assertions fail on
- * current main (proved in the raw red run — `refusedIds`/`protectedIds`
- * undefined, `--cascade-children` rejected as unknown) while the suite stays
- * green for the finish and dev-push gates. WL-0MWGRK52Z0078SJJ must flip
- * `it.fails(` → `it(` on all four specs as the guard lands (repo convention,
- * cf. tests/cli/doctor-prefix.test.ts).
+ * WL-0MWGRK52Z0078SJJ. The specs below were **RED-pinned with
+ * `it.fails(...)`** by the test-first child (their assertions fail on current
+ * main). WL-0MWGRK52Z0078SJJ flipped `it.fails(` → `it(` on all four specs as
+ * the guard landed (repo convention, cf. tests/cli/doctor-prefix.test.ts) and
+ * they now verify the landed behaviour.
  *
  * ## Contract pinned here
  *
@@ -31,7 +29,8 @@
  *
  * On current main `refusedIds`/`protectedIds` do not exist and every
  * candidate is hard-deleted regardless of live children, so every assertion
- * below fails (or the `--cascade-children` flag is rejected as unknown).
+ * below failed (or the `--cascade-children` flag was rejected as unknown)
+ * before WL-0MWGRK52Z0078SJJ landed the guard.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -71,7 +70,7 @@ describe('orphan-guard: hard-delete admin paths (R1)', () => {
 
   // ── wl doctor prune ─────────────────────────────────────────────────────
 
-  it.fails('prune refuses to hard-delete a parent with live children (default)', async () => {
+  it('prune refuses to hard-delete a parent with live children (default)', async () => {
     const { parent, children } = PRUNE_PARENT_WITH_CHILDREN;
     seedPruneParentWithLiveChildren(tempState.tempDir);
 
@@ -92,7 +91,7 @@ describe('orphan-guard: hard-delete admin paths (R1)', () => {
     }
   });
 
-  it.fails('prune --cascade-children hard-deletes the parent AND its live children (explicit opt-in)', async () => {
+  it('prune --cascade-children hard-deletes the parent AND its live children (explicit opt-in)', async () => {
     const { parent, children } = PRUNE_PARENT_WITH_CHILDREN;
     seedPruneParentWithLiveChildren(tempState.tempDir);
 
@@ -113,7 +112,7 @@ describe('orphan-guard: hard-delete admin paths (R1)', () => {
 
   // ── wl doctor foreign-items --apply ────────────────────────────────────
 
-  it.fails('foreign-items --apply protects a foreign parent referenced by an own child (default)', async () => {
+  it('foreign-items --apply protects a foreign parent referenced by an own child (default)', async () => {
     const { foreignParent, ownChild, plainForeign, plainOwn } = FOREIGN_PARENT_WITH_OWN_CHILD;
     seedForeignParentWithOwnChild(tempState.tempDir);
 
@@ -135,7 +134,7 @@ describe('orphan-guard: hard-delete admin paths (R1)', () => {
     expect(JSON.parse(showOut).workItem.parentId).toBe(foreignParent);
   });
 
-  it.fails('foreign-items --apply --cascade-children removes the foreign parent and its own child (explicit opt-in)', async () => {
+  it('foreign-items --apply --cascade-children removes the foreign parent and its own child (explicit opt-in)', async () => {
     const { foreignParent, ownChild, plainForeign, plainOwn } = FOREIGN_PARENT_WITH_OWN_CHILD;
     seedForeignParentWithOwnChild(tempState.tempDir);
 

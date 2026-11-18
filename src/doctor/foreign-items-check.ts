@@ -132,11 +132,16 @@ export interface ForeignItemApplyResult {
   removedCount: number;
   removedByPrefix: Record<string, number>;
   removedIds: string[];
+  /** Foreign ids kept because an own-prefix child still references them (default protect). */
+  protectedIds: string[];
+  /** Own-prefix children hard-deleted together with their foreign parent (cascade opt-in). */
+  cascadedIds: string[];
   errors: Array<{ id: string; error: string }>;
 }
 
 /**
- * Hard-delete all foreign items listed in the report with full cascade.
+ * Hard-delete foreign items listed in the report, protecting or cascading
+ * own-prefix children (cascade-or-refuse, R1).
  *
  * For each foreign item, the following are removed:
  * - the workitem row (via store.deleteWorkItem, which also removes
@@ -144,44 +149,116 @@ export interface ForeignItemApplyResult {
  * - the audit_results row (NOT cascaded by deleteWorkItem)
  * - the FTS index entry (NOT cascaded by deleteWorkItem)
  *
- * Own items are never touched. The operation is destructive and should be
- * gated by an explicit `--apply` flag by the caller.
+ * Cascade-or-refuse guard: when a foreign item is still referenced as the
+ * `parentId` of an own-prefix child (a child whose id prefix matches the
+ * project prefix), the foreign item is **protected** by default — it stays in
+ * the database and is reported in `protectedIds`. With the explicit
+ * `cascadeChildren` opt-in, the foreign item is removed together with its
+ * own-prefix descendants (hard-deleted), so no live own item is ever left
+ * pointing at a vanished parent.
+ *
+ * Own items are never touched (except as cascaded descendants of a foreign
+ * parent under the explicit opt-in). The operation is destructive and should
+ * be gated by an explicit `--apply` flag by the caller.
  *
  * @param db - The WorklogDatabase instance (store accessed via `(db as any).store`).
  * @param report - The foreign-item report (only `foreignIds` and `prefix` are used).
- * @returns Before/after counts, per-prefix removed counts, and any errors.
+ * @param opts - `cascadeChildren`: hard-delete own-prefix descendants instead
+ *               of protecting the foreign parent (default false).
+ * @returns Before/after counts, per-prefix removed counts, protected/cascaded
+ *          ids, and any errors.
  */
 export function applyForeignItemCleanup(
   db: { getAll(): WorkItem[] },
   report: Pick<ForeignItemReport, 'foreignIds' | 'prefix'>,
+  opts: { cascadeChildren?: boolean } = {},
 ): ForeignItemApplyResult {
+  const cascadeChildren = opts.cascadeChildren === true;
   const store = (db as any).store;
   const totalBefore = db.getAll().length;
   const foreignBefore = report.foreignIds.length;
   const ownBefore = totalBefore - foreignBefore;
+  const configPrefix = report.prefix;
+
+  // Index children by parent so we can find own-prefix children that
+  // reference a foreign id (cascade-or-refuse guard).
+  const childrenByParent = new Map<string, WorkItem[]>();
+  for (const item of db.getAll()) {
+    if (!item.parentId) continue;
+    const siblings = childrenByParent.get(item.parentId) ?? [];
+    siblings.push(item);
+    childrenByParent.set(item.parentId, siblings);
+  }
+  const isOwnItem = (id: string): boolean => !isForeignItem(id, configPrefix);
+  // Recursively collect own-prefix descendants of a foreign id.
+  const ownDescendantsOf = (id: string): WorkItem[] => {
+    const out: WorkItem[] = [];
+    const stack = [...(childrenByParent.get(id) ?? [])];
+    while (stack.length > 0) {
+      const child = stack.pop()!;
+      if (!isOwnItem(child.id)) continue; // foreign children are handled by the loop itself
+      out.push(child);
+      stack.push(...(childrenByParent.get(child.id) ?? []));
+    }
+    return out;
+  };
+  // A foreign id is protected when an own-prefix child (not itself deleted)
+  // still points at it — deleting it would silently orphan that child.
+  const hasLiveOwnChild = (id: string): boolean =>
+    (childrenByParent.get(id) ?? []).some(c => isOwnItem(c.id) && c.status !== 'deleted');
 
   const removedIds: string[] = [];
   const removedByPrefix: Record<string, number> = {};
+  const protectedIds: string[] = [];
+  const cascadedIds: string[] = [];
   const errors: Array<{ id: string; error: string }> = [];
+  const alreadyRemoved = new Set<string>();
+
+  const hardDelete = (targetId: string): boolean => {
+    // Cascade beyond deleteWorkItem: audit results and FTS entries are NOT
+    // removed by deleteWorkItem and must be cleaned explicitly.
+    if (store && typeof store.deleteAuditResult === 'function') {
+      try { store.deleteAuditResult(targetId); } catch (_) { /* best-effort */ }
+    }
+    if (store && typeof store.deleteFtsEntry === 'function') {
+      try { store.deleteFtsEntry(targetId); } catch (_) { /* best-effort */ }
+    }
+    let ok = false;
+    if (store && typeof store.deleteWorkItem === 'function') {
+      ok = store.deleteWorkItem(targetId);
+    }
+    return ok;
+  };
 
   for (const id of report.foreignIds) {
     const prefix = extractIdPrefix(id);
     const key = (prefix ?? '').toUpperCase();
+
+    // Cascade-or-refuse: protect the foreign parent by default when an
+    // own-prefix live child references it.
+    if (hasLiveOwnChild(id) && !cascadeChildren) {
+      protectedIds.push(id);
+      continue;
+    }
+
     try {
-      // Cascade beyond deleteWorkItem: audit results and FTS entries are NOT
-      // removed by deleteWorkItem and must be cleaned explicitly.
-      if (store && typeof store.deleteAuditResult === 'function') {
-        try { store.deleteAuditResult(id); } catch (_) { /* best-effort */ }
+      // Cascade opt-in: hard-delete own-prefix descendants first, then the
+      // foreign item itself — no own child is left pointing at a vanished parent.
+      if (cascadeChildren) {
+        for (const descendant of ownDescendantsOf(id)) {
+          if (alreadyRemoved.has(descendant.id)) continue;
+          if (hardDelete(descendant.id)) {
+            cascadedIds.push(descendant.id);
+            alreadyRemoved.add(descendant.id);
+          } else {
+            errors.push({ id: descendant.id, error: 'deleteWorkItem returned false (item not found)' });
+          }
+        }
       }
-      if (store && typeof store.deleteFtsEntry === 'function') {
-        try { store.deleteFtsEntry(id); } catch (_) { /* best-effort */ }
-      }
-      let ok = false;
-      if (store && typeof store.deleteWorkItem === 'function') {
-        ok = store.deleteWorkItem(id);
-      }
-      if (ok) {
+      if (alreadyRemoved.has(id)) continue;
+      if (hardDelete(id)) {
         removedIds.push(id);
+        alreadyRemoved.add(id);
         removedByPrefix[key] = (removedByPrefix[key] ?? 0) + 1;
       } else {
         errors.push({ id, error: 'deleteWorkItem returned false (item not found)' });
@@ -209,6 +286,8 @@ export function applyForeignItemCleanup(
     removedCount: removedIds.length,
     removedByPrefix,
     removedIds,
+    protectedIds,
+    cascadedIds,
     errors,
   };
 }

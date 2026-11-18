@@ -152,7 +152,21 @@ Notes on GitHub-linked items:
 
 - By default `wl doctor prune` skips any deleted work item that is linked to a GitHub issue (has `githubIssueNumber`) when the local `updatedAt` is newer than the recorded `githubIssueUpdatedAt` on the work item. This prevents accidentally orphaning GitHub issues that have local changes not yet reflected on GitHub.
 
-JSON output from `--json` includes a `skippedIds` array when such items are detected during a dry-run or actual prune.
+Cascade-or-refuse (R1, WL-0MWGRK52Z0078SJJ):
+
+- By default a candidate that still has **live children** (children that are not themselves deleted) is **refused** — it is not hard-deleted, so its children keep a resolvable `parentId`. Refused ids are reported in the `refusedIds` array (dry-run and actual) and never appear in `prunedIds`.
+- `--cascade-children` is the explicit destructive opt-in: the candidate **and all of its descendants are hard-deleted with it** (deepest-first), so no child is left pointing at a parent that no longer exists. There is no default cascade.
+- After a prune that actually removes rows, any lingering local `.worklog/worklog-data.jsonl` is dropped (ephemeral JSONL pattern) so a later open of an emptied store cannot re-import it and resurrect the pruned rows.
+
+```bash
+# Preview (refused candidates are listed, not pruned)
+wl doctor prune --dry-run
+
+# Force-prune a parent together with its live children (destructive)
+wl doctor prune --days 90 --cascade-children
+```
+
+JSON output from `--json` includes `skippedIds` (GitHub-linked with newer local changes) and `refusedIds` (cascade-or-refuse guard) arrays during a dry-run or actual prune.
 
 ### Detecting foreign work items (`wl doctor foreign-items`)
 
@@ -171,6 +185,9 @@ wl doctor foreign-items --prefix SA
 # Hard-delete all foreign items (destructive; explicit opt-in required)
 wl doctor foreign-items --apply
 
+# Also hard-delete own-prefix children of a removed foreign item (destructive)
+wl doctor foreign-items --apply --cascade-children
+
 # Clean the DB and rewrite the remote worklog ref so it contains only own items
 wl doctor foreign-items --apply --push
 ```
@@ -178,6 +195,12 @@ wl doctor foreign-items --apply --push
 The report includes total items scanned, the foreign count, counts grouped by prefix, the deleted/non-deleted breakdown, and the full list of foreign IDs. Dry-run mode never modifies the database.
 
 `--apply` hard-deletes every foreign item with full cascade: the work item row, its comments, dependency edges referencing it, its `audit_results` row, and its FTS index entry. Own items are never touched. The result reports before/after totals, per-prefix removed counts, and any errors. Run `--dry-run` first to preview exactly what will be removed.
+
+Cascade-or-refuse (R1, WL-0MWGRK52Z0078SJJ):
+
+- By default a foreign item that is still referenced as the `parentId` of an **own-prefix live child** is **protected** — it is not removed, and its own-prefix child keeps a resolvable parent. Protected ids are reported in the `protectedIds` array and never appear in `removedIds`.
+- `--cascade-children` is the explicit destructive opt-in: the foreign item is removed together with its own-prefix descendants (hard-deleted), reported in `cascadedIds`, so no live own item is left pointing at a vanished foreign parent. There is no default cascade.
+- After an `--apply` that actually removes rows (and does not `--push`), any lingering local `.worklog/worklog-data.jsonl` is dropped (ephemeral JSONL pattern) so a later open of an emptied store cannot resurrect the removed rows.
 
 See [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) for the full usage guide, recommended workflow, and the pollution-source sweep findings.
 
