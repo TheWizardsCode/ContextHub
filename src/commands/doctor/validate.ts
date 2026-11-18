@@ -25,7 +25,7 @@ import { loadStatusStageRules } from '../../status-stage-rules.js';
 import { validateStatusStageItems } from '../../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../../doctor/dependency-check.js';
 import { resolveForeignItem, prefixOfWorkItemId } from '../../cross-repo/foreign-store.js';
-import { validateParentReferences } from '../../doctor/parent-check.js';
+import { validateParentReferences, groupOrphanFindings } from '../../doctor/parent-check.js';
 import { validatePodcastScripts } from '../../doctor/podcast-scripts-check.js';
 import { probeAuditFingerprintSkewFinding } from '../../doctor/audit-fingerprint-skew-check.js';
 import { withStoreMutationLock } from '../../mutation-lock.js';
@@ -416,6 +416,21 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
           if (finding.proposedFix) {
             console.log(`    Suggested: ${JSON.stringify(finding.proposedFix)}`);
           }
+        }
+      }
+
+      // Grouped orphan summary (R3/R3b, WL-0MWGRKLLG0035PLG): the per-item
+      // findings above stay for actionability, but orphans are inherently a
+      // group problem — a single lost parent strands N children — so summarise
+      // them by lost-parent id. `--fix` detaches safe findings above, leaving
+      // this summary empty once the repair has been applied.
+      const orphanGroups = groupOrphanFindings(findings);
+      if (orphanGroups.length > 0) {
+        console.log('\nOrphan summary (children grouped by lost parent):');
+        for (const group of orphanGroups) {
+          console.log(
+            `  - ${group.parentId}: ${group.count} child(ren) [${group.childIds.join(', ')}]`,
+          );
         }
       }
 

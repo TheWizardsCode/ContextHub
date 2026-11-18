@@ -15,7 +15,7 @@
 
 import type { Command } from 'commander';
 import type { WorklogDatabase } from '../../database.js';
-import { validateParentReferences } from '../../doctor/parent-check.js';
+import { groupOrphanFindings, validateParentReferences } from '../../doctor/parent-check.js';
 import { withStoreMutationLock } from '../../mutation-lock.js';
 
 /**
@@ -61,15 +61,20 @@ export function registerDanglingParentsCommand(
       const all = db.getAll();
       const byId = new Map(all.map(item => [item.id, item]));
 
-      const dangling = validateParentReferences(all).map(finding => ({
+      const orphanFindings = validateParentReferences(all);
+      const dangling = orphanFindings.map(finding => ({
         id: finding.itemId,
         title: byId.get(finding.itemId)?.title || '',
         parentId: String((finding.context as { parentId?: unknown }).parentId ?? ''),
       }));
+      // R3/R3b (WL-0MWGRKLLG0035PLG): group the stranded children by the id of
+      // the parent they lost, so one lost parent reads as one row with a
+      // child count instead of N unrelated findings.
+      const groups = groupOrphanFindings(orphanFindings);
 
       if (dangling.length === 0) {
         if (utils.isJsonMode()) {
-          output.json({ success: true, items: [], fixed: [] });
+          output.json({ success: true, items: [], groups: [], fixed: [] });
           return;
         }
         console.log('Doctor dangling-parents: no dangling parent references found.');
@@ -79,7 +84,7 @@ export function registerDanglingParentsCommand(
       // Default is dry-run; --apply is required to change anything.
       if (opts.dryRun || !opts.apply) {
         if (utils.isJsonMode()) {
-          const out: any = { dryRun: true, items: dangling, count: dangling.length };
+          const out: any = { dryRun: true, items: dangling, count: dangling.length, groups };
           if (!opts.dryRun) {
             out.hint = 'Use --apply to fix by setting parentId to null';
           }
@@ -91,6 +96,13 @@ export function registerDanglingParentsCommand(
         );
         for (const d of dangling) {
           console.log(`  - ${d.id}: "${d.title}" (parentId = ${d.parentId})`);
+        }
+        console.log('');
+        console.log('Grouped orphan summary (children per lost parent):');
+        for (const group of groups) {
+          console.log(
+            `  - ${group.parentId}: ${group.count} child(ren) [${group.childIds.join(', ')}]`,
+          );
         }
         if (!opts.dryRun) {
           console.log('');
