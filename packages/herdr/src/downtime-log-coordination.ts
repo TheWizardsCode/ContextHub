@@ -209,6 +209,39 @@ export interface CoordinationLogEntry {
     itemsRead: number;
   };
   /**
+   * Per-project fairness accounting (WL-0MWKY141H002LULI, parent
+   * WL-0MWKE9VF800101V9 AC3): the root `selectLeastRecentlyServed` put first
+   * this tick. Recorded on EVERY dispatch decision (successful dispatch and
+   * `no-dispatch` refusal) so a night's rotation is auditable from the
+   * decision log alone. `null`/absent only when the tick had no candidate root
+   * to select — never fabricated. Additive/optional: earlier entry shapes are
+   * unchanged.
+   */
+  selectedRoot?: string | null;
+  /**
+   * Per-project fairness accounting (WL-0MWKY141H002LULI, AC3): the root whose
+   * offer was CONSUMED by this tick. Present on a successful dispatch
+   * decision and ABSENT on a `no-dispatch` decision (never fabricated).
+   * Additive/optional.
+   */
+  dispatchingRoot?: string;
+  /**
+   * Per-project fairness accounting (WL-0MWKY141H002LULI, AC3): the
+   * dispatching root's consecutive run length INCLUDING this dispatch, derived
+   * from the tail of this decision log (see `downtime-worker.fairness.ts` for
+   * the recorded design rationale). `1` means the previous dispatch went to a
+   * different root, or there was none. Present only alongside
+   * `dispatchingRoot`. Additive/optional.
+   */
+  consecutiveRunLength?: number;
+  /**
+   * Tick outcome token (WL-0MWKY141H002LULI, AC3): `dispatched` on a
+   * successful dispatch decision, `no-dispatch` on a refusal. Older entries
+   * (and non-decision records) omit it; `operation` and `reason` continue to
+   * carry the pre-feature vocabulary unchanged. Additive/optional.
+   */
+  outcome?: 'dispatched' | 'no-dispatch';
+  /**
    * Panes the long-running detector flagged when the starvation signal fired
    * (WL-0MVKNC2N50025HXE AC2/AC3): each entry names the pane, item, kind and
    * how long the item has gone without progress. Bounded; absent when the

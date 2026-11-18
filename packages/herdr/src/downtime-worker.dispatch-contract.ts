@@ -749,6 +749,25 @@ export interface DowntimeDispatchOutcome {
   hostCpuPercent?: number;
   hostCpuSource?: HostCpuSource;
   cpuGatePercent?: number;
+
+  /**
+   * Per-project fairness (WL-0MWKY141H002LULI, parent WL-0MWKE9VF800101V9
+   * AC3): the worklog root whose offer this dispatch ATTEMPTED (the entry's
+   * root on the offer path, the swept root on the registered-root sweep, the
+   * leader's own root on the own-backlog/continuation path). Recorded as
+   * `dispatchingRoot` on a successful dispatch decision only — a refusal keeps
+   * it out of the entry, so `no-dispatch` never fabricates a dispatching root.
+   * Additive and optional — every existing outcome shape is unchanged.
+   */
+  attemptedRoot?: string;
+  /**
+   * Per-project fairness selection override (WL-0MWKY141H002LULI AC3): the
+   * root the REGISTERED-ROOT SWEEP put first, whose candidate universe is the
+   * registry rather than the offer list. Offered-path outcomes omit it and the
+   * orchestrator derives the selection from its own offer snapshot. Additive
+   * and optional.
+   */
+  selectedRoot?: string | null;
 }
 
 // ── Continuable holds (WL-0MWBT76WY00298AY AC1) ────────────────────────

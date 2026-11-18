@@ -4145,6 +4145,35 @@ exactly one charge of that root's cursor entry, and a charge never happens
 without a consumed offer (`dispatched` / `spawn-failed` /
 `marker-write-failed`).
 
+**Per-project fairness metric (WL-0MWKY141H002LULI, parent
+WL-0MWKE9VF800101V9 AC3).** Every coordination decision entry — a successful
+dispatch as well as a `no-dispatch` refusal — records the fairness fields, so a
+night's per-project distribution is auditable from
+`.worklog/downtime-coordination.log` alone, without replaying the dispatcher:
+
+| Field | On a dispatch | On `no-dispatch` |
+|---|---|---|
+| `outcome` | `dispatched` | `no-dispatch` |
+| `selectedRoot` | the root `selectLeastRecentlyServed` put first | the same selection (`null` when no candidate root existed) |
+| `dispatchingRoot` | the root whose offer was consumed | **absent** (never fabricated) |
+| `consecutiveRunLength` | the dispatching root's run length INCLUDING this dispatch (`1` = the previous dispatch went to a different root) | absent |
+
+A successful dispatch is written as a non-refusal **observation**
+(`blocking: false`, so the header token and the starvation tracker are
+untouched) and is **never rate-limited** — every slot must be recorded. The
+registered-root sweep records the same fields, with `selectedRoot` being the
+sweep's own least-recently-served root rather than the offer-list selection.
+
+**Run-length source: the decision-log tail.** `consecutiveRunLength` is derived
+from the tail of the same decision log (a bounded, fail-open read) rather than a
+second durable cursor. That keeps the on-disk round-robin cursor format
+`{ "<worklogRoot>": "<ISO-8601>" }` unchanged, adds no file or lock, and gives
+restart-safe history that an auditor can reproduce. A missing/unreadable log
+degrades to `1` and never blocks a dispatch. Rejected alternative: a durable
+per-root run cursor (extra file, extra lock acquisition, and a second source of
+truth that can drift from the entry it describes). Legacy (non-coordination)
+direct-mode entries keep their existing shape.
+
 **Which outcomes charge (WL-0MWFIZ8H5005FVNN).** The charge point is the
 **consumed offer**, decided by one shared predicate
 (`isConsumedDispatchOutcome`) used by both the leader offer loop and the

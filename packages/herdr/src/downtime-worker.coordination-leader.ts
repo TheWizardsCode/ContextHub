@@ -737,7 +737,7 @@ async function dispatchFromCoordinationGated(
           advanceRoundRobinCursor(opts.coordinationDir, worklogRoot, now);
         }
         return withOfferRejections(
-          outcome,
+          { ...outcome, attemptedRoot: worklogRoot },
           offerRejections.slice(rejectionsBeforeEntry),
         );
       }

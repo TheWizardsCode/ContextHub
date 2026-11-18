@@ -380,6 +380,16 @@ export interface DecisionEntryFields extends CapacityEvidence {
   ownerPresent: boolean;
   runningPanes: number | null;
   contentionDepth: number;
+  /**
+   * Per-project fairness accounting (WL-0MWKY141H002LULI, parent
+   * WL-0MWKE9VF800101V9 AC3): the root selection put first this tick, the root
+   * whose offer was consumed (successful dispatches only) and that root's
+   * consecutive run length including this dispatch. Additive and optional —
+   * every non-fairness decision entry keeps its existing shape.
+   */
+  selectedRoot?: string | null;
+  dispatchingRoot?: string;
+  consecutiveRunLength?: number;
   /** Depth-aware audit-batch metadata (parent WL-0MVEDM8OT007WDRS AC5). */
   auditBatchDepth?: number;
   auditBatchCap?: number;

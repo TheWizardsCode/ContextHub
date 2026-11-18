@@ -360,6 +360,9 @@ export async function dispatchFromOwnHead(
         selectionReason: ctx.selectionReason,
       },
     );
+    // Per-project fairness (WL-0MWKY141H002LULI AC3): the caller records this
+    // attempted root as `dispatchingRoot` only when the outcome dispatched.
+    outcome.attemptedRoot = ctx.root;
     if (outcome.dispatched) return outcome;
     // A non-continuable outcome (wl-error, spawn-failed, marker-write-failed,
     // anchor-unavailable, …) is returned unchanged so the caller's strike/skip
@@ -500,6 +503,11 @@ export async function dispatchFromRegisteredRoots(
       // an I/O error — never blocks a dispatch.
       if (isConsumedDispatchOutcome(outcome)) {
         advanceRoundRobinCursor(opts.coordinationDir, root, now);
+        // Per-project fairness accounting (WL-0MWKY141H002LULI AC3): the
+        // sweep's OWN selection rides the outcome so the orchestrator records
+        // `selectedRoot` for the registry candidate universe (the offer-list
+        // selection is a different universe and would misattribute a sweep).
+        return { ...outcome, selectedRoot: first };
       }
       return outcome;
     }
