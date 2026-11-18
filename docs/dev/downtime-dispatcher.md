@@ -3067,6 +3067,24 @@ ends:
 - **pane close** — the reaper releases the item's entry right after it closes
   that pane (`ReaperDeps.releasePaneBudget`), for both `implement` and
   `audit`;
+- **session finished (WL-0MWJVY6NR001E0FS)** — the reaper releases the
+  finished session's entry on its own cadence, **independently of any close**
+  (`ReaperDeps.releaseFinishedSessionBudget`). "Finished" is the shared
+  `isSessionFinished` predicate: the final assistant message ends with the
+  `</end_session>` marker **or** the herdr agent status is terminal
+  (`done`/`exited`). This is the earlier trigger for the panes the close
+  policy deliberately leaves **open** — an `implement` pane (never
+  auto-closed) and a terminal-status `audit` pane caught by the dead-agent
+  guard — which previously held their tier slot for the whole 2 h staleness
+  window after the session had ended. The release is
+  **identity-safe and kind-generic**: it removes only the entry owned by the
+  finished **pane id** (a sibling dispatch for the same item keeps its entry,
+  WL-0MWFJD5T4003OM91) and omits `kind`, so `release` keys off the ledger
+  entry's OWN kind and a future capped skill kind is covered with no change.
+  A still-working session (a `work`-class status or an active-agent signal
+  with no marker) and an unknown/empty status never release, and an
+  unreadable/UNKNOWN pane read releases nothing (no pane is classified). The
+  pane itself is **not** closed: only the budget is freed;
 - **staleness** — the ledger's own 2 h heartbeat-staleness reap remains the
   final backstop. Since WL-0MW9VQ08W000SN63 this reap is **pane-derived** for
   the implement tier: a stale heartbeat alone never releases a confirmed
@@ -3074,6 +3092,12 @@ ends:
   conclusive evidence of in-flight work, and `heartbeatAt` is only written at
   reserve/confirm — there is no refresh path). The entry is released by
   staleness only once its pane is also gone.
+
+The finished-session release is additive — the pane-close release, the
+dead-pane sweep and the 2 h staleness reap all remain in place. It runs on
+the reaper cadence (`PANE_CLOSE_REAPER_INTERVAL_MS`, 60 s) and is fail-open:
+a release error never crashes the reaper or blocks a dispatch, and a missed
+release is bounded by the staleness window. A dry run mutates nothing.
 
 A pane can still be closed *outside* those paths (the operator closes it in
 herdr, a session crashes, the window is torn down). Because the audit tier
@@ -4348,6 +4372,14 @@ dead agent is **not** closed — the operator may still need to read the final
 output. A close failure for one pane is recorded and the run continues; a
 reaper throw is caught and logged so it can never crash the worker.
 
+**Free the budget, keep the pane (WL-0MWJVY6NR001E0FS).** The same pass also
+releases the host dispatch-budget slot of every pane whose session is
+**finished** (`isSessionFinished`: the `</end_session>` marker or a terminal
+`done`/`exited` status), independent of the close decision — so the
+never-closed `implement` pane and the dead-agent-guard `audit` pane stop
+holding their tier. Only the ledger entry is removed; the pane stays open for
+the operator to inspect.
+
 **Active-agent signals (parent AC3).** The production deps
 (`pane-close-herdr.ts`) populate the classifier's activity signals so
 long-running-but-silent agents are not reaped: the raw herdr `agent_status`
@@ -4451,8 +4483,8 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/downtime-log*.ts` | The downtime-log module family: the barrel (`downtime-log.ts`, re-exports only) over the sibling modules — storage/rotation policy and atomic append (`downtime-log-storage.ts`), host-budget refusal vocabulary (`downtime-log-budget.ts`), coordination/decision log (`downtime-log-coordination.ts`), dispatch log and pane-close entries (`downtime-log-entries.ts`), dispatched-marker readers and suppression decisions (`downtime-log-markers.ts`), recent-dispatches projection and time blocks (`downtime-log-recent.ts`) (full layout: [downtime-log module layout](#downtime-log-module-layout-wl-0mvgkhft4003x6jw)) |
-| `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
-| `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
+| `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) and the shared finished-session predicate (`isSessionFinished`, `hasEndSessionMarker`) consumed by the reaper, the finished-session budget release and `pane-triage` (WL-0MUJL1NAH0042GOS, WL-0MWJVY6NR001E0FS) |
+| `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`, `finishedSessionReleaseIdentity`) — close decisions plus the finished-session budget release |
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
 | `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + `herdr pane process-info` + pi session logs (activity probes: agent status, recent file modifications, spawned child processes) |
 | `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |

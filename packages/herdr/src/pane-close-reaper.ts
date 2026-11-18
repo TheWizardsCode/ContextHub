@@ -22,7 +22,7 @@
  * monitor never runs in production — WL-0MWJ7QONS0052HXX).
  */
 
-import { classifySession, extractFinalAssistantText } from './pane-close.js';
+import { classifySession, extractFinalAssistantText, isSessionFinished } from './pane-close.js';
 import type { CloseDecision, CloseReasonSnapshot, SessionSample } from './pane-close.js';
 import type { TerminateResult } from './process-group.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -81,6 +81,23 @@ export interface ReaperDeps {
    * callers skip the sweep entirely.
    */
   sweepBudgetLedger?(panes: readonly PaneStatus[]): Promise<void>;
+  /**
+   * Finished-session budget release (WL-0MWJVY6NR001E0FS): called once per
+   * pane whose Pi session is authoritatively FINISHED (`</end_session>`
+   * marker or a terminal `done`/`exited` agent status), INDEPENDENT of the
+   * close decision. The whole point is the panes the close policy leaves
+   * OPEN — an `implement` pane (never auto-closed) and a terminal-status
+   * `audit` pane caught by the dead-agent guard — so a finished session hands
+   * its tier slot back instead of holding it for the 2 h staleness window.
+   *
+   * Identity-safe and kind-generic: the caller releases by the finished
+   * pane's id (see {@link finishedSessionReleaseIdentity}), so a sibling
+   * dispatch for the same item keeps its entry and a future capped skill kind
+   * is covered without another change. Idempotent and best-effort — the
+   * reaper wraps it fail-open, and the close-path release / dead-pane sweep /
+   * 2 h stale reap remain as backstops. Absent → legacy callers skip it.
+   */
+  releaseFinishedSessionBudget?(pane: PaneStatus): Promise<void>;
 }
 
 /**
@@ -296,6 +313,23 @@ const DEFAULT_OPTIONS: ReaperOptions = {
   dryRun: false,
 };
 
+// ── Finished-session release identity ─────────────────────────────────
+
+/**
+ * Build the identity-safe release request for a finished session's
+ * dispatch-budget entry (WL-0MWJVY6NR001E0FS).
+ *
+ * Deliberately omits `kind`: `release` then keys off the ledger entry's OWN
+ * kind, so a future capped skill kind is covered with no change here. The
+ * pane id is the ownership proof (`WL-0MWFJD5T4003OM91`), so a sibling
+ * dispatch for the same item — a different pane — keeps its entry.
+ */
+export function finishedSessionReleaseIdentity(
+  pane: Pick<PaneStatus, 'itemId' | 'id'>,
+): { itemId: string; paneId: string } {
+  return { itemId: pane.itemId, paneId: pane.id };
+}
+
 // ── Classification ────────────────────────────────────────────────────
 
 /**
@@ -366,6 +400,24 @@ export async function runReaper(
       idleThresholdMs: options.idleThresholdMs,
       gracePeriodMs: options.gracePeriodMs,
     });
+
+    // Finished-session budget release (WL-0MWJVY6NR001E0FS): a pane whose Pi
+    // session is authoritatively FINISHED gives its host dispatch-budget slot
+    // back even when the close policy deliberately leaves the pane OPEN. This
+    // runs INDEPENDENT of `decision.close` — the `implement` guard and the
+    // dead-agent guard mean the panes this targets never reach the close-path
+    // release below. Fail-open: a release failure never blocks, crashes or
+    // changes a close decision, and the close-path release / dead-pane sweep /
+    // 2 h stale reap remain as backstops. A dry run mutates nothing.
+    if (isSessionFinished(sample) && !options.dryRun) {
+      try {
+        await deps.releaseFinishedSessionBudget?.(pane);
+      } catch (err) {
+        console.error(
+          `reaper: finished-session budget release failed for ${pane.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
 
     let success = true;
     let error: string | undefined;

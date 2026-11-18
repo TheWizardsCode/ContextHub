@@ -585,6 +585,20 @@ dispatches; the other herdr instances coordinate instead of polling:
     implement-tier-only for admission. The one-release
     `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
     decision for a single release.
+  - **A finished session frees its slot without closing its pane
+    (WL-0MWJVY6NR001E0FS).** The pane-close reaper releases a dispatch's
+    ledger entry when its Pi session is **finished** — the final assistant
+    message ends with the `</end_session>` marker, or the herdr agent status
+    is terminal (`done`/`exited`) — on its 60 s cadence and **independently of
+    any close**. This matters for the panes the close policy deliberately
+    leaves open: an `implement` pane is never auto-closed and a
+    terminal-status `audit` pane hits the dead-agent guard, so before this
+    they held their tier until the 2 h staleness window expired. Only the
+    budget is freed; the pane stays open. The release is identity-safe (keyed
+    by the finished **pane id**, so a sibling dispatch for the same item keeps
+    its entry) and kind-generic (it omits `kind`, so the ledger entry's own
+    kind keys it). A still-working or unknown session, and an unreadable pane
+    read, never release.
   - **A refusal is a continuable hold on that candidate, not a whole-tick
     stop.** Both head-scan paths record the refusal (reason + `live`/`max`
     evidence) and keep scanning, so `plan`/`intake` ranked behind a refused

@@ -106,6 +106,7 @@ import {
 } from './pane-close-herdr.js';
 import { observeDispatchedPaneOutcome } from './downtime-worker.route-outcome.js';
 import { runScheduledPaneClose } from './pane-close-scheduler.js';
+import { finishedSessionReleaseIdentity } from './pane-close-reaper.js';
 import {
   createDowntimeWorker,
   createDowntimePoller,
@@ -1482,6 +1483,25 @@ export function createDowntimeDeps(
           sweepClosedPanes(panes.map((pane) => ({ paneId: pane.paneId })), {
             actor: `herdr:${process.pid}`,
           });
+        },
+        // Finished-session budget release (WL-0MWJVY6NR001E0FS): a pane whose
+        // Pi session is FINISHED gives its tier slot back even when the close
+        // policy leaves the pane OPEN (an `implement` pane is never
+        // auto-closed; a terminal-status `audit` pane is caught by the
+        // dead-agent guard). The release identity omits `kind`, so the
+        // ledger entry's OWN kind keys it — a future capped skill kind is
+        // covered with no change here — and the finished PANE id is the
+        // ownership proof, so a sibling dispatch for the same item keeps its
+        // entry (WL-0MWFJD5T4003OM91). Best-effort: the reaper wraps it
+        // fail-open; the close-path release, dead-pane sweep and 2 h stale
+        // reap remain as backstops.
+        releaseFinishedSessionBudget: async (pane) => {
+          if (pane.itemId !== '') {
+            releaseHostBudgetDispatch(finishedSessionReleaseIdentity(pane), {
+              reason: 'session-finished',
+              actor: `herdr:${process.pid}`,
+            });
+          }
         },
       });
       const result = await runScheduledPaneClose(

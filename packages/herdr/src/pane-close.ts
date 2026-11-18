@@ -27,7 +27,17 @@
  *  - `live-children`  — has spawned children that must not be orphaned (AC5)
  *  - `grace-period`   — within the configured grace window since first
  *    dispatch (never auto-close; parent AC5)
+ *
+ * ## Finished-session vocabulary (WL-0MWJVY6NR001E0FS)
+ *
+ * `isSessionFinished` is the single definition of "the Pi session has ended"
+ * (the `</end_session>` marker OR a terminal herdr agent status) shared by the
+ * close decision and the finished-session budget release. `classifySession`
+ * still applies its never-close guards first, so an `implement` pane is never
+ * closed — the release path frees only its host budget slot.
  */
+
+import { isTerminalAgentStatus } from './pane-discovery.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -170,10 +180,32 @@ export function extractFinalAssistantText(
 
 /**
  * Check whether a string ends with the `</end_session>` marker after
- * `.rstrip()`-ing trailing whitespace.
+ * `.rstrip()`-ing trailing whitespace. The explicit end-of-session contract
+ * (WL-0MWJVY6NR001E0FS).
  */
-function endsWithMarker(text: string): boolean {
-  return text.trimEnd().endsWith('</end_session>');
+export function hasEndSessionMarker(text: string | undefined): boolean {
+  return typeof text === 'string' && text.trimEnd().endsWith('</end_session>');
+}
+
+/**
+ * True when the pane's Pi session is authoritatively FINISHED
+ * (WL-0MWJVY6NR001E0FS): either the final assistant message ends with the
+ * `</end_session>` marker, or the herdr agent status is terminal
+ * (`done`/`exited`, the shared vocabulary from `pane-discovery.ts`).
+ *
+ * Fail-safe by construction: a still-working status (`work`/`working`/…), an
+ * unknown/empty status, or a missing marker is NOT finished, so a live session
+ * never loses its dispatch-budget slot. The marker is authoritative even when
+ * an agent status still reads `work` (the session explicitly ended its turn).
+ *
+ * Shared by `classifySession` (the close decision) and the reaper's
+ * finished-session budget release, so "finished" has exactly one definition.
+ */
+export function isSessionFinished(
+  sample: Pick<SessionSample, 'lastAssistantText' | 'agentStatus'>,
+): boolean {
+  if (hasEndSessionMarker(sample.lastAssistantText)) return true;
+  return isTerminalAgentStatus(sample.agentStatus);
 }
 
 // ── Classification ────────────────────────────────────────────────────
@@ -263,7 +295,7 @@ export function classifySession(
   }
 
   // 3. Marker at end of final assistant message.
-  if (typeof sample.lastAssistantText === 'string' && endsWithMarker(sample.lastAssistantText)) {
+  if (hasEndSessionMarker(sample.lastAssistantText)) {
     return decide(true, 'marker');
   }
 
