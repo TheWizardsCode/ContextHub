@@ -29,6 +29,7 @@ import { validateParentReferences, groupOrphanFindings } from '../../doctor/pare
 import { validatePodcastScripts } from '../../doctor/podcast-scripts-check.js';
 import { probeAuditFingerprintSkewFinding } from '../../doctor/audit-fingerprint-skew-check.js';
 import { withStoreMutationLock } from '../../mutation-lock.js';
+import { recordDetachAttribution } from '../../orphan-attribution.js';
 import {
   normalizePriority,
   isValidPriority,
@@ -266,6 +267,11 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
               if (Object.prototype.hasOwnProperty.call(f.proposedFix, 'parentId')) {
                 update.parentId = (f.proposedFix as any).parentId;
               }
+              // A safe `parentId: null` fix detaches the item — remember the
+              // previous parent and, once the write lands, record the
+              // promotion attribution (R2, WL-0MWGRKYG0006N2A8).
+              const previousParentId =
+                update.parentId === null && item.parentId ? item.parentId : null;
               if (Object.keys(update).length > 0) {
                 try {
                   db.update(itemId, update);
@@ -273,6 +279,14 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
                   // if update fails, keep finding in remaining list so it appears in report
                   remainingFindings.push(f);
                   continue;
+                }
+                if (previousParentId) {
+                  recordDetachAttribution(
+                    db,
+                    itemId,
+                    previousParentId,
+                    'wl doctor --fix',
+                  );
                 }
                 // applied successfully; don't add to remainingFindings
                 continue;

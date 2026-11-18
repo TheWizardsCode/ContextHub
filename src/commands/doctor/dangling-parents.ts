@@ -17,6 +17,7 @@ import type { Command } from 'commander';
 import type { WorklogDatabase } from '../../database.js';
 import { groupOrphanFindings, validateParentReferences } from '../../doctor/parent-check.js';
 import { withStoreMutationLock } from '../../mutation-lock.js';
+import { recordDetachAttribution } from '../../orphan-attribution.js';
 
 /**
  * Narrow context the dangling-parents subcommand needs from the CLI
@@ -116,6 +117,15 @@ export function registerDanglingParentsCommand(
       withStoreMutationLock(dataPath, () => {
       for (const d of dangling) {
         db.update(d.id, { parentId: null });
+        // Promotion attribution (R2, WL-0MWGRKYG0006N2A8): record the
+        // previous parent and the retention-rule rationale on the child so
+        // the detach is traceable. Best-effort.
+        recordDetachAttribution(
+          db,
+          d.id,
+          d.parentId,
+          'wl doctor dangling-parents --apply',
+        );
         fixed.push({ id: d.id, parentId: d.parentId });
       }
       });

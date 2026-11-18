@@ -7,6 +7,7 @@ import type { UpdateOptions } from '../cli-types.js';
 import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent, RevertedItem } from '../types.js';
 import { isAutomationAuthoredChild } from '../automation.js';
 import { recordDemotionAuditTrail } from '../demotion-audit.js';
+import { recordDetachAttribution } from '../orphan-attribution.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -615,6 +616,18 @@ export default function register(ctx: PluginContext): void {
             results.push(divergence);
             continue;
           }
+        }
+
+        // Promotion attribution (R2, WL-0MWGRKYG0006N2A8): an explicit
+        // `--parent null` detaches the child. Record a comment naming the
+        // previous parent and the retention-rule rationale. Best-effort.
+        if (parentCandidate === null && itemBeforeUpdate?.parentId) {
+          recordDetachAttribution(
+            db,
+            normalizedId,
+            itemBeforeUpdate.parentId,
+            'wl update --parent null',
+          );
         }
 
         // Auto-downgrade on a terminal transition (WL-0MSJM4EIV001A0V9): an

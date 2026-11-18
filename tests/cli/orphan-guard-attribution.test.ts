@@ -4,12 +4,12 @@
  *
  * Serves WL-0MWGRJCXO006A9ZV (fixture slice of WL-0MWFMKWZA005ZT4T) and pins
  * the AC2 / AC4 / R2 contract implemented by the sibling slice
- * WL-0MWGRKYG0006N2A8. The specs below are **RED-pinned with
- * `it.fails(...)`** by this test-first child: their assertions fail on
- * current main (proved in the raw red run — no comment is written on any of
- * the four paths) while the suite stays green for the finish and dev-push
- * gates. WL-0MWGRKYG0006N2A8 must flip `it.fails(` → `it(` on all four specs
- * as the attribution lands (repo convention, cf. tests/cli/doctor-prefix.test.ts).
+ * WL-0MWGRKYG0006N2A8. The specs below were **RED-pinned with `it.fails(...)`**
+ * by this test-first child: their assertions failed on current main (proved in
+ * the raw red run — no comment was written on any of the four paths) while the
+ * suite stayed green for the finish and dev-push gates. WL-0MWGRKYG0006N2A8
+ * flipped `it.fails(` → `it(` on all four specs as the attribution landed
+ * (repo convention, cf. tests/cli/doctor-prefix.test.ts).
  *
  * ## Contract pinned here
  *
@@ -74,7 +74,7 @@ describe('orphan-guard: attribution comments (R2)', () => {
 
   // ── Explicit orphaning: wl delete --no-recursive (AC2) ─────────────────
 
-  it.fails('wl delete --no-recursive comments each orphaned child naming the previous parent', async () => {
+  it('wl delete --no-recursive comments each orphaned child naming the previous parent', async () => {
     const { parent, children } = NO_RECURSIVE_ORPHAN;
     seedNoRecursiveOrphan(tempState.tempDir);
 
@@ -92,7 +92,7 @@ describe('orphan-guard: attribution comments (R2)', () => {
 
   // ── Promotion paths (AC4) ──────────────────────────────────────────────
 
-  it.fails('wl update --parent null records a comment naming the previous parent and rationale', async () => {
+  it('wl update --parent null records a comment naming the previous parent and rationale', async () => {
     const { parent, child } = PROMOTION;
     seedPromotion(tempState.tempDir);
 
@@ -108,7 +108,7 @@ describe('orphan-guard: attribution comments (R2)', () => {
     expect(comments.some((c) => rationale.test(c.comment))).toBe(true);
   });
 
-  it.fails('wl doctor dangling-parents --apply records a comment naming the previous parent and rationale', async () => {
+  it('wl doctor dangling-parents --apply records a comment naming the previous parent and rationale', async () => {
     const { parentId, child } = DANGLING;
     seedDangling(tempState.tempDir);
 
@@ -123,7 +123,7 @@ describe('orphan-guard: attribution comments (R2)', () => {
     expect(comments.some((c) => rationale.test(c.comment))).toBe(true);
   });
 
-  it.fails('wl doctor --fix records a comment naming the previous parent and rationale on detach', async () => {
+  it('wl doctor --fix records a comment naming the previous parent and rationale on detach', async () => {
     const { parentId, child } = DANGLING;
     seedDangling(tempState.tempDir);
 
