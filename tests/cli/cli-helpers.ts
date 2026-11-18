@@ -439,6 +439,8 @@ export function seedWorkItems(
     githubIssueUpdatedAt?: string;
     /** Explicit audit-gap waiver (WL-0MUBVH9FV0027COG). */
     auditWaiver?: { reason: string; author: string; waivedAt: string } | null;
+    /** Earliest start instant (ISO-8601); omitted = the item's `createdAt`. */
+    startOn?: string;
     audit?: {
       time: string;
       author: string;
@@ -472,6 +474,9 @@ export function seedWorkItems(
       githubIssueId: item.githubIssueId,
       githubIssueUpdatedAt: item.githubIssueUpdatedAt,
       auditWaiver: item.auditWaiver ?? null,
+      // A seeded `startOn` is written verbatim; an omitted one is back-filled
+      // with `createdAt` on import (WL-0MWMGEPY2004EDZ8).
+      startOn: item.startOn,
       audit: item.audit,
     }));
 

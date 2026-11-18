@@ -13,9 +13,17 @@
  * the read (visibility) and write (mutability) paths (WL-0MW7S20IC001F3AP).
  * `isNotStarted` is the single definition of "not yet started" for the
  * `startOn` scheduling dimension (WL-0MWMGEL5R003IH71).
+ *
+ * `normalizeStartOn` (re-exported from `./start-on.js`) is the single
+ * definition of how a `startOn` value is stored — the effective instant
+ * `startOn ?? createdAt`, normalised to UTC (WL-0MWMGEPY2004EDZ8). Consumers
+ * outside the shared package (JSONL import, the `wl doctor` check) reach it
+ * through this subpath, exactly as they reach the predicate.
  */
 
 export { isSoftDeleted } from './database/work-items.js';
+
+export { normalizeStartOn, effectiveStartOn } from './start-on.js';
 
 /**
  * The fields {@link isNotStarted} reads.

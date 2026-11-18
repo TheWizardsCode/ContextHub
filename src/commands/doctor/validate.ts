@@ -28,6 +28,10 @@ import { resolveForeignItem, prefixOfWorkItemId } from '../../cross-repo/foreign
 import { validateParentReferences, groupOrphanFindings } from '../../doctor/parent-check.js';
 import { validatePodcastScripts } from '../../doctor/podcast-scripts-check.js';
 import { probeAuditFingerprintSkewFinding } from '../../doctor/audit-fingerprint-skew-check.js';
+import {
+  summariseMissingStartOn,
+  validateStartOnInstants,
+} from '../../doctor/start-on-check.js';
 import { withStoreMutationLock } from '../../mutation-lock.js';
 import { recordDetachAttribution } from '../../orphan-attribution.js';
 import {
@@ -145,6 +149,13 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
       // allowed to change the exit status. `null` means ok/skip or no skew.
       const auditFingerprintSkew = probeAuditFingerprintSkewFinding();
 
+      // `startOn` storage checks (WL-0MWMGEPY2004EDZ8): `missing` is a global
+      // finding built from the RAW column (a loaded item always reports the
+      // `createdAt` fallback, so it cannot reveal a `NULL` row), `invalid` is
+      // per item because it is one row's data problem. Both are warning-only
+      // and read-only.
+      const startOnMissing = summariseMissingStartOn(db.getItemIdsMissingStartOn());
+
       let findings: any[] = [
         // Dependency-graph findings come first: an unresolved foreign edge is
         // the item's primary dependency signal and must not be buried behind
@@ -167,6 +178,8 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
         ...priorityFindings,
         ...validatePodcastScripts(items),
         ...(auditFingerprintSkew ? [auditFingerprintSkew] : []),
+        ...validateStartOnInstants(items),
+        ...(startOnMissing ? [startOnMissing] : []),
       ];
 
       // If --fix was provided, attempt to apply safe fixes and prompt per non-safe finding

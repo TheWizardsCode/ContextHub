@@ -85,7 +85,11 @@ function mergeSameTimestampItems(
     ? 'merged deterministically'
     : `merged using ${sameTimestampStrategy} preference`;
   const merged: WorkItem = { ...localItem };
-  const fields: (keyof WorkItem)[] = ['title', 'description', 'status', 'priority', 'sortIndex', 'parentId', 'tags', 'assignee', 'stage', 'issueType', 'createdBy', 'deletedBy', 'deleteReason'];
+  // `startOn` participates exactly like the other mutable fields
+  // (WL-0MWMGEPY2004EDZ8): the effective value is resolved by the same
+  // default/newest-write-wins rules, so two-way sync can never resurrect a
+  // stale scheduling instant.
+  const fields: (keyof WorkItem)[] = ['title', 'description', 'status', 'priority', 'sortIndex', 'parentId', 'tags', 'assignee', 'stage', 'issueType', 'createdBy', 'deletedBy', 'deleteReason', 'startOn'];
   const mergedFields: string[] = [];
   const fieldDetails: ConflictFieldDetail[] = [];
 
@@ -351,7 +355,11 @@ function mergeDifferentTimestampItems(
 ): { merged: WorkItem; conflictMessages: string[]; conflictDetail: ConflictDetail | null } {
   const isRemoteNewer = new Date(remoteItem.updatedAt).getTime() > new Date(localItem.updatedAt).getTime();
   const merged: WorkItem = { ...localItem };
-  const fields: (keyof WorkItem)[] = ['title', 'description', 'status', 'priority', 'sortIndex', 'parentId', 'tags', 'assignee', 'stage', 'issueType', 'createdBy', 'deletedBy', 'deleteReason'];
+  // `startOn` participates exactly like the other mutable fields
+  // (WL-0MWMGEPY2004EDZ8): the effective value is resolved by the same
+  // default/newest-write-wins rules, so two-way sync can never resurrect a
+  // stale scheduling instant.
+  const fields: (keyof WorkItem)[] = ['title', 'description', 'status', 'priority', 'sortIndex', 'parentId', 'tags', 'assignee', 'stage', 'issueType', 'createdBy', 'deletedBy', 'deleteReason', 'startOn'];
   const mergedFields: string[] = [];
   const conflictedFields: string[] = [];
   const fieldDetails: ConflictFieldDetail[] = [];

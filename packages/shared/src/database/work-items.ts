@@ -44,6 +44,7 @@ import {
   WorkItemQuery,
 } from '../types.js';
 import { normalizeStatusValue } from '../status-stage-rules.js';
+import { normalizeStartOn } from '../start-on.js';
 import {
   ItemHooks,
   UpdateIfMatchesResult,
@@ -78,6 +79,10 @@ export function create(
     parentId: input.parentId || null,
     createdAt: now,
     updatedAt: now,
+    // `startOn` is always populated on write with the effective instant
+    // (`startOn ?? createdAt`, WL-0MWMGEPY2004EDZ8), so the returned item
+    // matches what the store will persist.
+    startOn: normalizeStartOn(input.startOn, now) ?? undefined,
     tags: input.tags || [],
     assignee: input.assignee || '',
     stage: input.stage || '',
@@ -257,6 +262,12 @@ export function update(
     // Normalize status to canonical hyphenated form (e.g. in_progress -> in-progress)
     status: (normalizeStatusValue(input.status ?? item.status) ?? item.status) as WorkItem['status'],
     createdAt: item.createdAt, // Prevent createdAt changes
+    // An omitted `startOn` keeps the stored value; an explicit blank clears it
+    // back to `createdAt` — the field is never left unset
+    // (WL-0MWMGEPY2004EDZ8).
+    startOn: Object.prototype.hasOwnProperty.call(input, 'startOn')
+      ? normalizeStartOn(input.startOn, item.createdAt) ?? undefined
+      : normalizeStartOn(item.startOn, item.createdAt) ?? undefined,
     githubIssueNumber: item.githubIssueNumber,
     githubIssueId: item.githubIssueId,
     githubIssueUpdatedAt: item.githubIssueUpdatedAt,
@@ -272,7 +283,10 @@ export function update(
   const contentFieldsToCompare: (keyof WorkItem)[] = [
     'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
     'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
-    'deletedBy', 'deleteReason'
+    'deletedBy', 'deleteReason',
+    // A scheduling change is a content change: it must bump `updatedAt` so
+    // the sync merge sees it as the newest write (WL-0MWMGEPY2004EDZ8).
+    'startOn',
   ];
   const fieldsToCompare: (keyof WorkItem)[] = [
     ...contentFieldsToCompare,
@@ -538,11 +552,14 @@ export function list(ctx: WorklogDatabaseContext, query?: WorkItemQuery): WorkIt
  *    flag (undefined on incoming items) is equivalent to an explicit `false`
  *    (the value stored items round-trip to) — no-op re-imports must not bump
  *    `updatedAt` (WL-0MVB9557U009LEIF).
+ *  - `startOn`: compared through its *effective* instant (`startOn ??
+ *    createdAt`), so a legacy record that omits the field matches a row whose
+ *    value was back-filled to `createdAt` (WL-0MWMGEPY2004EDZ8).
  *  - arrays (tags) are compared by value; all other fields use strict
  *    equality.
  *
- * Shared by {@link hasWorkItemChanged} (16-field tracked set, used by
- * import()/upsertItems()) and the no-op guard in {@link update} (13-field
+ * Shared by {@link hasWorkItemChanged} (17-field tracked set, used by
+ * import()/upsertItems()) and the no-op guard in {@link update} (15-field
  * set, excluding the GitHub metadata fields).
  */
 export function compareTrackedFields(oldItem: WorkItem, newItem: WorkItem, fields: (keyof WorkItem)[]): boolean {
@@ -561,6 +578,17 @@ export function compareTrackedFields(oldItem: WorkItem, newItem: WorkItem, field
       // explicit false — otherwise every no-op re-import looks like a
       // semantic change and updatedAt gets bumped (WL-0MVB9557U009LEIF).
       return Boolean(oldVal) !== Boolean(newVal);
+    }
+    if (f === 'startOn') {
+      // Compare the *effective* instant (`startOn ?? createdAt`): a legacy
+      // record that omits the field and a stored row whose `startOn` was
+      // back-filled to `createdAt` mean the same thing, so importing a legacy
+      // JSONL snapshot must never look like a change
+      // (WL-0MWMGEPY2004EDZ8).
+      return (
+        normalizeStartOn(oldVal as string | undefined, oldItem.createdAt) !==
+        normalizeStartOn(newVal as string | undefined, newItem.createdAt)
+      );
     }
     if (Array.isArray(oldVal) && Array.isArray(newVal)) {
       return JSON.stringify(oldVal) !== JSON.stringify(newVal);
@@ -583,7 +611,11 @@ export function hasWorkItemChanged(oldItem: WorkItem, newItem: WorkItem): boolea
     'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
     'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
     'needsProducerReview', 'githubIssueNumber', 'githubIssueId',
-    'githubIssueUpdatedAt'
+    'githubIssueUpdatedAt',
+    // Keeps a scheduling change part of the sync/import delta
+    // (WL-0MWMGEPY2004EDZ8): without it a `startOn`-only edit is invisible to
+    // `import()`/`upsertItems()` and never propagates.
+    'startOn',
   ];
   return compareTrackedFields(oldItem, newItem, fieldsToCompare);
 }

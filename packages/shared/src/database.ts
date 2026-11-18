@@ -1642,6 +1642,16 @@ export class WorklogDatabase {
     return this.store.getAllWorkItems();
   }
 
+  /**
+   * Ids of live rows whose stored `startOn` column is `NULL`/blank — a stored
+   * value that violates the field's "always populated with the effective
+   * instant" invariant, i.e. a back-fill migration that has not run
+   * (WL-0MWMGEPY2004EDZ8). Used by the `wl doctor` `startOn.missing` check.
+   */
+  getItemIdsMissingStartOn(): string[] {
+    return this.store.getItemIdsMissingStartOn();
+  }
+
   getAllOrderedByHierarchySortIndex(): WorkItem[] {
     return this.store.getAllWorkItemsOrderedByHierarchySortIndex();
   }
@@ -1663,11 +1673,14 @@ export class WorklogDatabase {
    * `Boolean()` so that an omitted flag (undefined on incoming items) is
    * equivalent to an explicit `false` (the value stored items round-trip
    * to) — no-op re-imports must not bump `updatedAt` (WL-0MVB9557U009LEIF).
+   * `startOn` is compared through its *effective* instant
+   * (`startOn ?? createdAt`), so a legacy record that omits the field matches a
+   * row whose value was back-filled to `createdAt` (WL-0MWMGEPY2004EDZ8).
    * All other fields use strict equality; arrays
    * (tags) are compared by value.
    *
-   * Shared by {@link hasWorkItemChanged} (16-field tracked set, used by
-   * import()/upsertItems()) and the no-op guard in {@link update} (13-field
+   * Shared by {@link hasWorkItemChanged} (17-field tracked set, used by
+   * import()/upsertItems()) and the no-op guard in {@link update} (15-field
    * set, excluding the GitHub metadata fields).
    *
    * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).

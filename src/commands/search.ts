@@ -251,6 +251,11 @@ export default function register(ctx: PluginContext): void {
                 title: item?.title || '',
                 status: item?.status || '',
                 priority: item?.priority || '',
+                // `startOn` is part of every JSON surface a consumer can read
+                // an item from (WL-0MWMGEPY2004EDZ8); search's default
+                // projection is deliberately narrow, so the scheduling
+                // instant is carried explicitly.
+                startOn: item?.startOn,
               };
           // Search-specific fields are always included, even when --fields
           // projects the work-item portion (the projection applies only to
