@@ -218,7 +218,8 @@ echo "source ~/.wl-completion.zsh" >> ~/.zshrc
 ## Development
 
 ```bash
-npm run build         # Build the project
+npm run build         # Build the project (shared + herdr plugin + CLI)
+npm run typecheck     # Type-check root, packages/shared and packages/herdr
 npm run dev           # Development mode with auto-reload
 npm test              # Run all tests
 npm run test:watch    # Tests in watch mode

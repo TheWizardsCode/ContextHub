@@ -45,13 +45,25 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 # Clone the repository
 cd /path/to/worklog-repo
 
-# Build the repo — the postbuild hook automatically links the herdr plugin
+# Build the repo — compiles the plugin too, then the postbuild hook links it
 # and registers the prefix+l keybinding (idempotent; safe to re-run)
 npm run build
 
-# Build the plugin (also triggered by herdr's own [[build]] step)
+# Type-check the repo and the plugin before you push (a type error fails the
+# canonical suite, CI and the release gate). Also available as the
+# typecheck:root / typecheck:shared / typecheck:herdr sub-scripts.
+npm run typecheck
+
+# Or build the plugin on its own (also triggered by herdr's own [[build]] step)
 cd packages/herdr && npm run build
 ```
+
+Since WL-0MWKQ51G0006F3KV the root `npm run build` compiles `packages/herdr`
+(`build:herdr` → the plugin's `build:only`, after `build:shared`), so a plugin
+type error fails the build instead of shipping — the plugin can no longer merge
+broken while the root build stays green. `tsc` also runs with
+`noEmitOnError: true`, so a red tree leaves `dist/` untouched rather than
+writing JS that loads and then crashes the pane.
 
 `npm run build` runs `scripts/install-herdr.sh` via the root `postbuild` hook. The script:
 
@@ -3117,6 +3129,12 @@ python3 <test-skill>/scripts/run_tests.py --group herdr --json   # groups.herdr
 
 # Build TypeScript (compiles packages/shared first, then the plugin)
 cd packages/herdr && npm run build
+
+# Type-check the plugin (npm run typecheck from the repo root runs this plus
+# the root and packages/shared projects). This is the authoritative
+# type check — src/build-guard.test.ts below is a secondary, profile-local
+# assertion that only runs under --type herdr / --group herdr.
+npm --prefix ../.. run typecheck:herdr
 ```
 
 The `herdr` type is defined in `.pi/skills_extensions/test/extension.json`, and

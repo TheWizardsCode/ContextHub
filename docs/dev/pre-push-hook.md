@@ -74,6 +74,18 @@ existing entry is never overwritten (SA-0MVTFMB7K002Y1F3, WL-0MV20XXWE00466FP).
 - A missing `run_tests.py` **hard-fails**: silently skipping would reproduce
   the unenforced-gate gap this hook closes.
 
+## The type check rides the full suite (WL-0MWKQ51G0006F3KV)
+
+`npm run typecheck` (root, `packages/shared` and `packages/herdr`) is the first
+entry in `.pi/test-config.json` `suiteCommands`, so the hook's `--scope full`
+run executes it **without the template carrying a type-check step of its own**.
+That is deliberate: the template is byte-locked across three artifacts, and a
+bespoke step would mean editing `PRE_PUSH_HOOK_CONTENT`, `.githooks/pre-push`
+and the fixture together for a check the suite already runs. `npm run build`
+compiles `packages/herdr` as well, so a broken tree also fails the release
+gate. See
+[test-suite-baseline.md](./test-suite-baseline.md#the-typecheck-gate-wl-0mwkq51g0006f3kv).
+
 ## Bypasses
 
 | Variable | Effect |

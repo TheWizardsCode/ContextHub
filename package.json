@@ -12,9 +12,14 @@
     "wl": "./dist/cli.js"
   },
   "scripts": {
-    "build": "npm run build:shared && tsc && node ./scripts/generate-version.cjs",
+    "build": "npm run build:shared && npm run build:herdr && tsc && node ./scripts/generate-version.cjs",
     "postbuild": "bash ./scripts/install-herdr.sh",
     "build:shared": "cd packages/shared && npm run build",
+    "build:herdr": "npm --prefix packages/herdr run build:only",
+    "typecheck": "npm run typecheck:root && npm run typecheck:shared && npm run typecheck:herdr",
+    "typecheck:root": "tsc --noEmit -p tsconfig.json",
+    "typecheck:shared": "tsc --noEmit -p packages/shared/tsconfig.json",
+    "typecheck:herdr": "tsc --noEmit -p packages/herdr/tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "prestart": "npm run build",
     "start": "node dist/index.js",
