@@ -42,7 +42,7 @@
  */
 
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -149,6 +149,48 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
 function spawnedPrompts(deps: DowntimeWorkerDeps): string[] {
   return (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls.map(
     (call) => call[0] as string,
+  );
+}
+
+/** Longest run of the same element in a sequence (parent AC1 metric). */
+function maxConsecutiveRun(sequence: readonly string[]): number {
+  let longest = 0;
+  let current = 0;
+  let previous: string | undefined;
+  for (const value of sequence) {
+    current = value === previous ? current + 1 : 1;
+    previous = value;
+    if (current > longest) longest = current;
+  }
+  return longest;
+}
+
+/**
+ * Seed the leader's decision log with `length` consecutive dispatches to
+ * `root` — the SINGLE run-length accounting source the ordering reads
+ * (WL-0MWKY141H002LULI). `dispatchFromCoordination` never appends here, so the
+ * seeded run persists for the tick under test.
+ */
+function seedDecisionLog(cwd: string, root: string, length: number): void {
+  mkdirSync(join(cwd, '.worklog'), { recursive: true });
+  const lines: string[] = [];
+  for (let i = 1; i <= length; i += 1) {
+    lines.push(
+      JSON.stringify({
+        kind: 'decision',
+        operation: 'dispatch',
+        reason: 'dispatched',
+        outcome: 'dispatched',
+        dispatchingRoot: root,
+        consecutiveRunLength: i,
+        at: `2026-01-0${i}T00:00:00.000Z`,
+      }),
+    );
+  }
+  writeFileSync(
+    join(cwd, '.worklog', 'downtime-coordination.log'),
+    `${lines.join('\n')}\n`,
+    'utf-8',
   );
 }
 
@@ -326,6 +368,111 @@ describe('mechanism (b): prep offers are never held by the implement/audit gates
     // The implement root's queue WAS consulted and found deep — the hold is the
     // only reason the mature implement offer lost to the prep offer.
     expect(deps.getReviewQueueCount).toHaveBeenCalledWith('/repo/impl');
+  });
+
+  // ── The concrete asymmetry case (WL-0MWKY1CIJ00462ZD, parent AC2) ──────
+  //
+  // The asymmetry is a real gate-coverage fact (pinned above), but it must not
+  // starve a peer that HAS admissible work. Parent AC2's asymmetry case is the
+  // decisive one: a root with only PREP offers versus a peer holding an
+  // ADMISSIBLE implement offer (its review queue is shallow, so nothing holds
+  // it). The whole-set round-robin + run-length deferral must serve the peer
+  // within the bound — the prep root may not win every slot.
+
+  it('a prep-only root does not win every slot while a peer holds an admissible implement offer', async () => {
+    // Root A: prep-only, oldest (the natural "large prep backlog" winner).
+    // Root B: an ADMISSIBLE non-critical implement offer — its review queue is
+    // shallow, so no gate holds it; it is genuinely dispatchable work.
+    seedCursor({
+      '/repo/prep': '2026-01-01T00:00:00.000Z',
+      '/repo/impl': '2026-01-02T00:00:00.000Z',
+    });
+
+    const baseNow = Date.UTC(2026, 0, 10, 0, 0, 0);
+    const dispatchedKind: string[] = [];
+
+    // Four ticks; each tick the owner re-offers its head after the consumed
+    // offer was removed, exactly as the live path does.
+    for (let tick = 0; tick < 4; tick += 1) {
+      const deps = makeDeps({
+        // Both queues shallow → the implement offer is ADMISSIBLE, not held.
+        getReviewQueueCount: vi.fn().mockResolvedValue(0),
+        fetchItem: vi.fn().mockImplementation(async (id: string) => {
+          if (id === 'WL-IMPL') return { ok: true, info: implementItem(id) };
+          return { ok: true, info: planItem(id) };
+        }),
+      });
+      const entries = [
+        makeEntry('inst-prep', 'WL-PREP', '/repo/prep'),
+        makeEntry('inst-impl', 'WL-IMPL', '/repo/impl'),
+      ];
+      const outcome = await dispatchFromCoordination(
+        deps,
+        entries,
+        {
+          model: 'plan',
+          cwd: testDir, // decision log is read here (absent → fail-open)
+          coordinationDir: testDir,
+          browseItemCount: 20,
+          // Surplus capacity: the fairness rule's precondition (parent AC1).
+          freeSlots: 8,
+          effectiveFreeSlots: 8,
+        },
+        baseNow + tick * 60_000,
+      );
+      expect(outcome.dispatched).toBe(true);
+      const prompt = spawnedPrompts(deps)[0];
+      dispatchedKind.push(prompt.includes('WL-IMPL') ? 'implement' : 'plan');
+    }
+
+    // The prep-only root does NOT win every slot: the admissible implement peer
+    // is served, so the prep supply is never allowed to monopolise.
+    expect(dispatchedKind).toContain('implement');
+    expect(dispatchedKind.filter((kind) => kind === 'plan')).toHaveLength(2);
+    // And the AC1 bound holds throughout — no run longer than twice.
+    expect(
+      maxConsecutiveRun(
+        dispatchedKind.map((kind) => (kind === 'implement' ? '/repo/impl' : '/repo/prep')),
+      ),
+    ).toBeLessThanOrEqual(2);
+  });
+
+  it('the run-length deferral is the mechanism that serves the admissible implement peer', async () => {
+    // Seed the run history so the prep root has ALREADY dispatched twice in
+    // succession. The round-robin cursor makes the prep root due again, so only
+    // the deferral (`deferRunLengthCeilingRoot`) can move the admissible
+    // implement peer ahead of it.
+    seedCursor({
+      '/repo/prep': '2026-01-01T00:00:00.000Z',
+      '/repo/impl': '2026-01-02T00:00:00.000Z',
+    });
+    seedDecisionLog(testDir, '/repo/prep', 2);
+
+    const deps = makeDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'WL-IMPL') return { ok: true, info: implementItem(id) };
+        return { ok: true, info: planItem(id) };
+      }),
+    });
+    const entries = [
+      makeEntry('inst-prep', 'WL-PREP', '/repo/prep'),
+      makeEntry('inst-impl', 'WL-IMPL', '/repo/impl'),
+    ];
+
+    const outcome = await dispatchFromCoordination(deps, entries, {
+      model: 'plan',
+      cwd: testDir,
+      coordinationDir: testDir,
+      browseItemCount: 20,
+      freeSlots: 8,
+      effectiveFreeSlots: 8,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    const prompt = spawnedPrompts(deps)[0];
+    expect(prompt).toContain('WL-IMPL');
+    expect(prompt).not.toContain('WL-PREP');
   });
 });
 
