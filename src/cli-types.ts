@@ -122,6 +122,14 @@ export interface UpdateOptions {
   deleteReason?: string;
   /** Earliest instant the item may proceed (full ISO-8601; offset accepted, normalised to UTC); "" clears back to createdAt */
   startOn?: string;
+  /**
+   * Audited override of the startOn claim guard (WL-0MWMGEUT10056MUI). When
+   * a claim (status in-progress or a non-empty assignee) targets an item whose
+   * explicit `startOn` is still in the future, supplying a non-blank reason
+   * lets the claim proceed and records a comment naming the actor, the reason
+   * and the overridden `startOn`.
+   */
+  forceStartOn?: string;
   /** Legacy audit flag (kept for compatibility) */
   audit?: string;
   /** Preferred audit flag for structured writes */

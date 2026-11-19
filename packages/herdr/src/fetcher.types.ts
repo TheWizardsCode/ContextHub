@@ -313,4 +313,14 @@ export interface ClaimResult {
    */
   stale?: boolean;
   error?: string;
+  /**
+   * Machine-readable refusal reason when the wl CLI refused the claim for a
+   * scheduling reason rather than a lost race. Currently
+   * `start_on_not_reached` (WL-0MWMGEUT10056MUI): the item's explicit `startOn`
+   * lies in the future and no audited `--force-start-on` override was passed.
+   * The Herdr dispatch pipeline must treat this as NOT dispatchable.
+   */
+  reason?: string;
+  /** The item's effective `startOn` (canonical UTC) when the guard refused. */
+  startOn?: string;
 }

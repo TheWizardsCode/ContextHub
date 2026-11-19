@@ -294,7 +294,7 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--start-on <ISO-8601>` (set the earliest start instant — same validation as `create`; `--start-on ""` clears it back to the item's `createdAt`), `--needs-producer-review <true|false>` (set needsProducerReview flag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--start-on <ISO-8601>` (set the earliest start instant — same validation as `create`; `--start-on ""` clears it back to the item's `createdAt`), `--force-start-on <reason>` (audited override of the `startOn` claim guard; see *Claiming a not-yet-started item* below), `--needs-producer-review <true|false>` (set needsProducerReview flag).
 
 > **`--start-on` validation is global (WL-0MWMGEREG002L2YA):** the value is parsed once, before any id is written, so an invalid value fails the whole command with a non-zero exit and leaves **every** id in a batch update untouched. The rejection is a JSON object with `error: "invalid-start-on"` and a `message` that names the flag, the received value and an accepted example.
 
@@ -441,6 +441,52 @@ wl list --include-not-started                       # every scheduled item
 wl list --starts-before 2026-12-01T00:00:00Z        # only those starting before December
 wl next --include-not-started --json                # work on scheduled items too
 ```
+
+#### Claiming a not-yet-started item is refused (WL-0MWMGEUT10056MUI)
+
+The read filter is defence in depth; the **claim path** enforces the schedule
+too. Setting an item to `in_progress` — or writing any non-empty `assignee`
+(the Herdr audit tier's status-neutral claim) — on an item whose **explicit**
+`startOn` is still in the future is **refused** before any write, with a
+non-zero exit and a machine-readable reason:
+
+```sh
+wl update WL-ABC123 --status in-progress --assignee implement
+# { "success": false, "error": "start_on_not_reached",
+#   "reason": "start_on_not_reached", "startOn": "2099-11-19T10:25:00.000Z",
+#   "msUntilStart": 3600000,
+#   "message": "Work item WL-ABC123 cannot be claimed: its startOn (...) has
+#               not been reached yet — 1 hour to go. To start early, pass
+#               --force-start-on \"<reason>\" …" }
+```
+
+- The refusal names the item's effective `startOn` and how long until it is
+  reached (`msUntilStart` is the same figure in milliseconds).
+- The guard covers **every claim path** that shells into `wl update`, including
+  the `StatusLifecycle` claim helper and the Herdr claim. The Herdr claim
+  surfaces `reason: "start_on_not_reached"` on its `ClaimResult` so a
+  dispatcher can treat the item as not dispatchable rather than a generic
+  error.
+- It is an **additional** sequential refusal: it never replaces the `assignee`
+  hold, dependency readiness or `needsProducerReview`. An item can be
+  dependency-ready, unheld and still not-yet-started.
+- The guard **never fires for a `createdAt`-defaulted item** (its `startOn`
+  equals its `createdAt`), nor for any item whose effective instant is at or
+  before now. The boundary is inclusive: `startOn == now` is started.
+
+To start early deliberately, pass the audited override — the claim proceeds
+and a comment records the **actor**, the **reason** and the overridden
+`startOn`:
+
+```sh
+wl update WL-ABC123 --status in-progress --assignee implement \
+  --force-start-on "measurement window must not slip"
+```
+
+The comment is visible in `wl show <id>` and survives export/import like any
+other comment. The override is only recorded when it actually bypasses a
+not-yet-reached instant, so passing the flag on an already-started item is a
+no-op.
 
 ### `reviewed` <id> [value]
 

@@ -8,6 +8,12 @@ import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, W
 import { isAutomationAuthoredChild } from '../automation.js';
 import { recordDemotionAuditTrail } from '../demotion-audit.js';
 import { recordDetachAttribution } from '../orphan-attribution.js';
+import { resolveAuditAuthor } from '../audit.js';
+import {
+  START_ON_NOT_REACHED_REASON,
+  evaluateClaimStartOn,
+  buildStartOnOverrideComment,
+} from '../claim-start-on.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -48,6 +54,7 @@ export default function register(ctx: PluginContext): void {
     .option('--deleted-by <deletedBy>', 'New deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'New delete reason (interoperability field)')
     .option('--start-on <ISO-8601>', `New earliest instant the item may be worked on (WL-0MWM0FDZK007BAD0): a full ISO-8601 timestamp with an explicit timezone, e.g. ${START_ON_UTC_EXAMPLE} or ${START_ON_TIMEZONE_EXAMPLE}; an offset is accepted and normalised to UTC. Pass "" to clear it back to the item's createdAt.`)
+    .option('--force-start-on <reason>', 'Override the startOn claim guard (WL-0MWMGEUT10056MUI): claim an item whose startOn has not been reached. The claim proceeds and a comment records the actor, this reason and the overridden startOn. Only meaningful on a claim (--status in-progress or a non-empty --assignee).')
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
@@ -61,14 +68,14 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','startOn','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','startOn','forceStartOn','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','startOn','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync'
+        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','startOn','forceStartOn','needsProducerReview','audit','auditText','auditFile','auditFingerprint','prefix','noReSort','reSortSync'
       ];
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
@@ -209,6 +216,12 @@ export default function register(ctx: PluginContext): void {
         startOnCandidate = parsedStartOn.value;
       }
       const auditCandidate = hasProvided('auditText') ? options.auditText : (hasProvided('audit') ? options.audit : undefined);
+      // `--force-start-on <reason>` (WL-0MWMGEUT10056MUI): the audited override
+      // of the startOn claim guard. Read only when the flag was actually
+      // supplied; a blank reason is treated as no override by the guard.
+      const forceStartOnCandidate = hasProvided('forceStartOn')
+        ? String(options.forceStartOn ?? '')
+        : undefined;
       let auditWritten = false;
       let auditEntryForOutput: {
         time: string;
@@ -506,6 +519,50 @@ export default function register(ctx: PluginContext): void {
           }
         }
 
+        // startOn claim guard (WL-0MWMGEUT10056MUI, parent AC5): a claim —
+        // a status flip to in-progress OR any non-empty assignee write — is
+        // refused when the item carries an EXPLICIT future startOn. This is
+        // defence in depth behind the default read filter
+        // (WL-0MWMGET8N009KG33) and covers every claim path that shells into
+        // `wl update` (the Herdr audit claim and the StatusLifecycle helper
+        // both do). It is an ADDITIONAL sequential refusal: the assignee hold,
+        // dependency readiness and needsProducerReview are untouched.
+        // `--force-start-on <reason>` bypasses it and records an audited
+        // comment naming the actor, the reason and the overridden startOn
+        // after the write succeeds.
+        let startOnOverride: { reason: string; startOn: string } | null = null;
+        {
+          const guardItem = db.get(normalizedId);
+          if (guardItem) {
+            const claimEvaluation = evaluateClaimStartOn({
+              item: guardItem,
+              intent: {
+                status: (requestedStatus ?? updates.status) as string | undefined,
+                assignee: updates.assignee,
+              },
+              overrideReason: forceStartOnCandidate,
+            });
+            if (claimEvaluation.refused) {
+              results.push({
+                id: normalizedId,
+                success: false,
+                error: START_ON_NOT_REACHED_REASON,
+                reason: START_ON_NOT_REACHED_REASON,
+                startOn: claimEvaluation.startOn,
+                msUntilStart: claimEvaluation.msUntilStart,
+                message: claimEvaluation.message,
+              });
+              continue;
+            }
+            if (claimEvaluation.overridden && claimEvaluation.startOn) {
+              startOnOverride = {
+                reason: claimEvaluation.overrideReason ?? '',
+                startOn: claimEvaluation.startOn,
+              };
+            }
+          }
+        }
+
         if (process.env.WL_DEBUG_SQL_BINDINGS) {
           try {
             const currentBefore = db.get(normalizedId);
@@ -639,6 +696,36 @@ export default function register(ctx: PluginContext): void {
           if (divergence) {
             results.push(divergence);
             continue;
+          }
+        }
+
+        // Record the audited `--force-start-on` override now that the claim
+        // has persisted (WL-0MWMGEUT10056MUI). The comment names the actor
+        // (the claim's assignee when given, else the resolved OS user), the
+        // reason the operator supplied and the startOn that was overridden,
+        // so a deliberate early start is traceable from `wl show <id>` and
+        // survives export/import like any other comment. Best-effort: a
+        // comment-write failure must never undo the successful claim.
+        if (startOnOverride) {
+          const actor =
+            typeof updates.assignee === 'string' && updates.assignee.trim() !== ''
+              ? updates.assignee.trim()
+              : resolveAuditAuthor();
+          try {
+            db.createComment({
+              workItemId: normalizedId,
+              author: actor,
+              comment: buildStartOnOverrideComment({
+                actor,
+                reason: startOnOverride.reason,
+                startOn: startOnOverride.startOn,
+                nowIso: new Date().toISOString(),
+              }),
+              references: [],
+            });
+          } catch {
+            // Best-effort: the claim already succeeded; never abort it for a
+            // failed audit comment.
           }
         }
 

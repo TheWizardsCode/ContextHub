@@ -151,6 +151,25 @@ describe('claimWorkItem (fetcher)', () => {
     expect(result.stale).toBe(true);
   });
 
+  it('surfaces a startOn claim-guard refusal as start_on_not_reached (WL-0MWMGEUT10056MUI)', async () => {
+    const mockFn = vi.fn().mockRejectedValue(
+      new Error(
+        '{"success":false,"id":"WL-ABC","error":"start_on_not_reached",'
+          + '"reason":"start_on_not_reached","startOn":"2099-11-19T10:25:00.000Z",'
+          + '"msUntilStart":3600000,"message":"Work item WL-ABC cannot be claimed"}',
+      ),
+    );
+    setExecFileAsync(mockFn as any);
+
+    const result = await claimWorkItem('WL-ABC', 'Map');
+
+    expect(result.success).toBe(false);
+    // A scheduling refusal is NOT a lost CAS race and not a generic error.
+    expect(result.stale).toBeFalsy();
+    expect(result.reason).toBe('start_on_not_reached');
+    expect(result.startOn).toBe('2099-11-19T10:25:00.000Z');
+  });
+
   it('includes --worklog-dir when the fetcher is configured', async () => {
     const mockFn = vi.fn().mockResolvedValue({
       stdout: '{"success":true}',
