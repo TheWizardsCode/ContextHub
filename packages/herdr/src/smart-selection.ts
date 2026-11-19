@@ -30,6 +30,17 @@
  * (`fetchItemsByStage`/`fetchItemsByPriority`), which stay strictly
  * root-only and never synthesise dependency rows.
  *
+ * Priority-first `others` truncation (WL-0MWMQ6AV6007ZUNK,
+ * WL-0MWMRG6LX006B8YO): the non-mandatory `others` slice is ordered by
+ * priority band (`high` → `medium` → `low`; unknown → `medium`) BEFORE the
+ * `othersLimit` window is applied, so a medium can never displace a high from
+ * the sprint window. The sort is stable, so the incoming `wl next` score order
+ * is preserved as the intra-band tie-break — this module does not re-score
+ * (the `computeScore` weights in packages/shared/src/database/sort.ts are
+ * untouched). The stable sort is the guarantee boundary: it uses whatever
+ * order the caller supplies (whether or not the fetcher guarantees score
+ * order) and only ever reorders across bands, never within one.
+ *
  * This function is intentionally duplicated per TUI (decision Q2c in
  * WL-0MS8W5LTW006YZ4B); the Pi TUI Worklog extension copy was removed by
  * WL-0MSGI7PV9004UD0N, so the Herdr plugin copy (and the core `wl next`
@@ -63,8 +74,9 @@ export function isMandatoryItem(item: Pick<WorkItem, 'priority' | 'status' | 'st
  * - All mandatory items (critical ∪ actively-worked in-progress ∪ in_review
  *   ∪ status=blocked) are always included, deduplicated (an item matching
  *   multiple criteria counts once).
- * - The remaining `browseItemCount` slots are filled with "other" items in
- *   their original (wl next) order.
+ * - The remaining `browseItemCount` slots are filled with "other" items
+ *   priority-first (high → medium → low; unknown → medium), then in their
+ *   original (wl next) order within each band (stable sort).
  * - When the mandatory set alone meets or exceeds `browseItemCount`, all
  *   mandatory items are shown and zero others (no hard cap on mandatory).
  *
@@ -75,6 +87,27 @@ export function isMandatoryItem(item: Pick<WorkItem, 'priority' | 'status' | 'st
  * Pure & deterministic: takes (items, browseItemCount), returns a new array,
  * does not mutate the input. The caller clamps `browseItemCount` to 1–50.
  */
+
+/**
+ * Priority band rank for the non-mandatory `others` ordering
+ * (`high` → `medium` → `low`). Unknown/missing priorities fall back to
+ * `medium`, matching `bandForPriority`/`priorityOrder` in grouping.ts.
+ * `critical` ranks highest defensively, though a critical item is always
+ * mandatory and so never reaches the `others` slice.
+ */
+const PRIORITY_BAND_RANK: Record<string, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+const DEFAULT_PRIORITY_BAND_RANK = PRIORITY_BAND_RANK.medium;
+
+/** Numeric priority band rank for a single item. */
+function priorityBandRank(priority: string | undefined): number {
+  return PRIORITY_BAND_RANK[priority ?? ''] ?? DEFAULT_PRIORITY_BAND_RANK;
+}
+
 export function selectWorkItems<T extends Pick<WorkItem, 'priority' | 'status' | 'stage' | 'parentId'>>(
   items: T[],
   browseItemCount: number,
@@ -112,5 +145,14 @@ export function selectWorkItems<T extends Pick<WorkItem, 'priority' | 'status' |
   const active = actionable.filter((i) => i.status === 'in-progress' && i.priority !== 'critical');
   const others = actionable.filter((i) => !isMandatoryItem(i));
   const othersLimit = Math.max(0, browseItemCount - (criticals.length + reviews.length + blockedItems.length + active.length));
-  return [...criticals, ...reviews, ...blockedItems, ...active, ...others.slice(0, othersLimit)];
+  // Priority-first truncation (WL-0MWMQ6AV6007ZUNK, WL-0MWMRG6LX006B8YO):
+  // order the non-mandatory slice by priority band BEFORE applying the
+  // window, so a medium can never displace a high. `others` is a fresh array
+  // from `filter`, so sorting it in place never mutates the input. The sort
+  // is stable, so the incoming `wl next` score order survives as the
+  // intra-band tie-break — no re-scoring here.
+  const selectedOthers = others
+    .sort((a, b) => priorityBandRank(b.priority) - priorityBandRank(a.priority))
+    .slice(0, othersLimit);
+  return [...criticals, ...reviews, ...blockedItems, ...active, ...selectedOthers];
 }

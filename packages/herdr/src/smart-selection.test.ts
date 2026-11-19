@@ -612,9 +612,9 @@ describe('selectWorkItems — smart selection algorithm', () => {
 // `others` slice must be ordered priority-first (high → medium → low) with the
 // incoming `wl next` score order as the stable intra-band tie-break, *before*
 // the `othersLimit` truncation. A medium can therefore never displace a high
-// from the sprint window. The `it.fails` blocks throw against today's sources
-// (which slice the raw input order); the selection implementation child
-// (WL-0MWMRG6LX006B8YO) flips them to `it`.
+// from the sprint window. These were `it.fails` against the old sources (which
+// sliced the raw input order); the selection implementation child
+// (WL-0MWMRG6LX006B8YO) flipped them to plain `it`.
 describe('selectWorkItems — priority-first others truncation (WL-0MWMQ6AV6007ZUNK)', () => {
   /** A non-mandatory HIGH item: open, root, not critical/in-progress/blocked/in_review. */
   const highOther = (id: string): WorkItem =>
@@ -623,7 +623,7 @@ describe('selectWorkItems — priority-first others truncation (WL-0MWMQ6AV6007Z
   const mediumOther = (id: string): WorkItem =>
     makeItem(id, { priority: 'medium', status: 'open', stage: 'idea' });
 
-  it.fails('never lets a medium displace a high from the others window (5 high, 2 medium, limit 3)', () => {
+  it('never lets a medium displace a high from the others window (5 high, 2 medium, limit 3)', () => {
     // The two mediums arrive first in `wl next` score order: a naive slice of
     // the raw order selects them and cuts three highs.
     const items = [
@@ -645,7 +645,7 @@ describe('selectWorkItems — priority-first others truncation (WL-0MWMQ6AV6007Z
     expect(selectedOthers.map((i) => i.id)).toEqual(['H1', 'H2', 'H3']);
   });
 
-  it.fails('preserves the incoming score order within a priority band (stable sort, no re-score)', () => {
+  it('preserves the incoming score order within a priority band (stable sort, no re-score)', () => {
     // Highs arrive interleaved with mediums in a deliberate, non-alphabetical
     // order. The stable priority sort must keep the highs' incoming relative
     // order — the tie-break is the `wl next` score order, not a re-sort.
@@ -667,7 +667,7 @@ describe('selectWorkItems — priority-first others truncation (WL-0MWMQ6AV6007Z
     ).toEqual(['H3', 'H1', 'H5']);
   });
 
-  it.fails('fills spare slots with mediums in incoming order once every high is selected', () => {
+  it('fills spare slots with mediums in incoming order once every high is selected', () => {
     const items = [
       mediumOther('M2'),
       mediumOther('M1'),
@@ -681,6 +681,44 @@ describe('selectWorkItems — priority-first others truncation (WL-0MWMQ6AV6007Z
     const selected = result.filter((i) => !isMandatoryItem(i)).map((i) => i.id);
 
     expect(selected).toEqual(['H1', 'H2', 'H3', 'H4', 'H5', 'M2']);
+  });
+
+  it('the reproduced anomaly is gone: a fresh audit-not-ready medium no longer out-selects a plain high', () => {
+    // The reported symptom (parent brief): `computeScore` awards +3500 to a
+    // fresh audit-not-ready item, so a medium scores 5500 and a plain high
+    // only 3000 — the medium arrives first in `wl next` order. With a single
+    // others slot the priority-first sort must still pick the high.
+    const items = [mediumOther('M-fresh-audit'), highOther('H-plain')];
+
+    const single = selectWorkItems(items, 1);
+    expect(single.map((i) => i.id)).toEqual(['H-plain']);
+
+    // Widen the window: the high stays ahead of the medium in rank order.
+    const both = selectWorkItems(items, 2);
+    expect(both.map((i) => i.id)).toEqual(['H-plain', 'M-fresh-audit']);
+  });
+
+  it('ranks unknown priority as medium for the others ordering', () => {
+    // Unknown future priority values must not jump ahead of a known high, and
+    // must not sink below a known low — they band with medium.
+    const unknown = makeItem('U1', { priority: 'expedite', status: 'open', stage: 'idea' });
+    const items = [mediumOther('M1'), unknown, highOther('H1')];
+
+    const result = selectWorkItems(items, 3);
+    const order = result.filter((i) => !isMandatoryItem(i)).map((i) => i.id);
+
+    expect(order).toEqual(['H1', 'M1', 'U1']);
+  });
+
+  it('orders low items after mediums and never before a high', () => {
+    const lowOther = (id: string): WorkItem =>
+      makeItem(id, { priority: 'low', status: 'open', stage: 'idea' });
+    const items = [lowOther('L1'), mediumOther('M1'), highOther('H1'), lowOther('L2')];
+
+    const result = selectWorkItems(items, 2);
+    const selected = result.filter((i) => !isMandatoryItem(i)).map((i) => i.id);
+
+    expect(selected).toEqual(['H1', 'M1']);
   });
 
   // Unchanged by this work — kept green as a regression guard. Reordering the
