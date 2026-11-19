@@ -847,6 +847,112 @@ function pinMap(entries: Array<[string, string | string[]]>): BlockerPins {
   return new Map(entries);
 }
 
+// ── Blocker-pin / band-first regression guard (WL-0MWMRG9GQ000P52S) ───
+//
+// The band-first re-bucketing (WL-0MWMQ6AV6007ZUNK) changed how section
+// numbers are derived: priority band is now the primary section key and the
+// label counter restarts per band. The pin override still has to hold under
+// that structure — a pinned blocker shares the blocked item's *band* section
+// and group number, and multi-band pins resolve to the lowest-numbered group
+// in display order (which is now the most urgent band). These specs guard
+// that interaction so a future grouping change cannot silently regress it.
+describe('regroupWorkItems — blocker pin under band-first grouping (WL-0MWMRG9GQ000P52S)', () => {
+  it('AC1: carries a pinned blocker across bands into the blocked item\'s band section and group', () => {
+    const blocked = makeItem('WL-B1', { stage: 'plan_complete', priority: 'high' });
+    const medium = makeItem('WL-M1', { stage: 'plan_complete', priority: 'medium' });
+    // The blocker's own band is Low — the pin must lift it into the blocked
+    // item's High band section.
+    const pinned = blocker('WL-P1', { priority: 'low' });
+    const input = [blocked, medium, pinned];
+
+    const unpinned = regroupWorkItems(input, 3);
+    const withPin = regroupPinned(input, pinMap([['WL-P1', 'WL-B1']]));
+
+    const unpinnedBlocker = unpinned.find((i) => i.id === 'WL-P1')!;
+    const blockedRow = withPin.find((i) => i.id === 'WL-B1')!;
+    const pinnedRow = withPin.find((i) => i.id === 'WL-P1')!;
+
+    // Without the pin the blocker rides its own (Low) band.
+    expect(unpinnedBlocker.groupLabel.startsWith('Low')).toBe(true);
+
+    // With the pin it shares the blocked item's band section, group number
+    // and label — the High band, not its own Low band.
+    expect(pinnedRow.group).toBe(blockedRow.group);
+    expect(pinnedRow.groupLabel).toBe(blockedRow.groupLabel);
+    expect(blockedRow.groupLabel.startsWith('High')).toBe(true);
+    expect(pinnedRow.groupLabel.startsWith('Low')).toBe(false);
+
+    // …and sorts immediately after the blocked item within that band group.
+    expect(withPin.findIndex((i) => i.id === 'WL-P1')).toBe(
+      withPin.findIndex((i) => i.id === 'WL-B1') + 1,
+    );
+  });
+
+  it('AC2: a blocker of two visible items in different bands appears once in the lowest-numbered group', () => {
+    const blockedHigh = makeItem('WL-BH', { stage: 'plan_complete', priority: 'high' });
+    const blockedLow = makeItem('WL-BL', { stage: 'plan_complete', priority: 'low' });
+    const pinned = blocker('WL-P1', { priority: 'medium' });
+    const input = [blockedHigh, blockedLow, pinned];
+
+    const items = regroupPinned(input, pinMap([['WL-P1', ['WL-BH', 'WL-BL']]]));
+    const highRow = items.find((i) => i.id === 'WL-BH')!;
+    const lowRow = items.find((i) => i.id === 'WL-BL')!;
+    const pinnedRows = items.filter((i) => i.id === 'WL-P1');
+
+    // The two blocked items genuinely sit in different priority bands and the
+    // High band's group number is lower in display order.
+    expect(highRow.groupLabel.startsWith('High')).toBe(true);
+    expect(lowRow.groupLabel.startsWith('Low')).toBe(true);
+    expect(highRow.group).toBeLessThan(lowRow.group);
+
+    // Exactly one row, in the lowest-numbered (High) group, labelled with the
+    // band of that group — not its own Medium band or the Low anchor.
+    expect(pinnedRows).toHaveLength(1);
+    expect(pinnedRows[0].group).toBe(highRow.group);
+    expect(pinnedRows[0].groupLabel).toBe(highRow.groupLabel);
+    expect(pinnedRows[0].groupLabel.startsWith('High')).toBe(true);
+
+    // …immediately after the anchor whose group won.
+    expect(items.findIndex((i) => i.id === 'WL-P1')).toBe(
+      items.findIndex((i) => i.id === 'WL-BH') + 1,
+    );
+
+    // Independent of the order the blocked ids are listed in the pin map.
+    const reversed = regroupPinned(
+      input,
+      pinMap([['WL-P1', ['WL-BL', 'WL-BH']]]),
+    );
+    const reversedPinned = reversed.find((i) => i.id === 'WL-P1')!;
+    expect(reversedPinned.group).toBe(highRow.group);
+    expect(reversedPinned.groupLabel).toBe(highRow.groupLabel);
+  });
+
+  it('AC3: an absent or empty pin map is byte-identical to unpinned band-first grouping', () => {
+    const input = [
+      makeItem('WL-H', { stage: 'plan_complete', priority: 'high' }),
+      makeItem('WL-M', { stage: 'plan_complete', priority: 'medium' }),
+      makeItem('WL-L', { stage: 'idea', priority: 'low' }),
+      makeItem('WL-R', { stage: 'in_review', priority: 'high', status: 'completed' }),
+    ];
+    const serialise = (rows: WorkItem[]): string[] =>
+      rows.map((i) => `${i.id}|${i.group}|${i.groupLabel}`);
+
+    // ABSENT pin map (argument omitted) vs EMPTY pin map — both must be a
+    // no-op against the unpinned band-first grouping.
+    const absent = serialise(regroupWorkItems(input, 3));
+    const empty = serialise(regroupWorkItems(input, 3, new Map()));
+
+    expect(empty).toEqual(absent);
+    // The shared output is the band-first order: High → Medium → Low → In Review.
+    expect(absent).toEqual([
+      'WL-H|1|High Group 1',
+      'WL-M|2|Medium Group 1',
+      'WL-L|3|Low Idea',
+      'WL-R|4|In Review',
+    ]);
+  });
+});
+
 // ── Priority-band section ordering (WL-0MWMQ6AV6007ZUNK) ──────────────
 //
 // RED WITNESS (test-first child WL-0MWMRFX27007NC0G). The parent epic moves
