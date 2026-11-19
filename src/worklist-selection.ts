@@ -189,6 +189,7 @@ export function selectBrowseFeed(
       return {
         id: wi.id,
         stage: wi.stage,
+        status: wi.status,
         filePaths: extractFilePaths(wi.description || ''),
         priority: wi.priority,
         needsProducerReview: wi.needsProducerReview,

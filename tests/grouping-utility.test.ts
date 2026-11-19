@@ -345,7 +345,7 @@ describe('grouping stability — content-deterministic grouping', () => {
     expect(assignItemGroups(churned, 3)).toEqual(reference);
   });
 
-  it.fails('moves an item between groups only when a material input changes (key files)', () => {
+  it('moves an item between groups only when a material input changes (key files)', () => {
     const before = [
       { id: 'WL-A', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'medium' },
       { id: 'WL-B', stage: 'plan_complete', filePaths: ['src/y.ts'], priority: 'medium' },
@@ -357,7 +357,7 @@ describe('grouping stability — content-deterministic grouping', () => {
     expect(assignItemGroups(after, 3).get('WL-B')!.groupLabel).toBe('Medium Group 2');
   });
 
-  it.fails('moves an item into the Critical band when its priority becomes critical (material change)', () => {
+  it('moves an item into the Critical band when its priority becomes critical (material change)', () => {
     const before = [{ id: 'WL-A', stage: 'plan_complete', filePaths: ['src/x.ts'], priority: 'high' }];
     expect(assignItemGroups(before, 3).get('WL-A')!.groupLabel).toBe('High Group 1');
     const after = before.map(item => ({ ...item, priority: 'critical' }));
@@ -409,7 +409,7 @@ describe('grouping stability — content-deterministic grouping', () => {
 describe('assignItemGroups — new group order', () => {
   // Red witness — priority-band section ordering (WL-0MWMQ6AV6007ZUNK): the
   // core copy used by `wl next --groups` must mirror herdr band-first order.
-  it.fails('produces the band-first group order: Critical → High → Medium → Low → In Review', () => {
+  it('produces the band-first group order: Critical → High → Medium → Low → In Review', () => {
     const items = [
       { id: 'WL-C1', stage: 'plan_complete', filePaths: ['src/c.ts'], priority: 'critical' },
       { id: 'WL-P1', stage: 'plan_complete', filePaths: ['src/p1.ts'], priority: 'high' },
@@ -479,7 +479,7 @@ describe('assignItemGroups — Critical Group N', () => {
     expect(groups.get('WL-C2')!.groupLabel).toBe('Critical Group 1');
   });
 
-  it.fails('excludes critical items from their band stage groups (Idea/Other/In Review)', () => {
+  it('excludes critical items from their band stage groups (Idea/Other/In Review)', () => {
     const items = [
       { id: 'WL-C1', stage: 'idea', filePaths: [], priority: 'critical' },
       { id: 'WL-idea', stage: 'idea', filePaths: [], priority: 'medium' },
@@ -496,7 +496,7 @@ describe('assignItemGroups — Critical Group N', () => {
 });
 
 describe('assignItemGroups — Group N (in_progress + plan_complete + intake_complete)', () => {
-  it.fails('partitions plan_complete and intake_complete items into per-band <Band> Group N labels', () => {
+  it('partitions plan_complete and intake_complete items into per-band <Band> Group N labels', () => {
     const items = [
       { id: 'WL-P1', stage: 'plan_complete', filePaths: ['src/a.ts'], priority: 'high' },
       { id: 'WL-I1', stage: 'intake_complete', filePaths: ['src/b.ts'], priority: 'medium' },
@@ -508,7 +508,7 @@ describe('assignItemGroups — Group N (in_progress + plan_complete + intake_com
     expect(groups.get('WL-P2')!.groupLabel).toBe('High Group 2');
   });
 
-  it.fails('includes in-progress items in their band Group N alongside plan_complete/intake_complete', () => {
+  it('includes in-progress items in their band Group N alongside plan_complete/intake_complete', () => {
     const items = [
       { id: 'WL-P1', stage: 'plan_complete', filePaths: ['src/a.ts'], priority: 'high' },
       { id: 'WL-IP1', status: 'in-progress', stage: 'plan_complete', filePaths: ['src/b.ts'], priority: 'high' },
@@ -538,7 +538,7 @@ describe('assignItemGroups — Group N (in_progress + plan_complete + intake_com
 });
 
 describe('assignItemGroups — Idea / Other / In Review', () => {
-  it.fails('places all idea items of a band in a single "<Band> Idea" group', () => {
+  it('places all idea items of a band in a single "<Band> Idea" group', () => {
     const items = [
       { id: 'WL-1', stage: 'idea', filePaths: [] },
       { id: 'WL-2', stage: 'idea', filePaths: ['src/foo.ts'] },
@@ -550,7 +550,7 @@ describe('assignItemGroups — Idea / Other / In Review', () => {
     expect(groups.get('WL-2')!.groupLabel).toBe('Medium Idea');
   });
 
-  it.fails('places all remaining items of a band in a single "<Band> Other" group', () => {
+  it('places all remaining items of a band in a single "<Band> Other" group', () => {
     // `done` and unknown/custom stages fall back to a band-prefixed Other group.
     const items = [
       { id: 'WL-1', stage: 'done', filePaths: [] },
@@ -562,7 +562,7 @@ describe('assignItemGroups — Idea / Other / In Review', () => {
     expect(groups.get('WL-1')!.group).toBe(groups.get('WL-2')!.group);
   });
 
-  it.fails('never places canonical stages in a band "Other" group (in-progress joins a band Group N)', () => {
+  it('never places canonical stages in a band "Other" group (in-progress joins a band Group N)', () => {
     const items = [
       { id: 'WL-idea', stage: 'idea', filePaths: ['src/idea.ts'], priority: 'medium' },
       { id: 'WL-intake', stage: 'intake_complete', filePaths: ['src/intake.ts'], priority: 'medium' },
@@ -612,7 +612,7 @@ describe('assignItemGroups — Idea / Other / In Review', () => {
     expect(assignItemGroups([], 3).size).toBe(0);
   });
 
-  it.fails('handles a single item', () => {
+  it('handles a single item', () => {
     const groups = assignItemGroups([{ id: 'WL-1', stage: 'idea', filePaths: [] }], 3);
     expect(groups.get('WL-1')!.groupLabel).toBe('Medium Idea');
   });
@@ -854,18 +854,14 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
 
 // ── Priority-band section ordering (WL-0MWMQ6AV6007ZUNK) ──────────────
 //
-// RED WITNESS (test-first child WL-0MWMRFX27007NC0G). This block specifies the
-// CORE mirror used by `wl next --groups` so the two hand-synchronised copies
-// are pinned to the same band-first contract: critical → high → medium → low →
-// In Review, with stage used only as the intra-band sub-order and file-path
-// conflict grouping applied per band.
-//
-// Every `it.fails` block throws against today's sources (its assertions encode
-// the new contract); the suite stays green while the specification is red — the
-// repo's documented red-witness pattern. The core mirror implementation child
-// (WL-0MWMRG3HL007PDZ6) flips each `it.fails` to `it`.
+// Born as a RED WITNESS in the test-first child (WL-0MWMRFX27007NC0G) and
+// green from the core mirror child (WL-0MWMRG3HL007PDZ6). This block specifies
+// the CORE mirror used by `wl next --groups` so the two hand-synchronised
+// copies are pinned to the same band-first contract: critical → high → medium
+// → low → In Review, with stage used only as the intra-band sub-order and
+// file-path conflict grouping applied per band.
 describe('assignItemGroups — priority-band first ordering (WL-0MWMQ6AV6007ZUNK)', () => {
-  it.fails('regroups a high@idea item below every medium@plan_complete item (the inversion)', () => {
+  it('regroups a high@idea item below every medium@plan_complete item (the inversion)', () => {
     const items = [
       { id: 'WL-idea-high', stage: 'idea', filePaths: [], priority: 'high' },
       { id: 'WL-plan-med-1', stage: 'plan_complete', filePaths: ['src/a.ts'], priority: 'medium' },
@@ -883,7 +879,7 @@ describe('assignItemGroups — priority-band first ordering (WL-0MWMQ6AV6007ZUNK
     ).toBeLessThan(groups.get('WL-plan-med-2')!.group);
   });
 
-  it.fails('orders every high item before every medium item before every low item, regardless of stage', () => {
+  it('orders every high item before every medium item before every low item, regardless of stage', () => {
     const items = [
       { id: 'WL-low-plan', stage: 'plan_complete', filePaths: ['src/l.ts'], priority: 'low' },
       { id: 'WL-med-intake', stage: 'intake_complete', filePaths: ['src/m.ts'], priority: 'medium' },
@@ -898,7 +894,7 @@ describe('assignItemGroups — priority-band first ordering (WL-0MWMQ6AV6007ZUNK
     );
   });
 
-  it.fails('labels sections with the band scheme: <Band> Group N, <Band> Idea, <Band> Other', () => {
+  it('labels sections with the band scheme: <Band> Group N, <Band> Idea, <Band> Other', () => {
     const items = [
       { id: 'WL-C', stage: 'plan_complete', filePaths: ['src/c.ts'], priority: 'critical' },
       { id: 'WL-H', stage: 'plan_complete', filePaths: ['src/h.ts'], priority: 'high' },
@@ -916,7 +912,7 @@ describe('assignItemGroups — priority-band first ordering (WL-0MWMQ6AV6007ZUNK
     expect(groups.get('WL-L-other')!.groupLabel).toBe('Low Other');
   });
 
-  it.fails('applies file-path conflict grouping per band: a same-band Key-File share never shares a group', () => {
+  it('applies file-path conflict grouping per band: a same-band Key-File share never shares a group', () => {
     const groups = assignItemGroups([
       { id: 'WL-h1', stage: 'plan_complete', filePaths: ['src/shared.ts'], priority: 'high' },
       { id: 'WL-h2', stage: 'plan_complete', filePaths: ['src/shared.ts'], priority: 'high' },
@@ -927,7 +923,7 @@ describe('assignItemGroups — priority-band first ordering (WL-0MWMQ6AV6007ZUNK
     expect(groups.get('WL-m1')!.groupLabel, 'a different band restarts its own label counter').toBe('Medium Group 1');
   });
 
-  it.fails('orders intra-band stage sub-sections: in-progress → plan_complete → intake_complete → idea → other', () => {
+  it('orders intra-band stage sub-sections: in-progress → plan_complete → intake_complete → idea → other', () => {
     // Ids deliberately sort against the expected stage order so a pure id
     // tie-break cannot accidentally satisfy the test.
     const items = [

@@ -889,6 +889,10 @@ function isFilePath(candidate: string): boolean {
 export interface GroupableItem {
   id: string;
   stage?: string;
+  /** Lifecycle status (`wl` status vocabulary). Used to detect actively-worked
+   * items (`status === 'in-progress'`), which drive the intra-band sub-order
+   * (WL-0MUY1CSQG007TCYX, WL-0MWMQ6AV6007ZUNK). */
+  status?: string;
   filePaths: string[];
   priority?: string;
   // Optional audit fields — used for in_review bucket sort

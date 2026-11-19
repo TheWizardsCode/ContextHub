@@ -1107,7 +1107,7 @@ Options:
 `--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
 `--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
-`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by priority, stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with priority `critical` are partitioned into `Critical Group N` file-path conflict groups at the top. Non-critical `in_progress`/`plan_complete`/`intake_complete` items are partitioned into `Group N` file-path conflict groups; items with unknown/custom stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
+`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by **priority band first**, then stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Sections render band-first (`critical` → `high` → `medium` → `low` → `In Review`), so a `high` item never appears below a `medium` item whatever its stage. Items with priority `critical` are partitioned into `Critical Group N` file-path conflict groups at the top; each other band is split into `<Band> Group N`, `<Band> Idea` and `<Band> Other` sections. See "Parallel-safe grouping" below.
 `--include-blocked` — Include dependency-blocked items (excluded by default).
 `--include-not-started` — Include not-yet-started items (`startOn` in the future), which are excluded by default (see *Scheduling with `startOn`*).
 `--starts-before <ISO-8601>` — Include not-yet-started items starting before this instant (opts in and bounds the window).
@@ -1143,30 +1143,33 @@ When requesting multiple items (`-n <count>`), the output wraps results in:
 
 When `-n > 1`, `wl next` automatically groups items into parallel-safe groups based on priority, stage, and file-path conflicts extracted from each item's description. The `--groups/-g` option controls the number of file-path-based groups (default: `3`).
 
-The grouping algorithm uses a greedy first-fit strategy:
+Sections are bucketed by **priority band first**: `critical` → `high` → `medium` → `low` → `In Review`. Stage only sub-divides inside a band, so a high-priority idea always renders above a medium-priority planned item (the old stage-first inversion is gone).
+
+The grouping algorithm uses a greedy first-fit strategy within each band:
 
 1. Extract file paths from each item's description using a `**Key Files:**` section convention (see [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) for the full specification).
-2. **Canonicalise the input order** before packing, using a purely content-derived key: priority (high → medium → low) → stage sub-order (`plan_complete` → `intake_complete` → remaining) → id. Timestamps (`updatedAt`) are never part of the key, so packing is order-independent (WL-0MVVLBTTP003Y4XO).
+2. **Canonicalise the input order** before packing, using a purely content-derived key: priority (high → medium → low) → stage sub-order (actively-worked → `plan_complete` → `intake_complete` → `idea` → remaining) → id. Timestamps (`updatedAt`) are never part of the key, so packing is order-independent (WL-0MVVLBTTP003Y4XO).
 3. **Critical priority items** are partitioned first into `Critical Group N` file-path conflict groups at the very top.
-4. Non-critical items with stage `in_progress`, `plan_complete`, or `intake_complete` are partitioned into `Group N` file-path conflict groups.
-5. `idea` items are placed together in a single "Idea" group.
-6. Items with unknown/custom stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting). This is a safety net for unknown/custom stages; it is empty for all canonical stages in the default selection list.
-7. `in_review` items are placed in a single "In Review" group, last.
+4. For each of the `high`, `medium` and `low` bands, the band's actively-worked (`status: in-progress`), `plan_complete` and `intake_complete` items are partitioned into `<Band> Group N` file-path conflict groups, with the label counter restarting at `1` in each band.
+5. The band's `idea` items are placed together in a single `<Band> Idea` group.
+6. The band's items with unknown/custom stages (e.g. `done`) are placed together in a single `<Band> Other` group (no file-overlap splitting). This is a safety net; it is empty for all canonical stages in the default selection list.
+7. `in_review` items are placed in a single "In Review" group, last, whatever their priority.
 
 The group display order is:
 1. **Critical Group N** — critical items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
-2. **Group N** — in_progress + plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, items sort by **priority first (high → medium → low)**, then by the stage sub-order (`in_progress` → `plan_complete` → `intake_complete` → remaining, with no headings between the sub-groups), then by id. The same within-group ordering applies inside each Critical Group N.
-3. **Idea** — single group, sorted by priority.
-4. **Other** — single group for items with unknown/custom stages.
-5. **In Review** — single group (last).
+2. **High / Medium / Low bands**, each contributing in turn:
+   - **<Band> Group N** — actively-worked + plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, items sort by **priority first (high → medium → low)**, then by the stage sub-order (actively-worked → `plan_complete` → `intake_complete` → remaining, with no headings between the sub-groups), then by id. The same within-group ordering applies inside each Critical Group N.
+   - **<Band> Idea** — single group, sorted by priority.
+   - **<Band> Other** — single group for items with unknown/custom stages.
+3. **In Review** — single group (last), pinning every `in_review` item regardless of priority.
 
 **Stability.** Grouping is a content-deterministic function of the item set: the same items with the same key files, priority and stage/status always land in the same groups, regardless of the order the database happened to return them in. An item only changes group when a material input changes — its `**Key Files:**` section, its priority, its stage/status, or the item set itself (an item added or removed). Comment or audit churn (`updatedAt`) never moves an item, and within a group priorities never interleave (every high item ranks ahead of every medium item, which ranks ahead of every low item).
 
 In JSON output (`--json` with `-n > 1`), each result entry includes a `group` field (integer, 1-indexed) indicating the group assignment.
 
-In human-readable output, group headings (e.g., `── Critical Group 1 ──`, `── Group 1 ──`, `── Idea ──`, `── Other ──`, `── In Review ──`) are displayed between groups.
+In human-readable output, group headings (e.g., `── Critical Group 1 ──`, `── High Group 1 ──`, `── Medium Idea ──`, `── Low Other ──`, `── In Review ──`) are displayed between groups.
 
-The Herdr plugin's Worklog selection list renders group separator lines between items in different groups, helping you quickly identify items you can work on in parallel.
+The Herdr plugin's Worklog selection list renders the same band-first sections. The two implementations are maintained as deliberate hand-synchronised copies (`src/commands/grouping.ts` and `packages/herdr/src/grouping.ts`), and `tests/grouping-parity.test.ts` keeps them in step by asserting identical group assignments for a shared fixture.
 
 To specify a custom number of groups:
 
