@@ -4303,6 +4303,58 @@ Three facts make the audit trustworthy:
 Count from the log alone; there is no need to read the round-robin cursor file
 or re-run the dispatcher.
 
+**Re-measuring concentration after a fix (WL-0MWKY1KL8009PS7K, parent AC5).**
+The enforced rule is verified in two ways: deterministically by the four-root
+fairness-invariant test, and empirically by re-measuring the live dispatch logs
+over a comparable window. The counting rules below are the empirical contract —
+state them with any result so it can be reproduced.
+
+*Counting rules.*
+
+- **Window.** A contiguous ISO-8601 interval (`--since` … `--until`), starting
+  **no earlier than the moment the fix became live** — not the merge commit: a
+  long-lived worker loads code only on restart, so a window that straddles a
+  code change (or merely a merge) mixes two behaviours and is not evidence.
+- **Rows.** Only dispatch rows that carry a `paneId` (a pane was actually
+  opened) count; the un-enriched "dispatched marker" rows and
+  `pane-close`/error rows are ignored. Duplicate rows for one dispatch
+  (identical `dispatchedAt` + `paneId` + `itemId` + `kind`) are counted once.
+- **Project key.** The row's `cwd` basename (the project root), not the log's
+  location.
+- **Regime check.** The rows must be produced by the fixed code. The live
+  marker is the fairness fields in `.worklog/downtime-coordination.log`: a
+  decision entry carrying `selectedRoot` proves a build that includes the
+  fairness accounting and therefore the whole-set rotation. **No `selectedRoot`
+  in the window ⇒ the measurement is inconclusive, not a pass** — the running
+  worker predates the fix.
+- **Even share.** `total dispatches in the window ÷ number of projects with at
+  least one dispatch` (projects with an admissible offer that got served).
+  Threshold: **no project above twice its even share**.
+- **Consecutive run.** Merge every project's rows chronologically and take the
+  longest maximal same-project sequence. Threshold: **no run longer than 2**
+  (`RUN_LENGTH_CEILING`).
+- **Kind mix.** Dispatches per project per `kind` (`intake` / `plan` /
+  `risk-effort` / `implement` / `audit`).
+- **Accounting identity.** Count `dispatchingRoot` over the window's
+  `outcome: "dispatched"` decision entries and compare per project with the
+  dispatch-log counts; take the maximum `consecutiveRunLength` and compare with
+  the computed runs. The two must agree exactly.
+
+*Recorded measurement — 2026-11-19T12:22:49Z onward (NOT a pass).* The window
+held 4 active projects and 8 dispatches (12:37:40Z → 14:09:22Z): AI_Hell 4
+(`intake` 2 / `plan` 2, longest run 2), SorraAgents 2 (`risk-effort` 1 / `plan`
+1), ContextHub 1 (`implement`), games_curator 1 (`audit`); even share 2.00, so
+the largest ratio was 2.00× and the longest run 2 — both exactly **at** the
+thresholds, on a sample far too small to demonstrate anything. It is recorded
+as **inconclusive** because the regime check failed: the live worker process was
+started 2026-11-18T15:39Z (a long-lived `tsx src/start.ts` plugin pane), i.e.
+before the fairness metric (22:41Z) and the fix (12:22Z), and no decision entry
+in any project's coordination log carries the fairness fields. The immediately
+preceding pre-fix window (2026-11-19T00:00Z–12:22Z, 13 dispatches, 5 projects)
+still shows the signature — SorraAgents 6 (2.31× even share) — which confirms
+the method detects the defect when the fixed code is not running. Re-measurement
+after a dispatcher restart is tracked by **WL-0MWNN84HO004DXQU**.
+
 **Run-length source: the decision-log tail.** `consecutiveRunLength` is derived
 from the tail of the same decision log (a bounded, fail-open read) rather than a
 second durable cursor. That keeps the on-disk round-robin cursor format
