@@ -452,7 +452,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
       const lines: string[] = [];
       // First line: title + id (compact)
       lines.push(`${formatTitleOnly(item)} ${renderPriorityColouredId(item.id, item.priority)}${notStartedSuffix(item)}`);
-    // Build metadata as a markdown table
+    // Build metadata as a markdown table (Status, SortIndex, Risk, Effort, Parent, Assignee, Audit, Tags)
     const metaRows: Array<[string, string]> = [];
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
@@ -463,6 +463,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     metaRows.push(['SortIndex', String(item.sortIndex)]);
     metaRows.push(['Risk', item.risk || '—']);
     metaRows.push(['Effort', item.effort || '—']);
+    if (item.parentId) metaRows.push(['Parent', item.parentId]);
     if (item.assignee) metaRows.push(['Assignee', item.assignee]);
     if (auditResult) {
       const raw = String(auditResult.summary || '');

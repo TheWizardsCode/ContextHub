@@ -181,6 +181,57 @@ describe('tree rendering helpers', () => {
     expect(normalized).toContain('| Effort    | XS');
   });
 
+  it('shows Parent row in concise format when parentId is set', () => {
+    const item = baseWorkItem({
+      id: 'TEST-PARENT-1',
+      title: 'Concise Child',
+      parentId: 'TEST-PARENT-PARENT',
+    });
+    const items = [item];
+
+    const { lines, spy } = captureConsole();
+    displayItemTreeWithFormat(items, null, 'concise');
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi).join('\n');
+    expect(normalized).toContain('| Parent    | TEST-PARENT-PARENT');
+  });
+
+  it('omits Parent row in concise format when parentId is not set', () => {
+    const item = baseWorkItem({ id: 'TEST-PARENT-2', title: 'Concise Root', parentId: null });
+    const items = [item];
+
+    const { lines, spy } = captureConsole();
+    displayItemTreeWithFormat(items, null, 'concise');
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi).join('\n');
+    expect(normalized).not.toContain('| Parent');
+  });
+
+  it('places the Parent row after Effort and before Assignee in concise format', () => {
+    const item = baseWorkItem({
+      id: 'TEST-PARENT-3',
+      title: 'Concise Ordered',
+      effort: 'XS',
+      assignee: 'alice',
+      parentId: 'TEST-PARENT-PARENT',
+    });
+    const items = [item];
+
+    const { lines, spy } = captureConsole();
+    displayItemTreeWithFormat(items, null, 'concise');
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi).join('\n');
+    const effortIdx = normalized.indexOf('| Effort');
+    const parentIdx = normalized.indexOf('| Parent');
+    const assigneeIdx = normalized.indexOf('| Assignee');
+    expect(effortIdx).toBeGreaterThanOrEqual(0);
+    expect(parentIdx).toBeGreaterThan(effortIdx);
+    expect(assigneeIdx).toBeGreaterThan(parentIdx);
+  });
+
   it('shows Risk and Effort placeholders in normal format when fields are empty', () => {
     const item = baseWorkItem({ id: 'TEST-RISK-4', title: 'Normal Test', risk: '', effort: '' });
     const items = [item];
