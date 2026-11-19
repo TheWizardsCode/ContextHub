@@ -51,7 +51,7 @@ import {
   readCoordinationLogEntries,
   type CoordinationLogEntry,
 } from './downtime-log-coordination.js';
-import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
+import { selectLeastRecentlyServed, orderRootsLeastRecentlyServed } from './downtime-round-robin-by-root.js';
 import { entryOffers } from './downtime-worker.offer-selection.js';
 
 /**
@@ -178,6 +178,92 @@ export async function nextRunLengthForRoot(cwd: string, root: string): Promise<n
   } catch {
     return 1; // fail-open: unknown history records the default run length
   }
+}
+
+/**
+ * The consecutive-run bound (parent WL-0MWKE9VF800101V9 AC1): while a peer root
+ * has an admissible offer and surplus capacity exists, a root that has already
+ * dispatched this many times in succession is deferred behind its peers.
+ */
+export const RUN_LENGTH_CEILING = 2;
+
+/**
+ * Read the previous dispatch run from this leader's decision log.
+ *
+ * This is the ONE run-length accounting source (WL-0MWKY141H002LULI); the
+ * ordering helpers below consume it rather than keeping a second durable
+ * cursor. Fail-open: a missing/unreadable/corrupt log (or any read failure)
+ * resolves `null` — "no previous dispatch" — so ordering degrades to today's
+ * behaviour and dispatch is never blocked, failed or delayed.
+ */
+export async function readPreviousDispatchRun(
+  cwd: string,
+): Promise<{ root: string; length: number } | null> {
+  try {
+    return previousDispatchRun(await readCoordinationLogEntries(cwd));
+  } catch {
+    return null; // fail-open: no history, no deferral
+  }
+}
+
+/**
+ * Defer a run-length ceiling root behind its peers (parent AC1).
+ *
+ * `orderedRoots` is the whole candidate set in rotation order (fresh — the
+ * input is never mutated). When `previousRun` shows the same root dispatched at
+ * least {@link RUN_LENGTH_CEILING} times in succession, `surplusCapacity` is
+ * true and at least one peer exists, that root is moved to the END of the
+ * order: peers are tried first, so the next genuinely admissible peer dispatches
+ * instead. A root whose peers are all held still falls through to this root —
+ * the bound only bites while a peer has an admissible offer, exactly as parent
+ * AC1 states.
+ *
+ * Pure and total: no I/O, never throws; any condition failing means the order is
+ * returned unchanged (fail-open — today's behaviour).
+ */
+export function deferRunLengthCeilingRoot(
+  orderedRoots: readonly string[],
+  previousRun: { root: string; length: number } | null,
+  surplusCapacity: boolean,
+): string[] {
+  const ordered = [...orderedRoots];
+  if (!surplusCapacity || ordered.length < 2 || previousRun === null) return ordered;
+  if (previousRun.length < RUN_LENGTH_CEILING) return ordered;
+  const index = ordered.indexOf(previousRun.root);
+  if (index < 0) return ordered;
+  const [deferred] = ordered.splice(index, 1);
+  ordered.push(deferred);
+  return ordered;
+}
+
+/**
+ * Order the leader's ENTIRE entry list for dispatch (WL-0MWKY1839000JM5O).
+ *
+ * The whole admissible candidate set is rotated, not just the tick's first
+ * choice: entries follow {@link orderRootsLeastRecentlyServed} (unknown roots
+ * first, least-recently-served first, ties alphabetical), so a
+ * selected-but-fully-held root no longer leaves fall-through in raw
+ * coordination-file order. The parent AC1 run-length bound then defers a root
+ * that already dispatched twice in succession behind its peers while surplus
+ * capacity exists, using the decision log (this module's SINGLE run-length
+ * source). Stable: entries of one root keep file order, and entries with no
+ * candidate root stay last.
+ *
+ * Pure read of the cursor; the decision-log read is fail-open. Never mutates
+ * `entries` and never throws.
+ */
+export async function orderCoordinationEntriesForDispatch(
+  entries: readonly CoordinationEntry[],
+  opts: { coordinationDir: string; countingCwd: string; surplusCapacity: boolean },
+): Promise<CoordinationEntry[]> {
+  const roots = orderRootsLeastRecentlyServed(opts.coordinationDir, eligibleOfferRoots(entries));
+  const previousRun = roots.length > 1 ? await readPreviousDispatchRun(opts.countingCwd) : null;
+  const orderedRoots = deferRunLengthCeilingRoot(roots, previousRun, opts.surplusCapacity);
+  const rank = new Map(orderedRoots.map((root, index) => [root, index]));
+  if (rank.size === 0) return [...entries];
+  const rankOf = (entry: CoordinationEntry): number =>
+    rank.get(entry.worklogRoot ?? entry.directory) ?? Number.MAX_SAFE_INTEGER;
+  return [...entries].sort((a, b) => rankOf(a) - rankOf(b));
 }
 
 /**

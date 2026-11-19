@@ -33,11 +33,12 @@
  *      other roots have mature implement/audit backlogs stuck behind those
  *      gates.
  *
- * These are CHARACTERISATION tests: they pin today's (biased) behaviour so the
- * fix item (WL-0MWKY1839000JM5O) can invert them deliberately. If a test here
- * starts failing because the ordering was fixed, that is the intended signal —
- * move the assertion to the fixed-behaviour expectation rather than deleting
- * the scenario.
+ * These are now CHARACTERISATION tests of the FIXED behaviour: they originally
+ * pinned the biased behaviour so the fix item (WL-0MWKY1839000JM5O) could invert
+ * them deliberately. The fix rotates the whole admissible candidate set, so the
+ * fall-through is round-robin and these specs assert the fair ordering. If one
+ * starts failing because the ordering regressed, the assertion (not the
+ * scenario) is the thing to restore.
  */
 
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
@@ -153,7 +154,7 @@ function spawnedPrompts(deps: DowntimeWorkerDeps): string[] {
 
 // ── Mechanism (a): selected-root-only rotation ────────────────────────
 
-describe('mechanism (a): rotation applies only to the tick’s selected root', () => {
+describe('mechanism (a): rotation applies to the whole admissible candidate set', () => {
   /**
    * Four roots, interleaved admissible/held offers, pinned by the parent AC1
    * shape. Root A is the least-recently-served root and is DISPATCH-HELD
@@ -161,13 +162,10 @@ describe('mechanism (a): rotation applies only to the tick’s selected root', (
    * charged). Roots B and C both have an admissible prep offer. C is strictly
    * LESS recently served than B.
    *
-   * Round-robin would serve C first among the admissible roots. Today's
-   * fall-through is raw coordination-file order, so B wins instead — and keeps
-   * winning on every subsequent tick because A is never charged and therefore
-   * stays selected, while B's charge only pushes B further back in the cursor,
-   * which the fall-through order ignores.
+   * Round-robin serves C first among the admissible roots. The fixed ordering
+   * rotates the WHOLE set, so C — not file-order B — wins the fall-through.
    */
-  it('fall-through is raw file order, not round-robin: B beats the less-recently-served C', async () => {
+  it('fall-through is round-robin: the less-recently-served C beats file-order B', async () => {
     // Root A is oldest (selected) but held; B is the most recently served and
     // C sits between them, so C is the correct round-robin choice.
     seedCursor({
@@ -203,14 +201,14 @@ describe('mechanism (a): rotation applies only to the tick’s selected root', (
     });
 
     expect(outcome.dispatched).toBe(true);
-    // Raw file order wins: B dispatches, even though C is less recently served.
+    // Whole-set round-robin: C dispatches, because it is less recently served.
     const prompts = spawnedPrompts(deps);
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain('WL-B');
-    expect(prompts[0]).not.toContain('WL-C');
+    expect(prompts[0]).toContain('WL-C');
+    expect(prompts[0]).not.toContain('WL-B');
   });
 
-  it('one held-selected root lets the earliest file-order root win several consecutive slots', async () => {
+  it('a held-selected root never monopolises the fall-through across consecutive slots', async () => {
     // Initial cursor: A is oldest and always held; C is less recently served
     // than B, so a round-robin across admissible roots would pick C first.
     seedCursor({
@@ -260,9 +258,12 @@ describe('mechanism (a): rotation applies only to the tick’s selected root', (
     }
 
     // The bound under test (parent AC1): no root may win more than twice in
-    // succession while a peer has an admissible offer. Today B wins all three
-    // because fall-through ignores the cursor for the non-selected roots.
-    expect(dispatched).toEqual(['B', 'B', 'B']);
+    // succession while a peer has an admissible offer. The whole-set order
+    // interleaves C and B (C is newer than B after tick 1), so the run is 1
+    // and neither admissible root is starved.
+    expect(dispatched).toEqual(['C', 'B', 'C']);
+    expect(dispatched.filter((root) => root === 'C')).toHaveLength(2);
+    expect(dispatched.filter((root) => root === 'B')).toHaveLength(1);
   });
 });
 

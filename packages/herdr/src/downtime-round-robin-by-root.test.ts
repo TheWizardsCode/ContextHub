@@ -26,6 +26,7 @@ import {
   loadRoundRobinCursor,
   saveRoundRobinCursor,
   selectLeastRecentlyServed,
+  orderRootsLeastRecentlyServed,
   advanceRoot,
   ROUND_ROBIN_BY_ROOT_FILE_NAME,
 } from './downtime-round-robin-by-root';
@@ -289,6 +290,118 @@ describe('new roots sort first', () => {
       Date.now(),
     );
     expect(result).toBe('alpha'); // all unknown → alpha-sort
+  });
+});
+
+// ── Test 6b: Whole-set ordered candidate list (WL-0MWKY1839000JM5O) ───
+//
+// The leader rotates the WHOLE candidate set, not just its first choice, so
+// selection exposes the full deterministic order. The rule is exactly the one
+// `selectLeastRecentlyServed` already applied to its first element: unknown
+// roots first (alphabetical), then known roots oldest-first (ties
+// alphabetical).
+describe('ordered candidate list — whole-set rotation', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkTmpDir();
+  });
+
+  afterEach(() => {
+    cleanupDir(tmpDir);
+  });
+
+  it('orders unknown roots first (alphabetical) then known roots oldest-first', () => {
+    saveRoundRobinCursor(tmpDir, {
+      'known-new': '2026-09-02T02:00:00.000Z',
+      'known-old': '2026-09-02T00:00:00.000Z',
+      'known-mid': '2026-09-02T01:00:00.000Z',
+    });
+
+    const ordered = orderRootsLeastRecentlyServed(tmpDir, [
+      'known-new',
+      'unknown-z',
+      'known-old',
+      'unknown-a',
+      'known-mid',
+    ]);
+
+    expect(ordered).toEqual([
+      'unknown-a',
+      'unknown-z',
+      'known-old',
+      'known-mid',
+      'known-new',
+    ]);
+  });
+
+  it('breaks timestamp ties alphabetically (deterministic)', () => {
+    saveRoundRobinCursor(tmpDir, {
+      gamma: '2026-09-02T00:00:00.000Z',
+      alpha: '2026-09-02T00:00:00.000Z',
+      beta: '2026-09-02T00:00:00.000Z',
+    });
+
+    expect(orderRootsLeastRecentlyServed(tmpDir, ['gamma', 'beta', 'alpha'])).toEqual([
+      'alpha',
+      'beta',
+      'gamma',
+    ]);
+  });
+
+  it('collapses duplicate roots and empty values (one rotation slot per root)', () => {
+    saveRoundRobinCursor(tmpDir, { alpha: '2026-09-02T00:00:00.000Z' });
+
+    expect(
+      orderRootsLeastRecentlyServed(tmpDir, ['beta', 'alpha', 'beta', '', 'alpha']),
+    ).toEqual(['beta', 'alpha']);
+  });
+
+  it('returns an empty list for no roots', () => {
+    expect(orderRootsLeastRecentlyServed(tmpDir, [])).toEqual([]);
+  });
+
+  it('agrees with selectLeastRecentlyServed: the first element is the selection', () => {
+    saveRoundRobinCursor(tmpDir, {
+      alpha: '2026-09-02T01:00:00.000Z',
+      beta: '2026-09-02T00:00:00.000Z',
+    });
+    const roots = ['alpha', 'beta', 'gamma'];
+
+    const ordered = orderRootsLeastRecentlyServed(tmpDir, roots);
+    // gamma is unknown → first, exactly as selection has always decided.
+    expect(ordered[0]).toBe('gamma');
+    expect(ordered[0]).toBe(selectLeastRecentlyServed(tmpDir, roots, Date.now()));
+  });
+
+  it('is a pure read — the cursor file bytes are unchanged', () => {
+    const cursorPath = path.join(tmpDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
+    saveRoundRobinCursor(tmpDir, {
+      alpha: '2026-09-02T00:00:00.000Z',
+      beta: '2026-09-02T01:00:00.000Z',
+    });
+    const before = fs.readFileSync(cursorPath, 'utf-8');
+
+    orderRootsLeastRecentlyServed(tmpDir, ['beta', 'alpha']);
+
+    expect(fs.readFileSync(cursorPath, 'utf-8')).toBe(before);
+  });
+
+  it('fails open on a corrupt cursor: alphabetical order, never a throw', () => {
+    const cursorPath = path.join(tmpDir, ROUND_ROBIN_BY_ROOT_FILE_NAME);
+    fs.writeFileSync(cursorPath, 'not valid json{{{');
+
+    expect(() => orderRootsLeastRecentlyServed(tmpDir, ['gamma', 'alpha', 'beta'])).not.toThrow();
+    expect(orderRootsLeastRecentlyServed(tmpDir, ['gamma', 'alpha', 'beta'])).toEqual([
+      'alpha',
+      'beta',
+      'gamma',
+    ]);
+  });
+
+  it('does not create a cursor file when none exists', () => {
+    orderRootsLeastRecentlyServed(tmpDir, ['beta', 'alpha']);
+    expect(fs.existsSync(path.join(tmpDir, ROUND_ROBIN_BY_ROOT_FILE_NAME))).toBe(false);
   });
 });
 
