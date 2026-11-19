@@ -48,11 +48,13 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch (per-offer iteration), own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
 | `downtime-worker.offer-selection.ts` | The leader's drain-aware tie-break over one entry's ADMISSIBLE offers (pure ordering arithmetic — never a gate, never a cross-root ranking) | `entryOffers`, `drainAwareRank`, `orderAdmissibleOffers` |
+| `downtime-worker.fairness.ts` | Per-project fairness accounting: whole-set candidate ordering, the twice-in-succession run-length bound (decision-log-sourced, fail-open) and the fairness decision evidence | `orderCoordinationEntriesForDispatch`, `deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING`, `selectedRootForTick`, `dispatchDecisionFairness` |
 | `downtime-worker.terminal-reason.ts` | The neutral terminal-reason precedence chain for a tick that dispatched nothing | `resolveTerminalOutcome` |
 | `downtime-worker.head-scan.ts` | Bounded head/extension candidate scan over ONE root, plus the registered-root sweep that applies it per root in round-robin order | `dispatchFromOwnHead`, `dispatchFromRegisteredRoots` |
 | `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
 | `downtime-worker.launch-fence.ts` | One-per-idle-window launch fence (closes the stale-status launch window) | `createIdleWindowLaunchFence` |
 | `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
+| `downtime-worker.orchestrator-signals.ts` | The observation/state writers the orchestrator composes: the three-strike pause, the capacity-starvation signal and the shared refusal-field composition | `refusalDecisionFields`, `pauseAfterPersistentErrors`, `writeCapacityStarvationSignal` |
 | `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
 | `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
 | `host-dispatch-budget.ts` | Machine-scoped dispatch-budget ledger + machine configuration (`budget.json`, env overrides, clamps) and its pure decision helpers (F1) | `readBudget`, `reserve`, `release`, `reap`, `sweepClosedPanes`, `liveCount`, `freshCount`, `readBudgetConfig`, `computeOverQuota`, `reduceAuditDisplayCounts` |
@@ -4173,9 +4175,11 @@ through.
 
 > **Retired for the coordination leader (WL-0MTK1ILM2009QYB2).** The cross-root
 > round-robin cursor ordering below was a *second ranking* on the dispatch path
-> and is removed: the coordination leader now dispatches ENTRIES in file order,
-> iterating the offers inside each entry (v2: up to one nominee per bucket; see
-> *Leader: iterating an entry's offers*). Cross-project interleaving is
+> and is removed: the coordination leader dispatches ENTRIES in round-robin
+> order — originally raw file order, **superseded** by the whole-set rule in
+> WL-0MWKY1839000JM5O below — iterating the offers inside each entry (v2: up to
+> one nominee per bucket; see *Leader: iterating an entry's offers*).
+> Cross-project interleaving is
 > achieved by offer removal + re-offer: a dispatched offer is removed (only the
 > last offer drops its entry) and the owner re-offers its next head at the next
 > check-in, so the next cycle serves the next offer in the file. The cursor module
@@ -4187,30 +4191,55 @@ through.
 > selection. The historical description below is retained for the record,
 > updated to the dispatch-driven charge.
 
-Within each tier, non-critical entries are dispatched in **global
-cross-project round-robin** order, not file order. This prevents any single
-project from monopolising the downtime worker when multiple projects
-have offers in the coordination list.
+**Enforced rule: rotate the whole admissible candidate set
+(WL-0MWKY1839000JM5O).** The leader does not rotate only the tick's first choice
+and then fall through in coordination-file order. `orderCoordinationEntriesForDispatch`
+(`downtime-worker.fairness.ts`) orders the **entire** entry list from
+`orderRootsLeastRecentlyServed` — the whole-set form of the cursor read:
 
-**How it works:**
+- **Unknown/new roots first** — a project with no dispatch history is never
+  penalised; ties are broken alphabetically.
+- Then **least-recently-DISPATCHED root first** (global cross-project
+  round-robin); ties alphabetical.
+- **Stable within a root** — entries of one root keep their coordination-file
+  order, and entries with no candidate root stay last.
 
-- A persistent cursor file
-  (`downtime-round-robin-by-root.json`) tracks the last-dispatched
-  `worklogRoot` (project) for every project that has offered work.
-- On each dispatch cycle, the leader calls
-  `selectLeastRecentlyServed()` to pick the **least-recently-dispatched
-  project** among those with offers in the current tier.
-- **New/unknown roots sort first** — a project that has never been
-  dispatched is never penalised; it is served before any known root.
-- After an offer is CONSUMED, the dispatching root's cursor entry is advanced
-  (via `advanceRoundRobinCursor`) and persisted atomically (tmp+rename);
-  selection itself advances nothing (WL-0MWFIZ8H5005FVNN).
+A root that is selected but whose offers are all held therefore cannot leave the
+fall-through in raw file order: the next candidate is always the next admissible
+root, not whichever entry happens to sit next in the file.
+
+**The twice-in-succession bound.** While **a peer root has an admissible offer
+and surplus capacity exists** (`freeSlots > 1`), a root that has already
+dispatched **twice in succession** is deferred behind its peers
+(`deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING = 2`). This is an **ordering**
+rule, never a gate: it moves a ceiling root to the end of the candidate order so
+the next genuinely admissible peer dispatches first. If every peer is held (or
+capacity has fallen to a single free slot), the order is returned unchanged and
+the ceiling root still dispatches — the bound only bites when a peer can
+actually take the slot. Fail-open: a missing/unreadable/corrupt decision log
+means "no previous dispatch", so no deferral happens and dispatch proceeds. The
+registered-root sweep uses the same ordered candidate list and the same
+deferral helper, so the two paths cannot drift.
+
+**A selected-but-held root is never charged.** Selection
+(`selectLeastRecentlyServed` / `orderRootsLeastRecentlyServed`) is a **pure
+read**: it takes no coordination lock and writes nothing, so a tick that selects
+a root and consumes nothing leaves `downtime-round-robin-by-root.json`
+**byte-identical**. Only a **consumed offer** charges the dispatching root, via
+`advanceRoundRobinCursor` and the shared `isConsumedDispatchOutcome` predicate
+(`dispatched` / `spawn-failed` / `marker-write-failed`). This is deliberate
+(WL-0MWFIZ8H5005FVNN): the cursor records **last dispatch**, not last attempt, so
+a root whose offers are all held receives no service and must not be penalised
+for it. Charging a held root would park it behind the rotation while it had
+nothing to dispatch, and would make the cursor disagree with the dispatch log.
+Fairness for a held root comes from the held offer itself (the log names the
+gate), not from the cursor.
 
 **Accounting identity:** the cursor file and `.worklog/downtime-dispatches.log`
 agree about who was served — every dispatch row in the log corresponds to
 exactly one charge of that root's cursor entry, and a charge never happens
 without a consumed offer (`dispatched` / `spawn-failed` /
-`marker-write-failed`).
+`marker-write-failed`), while a selected-but-held root is charged nothing.
 
 **Per-project fairness metric (WL-0MWKY141H002LULI, parent
 WL-0MWKE9VF800101V9 AC3).** Every coordination decision entry — a successful
@@ -4230,6 +4259,49 @@ A successful dispatch is written as a non-refusal **observation**
 untouched) and is **never rate-limited** — every slot must be recorded. The
 registered-root sweep records the same fields, with `selectedRoot` being the
 sweep's own least-recently-served root rather than the offer-list selection.
+
+**Worked example: auditing a night from the decision log alone.** The fairness
+fields are sufficient to reconstruct a night's per-root distribution without
+replaying the dispatcher. Take this chronological excerpt from one root's
+`.worklog/downtime-coordination.log` (fairness fields only, ellipses omitted):
+
+```jsonl
+{"outcome":"dispatched","selectedRoot":"/p/alpha","dispatchingRoot":"/p/alpha","consecutiveRunLength":1,"reason":"dispatched"}
+{"outcome":"dispatched","selectedRoot":"/p/alpha","dispatchingRoot":"/p/alpha","consecutiveRunLength":2,"reason":"dispatched"}
+{"outcome":"dispatched","selectedRoot":"/p/beta","dispatchingRoot":"/p/beta","consecutiveRunLength":1,"reason":"dispatched"}
+{"outcome":"no-dispatch","selectedRoot":"/p/alpha","reason":"review-queue-hold"}
+{"outcome":"dispatched","selectedRoot":"/p/beta","dispatchingRoot":"/p/beta","consecutiveRunLength":2,"reason":"dispatched"}
+{"outcome":"dispatched","selectedRoot":"/p/alpha","dispatchingRoot":"/p/alpha","consecutiveRunLength":1,"reason":"dispatched"}
+{"outcome":"dispatched","selectedRoot":"/p/gamma","dispatchingRoot":"/p/gamma","consecutiveRunLength":1,"reason":"dispatched"}
+```
+
+Derive the distribution by counting the `dispatchingRoot` of the
+`outcome: "dispatched"` rows and taking the maximum `consecutiveRunLength`:
+
+| Root | Dispatches | Longest recorded run |
+|---|---|---|
+| `/p/alpha` | 3 | 2 |
+| `/p/beta` | 2 | 2 |
+| `/p/gamma` | 1 | 1 |
+
+Three facts make the audit trustworthy:
+
+- **`no-dispatch` rows never break a run.** They carry `selectedRoot` but no
+  `dispatchingRoot`, so they are skipped when counting dispatches — the run
+  reflected in `consecutiveRunLength` only counts actual dispatches (row 5 is
+  `beta`'s second run because the intervening hold at row 4 served nobody).
+- **The bound is self-evident in the data.** No row records a
+  `consecutiveRunLength` above `2`, which is the enforced ceiling; the row 3
+  `selectedRoot`/`dispatchingRoot` switch is the deferral taking effect after
+  `alpha` reached two.
+- **A held root is visible and uncharged.** Row 4 selects `/p/alpha` yet
+  dispatches nothing, so no cursor charge and no `dispatchingRoot` were
+  fabricated; the reason names the gate that held it. A root that appears only
+  in `selectedRoot` rows was selected but never served — the open question the
+  metric answers.
+
+Count from the log alone; there is no need to read the round-robin cursor file
+or re-run the dispatcher.
 
 **Run-length source: the decision-log tail.** `consecutiveRunLength` is derived
 from the tail of the same decision log (a bounded, fail-open read) rather than a
@@ -4265,6 +4337,32 @@ file **byte-identical** — a root is never parked behind the rotation for an
 empty turn. Because the old selection-time charge also charged a root that
 dispatched from a **non-front** slot, restoring the charge at consumption is
 what keeps the rotation honest in both directions.
+
+**Gate asymmetry: which gates hold prep work (WL-0MWKY1CIJ00462ZD).** The
+gate-coverage is deliberately uneven across dispatch kinds, and the asymmetry is
+large enough to look like a fairness defect from a log alone:
+
+| Gate | Holds | Does **not** hold |
+|---|---|---|
+| Review-queue depth (`isImplementHeldByReviewGate`) | non-critical `implement` only | `audit`, `plan`, `intake`, `risk-effort`, critical `implement` |
+| Host-CPU gate | `audit`, `implement` | `plan`, `intake`, `risk-effort` |
+| Audit slot minimum / leaf-audit pin | `audit` | every other kind |
+
+So a prep-tier offer (`intake` / `plan` / `risk-effort`) is never held by the
+review-queue, CPU or audit-slot gates, while `implement` and `audit` offers are.
+On a machine where one project has a large prep backlog and its peers have
+mature implement/audit backlogs, the prep project can look like it "wins"
+repeatedly.
+
+**Verdict: a real asymmetry, but not a fairness defect (ruled out with
+evidence).** A root whose offers are all held has **no admissible offer** by
+definition — that is a legitimate scarcity signal, not an ordering failure. After
+the whole-set rotation and the twice-in-succession bound, any root that *does*
+have an admissible `implement` or `audit` offer is served within two slots, so a
+prep-only root cannot monopolise the dispatcher while a peer has ready work. The
+bound is the intended mechanism; **no gate was relaxed, reordered or duplicated
+to buy fairness**, and the override-precedence regression tests stay green
+(WL-0MWKY1CIJ00462ZD).
 
 **Fail-open:** a missing, corrupt, or unreadable cursor degrades to
 file order (the pre-refactor behaviour) — the cursor never blocks
@@ -4597,7 +4695,7 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
 | `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired** (WL-0MVXY0XPF006YUHA F2): a non-stale file written by an older instance is still read as ONE synthetic audit entry; this version never creates or removes it |
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
-| `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning + no-dispatch decisions (per worklog; rotating, 500 entries/file × 4 files ≈ ≥ 24 h — see [Retention & rotation](#rolling-log-trimming-retention--rotation)) |
+| `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning + every dispatch decision — successful dispatches and `no-dispatch` refusals alike, carrying the per-project fairness fields `selectedRoot` / `dispatchingRoot` / `consecutiveRunLength` / `outcome` (per worklog; rotating, 500 entries/file × 4 files ≈ ≥ 24 h — see [Retention & rotation](#rolling-log-trimming-retention--rotation)) |
 | `<worklog-root>/.worklog/downtime-dispatches.log` | Dispatched items (per worklog, retained; includes `anchor-unavailable` neutral no-dispatch) |
 | `<worklog-root>/.worklog/local-route.log` | Per-response local-preference route evidence written by the Worklog pi extension (bounded at 2000 lines; `at`/`sessionId`/`preference`/`route`/`fallbackReason`/`model`/`ticket`, WL-0MVLJTV03000KIQZ) |
 | `<worklog-root>/.worklog/pane-close-ledger.jsonl` | Pane-closure reaper ledger (one JSONL row per evaluated pane, per worklog, WL-0MUJL1NAH0042GOS) |
