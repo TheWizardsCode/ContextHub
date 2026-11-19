@@ -197,6 +197,16 @@ it('AC1: restores a soft-deleted item — tombstone cleared, live status, stage 
   const listed = await run(' --json list', 15000);
   const listedIds = JSON.parse(listed.stdout).workItems.map((w: any) => w.id);
   expect(listedIds).toContain(id);
+
+  // And visible to `wl next` again: the restore returned it to `open` without a
+  // claim, so dispatch can pick it up (a tombstoned item is never dispatched).
+  const nextRun = await run(' --json next -n 5', 15000);
+  expect(nextRun.exitCode).toBe(0);
+  const nextParsed = JSON.parse(nextRun.stdout);
+  const nextIds = (nextParsed.workItems ?? nextParsed.results ?? []).map(
+    (w: any) => w?.id ?? w?.workItem?.id
+  );
+  expect(nextIds).toContain(id);
 });
 
 it('AC1: restoring an item whose stage only fits a terminal status picks that status', async () => {
@@ -366,6 +376,7 @@ it('AC5: --dry-run reports the plan and mutates nothing', async () => {
   const child = await createItem('Dry child', `--parent ${parentId}`);
   const childId = child.workItem.id;
   await deleteItems([parentId]);
+  const before = await getItem(parentId);
 
   const result = await run(` --json undelete ${parentId} --dry-run --no-sync`);
   expect(result.exitCode).toBe(0);
@@ -380,10 +391,65 @@ it('AC5: --dry-run reports the plan and mutates nothing', async () => {
   // Nothing changed, and no audit comment was written.
   expect((await getItem(parentId)).status).toBe('deleted');
   expect((await getItem(parentId)).deletedBy).toBe('deleter@example.com');
+  // `updatedAt` is re-read: a dry run must not even bump the row's timestamp.
+  const after = await getItem(parentId);
+  expect(after.updatedAt).toBe(before.updatedAt);
+  expect(after.deleteReason).toBe(before.deleteReason);
   const audit = (await getComments(parentId)).find((c) =>
     String(c.comment).includes('Restored from soft-delete')
   );
   expect(audit).toBeUndefined();
+});
+
+it('AC4: human output prints one line per id and exits non-zero only for the unknown id', async () => {
+  const live = await createItem('Human live');
+  const doomed = await createItem('Human doomed');
+  await deleteItems([doomed.workItem.id]);
+
+  // Non-JSON mode: one line per id, the live one reported as skipped and the
+  // deleted one restored; the exit code stays 0 because nothing hard-failed.
+  const batch = await run(
+    ` undelete ${live.workItem.id} ${doomed.workItem.id} --no-sync`,
+    20000
+  );
+  expect(batch.exitCode).toBe(0);
+  const combined = batch.stdout + batch.stderr;
+  expect(combined).toContain(live.workItem.id);
+  expect(combined).toContain(doomed.workItem.id);
+  expect(combined).toMatch(/skip/i);
+  const lines = batch.stdout.trim().split('\n').filter(Boolean);
+  expect(lines.length).toBe(2);
+  expect((await getItem(doomed.workItem.id)).status).toBe('open');
+
+  // An unknown id is a hard failure: exit non-zero, and the deleted sibling in
+  // the same batch is still restored.
+  const unknown = await createItem('Human unknown target');
+  await deleteItems([unknown.workItem.id]);
+  const mixed = await run(
+    ` undelete ${unknown.workItem.id} UND-NOSUCHID --no-sync`,
+    20000
+  );
+  expect(mixed.exitCode).toBe(1);
+  expect(mixed.stdout + mixed.stderr).toMatch(/not found/i);
+  expect((await getItem(unknown.workItem.id)).status).toBe('open');
+});
+
+it('AC6: a sync failure warns without failing the restore', async () => {
+  const created = await createItem('Sync failure');
+  const id = created.workItem.id;
+  await deleteItems([id]);
+  performSyncMock.mockClear();
+  performSyncMock.mockRejectedValueOnce(new Error('remote unavailable'));
+
+  const result = await run(` --json undelete ${id}`, 20000);
+  expect(result.exitCode).toBe(0);
+  expect(performSyncMock).toHaveBeenCalledTimes(1);
+  expect(result.stdout + result.stderr).toMatch(/auto-sync after undelete failed/i);
+  expect(result.stdout + result.stderr).toContain('remote unavailable');
+  // The restore itself already landed locally.
+  const restored = await getItem(id);
+  expect(restored.status).toBe('open');
+  expect(restored.deletedBy ?? '').toBe('');
 });
 
 it('AC6: syncs once for the whole batch; --no-sync suppresses it', async () => {
