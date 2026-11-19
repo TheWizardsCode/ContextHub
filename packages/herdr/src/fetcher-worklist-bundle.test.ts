@@ -586,8 +586,9 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(root?.priority).toBe('medium');
     expect(root?.status).toBe('open');
     expect(root?.stage).toBe('idea');
-    // Sorted by its own group, not promoted into a Critical group (Q3: no badge).
-    expect(root?.groupLabel).toBe('Idea');
+    // Sorted by its own band-prefixed group, not promoted into a Critical group
+    // (Q3: no badge).
+    expect(root?.groupLabel).toBe('Medium Idea');
     expect(root?.groupLabel?.startsWith('Critical')).toBe(false);
     // No marker/indicator field is attached to the substituted row.
     for (const marker of [

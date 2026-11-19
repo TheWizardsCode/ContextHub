@@ -39,6 +39,16 @@ import { isAuditFresh } from '@worklog/shared/icons';
  * content-derived grouping and an empty pin map is byte-identical to today
  * (AC5). Stage-filtered views (`fetchItemsByStage`/`fetchItemsByPriority`)
  * pass no pin map and do not synthesise dependency rows.
+ *
+ * Band-first grouping (WL-0MWMQ6AV6007ZUNK): sections are bucketed by
+ * **priority band first** — `critical` → `high` → `medium` → `low` →
+ * `In Review` — so a `high@idea` item can never render below a
+ * `medium@plan_complete` item. Stage is used only as the intra-band sub-order
+ * (`in-progress` → `plan_complete` → `intake_complete` → `idea` → other) and
+ * as the sub-section scheme inside a band (`<Band> Group N`, `<Band> Idea`,
+ * `<Band> Other`). File-path conflict grouping and its label counter apply
+ * per band, restarting at 1. `In Review` stays a single global section pinned
+ * last, whatever the priority of its members.
  */
 
 // ── File path extraction ──────────────────────────────────────────────
@@ -166,14 +176,15 @@ export interface GroupAssignment {
 /**
  * Stage sub-order within a group: actively-worked items first
  * (derived from `status === 'in-progress'`), then plan_complete, then
- * intake_complete, then all remaining stages.
+ * intake_complete, then idea, then all remaining stages.
  * No headings are rendered between sub-groups.
  */
 const WITHIN_GROUP_STAGE_ORDER: Record<string, number> = {
   plan_complete: 1,
   intake_complete: 2,
+  idea: 3,
 };
-const REMAINING_STAGE_ORDER = 3;
+const REMAINING_STAGE_ORDER = 4;
 
 /**
  * Priority order for within-group sorting: high → medium → low.
@@ -306,18 +317,25 @@ export function groupItemsByFilePaths(
 }
 
 /**
- * Assign items to groups based on priority, stage and file-path conflicts.
+ * Assign items to groups based on priority band first, then stage and
+ * file-path conflicts.
  *
- * Group display order (most actionable first):
- * - **Critical Group N** — critical items partitioned by file-path conflicts
- *   (per-category label counter, no single all-inclusive "Critical" group).
- * - **Group N** — non-critical actively-worked (`status === 'in-progress'`)
- *   + `plan_complete` + `intake_complete` items partitioned by file-path
- *   conflicts (no stage prefix in the label).
- * - **Idea** — single group for all `idea` items.
- * - **Other** — single group for all remaining non-critical items (safety net
- *   for unknown/custom stages, `done`, etc.).
- * - **In Review** — single group for all `in_review` items, placed last.
+ * Sections are bucketed by **priority band first** — a `high` item can never
+ * render below a `medium` item, whatever their stages. Group display order
+ * (most actionable first):
+ *
+ * - **Critical Group N** — every critical item partitioned by file-path
+ *   conflicts (per-category label counter, no Idea/Other split).
+ * - **High / Medium / Low** bands, each in turn:
+ *   - **<Band> Group N** — the band's actively-worked
+ *     (`status === 'in-progress'`) + `plan_complete` + `intake_complete`
+ *     items partitioned by file-path conflicts (label counter restarts at 1
+ *     per band-section).
+ *   - **<Band> Idea** — single group for the band's `idea` items.
+ *   - **<Band> Other** — single group for the band's remaining items (safety
+ *     net for unknown/custom stages, `done`, etc.).
+ * - **In Review** — single global group for all `in_review` items, placed
+ *   last regardless of the priority of its members.
  *
  * Input order is canonicalised inside `groupItemsByFilePaths`
  * (priority → stage sub-order → id), so group assignment is a
@@ -345,69 +363,68 @@ export function assignItemGroups(
     return { map, count: unique.length };
   };
 
-  // 0. Critical Group N.
-  const criticalItems = items.filter(item => item.priority === 'critical');
-  if (criticalItems.length > 0) {
-    const criticalGroups = groupItemsByFilePaths(criticalItems, maxFilePathGroups);
-    const { map: groupNumMap, count } = remapToSequential(criticalGroups, nextGroup);
-    const labelNumByFileGroup = buildLabelCounter(criticalGroups);
-    for (const [id, g] of criticalGroups) {
-      const groupNum = groupNumMap.get(g)!;
-      result.set(id, { group: groupNum, groupLabel: `Critical Group ${labelNumByFileGroup.get(g)}` });
+  // Band-first bucketing (WL-0MWMQ6AV6007ZUNK): priority band is the primary
+  // section key; stage only sub-divides inside a band. In Review is a single
+  // global section pinned last, whatever the priority of its members.
+  const inReviewItems = items.filter(item => item.stage === 'in_review');
+  const bandCandidates = items.filter(item => item.stage !== 'in_review');
+
+  for (const band of PRIORITY_BANDS) {
+    const bandItems = bandCandidates.filter(item => bandForPriority(item.priority) === band);
+    if (bandItems.length === 0) continue;
+    const bandLabel = BAND_LABELS[band];
+
+    if (band === 'critical') {
+      // Critical keeps today's file-path partitioning: every critical item is
+      // packed into `Critical Group N` by Key-File conflicts (per-category
+      // label counter), not split into Idea/Other sub-sections.
+      const criticalGroups = groupItemsByFilePaths(bandItems, maxFilePathGroups);
+      const { map: groupNumMap, count } = remapToSequential(criticalGroups, nextGroup);
+      const labelNumByFileGroup = buildLabelCounter(criticalGroups);
+      for (const [id, g] of criticalGroups) {
+        const groupNum = groupNumMap.get(g)!;
+        result.set(id, { group: groupNum, groupLabel: `${bandLabel} Group ${labelNumByFileGroup.get(g)}` });
+      }
+      nextGroup += count;
+      continue;
     }
-    nextGroup += count;
+
+    // Non-critical band: `<Band> Group N` — actively-worked + plan_complete +
+    // intake_complete items partitioned by file-path conflicts, with the
+    // label counter restarting at 1 for each band-section.
+    const groupNItems = bandItems.filter(isActivelyWorkedOrPlanned);
+    if (groupNItems.length > 0) {
+      const groupNGroups = groupItemsByFilePaths(groupNItems, maxFilePathGroups);
+      const { map: groupNumMap, count } = remapToSequential(groupNGroups, nextGroup);
+      const labelNumByFileGroup = buildLabelCounter(groupNGroups);
+      for (const [id, g] of groupNGroups) {
+        const groupNum = groupNumMap.get(g)!;
+        result.set(id, { group: groupNum, groupLabel: `${bandLabel} Group ${labelNumByFileGroup.get(g)}` });
+      }
+      nextGroup += count;
+    }
+
+    // `<Band> Idea` — a single group for the band's `idea` items.
+    const ideaItems = bandItems.filter(item => item.stage === 'idea');
+    if (ideaItems.length > 0) {
+      for (const item of ideaItems) {
+        result.set(item.id, { group: nextGroup, groupLabel: `${bandLabel} Idea` });
+      }
+      nextGroup++;
+    }
+
+    // `<Band> Other` — safety net for the band's remaining items (unknown or
+    // legacy stages such as the removed `in_progress`, `done`, etc.).
+    const otherItems = bandItems.filter(item => !isActivelyWorkedOrPlanned(item) && item.stage !== 'idea');
+    if (otherItems.length > 0) {
+      for (const item of otherItems) {
+        result.set(item.id, { group: nextGroup, groupLabel: `${bandLabel} Other` });
+      }
+      nextGroup++;
+    }
   }
 
-  // 1. Group N (actively worked + plan_complete + intake_complete).
-  // `in_progress` is no longer a CLI stage; "actively worked" is derived from
-  // `status === 'in-progress'` (WL-0MUY1CSQG007TCYX).
-  const groupNItems = items.filter(
-    item =>
-      item.priority !== 'critical' &&
-      (item.status === 'in-progress' || item.stage === 'plan_complete' || item.stage === 'intake_complete'),
-  );
-  if (groupNItems.length > 0) {
-    const groupNGroups = groupItemsByFilePaths(groupNItems, maxFilePathGroups);
-    const { map: groupNumMap, count } = remapToSequential(groupNGroups, nextGroup);
-    const labelNumByFileGroup = buildLabelCounter(groupNGroups);
-    for (const [id, g] of groupNGroups) {
-      const groupNum = groupNumMap.get(g)!;
-      result.set(id, { group: groupNum, groupLabel: `Group ${labelNumByFileGroup.get(g)}` });
-    }
-    nextGroup += count;
-  }
-
-  // 2. Idea.
-  const ideaItems = items.filter(item => item.priority !== 'critical' && item.stage === 'idea');
-  if (ideaItems.length > 0) {
-    for (const item of ideaItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: 'Idea' });
-    }
-    nextGroup++;
-  }
-
-  // 3. Other.
-  // Safety net for remaining non-critical items (unknown/legacy stages such
-  // as the removed `in_progress`, `done`, etc.). Excludes actively-worked
-  // items because they belong to Group N via `status === 'in-progress'`.
-  const otherItems = items.filter(
-    item =>
-      item.priority !== 'critical' &&
-      item.status !== 'in-progress' &&
-      item.stage !== 'in_review' &&
-      item.stage !== 'plan_complete' &&
-      item.stage !== 'intake_complete' &&
-      item.stage !== 'idea',
-  );
-  if (otherItems.length > 0) {
-    for (const item of otherItems) {
-      result.set(item.id, { group: nextGroup, groupLabel: 'Other' });
-    }
-    nextGroup++;
-  }
-
-  // 4. In Review (last).
-  const inReviewItems = items.filter(item => item.priority !== 'critical' && item.stage === 'in_review');
+  // In Review (last, single global section).
   if (inReviewItems.length > 0) {
     for (const item of inReviewItems) {
       result.set(item.id, { group: nextGroup, groupLabel: 'In Review' });
@@ -416,6 +433,38 @@ export function assignItemGroups(
   }
 
   return result;
+}
+
+/** Priority bands in display order (most urgent first). */
+const PRIORITY_BANDS = ['critical', 'high', 'medium', 'low'] as const;
+type PriorityBand = (typeof PRIORITY_BANDS)[number];
+
+/** Display label prefix for each priority band's sections. */
+const BAND_LABELS: Record<PriorityBand, string> = {
+  critical: 'Critical',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+};
+
+/**
+ * Resolve an item's priority band. Unknown/missing priorities fall back to
+ * `medium`, matching {@link priorityOrder} (and the old non-critical bucket).
+ */
+function bandForPriority(priority: string | undefined): PriorityBand {
+  return priority === 'critical' || priority === 'high' || priority === 'medium' || priority === 'low'
+    ? priority
+    : 'medium';
+}
+
+/**
+ * Whether an item belongs to its band's `<Band> Group N` sub-section:
+ * actively-worked items (`status === 'in-progress'`) plus `plan_complete`
+ * and `intake_complete`. `in_progress` is no longer a CLI stage; "actively
+ * worked" is derived from `status` (WL-0MUY1CSQG007TCYX).
+ */
+function isActivelyWorkedOrPlanned(item: GroupableItem): boolean {
+  return item.status === 'in-progress' || item.stage === 'plan_complete' || item.stage === 'intake_complete';
 }
 
 /**
@@ -528,7 +577,7 @@ export function compareInReviewItems(a: GroupableItem & {
  * Compare two items for within-group display order: **priority first**
  * (high → medium → low — so every high item ranks ahead of every medium item,
  * which ranks ahead of every low item), then stage sub-sort (actively worked →
- * plan_complete → intake_complete → remaining stages), then id as a
+ * plan_complete → intake_complete → idea → remaining stages), then id as a
  * deterministic tie-break.
  *
  * Priority became the primary key in WL-0MVVLBTTP003Y4XO (the stage sub-order

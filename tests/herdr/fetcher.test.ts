@@ -293,7 +293,8 @@ describe('fetchItemsByStage', () => {
   it('regroups results priority-first before display (WL-0MSOPHLD1000EWNN)', async () => {
     // CLI order is NOT priority-first: a low-priority plan_complete item
     // precedes a critical one. The regroup wiring must reorder to the
-    // canonical bucket order (Critical Group → Group) and stamp metadata.
+    // canonical band-first bucket order (Critical Group → Low Group) and stamp
+    // metadata.
     const mockFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
         workItems: [
@@ -308,7 +309,7 @@ describe('fetchItemsByStage', () => {
     const items = await fetchItemsByStage('plan_complete');
     expect(items.map((i) => i.id)).toEqual(['WL-STAGE-CRIT', 'WL-STAGE-LOW']);
     expect(items[0].groupLabel).toBe('Critical Group 1');
-    expect(items[1].groupLabel).toBe('Group 1');
+    expect(items[1].groupLabel).toBe('Low Group 1');
     expect(items[0].group).toBeLessThan(items[1].group!);
   });
 });
@@ -376,7 +377,7 @@ describe('fetchItemsByPriority', () => {
     const items = await fetchItemsByPriority('critical');
     expect(items.map((i) => i.id)).toEqual(['WL-PRIO-CRIT', 'WL-PRIO-LOW']);
     expect(items[0].groupLabel).toBe('Critical Group 1');
-    expect(items[1].groupLabel).toBe('Group 1');
+    expect(items[1].groupLabel).toBe('Low Group 1');
     expect(items[0].group).toBeLessThan(items[1].group!);
   });
 });
@@ -436,7 +437,8 @@ describe('fetchChildrenForItem', () => {
   it('regroups child items priority-first, preserving depth (WL-0MSOPHLD1000EWNN)', async () => {
     // CLI order is NOT priority-first: a medium Group N child precedes a
     // critical one. The regroup wiring must reorder children to the
-    // canonical bucket order while keeping the hierarchy `depth` intact.
+    // canonical band-first bucket order while keeping the hierarchy `depth`
+    // intact.
     // (The medium child uses a valid lifecycle stage; the removed
     // `in_progress` stage is no longer a Group N stage — WL-0MUY1CSQG007TCYX.)
     const mockFn = vi.fn().mockResolvedValue({
@@ -453,7 +455,7 @@ describe('fetchChildrenForItem', () => {
     const children = await fetchChildrenForItem('WL-001', 1);
     expect(children.map((c) => c.id)).toEqual(['WL-001-C2', 'WL-001-C1']);
     expect(children[0].groupLabel).toBe('Critical Group 1');
-    expect(children[1].groupLabel).toBe('Group 1');
+    expect(children[1].groupLabel).toBe('Medium Group 1');
     // Depth must survive regrouping — the expand hierarchy still renders.
     expect(children[0].depth).toBe(1);
     expect(children[1].depth).toBe(1);
