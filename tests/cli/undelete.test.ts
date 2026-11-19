@@ -316,6 +316,16 @@ it('AC3: a descendant deleted in its own right is not resurrected', async () => 
   const stillDeleted = await getItem(childId);
   expect(stillDeleted.status).toBe('deleted');
   expect(stillDeleted.deleteReason).toContain('retired, not swept');
+
+  // ...and it is *reported* as skipped with its own reason, so the operator can
+  // tell a swept child apart from one that was retired deliberately.
+  const parsed = JSON.parse(result.stdout);
+  expect(parsed.results[0].skippedDescendants).toEqual([
+    expect.objectContaining({
+      id: childId,
+      deleteReason: expect.stringContaining('retired, not swept'),
+    }),
+  ]);
 });
 
 it('AC4: restoring a live item is an idempotent skip, not an error', async () => {
