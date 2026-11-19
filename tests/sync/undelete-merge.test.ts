@@ -118,3 +118,40 @@ describe('undelete ↔ sync convergence', () => {
     expect(items[0].status).toBe('open');
   });
 });
+
+describe('undelete ↔ sync at equal timestamps (delete stays terminal)', () => {
+  // Same-millisecond clock skew across stores is the one case where recency
+  // cannot decide. The rule is deliberate: a tombstone wins the tie, so a
+  // restore can never resurrect an item against a concurrent delete.
+  const SAME = '2026-01-02T00:00:00.000Z';
+
+  it('a tombstone wins the tie when it is the local side', () => {
+    const local = tombstone(SAME);
+    const remote = restored(SAME);
+
+    const { merged: items } = mergeWorkItems([local], [remote]);
+
+    expect(items[0].status).toBe('deleted');
+    expect(items[0].deletedBy).toBe('Map');
+  });
+
+  it('a tombstone wins the tie when it is the remote side', () => {
+    const local = restored(SAME);
+    const remote = tombstone(SAME);
+
+    const { merged: items } = mergeWorkItems([local], [remote]);
+
+    expect(items[0].status).toBe('deleted');
+    expect(items[0].deletedBy).toBe('Map');
+  });
+
+  it('one millisecond of recency is enough for the restore to win', () => {
+    const local = restored('2026-01-02T00:00:00.001Z');
+    const remote = tombstone(SAME);
+
+    const { merged: items } = mergeWorkItems([local], [remote]);
+
+    expect(items[0].status).toBe('open');
+    expect(items[0].deletedBy ?? '').toBe('');
+  });
+});
