@@ -93,6 +93,23 @@ An older build ignores the column if it is left in place, so dropping it is
 only necessary if you also want the schema byte-identical to the previous
 release.
 
+## Title-prefix scheduling (legacy workflows)
+
+Scheduling is expressed **only** by the `startOn` field. No work-item title is
+parsed for a start instant, and no workflow reference in this repository (or in
+the installed Pi skill set) uses a `[run-not-before …]` title prefix. If a
+project migrating from an older convention still carries such a prefix, drop it
+and set the field instead:
+
+```bash
+wl update WL-ABC123 --title "Re-measure cache hit rate" \
+  --start-on 2026-11-19T10:25:00Z
+```
+
+The field is visible and queryable (`wl list --include-not-started`,
+`wl list --fields startOn`, `wl next --starts-before …`) and the claim guard
+enforces it, none of which a title prefix could do.
+
 ## Notes for developers
 
 - Storage invariant: `saveWorkItem` writes `normalizeStartOn(startOn, createdAt)`

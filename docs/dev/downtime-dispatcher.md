@@ -1742,6 +1742,47 @@ parity-complete with the CLI's default filter (WL-0MWMGET8N009KG33):
   and **strictly read-only** — it never claims an item, writes a status/stage,
   or changes a `startOn`.
 
+#### Composition with the other holds and gates
+
+The `startOn` gate is one entry in the classifier's ordered refusal chain
+(`classifyItemForDispatchDetail`, `packages/herdr/src/downtime-worker.gates.ts`),
+never a replacement for the others. The order is fixed and each gate is
+sufficient on its own:
+
+1. `soft-deleted` — a non-empty `deletedBy` excludes the item;
+2. `producer-review` — `needsProducerReview === true` (the only persistent hold);
+3. `assignee-hold` — any non-empty `assignee` (the scheduling hold);
+4. `startOnNotReached` — effective `startOn` still in the future;
+5. the tier classification (`audit`, `implement`, `plan`, `intake`, or
+   `not-dispatchable`).
+
+Consequences:
+
+- **With the `assignee` hold:** orthogonal. An item can be both held and
+  scheduled; the earlier gate reports the hold (`assignee-hold`) and the later
+  one never runs, so any surface explaining the refusal names the *first*
+  reason. Clearing one never clears the other: `wl update <id> --assignee ""`
+  releases only the hold, while `--start-on` (or the passage of time) releases
+  only the schedule.
+- **With dependency readiness:** also orthogonal, and deliberately outside this
+  classifier. Readiness is enforced upstream by the candidate feeds — `wl
+  next`'s shared `filterCandidates` excludes dependency-blocked items unless
+  `--include-blocked` is passed, and the implement-tier candidate lookup keeps
+  that default exclusion — while the Herdr display reads
+  `--include-blocked --include-not-started` so a blocked or scheduled item is
+  still *shown*. The `startOn` gate can only additionally refuse an item; it
+  never makes a dependency-blocked item eligible. Both markers on the worklist
+  are read-only.
+- **With `needsProducerReview`:** the flag is the only persistent refusal, and
+  the `startOn` gate can never clear it. An item that is both flagged for
+  producer review and scheduled stays undispatchable until the flag is cleared
+  **and** its `startOn` has passed; one release never implies the other.
+- **With the CLI claim guard:** `wl update --force-start-on "<reason>"`
+  overrides only the `startOn` refusal (and records the actor, reason and
+  overridden instant as a comment). It bypasses neither the assignee CAS
+  (`--if-assignee`), the producer-review hold, nor dependency readiness — a
+  forced claim is a normal claim in every other respect.
+
 ### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
 
 A marker is written **before** the pane spawns to prevent duplicate dispatch, and its readers exclude the item **while the item remains at the marker's dispatched-at stage**. That is correct for a healthy run (the agent advances the item and the stage change releases the marker), but a pane that spawns successfully and never advances the item — a crash, a manual close, a silent failure, or an agent that exits without progressing — left the marker standing **forever**. The item became permanently invisible to the tier that would retry it and could only leave the stage by completing the very step that would never be scheduled: a deadlock.

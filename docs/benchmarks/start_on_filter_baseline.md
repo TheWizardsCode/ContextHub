@@ -8,10 +8,12 @@ future. Parent AC9 requires `list` / `search` / `next` to stay within the
 existing benchmarks on the current store size and requires the figures to be
 recorded.
 
-Slice 1 (WL-0MWMGEL5R003IH71) records the **before** figures on unchanged code,
-so slice 4's default filter and slice 2's index can be compared against a
-measured baseline instead of a guess, and slice 7 can publish an honest
-before/after pair.
+Slice 1 (WL-0MWMGEL5R003IH71) recorded the **before** figures on unchanged
+code, so slice 4's default filter and slice 2's index can be compared against a
+measured baseline instead of a guess, and slice 7 (WL-0MWMGEXX3003QJRV) can
+publish an honest before/after pair. **Slice 7's after run is recorded below**
+together with the `EXPLAIN QUERY PLAN` evidence and a verdict against
+`packages/herdr/test/perf/large-db-budget.json`.
 
 This baseline was captured **before any `startOn` code landed**: no schema
 column, no index, no filter, no predicate in the measured paths. The predicate
@@ -40,6 +42,13 @@ Options:
 The script is a recorder, not a gate: it exits non-zero only on a malformed
 argument or a fixture/bench failure. Regression gating stays where it already
 lives (the herdr large-DB budget ratchet and the dev-push suite).
+
+The report also carries `queryPlans`: `EXPLAIN QUERY PLAN` output captured from
+the live connection for the statements each surface actually prepares (a
+one-off `prepare` wrapper, never inside a timed sample), plus a representative
+SQL-side `startOn` predicate (`START_ON_INDEX_PROBE_SQL`). It is emitted in both
+the text and `--json` reports so the index verdict below is reproducible, not
+hand-copied.
 
 ## Method
 
@@ -104,7 +113,7 @@ incremental cost is taken from the `filter pass` row (a pure in-memory
 computation, load-insensitive at this scale) rather than from the difference
 between two dominated-by-I/O reads.
 
-## Results — full profile (2,600 items / 123.7 MB)
+## Results — before (full profile, 2,600 items / 123.7 MB)
 
 Captured 2026-11-18T21:19:01Z, 9 samples per surface, commit `39b10762d`
 (the `dev` tip the slice branched from).
@@ -129,7 +138,7 @@ Environment:
 - Store row cache disabled (`WL_CACHE_ENABLED=0`), FTS index rebuilt before
   measuring (2,012 ms, 2,600 documents).
 
-### Interpretation for AC9
+### Interpretation for AC9 (written before the filter shipped)
 
 - **The filter is cheap relative to the reads it filters.** `isNotStarted` over
   the whole 2,600-item store costs **1.6–1.8 ms median** (≈ 0.7 µs/item, one
@@ -153,7 +162,7 @@ Environment:
   regression signal — the recorded p95s, not the medians, are the comparison
   points because host load moves medians by ~20 %.
 
-## Default profile (300 items / 1.7 MB)
+## Before — default profile (300 items / 1.7 MB)
 
 The `default` profile is the fixture size the default test suite uses; it is
 recorded for a quick sanity check of the same trend at small scale
@@ -166,6 +175,150 @@ recorded for a quick sanity check of the same trend at small scale
 | `next` | 415.81 ms | 431.05 ms | 30 |
 | `filter pass` | 0.18 ms | 0.21 ms | 300 |
 | `list + filter` | 2.26 ms | 2.44 ms | 300 |
+
+## Results — after (default filter and index shipped)
+
+Captured on the same host and fixture, **after** the whole `startOn` epic
+landed. Nothing in the measurement method changed between the two runs (same
+script, same cache/FTS preparation, same warmup-then-`--runs` protocol), so the
+before/after rows are directly comparable.
+
+- Before: `39b10762d`, 2026-11-18T21:19:01Z, load average 14.23 (shared,
+  contended host).
+- After: `6088d6655`, 2026-11-19T11:47:33Z, load average 1.90 (quiet host).
+
+The host was noticeably quieter for the after run. That flatters every absolute
+number (including the before run's own second sample, which moved 10–20 %), so
+the comparison below is deliberately conservative: it reads the **after p95 as
+an upper bound against the before p95**, not the after median against the before
+median. The floor for the change's cost is the `filter pass` row (a pure
+in-memory predicate, not bound by I/O) and the difference between `list` and
+`list + filter`.
+
+### After — full profile (2,600 items / 123.7 MB, 9 samples)
+
+Store: 2,600 items, 259 dependency edges, 123.7 MB SQLite database, 123.7 MB on
+disk, fixture generation 2,384 ms, FTS rebuild 2,600 documents in 1,105 ms.
+Same size as the before run (the generator is deterministic).
+
+| Surface | Median | p95 | Min | Max | Rows returned |
+|---|---|---|---|---|---|
+| `list` | 36.27 ms | 36.99 ms | 32.68 ms | 36.99 ms | 2,600 |
+| `search` | 106.75 ms | 112.24 ms | 105.32 ms | 112.24 ms | 20 |
+| `next` (includes the shipped default filter) | 1,238.76 ms | 1,266.17 ms | 1,211.48 ms | 1,266.17 ms | 30 |
+| `filter pass` | 0.67 ms | 0.80 ms | 0.65 ms | 0.80 ms | 2,600 |
+| `list + filter` | 35.17 ms | 39.16 ms | 34.09 ms | 39.16 ms | 2,600 |
+
+### Before → after, full profile
+
+| Surface | Before p95 | After p95 | Δ | Baseline comparison point |
+|---|---|---|---|---|
+| `list` (raw read) | 83.81 ms | 36.99 ms | −55.9 % | 84 ms p95 |
+| `search` (raw FTS read) | 172.45 ms | 112.24 ms | −34.9 % | 172 ms p95 |
+| `next` (filter applied inside the selection) | 2,407.35 ms | 1,266.17 ms | −47.4 % | 2.4 s p95 |
+| `filter pass` (predicate only) | 22.75 ms p95 / 1.81 ms median | 0.80 ms p95 / 0.67 ms median | — | n/a (new predicate) |
+| `list + filter` (shipped list shape) | 73.48 ms p95 | 39.16 ms p95 | −46.7 % | 84 ms p95 |
+
+**Verdict: within the existing benchmarks.** Every after p95 is *below* the
+before p95 it is compared against, on a store of identical size, with the
+shipped filter applied. The filter's own incremental cost is **0.65–0.80 ms over
+2,600 items** (≈ 0.2–0.3 µs/item) — ~2 % of a cold `list` and ~0.05 % of a
+`next` selection — exactly the order slice 1 predicted (1.6–1.8 ms median then,
+re-measured at the same order under lighter load). `list + filter` tracks `list`
+within run-to-run noise, so the default exclusion adds no measurable read cost.
+
+### After — default profile (300 items / 1.7 MB, 9 samples)
+
+Captured 2026-11-19T11:50:10Z, load average 2.57.
+
+| Surface | Median | p95 | Rows returned |
+|---|---|---|---|
+| `list` | 1.82 ms | 2.77 ms | 300 |
+| `search` | 5.93 ms | 6.51 ms | 20 |
+| `next` | 218.93 ms | 232.91 ms | 30 |
+| `filter pass` | 0.09 ms | 0.10 ms | 300 |
+| `list + filter` | 1.60 ms | 2.55 ms | 300 |
+
+The small fixture is where the before p95s were measured from only 3 samples:
+`list` 2.77 ms after vs 2.60 ms before p95 (+0.17 ms, well inside the ±20 %
+host noise documented in the method), `list + filter` 2.55 ms vs 2.44 ms, and
+`next` 232.91 ms vs 431.05 ms. No default-profile regression signal.
+
+### `EXPLAIN QUERY PLAN` — the statements the surfaces actually prepare
+
+Captured from the live connection during the after run (verbatim detail lines;
+the SQL is whitespace-normalised):
+
+```text
+list, next
+  SCAN workitems
+  sql: SELECT * FROM workitems
+
+search
+  SCAN worklog_fts VIRTUAL TABLE INDEX 0:M7
+  SEARCH workitems USING INDEX sqlite_autoindex_workitems_1 (id=?)
+  USE TEMP B-TREE FOR ORDER BY
+  sql: SELECT worklog_fts.itemId, bm25(worklog_fts, 10.0, 5.0, 2.0, 3.0) AS rank,
+       snippet(worklog_fts, 0, '<<', '>>', '...', 32) AS title_snippet,
+       snippet(worklog_fts, 1, '<<', '>>', '...', 32) AS desc_snippet,
+       snippet(worklog_fts, 2, '<<', '>>', '...', 32) AS comment_snippet,
+       snippet(worklog_fts, 3, '<<', '>>', '...', 32) AS tags_snippet,
+       worklog_fts.status, worklog_fts.parentId
+  FROM worklog_fts
+  JOIN workitems ON worklog_fts.itemId = workitems.id
+  WHERE worklog_fts MATCH ? AND workitems.status != 'deleted'
+  ORDER BY rank LIMIT ?
+
+index probe (not a shipped call — representative SQL-side `startOn` predicate)
+  SEARCH workitems USING INDEX idx_workitems_startOn (startOn>?)
+  sql: SELECT id FROM workitems WHERE startOn > ? ORDER BY startOn
+```
+
+### The index verdict (honest form of AC9)
+
+The migration creates `idx_workitems_startOn`, and the probe row proves it is
+usable: any SQL-side `startOn` predicate is planned as
+`SEARCH workitems USING INDEX idx_workitems_startOn (startOn>?)` instead of a
+table scan.
+
+The shipped default filter deliberately does **not** put `startOn` into SQL.
+The slice-4 design applies one `isNotStarted` predicate to rows the reads have
+already materialised:
+
+- `list` and `next` read `SELECT * FROM workitems` (`SCAN workitems`),
+- `search` reads the FTS index and joins by rowid,
+- `filter pass` / `list + filter` measure that memory-side predicate.
+
+So AC9 is satisfied through its **"or an equivalent query plan"** branch: the
+existing plans are untouched (no new per-row query on the `next` path, which was
+the regression risk slice 1 called out), and the recorded figures show the
+surfaces stay comfortably within the benchmarks. The index is not what keeps
+these three reads fast — it is the seed for any future SQL-side scheduling read
+and costs only the write-side maintenance of one column index.
+
+## Verdict against `packages/herdr/test/perf/large-db-budget.json`
+
+The budget file owns the Herdr large-DB refresh ratchet (full profile,
+`dist` target). Re-ran it on the after tree
+(`npx tsx packages/herdr/test/perf/large-db-harness.ts --profile full --json`,
+2026-11-19T11:48:13Z, 2,600 items / 123.7 MB, 5 samples) — the harness's own
+`evaluation.ok` is `true` with an empty `violations` list:
+
+| Metric | Measured | Recorded baseline | Limit (headroom) | AC target | Result |
+|---|---|---|---|---|---|
+| `refreshP95WallMs` | 240.5 ms | 714 ms | 2,642 ms | 1,500 ms | pass |
+| `refreshP95CpuMs` (load-independent gate) | 309.1 ms | 885.4 ms | 1,771 ms | — | pass |
+| `eventLoopBlockingP95Ms` | 68.8 ms | 172.7 ms | 618 ms | 200 ms | pass |
+| `peakRssPerSpawnMb` | 142.0 | 144.7 | 180.9 | either route (see note) | pass |
+| `paneAggregateRssMb` | 417.1 | 426.5 | 533.1 | — | pass |
+| `writeToReflectP95Ms` | 901.4 ms | 1,404.9 ms | 4,715 ms | 2,000 ms | pass |
+| `spawnsPerRefresh` | 1 | 1 | 1 | 1 | pass |
+| `idleSpawns` | 0 | 0 | 0 | 0 | pass |
+
+`spawnMemoryBudget` passes via the capped fan-out route (1 × 142 MB = 142 MB
+against the 300 MB pane ceiling), exactly as the budget file's `acTargets.note`
+requires, because the per-spawn peak (142 MB) is still above the 130 MB
+per-spawn target on this host.
 
 ## Related
 

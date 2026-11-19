@@ -44,6 +44,11 @@
  * - One discarded warmup per surface, then `--runs` samples; median and p95
  *   (nearest-rank) are reported alongside every raw sample, with the result
  *   count so a row can never be read as "latency of returning nothing".
+ * - `EXPLAIN QUERY PLAN` is captured for the statements each surface actually
+ *   prepares (via a one-off `prepare` wrapper, never inside a timed sample)
+ *   plus a representative SQL-side `startOn` predicate. The capture is what
+ *   lets the note say which reads use `idx_workitems_startOn` and which are
+ *   unaffected because the default filter runs in memory.
  *
  * Usage:
  *
@@ -108,6 +113,28 @@ export interface SurfaceResult {
   maxMs: number;
 }
 
+/**
+ * A representative SQL-side `startOn` predicate, used only to show that the
+ * index the migration creates is actually usable. None of the measured
+ * surfaces run it: the shipped default filter is applied **in memory** over
+ * rows the reads already materialise. It is captured so the benchmark note can
+ * state honestly which queries use the index and which do not.
+ */
+export const START_ON_INDEX_PROBE_SQL =
+  'SELECT id FROM workitems WHERE startOn > ? ORDER BY startOn';
+
+/** One captured `EXPLAIN QUERY PLAN` result for a statement a surface runs. */
+export interface QueryPlanEntry {
+  /** Surfaces that prepare this statement (`list`, `search`, `next`, `index probe`). */
+  surfaces: string[];
+  /** The statement, whitespace-normalised to a single line. */
+  sql: string;
+  /** `EXPLAIN QUERY PLAN` detail lines, in SQLite's order. */
+  plan: string[];
+  /** True when the plan reads `idx_workitems_startOn`. */
+  usesStartOnIndex: boolean;
+}
+
 /** A full baseline run. */
 export interface StartOnFilterBaselineReport {
   capturedAt: string;
@@ -137,6 +164,12 @@ export interface StartOnFilterBaselineReport {
     commit: string;
   };
   surfaces: SurfaceResult[];
+  /**
+   * `EXPLAIN QUERY PLAN` for the statements the surfaces actually prepare,
+   * plus {@link START_ON_INDEX_PROBE_SQL}. Captured from the live connection
+   * (not copied from source) so a plan can never describe a stale statement.
+   */
+  queryPlans: QueryPlanEntry[];
 }
 
 /** Options for {@link runStartOnFilterBaseline}. */
@@ -212,6 +245,89 @@ function openFixture(fixture: LargeDbFixture): WorklogDatabase {
   return new WorklogDatabase('LDB', fixture.dbPath, jsonlPath, true, false);
 }
 
+/** Minimal shape of the underlying better-sqlite3 connection. */
+interface RawConnection {
+  prepare(sql: string): { all(...params: unknown[]): unknown[] };
+}
+
+/**
+ * The fixture's raw SQLite connection.
+ *
+ * Bench-only reflection: `store` is private on the shared façade, but capturing
+ * the plan of the statement the store actually prepares is the whole point — a
+ * copy of the SQL in this file would be able to drift from the source it
+ * claims to describe.
+ */
+function rawConnection(db: WorklogDatabase): RawConnection {
+  return (db as unknown as { store: { db: RawConnection } }).store.db;
+}
+
+/** Collapse a multi-line statement to one line for reporting. */
+function normaliseSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Run `fn` once with `prepare` wrapped, returning the distinct normalised SQL
+ * statements it prepared against the work-item or FTS tables.
+ *
+ * Nothing is cached (`WL_CACHE_ENABLED=0`), so every surface prepares its own
+ * statements and the capture attributes each one to the surface that ran it.
+ */
+function captureSurfaceSql(db: WorklogDatabase, fn: () => unknown): string[] {
+  const raw = rawConnection(db);
+  const original = raw.prepare.bind(raw);
+  const captured = new Set<string>();
+  raw.prepare = (sql: string) => {
+    const normalised = normaliseSql(sql);
+    if (/workitems|worklog_fts/.test(normalised)) captured.add(normalised);
+    return original(sql);
+  };
+  try {
+    fn();
+  } finally {
+    // Restore the prototype method rather than leaving a wrapper installed: a
+    // later EXPLAIN must go straight to better-sqlite3.
+    delete (raw as { prepare?: unknown }).prepare;
+  }
+  return [...captured];
+}
+
+/** `EXPLAIN QUERY PLAN` detail lines for one statement. */
+function explainQueryPlan(raw: RawConnection, sql: string): string[] {
+  // `EXPLAIN QUERY PLAN` never evaluates the statement, so placeholders only
+  // need the right arity; NULL bindings are never read.
+  const placeholders = (sql.match(/\?/g) ?? []).length;
+  const rows = raw
+    .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+    .all(...Array(placeholders).fill(null)) as { detail?: unknown }[];
+  return rows.map((row) => String(row.detail ?? ''));
+}
+
+/** Build the de-duplicated plan list from the per-surface captures. */
+function buildQueryPlans(
+  db: WorklogDatabase,
+  captures: { surface: string; sql: string }[],
+): QueryPlanEntry[] {
+  const raw = rawConnection(db);
+  const bySql = new Map<string, QueryPlanEntry>();
+  for (const capture of captures) {
+    const existing = bySql.get(capture.sql);
+    if (existing) {
+      if (!existing.surfaces.includes(capture.surface)) existing.surfaces.push(capture.surface);
+      continue;
+    }
+    const plan = explainQueryPlan(raw, capture.sql);
+    bySql.set(capture.sql, {
+      surfaces: [capture.surface],
+      sql: capture.sql,
+      plan,
+      usesStartOnIndex: plan.some((line) => line.includes('idx_workitems_startOn')),
+    });
+  }
+  return [...bySql.values()];
+}
+
 /**
  * Run the baseline and return the report.
  *
@@ -240,6 +356,20 @@ export function runStartOnFilterBaseline(
     const fts = db.rebuildFtsIndex();
     const ftsRebuildMs = round2(performance.now() - ftsStartedAt);
     const snapshot = db.list({});
+
+    // Capture each surface's statements on a dedicated (unmeasured) call, then
+    // explain them. A capture pass must never run inside `measure`: wrapping
+    // `prepare` is fixture tooling, not part of a sample.
+    const captures: { surface: string; sql: string }[] = [];
+    for (const [surface, fn] of [
+      ['list', () => db.list({})],
+      ['search', () => db.search(SEARCH_TERM, { limit: SEARCH_LIMIT })],
+      ['next', () => selectBrowseFeed(db, { count: scale.browseCount })],
+    ] as const) {
+      for (const sql of captureSurfaceSql(db, fn)) captures.push({ surface, sql });
+    }
+    captures.push({ surface: 'index probe', sql: START_ON_INDEX_PROBE_SQL });
+    const queryPlans = buildQueryPlans(db, captures);
 
     const surfaces = [
       measure('list', 'db.list({})', runs, () => {
@@ -288,6 +418,7 @@ export function runStartOnFilterBaseline(
         commit: gitCommit(),
       },
       surfaces,
+      queryPlans,
     };
   } finally {
     db.close();
@@ -326,6 +457,14 @@ export function formatStartOnFilterBaseline(report: StartOnFilterBaselineReport)
   lines.push('', '  calls:', '');
   for (const surface of report.surfaces) {
     lines.push(`  - ${surface.surface}: ${surface.call}`);
+  }
+  lines.push('', '  EXPLAIN QUERY PLAN (captured from the live connection):', '');
+  for (const entry of report.queryPlans) {
+    lines.push(
+      `  - ${entry.surfaces.join(', ')}${entry.usesStartOnIndex ? ' [idx_workitems_startOn]' : ''}`,
+    );
+    for (const detail of entry.plan) lines.push(`      ${detail}`);
+    lines.push(`      sql: ${entry.sql}`);
   }
   lines.push('');
   return lines.join('\n');

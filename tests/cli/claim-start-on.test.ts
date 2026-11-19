@@ -213,5 +213,9 @@ describe('startOn claim guard (wl update)', () => {
     const { stdout } = await execAsync(`tsx ${cliPath} update --help`);
     expect(stdout).toContain('--force-start-on');
     expect(stdout.toLowerCase()).toContain('starton');
+    // Parent AC8: `wl update --help` describes the field *and its default*.
+    expect(stdout).toContain('--start-on');
+    expect(stdout).toContain('createdAt');
+    expect(stdout).toContain('""');
   });
 });
