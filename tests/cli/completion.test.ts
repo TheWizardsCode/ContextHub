@@ -74,6 +74,22 @@ describe('wl completion bash', () => {
     expect(result.stdout).toContain('--json');
   });
 
+  test('offers work-item ID completion for undelete next to delete', () => {
+    const result = runCompletion('bash');
+    // The dynamic ID arm is a single case pattern listing every id-taking
+    // command (e.g. `audit|delete|dep|...|undelete|update|reviewed)`) followed
+    // by the `wl list --json` ID fetch. Require delete and undelete to be
+    // alternatives in that same arm.
+    const idArm = result.stdout
+      .split('\n')
+      .find(line =>
+        line.includes('delete|') &&
+        line.includes('undelete') &&
+        line.trim().endsWith(')'));
+    expect(idArm).toBeDefined();
+    expect(result.stdout).toContain('wl list');
+  });
+
   test('creates completions for completion subcommand itself', () => {
     const result = runCompletion('bash');
     expect(result.stdout).toContain('completion');

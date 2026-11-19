@@ -154,6 +154,33 @@ during a parked sync; a stale second store pushing a newer downgrade) and
 `tests/unit/claim-hold.test.ts` (the pure decision rules, including TTL expiry
 and the attributed-delete exemption).
 
+### Restoring a Soft-Deleted Item
+
+A delete is tombstoned rather than removed, so it propagates to every peer.
+`wl undelete <ids...>` is the sanctioned inverse: it clears `deletedBy` and
+`deleteReason` and records the restoring identity plus the previous
+tombstone in an audit comment (WL-0MWMRNL2W003W5R3).
+
+The merge rule mirrors the delete-side protection above:
+
+- **Recency decides.** A restore is the *newer* write, so `status`,
+  `deletedBy`, `deleteReason` and `assignee` follow the live side when one side
+  is live and the other holds an **attributed** tombstone. Without that rule the
+  regression guard would keep the item `deleted` and every peer would
+  re-tombstone it.
+- **Delete stays terminal at equal timestamps.** When both sides carry the same
+  timestamp, the tombstone wins — a restore never resurrects an item on a
+  same-millisecond tie.
+- **A later delete still wins.** A tombstone newer than the restore re-applies
+  normally; a restore never makes deletion impossible.
+- **Unattributed deletes are still ignored.** `deletedBy`/`deleteReason` that
+  were never recorded do not gate a restore or a live status, exactly as they
+  never gate the claim hold above.
+
+The restore is represented by the cleared attribution plus the newer
+`updatedAt` — no schema or JSONL field is added. Regression coverage:
+`tests/sync/undelete-merge.test.ts`.
+
 ### One Store Per Repository (Worktrees)
 
 `.worklog/config.yaml` is tracked in git (`.gitignore` re-includes it), so every

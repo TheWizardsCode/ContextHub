@@ -707,6 +707,19 @@ wl undelete WL-ABC123 --dry-run                     # report the plan, mutate no
 wl --json undelete WL-ABC123 WL-DEF456              # batch, machine-readable
 ```
 
+Recovering a mistaken delete — copy-paste runbook:
+
+```sh
+wl show WL-ABC123 --json                     # 1. inspect the tombstone (deletedBy/deleteReason)
+wl undelete WL-ABC123 --dry-run              # 2. preview the restore set (parent + swept children)
+wl undelete WL-ABC123                        # 3. restore it, audit comment + one sync included
+wl show WL-ABC123 --children --json          # 4. confirm children and dependency edges survived
+```
+
+Step 4 is the check that matters for a parent item: the restore brings back the
+children that were swept with it, but a child deleted in its own right stays
+deleted (reported as `skipped`) and must be restored deliberately.
+
 ### `comment` (subcommands)
 
 Manage comments attached to work items. Use `wl comment <subcommand>`.

@@ -12,7 +12,7 @@ import type { PluginContext } from '../plugin-types.js';
 
 // Commands that accept a work-item ID as their primary argument
 const ID_ARG_COMMANDS = new Set([
-  'show', 'update', 'delete', 'close', 'comment', 'dep', 'audit',
+  'show', 'update', 'delete', 'undelete', 'close', 'comment', 'dep', 'audit',
   'audit-show', 'audit-set', 'migrate',
 ]);
 
