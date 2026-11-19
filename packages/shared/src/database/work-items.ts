@@ -428,6 +428,16 @@ export function deleteWorkItem(
       return depthB - depthA;
     });
     for (const descendant of deepestFirst) {
+      // An already-retired descendant keeps its own tombstone: the cascade
+      // records why THE SWEEP happened and must not overwrite attribution that
+      // already carried real intent. `wl undelete` uses the
+      // `cascade from <parent>` reason prefix to decide which descendants the
+      // parent's delete swept, so re-attributing a deliberately-retired child
+      // here would silently resurrect it on the parent's restore
+      // (WL-0MWMRNL2W003W5R3).
+      if (isSoftDeleted(descendant)) {
+        continue;
+      }
       // Attribute each descendant distinctly (AC4): the cascade source id is
       // always recorded, so a swept child is distinguishable from an item
       // deliberately retired in its own right. Prefer an explicit caller

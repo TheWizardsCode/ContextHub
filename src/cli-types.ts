@@ -202,6 +202,20 @@ export interface CloseOptions { reason?: string; author?: string; prefix?: strin
 
 export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: boolean; reason?: string; deletedBy?: string }
 
+export interface UndeleteOptions {
+  prefix?: string;
+  recursive?: boolean;
+  sync?: boolean;
+  /** Target status for the restored item (default: derived from its stage). */
+  status?: string;
+  /** Assignee to record on restore (default: cleared). */
+  assignee?: string;
+  /** Report the plan without mutating anything. */
+  dryRun?: boolean;
+  /** Identity recorded in the audit comment (default: configured git identity). */
+  restoredBy?: string;
+}
+
 export interface ReviewedOptions { prefix?: string }
 
 export interface InterviewOptions {

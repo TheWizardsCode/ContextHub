@@ -363,6 +363,13 @@ function mergeDifferentTimestampItems(
   const mergedFields: string[] = [];
   const conflictedFields: string[] = [];
   const fieldDetails: ConflictFieldDetail[] = [];
+  // Which side supplied the winning status when this merge resolved a
+  // restore-versus-tombstone pair (WL-0MWMRNL2W003W5R3). The attribution
+  // fields (`deletedBy`/`deleteReason`) and the claim (`assignee`) must follow
+  // that side, otherwise the tombstone's non-default values win the
+  // default-vs-value rule and leave the restored item soft-deleted (a
+  // non-empty `deletedBy` alone satisfies `isSoftDeleted`) with a stale hold.
+  let restoreSide: 'local' | 'remote' | null = null;
 
   for (const field of fields) {
     const localValue = localItem[field];
@@ -390,6 +397,21 @@ function mergeDifferentTimestampItems(
           chosenValue: mergedTags,
           chosenSource: 'merged',
           reason: 'union of both tag sets'
+        });
+        continue;
+      }
+
+      if ((field === 'deletedBy' || field === 'deleteReason' || field === 'assignee') && restoreSide !== null) {
+        const chosenValue = restoreSide === 'local' ? localValue : remoteValue;
+        (merged as any)[field] = chosenValue;
+        mergedFields.push(`${field} (follows the restoring side)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue,
+          chosenSource: restoreSide,
+          reason: `${field} follows the side that restored the item over an older soft delete`
         });
         continue;
       }
@@ -481,6 +503,43 @@ function mergeDifferentTimestampItems(
               reason: 'local soft delete is unattributed (no deletedBy/deleteReason); remote live status kept'
             });
           }
+          continue;
+        }
+
+        // RESTORE PROPAGATION (WL-0MWMRNL2W003W5R3): the NEWER side is live
+        // while the older side records an ATTRIBUTED soft delete. `wl
+        // undelete` is the newer write, so recency wins for the status and the
+        // attribution trio — without this the regression guard below keeps
+        // `deleted` and every peer re-tombstones a restored item. An
+        // UNATTRIBUTED delete never gated a restore (it is not intent), so the
+        // delete-side protection of WL-0MSKZ30SK007K9TO is untouched: this
+        // branch only fires for a delete that was real when it was recorded.
+        if (remoteValue === 'deleted' && !isRemoteNewer && isAttributedDelete(remoteItem)) {
+          (merged as any)[field] = localValue;
+          restoreSide = 'local';
+          mergedFields.push(`${field} (restored from local, newer than remote delete)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: localValue,
+            chosenSource: 'local',
+            reason: 'local is the newer write and records a live status; the older remote soft delete is superseded (restore)'
+          });
+          continue;
+        }
+        if (localValue === 'deleted' && isRemoteNewer && isAttributedDelete(localItem)) {
+          (merged as any)[field] = remoteValue;
+          restoreSide = 'remote';
+          mergedFields.push(`${field} (restored from remote, newer than local delete)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: remoteValue,
+            chosenSource: 'remote',
+            reason: 'remote is the newer write and records a live status; the older local soft delete is superseded (restore)'
+          });
           continue;
         }
         const localIsClose = localValue === 'completed' && (isTerminalStage(localItem.stage) || isTerminalStage(remoteItem.stage));

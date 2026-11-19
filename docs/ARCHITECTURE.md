@@ -208,7 +208,7 @@ process, so a mutation that internally triggers a sync (e.g. `wl delete`'s
 auto-sync) does not deadlock.
 
 The locked commands are: `wl update`; `wl comment add/update/delete`;
-`wl audit-set`; `wl close`; `wl delete`; `wl dep add/rm`; `wl create`;
+`wl audit-set`; `wl close`; `wl delete`; `wl undelete`; `wl dep add/rm`; `wl create`;
 `wl reviewed`; `wl interview`; `wl audit-waive/unwaive`; `wl re-sort`; the
 writing `wl doctor` subcommands; `wl github import`; `wl github push`;
 `wl import`; `wl init`; and `wl migrate`. See
@@ -562,6 +562,7 @@ modules.
 | `src/commands/doctor/stage-sync.ts` | `doctor stage-sync`: detect and (`--apply`) correct stale status/stage combinations. |
 | `src/commands/doctor/prune.ts` | `doctor prune`: hard-delete soft-deleted items older than a threshold, never orphaning linked GitHub issues. |
 | `src/commands/doctor/cache.ts` | `doctor cache`: report and (`--prune`) reclaim the bounded read-cache state directory. |
+| `src/commands/undelete.ts` | `wl undelete`: restore soft-deleted items (the sanctioned inverse of `wl delete`) — clears the tombstone, restores a status compatible with the stage, restores cascade-swept descendants, records an audit comment and syncs once. |
 | `src/commands/doctor/foreign-items.ts` | `doctor foreign-items`: report foreign-prefix items and, with `--apply`, hard-delete them (optionally rewriting the remote worklog ref). |
 | `src/commands/doctor/prefix.ts` | `doctor prefix`: preview (default) or apply a project ID-prefix rename together with its revertible rename map. |
 | `src/commands/doctor/audit-gaps.ts` | `doctor audit-gaps`: read-only report of `completed`/`in_review` items with no audit record. |

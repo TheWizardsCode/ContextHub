@@ -11,7 +11,7 @@ import { runCliProcess } from './cli-bundle.js';
 
 // Known subcommands that should appear in completion scripts
 const KNOWN_COMMANDS = [
-  'init', 'status', 'create', 'list', 'show', 'update', 'delete',
+  'init', 'status', 'create', 'list', 'show', 'update', 'delete', 'undelete',
   'export', 'import', 'next', 'worklist', 'in-progress', 'sync', 'github',
   'comment', 'close', 'recent', 'plugins', 'migrate', 'dep',
   're-sort', 'doctor', 'search', 'unlock', 'audit',

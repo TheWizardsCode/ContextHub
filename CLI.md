@@ -584,6 +584,41 @@ When orphaning is applied, `wl delete --no-recursive` records a comment on **eac
 
 After an explicit orphaning, apply the retention rule to each survivor (see [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#orphan-retention-and-remediation)): **promote** it when its subject is still live (`wl update <id> --parent null`, or `wl doctor dangling-parents --apply`), and **retire** it when it is superseded, its target is gone, or the abandoned parent's feature was never delivered (`wl close <id>` or `wl delete <id>`).
 
+### `undelete` [options] <ids...>
+
+Restore one or more soft-deleted work items — the sanctioned inverse of `wl delete`. `wl update` deliberately refuses every field mutation on a soft-deleted item (only the delete-attribution fields can be changed), so an accidental or over-broad delete used to be unrecoverable from the CLI; `wl undelete` clears the tombstone and brings the item back with its history, children and dependency edges intact.
+
+What a restore does:
+
+- Clears `deletedBy` and `deleteReason`.
+- Restores a **live status**: `--status` wins when given; otherwise the status is derived from the item's stage (`in_review`/`done` → `completed`, `in_progress` → `in-progress`, otherwise `open`), validated against the project's `statusStageCompatibility`. The stage itself is preserved whenever a live status can carry it, and only cleared (reported in the audit comment) when it cannot.
+- Clears `assignee` (a stale claim is a scheduling hold) unless `--assignee` is given.
+- Restores **cascade-deleted descendants** by default: a descendant whose `deleteReason` starts with `cascade from <id>` was swept with the parent and comes back with it. A descendant retired in its own right keeps its tombstone and is reported as skipped. `wl delete` no longer re-attributes an already-retired descendant, which is what makes this distinction reliable.
+- Records an **audit comment** on the item naming the restoring identity, the previous `status`, `deletedBy` and `deleteReason`, so the delete/restore history survives log rotation.
+- Runs the automatic post-batch sync exactly once (`--no-sync` opts out), the same contract `wl delete` uses, so the restore propagates to peers instead of being undone by the next pull. Sync/merge treats a restore as the newer write: an older attributed tombstone no longer re-tombstones a restored item, while a later delete still wins.
+
+Options:
+
+- `--prefix <prefix>` — Operate on a specific prefix (applies to every id in the batch).
+- `--status <status>` — Status to restore to. `deleted` is refused.
+- `--assignee <assignee>` — Record an assignee on restore (default: cleared).
+- `--no-recursive` — Restore only the named items, leaving cascade-deleted children deleted.
+- `--dry-run` — Report exactly what would be restored; mutate nothing and skip the sync.
+- `--no-sync` — Skip the automatic post-restore sync for the whole batch.
+- `--restored-by <identity>` — Identity recorded in the audit comment (default: the configured git identity).
+
+Every id is processed independently, mirroring `wl delete`: an id that is not soft-deleted is a `skipped` (`already live`) result, an unknown id is a failure, and the command exits non-zero only when an id failed. JSON mode returns a per-id `results` array plus an overall `success`/`restored`/`failed` summary (plus `restoredDescendantsCount`, `restoredDescendants` and `skippedDescendants` when the subtree mattered).
+
+Examples:
+
+```sh
+wl undelete WL-ABC123                               # back to a live status, stage kept
+wl undelete WL-ABC123 --status blocked --assignee agent-x
+wl undelete WL-ABC123 --no-recursive                # only the parent comes back
+wl undelete WL-ABC123 --dry-run                     # report the plan, mutate nothing
+wl --json undelete WL-ABC123 WL-DEF456              # batch, machine-readable
+```
+
 ### `comment` (subcommands)
 
 Manage comments attached to work items. Use `wl comment <subcommand>`.
