@@ -82,7 +82,7 @@ export function isMandatoryItem(item: Pick<WorkItem, 'priority' | 'status' | 'st
  *
  * Placement order (pre-regroup): criticals, then completed/in_review
  * reviews, then status=blocked items, then actively-worked in-progress items
- * (the downstream Group N section), then capped others.
+ * (the downstream `<Band> Group N` section), then capped others.
  *
  * Pure & deterministic: takes (items, browseItemCount), returns a new array,
  * does not mutate the input. The caller clamps `browseItemCount` to 1–50.

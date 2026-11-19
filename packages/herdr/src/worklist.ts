@@ -3718,7 +3718,7 @@ export async function runWorklistTui(
   /**
    * Apply the pane-based active marker to freshly fetched items: any item
    * with a matching pane title in THIS workspace is shown as `in-progress`
-   * (marker + Group N), independent of the worklog status the demotion loop
+   * (marker + `<Band> Group N` placement), independent of the worklog status the demotion loop
    * maintains. This makes the selection list's marker reflect pane existence
    * directly (WL-0MV1BWETT005GSUJ). The production implementation is
    * injected by `index.ts`; when absent it is a no-op, so tests never spawn

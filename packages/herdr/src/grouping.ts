@@ -648,7 +648,7 @@ export type BlockerPins = ReadonlyMap<string, string | string[]>;
 export function regroupWorkItems<T extends {
   id: string;
   stage?: string;
-  /** Lifecycle status — drives actively-worked Group N membership/ordering. */
+  /** Lifecycle status — drives actively-worked `<Band> Group N` membership/ordering. */
   status?: string;
   priority?: string;
   description?: string;

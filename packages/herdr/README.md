@@ -16,7 +16,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (reused if it already exists) — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
-- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items and decides *busy* from two independent signals: a pane in the current workspace whose title contains the work-item ID (**primary**, producer rule WL-0MV1BWETT005GSUJ) and a **live per-child claim holder** (`<worklog>/locks/child-<id>.lock` currently `flock`ed — the second signal that keeps a pane-less driven session busy, WL-0MVWDAZL10025P8J). Only when both are negative is the claim released — `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage — and every release clears the scheduling hold (`assignee`) and records the previous holder in a `herdr-hydrator` audit comment. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
+- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items and decides *busy* from two independent signals: a pane in the current workspace whose title contains the work-item ID (**primary**, producer rule WL-0MV1BWETT005GSUJ) and a **live per-child claim holder** (`<worklog>/locks/child-<id>.lock` currently `flock`ed — the second signal that keeps a pane-less driven session busy, WL-0MVWDAZL10025P8J). Only when both are negative is the claim released — `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage — and every release clears the scheduling hold (`assignee`) and records the previous holder in a `herdr-hydrator` audit comment. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + `<Band> Group N` placement) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
 - **Per-request priority (`X-Priority`)** — The proxy's retired fast/cheap operating mode is replaced by a per-request priority. Herdr maps each dispatched work item's priority onto a request priority and conveys it as the pane-launch environment variable `HERDR_REQUEST_PRIORITY`, which the Worklog pi extension turns into the `X-Priority` provider header. See [Request priority](#request-priority-per-request-x-priority).
 - **Local capacity reservation** — Before launching a downtime pane the worker claims capacity atomically via `POST /llama/local/reserve`: a granted ticket travels into the pane as `PI_LOCAL_RESERVATION_TICKET` (its first request carries `X-Local-Reservation`), a `429` refusal defers with the proxy's `retry_after_s` and the decision log records the evidence, and an absent/failing endpoint fails open to the pre-reservation polling behaviour. An idle window admits at most one launch: a second launch needs a fresh status tick that shows the launched prefill registered plus its own granted ticket. See [Local capacity reservation](#downtime-worker-local-llm-idle-dispatch).
 - **Work-item pane indicator** — The selection list shows a green circle icon (🟢) in the icon prefix of every item with an open work-item pane in the current workspace: a pane whose title carries the work-item ID (the dispatch pane-title convention preserves the ID as a trailing suffix). The icon appears exactly when such a pane is open and never otherwise (producer's rule, WL-0MV1BWETT005GSUJ) — it is pane existence, not a live agent status. The worklist also records which pi agent pane is attached to each dispatched item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes (used for the hover tooltip). The icon occupies a fixed-width slot so the item-ID column never shifts. See [Green-circle icon (work-item pane open)](#green-circle-icon-work-item-pane-open).
@@ -26,7 +26,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, **assignee**, tags, audit info, its **active dependency blockers**, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
-- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values). Actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
+- **Priority-band grouping** — Work items are bucketed by **priority band first** (`critical` → `high` → `medium` → `low`), with `In Review` pinned last as a single global section; stage only sub-divides inside a band (`in-progress` → `plan_complete` → `intake_complete` → `idea` → other), so a high-priority `idea` item always renders above a medium-priority `plan_complete` item (WL-0MWMQ6AV6007ZUNK). Grouping uses the standard lifecycle stages only (`idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values); actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Priority-band grouping](#priority-band-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. Any markdown document opened in the viewer can also be annotated in place (`n,e` add/edit, `n,d` delete); podcast scripts sync notes to the worklog as child work items (PRD §7.3). See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
@@ -363,8 +363,8 @@ The hydrator detects those claims and releases them:
   items.
 - **Selection-list marker** (WL-0MV1BWETT005GSUJ) — the same pane-title lookup
   drives the selection list's in-progress marker: an item with a matching pane
-  is rendered `in-progress` (marker + Group N) even when its worklog status is
-  still `open`, and loses the marker when the pane closes.
+  is rendered `in-progress` (marker + `<Band> Group N` placement) even when its
+  worklog status is still `open`, and loses the marker when the pane closes.
   Terminal `in_review`/`completed` items keep their own review marker. Because
   opening/closing a work-item pane does not touch the worklog DB (so the
   DB-change-gated refresh tick cannot update the marker for it), the marker is
@@ -2617,42 +2617,54 @@ first rows), so a long list never scrolls off the top.
   list, filtering, or refreshing resets the panel scroll so the top of the
   panel is always visible again.
 
-## Stage grouping
+## Priority-band grouping
 
-Work items are grouped by their Worklog **stage** using the standard
-lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
-`in_review`, `done`. No custom stage values are required for
+Work items are bucketed by **priority band first** — `critical` → `high` →
+`medium` → `low` → `In Review` (WL-0MWMQ6AV6007ZUNK) — so priority, not
+stage, decides the top-level section order: a `high@idea` item can never
+render below a `medium@plan_complete` one. Stage is used only as the
+intra-band sub-order (`in-progress` → `plan_complete` → `intake_complete` →
+`idea` → other) and as the sub-section scheme inside each band
+(`<Band> Group N`, `<Band> Idea`, `<Band> Other`); the file-path conflict
+groups and their `N` counter restart at `1` in every band. `In Review` stays
+a single global section pinned last, whatever the priority of its members.
+
+Grouping uses the standard lifecycle stages only — `idea`, `intake_complete`,
+`plan_complete`, `in_review`, `done`. No custom stage values are required for
 grouping, so podcast episode items group exactly as their frontmatter
 `pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
-in the canonical order (Critical → Group N → Idea → Other → In Review) as
-**collapsible heading rows** (WL-0MSL5MPSZ003TG94): each heading shows the
-group label plus its item count (`── Group 1 (4) ▼ ──`), and pressing **Tab**
+in the band-first order above as **collapsible heading rows**
+(WL-0MSL5MPSZ003TG94): each heading shows the group label plus its item count
+(`── High Group 1 (4) ▼ ──`), and pressing **Tab**
 while a heading is selected collapses/expands that group — collapsed groups
 hide their items from both the render and navigation (the heading itself
 stays). The **In Review** heading carries a grey background fill (ANSI 256
 colour 238) so the producer-review queue stands out from the other sections
 at a glance; every other heading keeps the plain bold/stage-coloured style
-(WL-0MUYJ8WJG0087VSU). Counts reflect the top-level items in the group (post stage-filter)
-regardless of collapse state. Stage changes re-group items on the next
-refresh. Non-critical actively-worked items (`status = in-progress`) join
-the file-path-partitioned `Group N` lists alongside
+(WL-0MUYJ8WJG0087VSU). Counts reflect the top-level items in the group (post
+stage-filter) regardless of collapse state. Stage or priority changes re-group
+items on the next refresh. Within a band, actively-worked items (`status = in-progress`)
+join the band's file-path-partitioned `<Band> Group N` lists alongside
 `plan_complete`/`intake_complete` items and, at equal priority, sort ahead of
-them; "Other" remains only as a safety net for
-unknown/custom stages (including the removed `in_progress`/`completed`
-stage values), so legacy rows still render deterministically.
+them; `<Band> Idea` holds the band's `idea` items, and `<Band> Other` remains
+only as a safety net for unknown/custom stages (including the removed
+`in_progress`/`completed` stage values), so legacy rows still render
+deterministically.
 
 ### Grouping stability (WL-0MVVLBTTP003Y4XO)
 
 Grouping is a **content-deterministic** function of the item set. Before the
 greedy first-fit packing runs, the selected items are canonicalised by a
-purely content-derived key — priority (high → medium → low) → stage sub-order →
-id. Timestamps are never part of the key, so a comment, an audit run or any
+purely content-derived key — priority band (critical → high → medium → low) →
+stage sub-order (`in-progress` → `plan_complete` → `intake_complete` →
+`idea` → remaining) → id. Timestamps are never part of the key, so a
+comment, an audit run or any
 other `updatedAt` churn cannot move an item between groups; only a material
 change can (its `**Key Files:**` section, its priority, its stage/status, or
 the item set itself).
 
-Within every group (including `Critical Group N` and `Group N`) the sort is
-**priority first** — every high-priority item ranks ahead of every
+Within every group (including `Critical Group N` and each band's
+`<Band> Group N`) the sort is **priority first** — every high-priority item ranks ahead of every
 medium-priority item, which ranks ahead of every low-priority item — then the
 stage sub-order (actively-worked → `plan_complete` → `intake_complete` →
 remaining), then `id` as a deterministic tie-break. Priority was the secondary

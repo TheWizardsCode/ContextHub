@@ -45,7 +45,7 @@ export interface DisplayHeadingRow {
   kind: 'heading';
   /** Group number (1-indexed, from regroupWorkItems). */
   group: number;
-  /** Human-readable group label (e.g. `Group 1`, `Idea`, `In Review`). */
+  /** Human-readable group label (e.g. `High Group 1`, `Medium Idea`, `In Review`). */
   groupLabel: string;
   /** Top-level items in this group in the current view (post stage-filter). */
   count: number;
