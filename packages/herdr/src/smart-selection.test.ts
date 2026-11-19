@@ -605,3 +605,99 @@ describe('selectWorkItems — smart selection algorithm', () => {
     });
   });
 });
+
+// ── Priority-first selection truncation (WL-0MWMQ6AV6007ZUNK) ─────────
+//
+// RED WITNESS (test-first child WL-0MWMRFX27007NC0G). The non-mandatory
+// `others` slice must be ordered priority-first (high → medium → low) with the
+// incoming `wl next` score order as the stable intra-band tie-break, *before*
+// the `othersLimit` truncation. A medium can therefore never displace a high
+// from the sprint window. The `it.fails` blocks throw against today's sources
+// (which slice the raw input order); the selection implementation child
+// (WL-0MWMRG6LX006B8YO) flips them to `it`.
+describe('selectWorkItems — priority-first others truncation (WL-0MWMQ6AV6007ZUNK)', () => {
+  /** A non-mandatory HIGH item: open, root, not critical/in-progress/blocked/in_review. */
+  const highOther = (id: string): WorkItem =>
+    makeItem(id, { priority: 'high', status: 'open', stage: 'idea' });
+  /** A non-mandatory MEDIUM item (same shape, lower band). */
+  const mediumOther = (id: string): WorkItem =>
+    makeItem(id, { priority: 'medium', status: 'open', stage: 'idea' });
+
+  it.fails('never lets a medium displace a high from the others window (5 high, 2 medium, limit 3)', () => {
+    // The two mediums arrive first in `wl next` score order: a naive slice of
+    // the raw order selects them and cuts three highs.
+    const items = [
+      mediumOther('M1'),
+      mediumOther('M2'),
+      highOther('H1'),
+      highOther('H2'),
+      highOther('H3'),
+      highOther('H4'),
+      highOther('H5'),
+    ];
+    const result = selectWorkItems(items, 3);
+    const selectedOthers = result.filter((i) => !isMandatoryItem(i));
+
+    expect(
+      selectedOthers.every((i) => i.priority === 'high'),
+      'all three selected others must be high — a medium may never displace a high',
+    ).toBe(true);
+    expect(selectedOthers.map((i) => i.id)).toEqual(['H1', 'H2', 'H3']);
+  });
+
+  it.fails('preserves the incoming score order within a priority band (stable sort, no re-score)', () => {
+    // Highs arrive interleaved with mediums in a deliberate, non-alphabetical
+    // order. The stable priority sort must keep the highs' incoming relative
+    // order — the tie-break is the `wl next` score order, not a re-sort.
+    const items = [
+      highOther('H3'),
+      mediumOther('M1'),
+      highOther('H1'),
+      mediumOther('M2'),
+      highOther('H5'),
+      highOther('H2'),
+      highOther('H4'),
+    ];
+    const result = selectWorkItems(items, 3);
+    const selected = result.filter((i) => !isMandatoryItem(i)).map((i) => i.id);
+
+    expect(
+      selected,
+      'the selected highs must keep their incoming (wl next score) order',
+    ).toEqual(['H3', 'H1', 'H5']);
+  });
+
+  it.fails('fills spare slots with mediums in incoming order once every high is selected', () => {
+    const items = [
+      mediumOther('M2'),
+      mediumOther('M1'),
+      highOther('H1'),
+      highOther('H2'),
+      highOther('H3'),
+      highOther('H4'),
+      highOther('H5'),
+    ];
+    const result = selectWorkItems(items, 6); // 5 highs fill first, then 1 medium
+    const selected = result.filter((i) => !isMandatoryItem(i)).map((i) => i.id);
+
+    expect(selected).toEqual(['H1', 'H2', 'H3', 'H4', 'H5', 'M2']);
+  });
+
+  // Unchanged by this work — kept green as a regression guard. Reordering the
+  // others slice must never drop a mandatory item, however small the window.
+  it('keeps every mandatory item selected after priority-first reordering', () => {
+    const items: WorkItem[] = [
+      critical('C1'),
+      active('A1'),
+      blocked('B1'),
+      inReview('R1'),
+      ...Array.from({ length: 5 }, (_, i) => highOther(`H${i + 1}`)),
+      mediumOther('M1'),
+    ];
+    const ids = selectWorkItems(items, 2).map((i) => i.id);
+
+    for (const id of ['C1', 'A1', 'B1', 'R1']) {
+      expect(ids, `${id} is mandatory and must always be selected`).toContain(id);
+    }
+  });
+});
