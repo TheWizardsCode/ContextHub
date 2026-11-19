@@ -92,7 +92,13 @@ export async function checkWlAvailable(): Promise<boolean> {
  * capture all critical/in_review/in-progress/blocked items. Runs the four
  * queries in parallel to mitigate refresh latency.
  */
-async function fetchMandatorySubsets(dirOverride?: string): Promise<WorkItem[]> {
+async function fetchMandatorySubsets(
+  dirOverride?: string,
+  includeNotStarted = false,
+): Promise<WorkItem[]> {
+  /** Append the opt-in flag to a `wl list` argument vector (WL-0MWMGEWH7004VUFI). */
+  const listArgs = (args: string[]): string[] =>
+    includeNotStarted ? [...args, '--include-not-started'] : args;
   // Critical items: fetch ALL critical items across all statuses (open,
   // in-progress, blocked, completed) at EVERY parent level (no --root-only).
   // This ensures child critical items that block releases (e.g. untriaged
@@ -130,10 +136,10 @@ async function fetchMandatorySubsets(dirOverride?: string): Promise<WorkItem[]> 
   // is still shown (WL-0MV71WBHB007D8ZE). The query is NOT merged into
   // reviewQueueArgs() (the review queue is stage-scoped; blocked spans stages).
   const [criticalOutput, reviewOutput, activeOutput, blockedOutput] = await Promise.all([
-    runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed'], true, undefined, dirOverride),
-    runWl(reviewQueueArgs(), true, undefined, dirOverride),
-    runWl(['list', '--status', 'in-progress', '--root-only'], true, undefined, dirOverride),
-    runWl(['list', '--status', 'blocked', '--root-only'], true, undefined, dirOverride),
+    runWl(listArgs(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed']), true, undefined, dirOverride),
+    runWl(listArgs(reviewQueueArgs()), true, undefined, dirOverride),
+    runWl(listArgs(['list', '--status', 'in-progress', '--root-only']), true, undefined, dirOverride),
+    runWl(listArgs(['list', '--status', 'blocked', '--root-only']), true, undefined, dirOverride),
   ]);
   const criticalItems = extractItems(extractJson(criticalOutput));
   const reviewItems = extractItems(extractJson(reviewOutput));
@@ -162,7 +168,18 @@ async function fetchMandatorySubsets(dirOverride?: string): Promise<WorkItem[]> 
  * instead (both fetch paths share {@link mergeMandatoryAndSelect},
  * WL-0MVN4WESM007T4XI).
  */
-export async function fetchNextItems(count?: number, dirOverride?: string): Promise<WorkItem[]> {
+export async function fetchNextItems(
+  count?: number,
+  dirOverride?: string,
+  /**
+   * Include not-yet-started items (`--include-not-started`, WL-0MWMGEWH7004VUFI).
+   * The WORKLIST display opts in so a scheduled item is visible read-only with
+   * its marker; the DISPATCH head (`getHerdrListHead`) never does, so a future
+   * item is never dispatched or claimed (the dispatch gate is the backstop).
+   */
+  opts: { includeNotStarted?: boolean } = {},
+): Promise<WorkItem[]> {
+  const includeNotStarted = opts.includeNotStarted === true;
   // A `dirOverride` (the `.worklog` directory of a foreign root) targets THAT
   // root's database for the whole read — the registered-root sweep's canonical
   // ranking seam (WL-0MVR8GDJ3008WY3Y AC3). Absent ⇒ module-configured root,
@@ -180,6 +197,7 @@ export async function fetchNextItems(count?: number, dirOverride?: string): Prom
       count === undefined ? 1 : count,
       undefined,
       dirOverride,
+      includeNotStarted,
     );
     return await assembleDefaultWorklist(bundle, itemDetails, count, dirOverride);
   } catch (error) {
@@ -205,6 +223,9 @@ export async function fetchNextItems(count?: number, dirOverride?: string): Prom
   // is never cut (WL-0MV71WBHB007D8ZE). The implement-tier candidate lookup
   // (getNextImplementCandidate) deliberately keeps the default exclusion.
   args.push('--include-blocked');
+  if (includeNotStarted) {
+    args.push('--include-not-started');
+  }
 
   // Run the base `wl next` selection and the mandatory subsets CONCURRENTLY:
   // they are independent reads, and overlapping them removes one full `wl`
@@ -213,7 +234,7 @@ export async function fetchNextItems(count?: number, dirOverride?: string): Prom
   // the count-less path returns the base selection unchanged.
   const needMandatory = count !== undefined;
   const mandatoryPromise: Promise<WorkItem[]> = needMandatory
-    ? fetchMandatorySubsets(dirOverride)
+    ? fetchMandatorySubsets(dirOverride, includeNotStarted)
     : Promise.resolve([] as WorkItem[]);
   const [output, mandatory] = await Promise.all([
     runWl(args, true, undefined, dirOverride),

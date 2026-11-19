@@ -60,6 +60,13 @@ import {
   type DispatchWindowHoldSummary,
 } from './dispatch-window-hold.js';
 import {
+  notStartedBannerText,
+  notStartedRowMarker,
+  notStartedStatusText,
+  summariseDispatchWindowStart,
+  type DispatchWindowStartSummary,
+} from './dispatch-window-start.js';
+import {
   hostBudgetStatusText,
   type HostBudgetStatus,
 } from './host-budget-status.js';
@@ -260,6 +267,9 @@ export function formatItemLine(
   maxCols: number,
   isSelected = false,
   noIcons = false,
+  // Frame instant, injectable so a frozen-clock test renders deterministically
+  // (WL-0MWMGEWH7004VUFI). Production callers omit it.
+  now: number = Date.now(),
 ): string {
   // Depth indentation for hierarchical display
   const depth = item.depth ?? 0;
@@ -304,6 +314,14 @@ export function formatItemLine(
     ? ` [${item.stage}]`
     : '';
 
+  // Not-yet-started marker (WL-0MWMGEWH7004VUFI): a row whose effective start
+  // instant (`startOn ?? createdAt`) is still in the future reads
+  // `[not started until <date>]`, so a scheduled row is distinguishable from
+  // an already-started one. Strictly read-only — it never changes the item,
+  // its `startOn` or any dispatch decision. Fail-open: an unreadable instant
+  // renders no marker.
+  const notStartedTag = notStartedRowMarker(item, now) ?? '';
+
   // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ): annotate the list row
   // with the dispatch kind and latest pane-close outcome so an operator can
   // triage without opening the detail view. Live items never carry these
@@ -312,7 +330,7 @@ export function formatItemLine(
     ? `${item.dispatchKind ? ` [${item.dispatchKind}]` : ''}${item.dispatchOutcome ? ` ${item.dispatchOutcome}` : ''}`
     : '';
 
-  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}${dispatchTag}`;
+  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}${dispatchTag}${notStartedTag}`;
 
   // Truncate to fit terminal width, accounting for ANSI codes and
   // multi-width characters (CJK, emoji, fullwidth forms). Reuses the
@@ -2313,6 +2331,19 @@ export function createListRenderer(getShowIcons?: () => boolean): (
    * (and no chrome row) when the budget/ledger is unavailable.
    */
   hostBudgetStatus?: string | null,
+  /**
+   * Header segment naming how many dispatch-window items are not yet started
+   * (`[not started: N]`, WL-0MWMGEWH7004VUFI). Display-only; null renders
+   * nothing.
+   */
+  notStartedStatus?: string | null,
+  /**
+   * Banner copy for a dispatch window where EVERY item is not yet started
+   * (WL-0MWMGEWH7004VUFI). Display-only and strictly read-only: the banner
+   * never clears/alters a `startOn` or changes a dispatch decision. `null`
+   * renders no banner (and consumes no chrome row).
+   */
+  notStartedNotice?: string | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -2364,6 +2395,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     assigneeHoldNotice?: string | null,
     /** Header segment for the host-wide dispatch budget (AC4, WL-0MVXY0ZYW009NEJD). */
     hostBudgetStatus?: string | null,
+    /** Header segment for not-yet-started items (WL-0MWMGEWH7004VUFI). */
+    notStartedStatus?: string | null,
+    /** Banner copy for an all-not-yet-started dispatch window (WL-0MWMGEWH7004VUFI). */
+    notStartedNotice?: string | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -2447,6 +2482,14 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (hostBudgetStatus) {
       header += ` ${ANSI.fg(45)}${hostBudgetStatus}${ANSI.reset}`;
     }
+    // ── Not-yet-started indicator (WL-0MWMGEWH7004VUFI) ───────────
+    // Names how many dispatch-window items are scheduled for the future.
+    // Display-only: it never clears/alters a `startOn` and never changes a
+    // dispatch decision. The all-not-started WARNING is a banner below; this
+    // segment reports the count even when the window still has started work.
+    if (notStartedStatus) {
+      header += ` ${ANSI.fg(45)}${notStartedStatus}${ANSI.reset}`;
+    }
     // ── Non-blocking sync notice (F3 — WL-0MVJV2O7H003HY9N) ─────
     // A tiny, render-only status notice ("⟳ syncing… Ns") while a background
     // `wl sync` is in flight. It NEVER blocks input: it is a pure string read
@@ -2505,6 +2548,18 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       output.push(truncateLine(bannerLine, cols));
       bannerCount++;
     }
+    // Not-yet-started banner (WL-0MWMGEWH7004VUFI): a dispatch window with
+    // ZERO already-started items because every item is scheduled for the
+    // future. Display-only WARNING — the schedule is intentional and is never
+    // altered; the operator just gets to tell "this work is scheduled" apart
+    // from "the dispatcher is broken". Consumes one chrome row so the
+    // `rows - 1` pane line-count invariant still holds (WL-0MSAAON63003N6LO).
+    if (notStartedNotice) {
+      const bannerText = `⚠ ${notStartedNotice}`;
+      const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
+    }
 
     // The caller passes the display-rows model (headings + items) — the
     // renderer renders exactly those rows and does NOT derive group
@@ -2553,6 +2608,9 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       output.push(` ${ANSI.dim}▲ more${ANSI.reset}`);
     }
     let numHeadings = 0;
+    // One frame instant for every row, so the not-started marker is consistent
+    // across the frame (WL-0MWMGEWH7004VUFI).
+    const frameNow = Date.now();
     for (let i = 0; i < visible.length; i++) {
       const actualIndex = scrollOffset + i;
       const row = visible[i];
@@ -2585,7 +2643,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       const isExpanded = expandedItems?.has(item.id) ?? false;
       const expandedItem = { ...item, _expanded: hasChildCount && isExpanded };
 
-      const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
+      const line = formatItemLine(expandedItem, cols, isSelected, noIcons, frameNow);
       if (isSelected) {
         output.push(reverseWrap(line));
       } else {
@@ -3939,6 +3997,31 @@ export async function runWorklistTui(
   // (fail-safe: no warning rather than a false one).
   let assigneeHoldSummary: DispatchWindowHoldSummary | null = null;
 
+  // ── Not-started scheduling surface (WL-0MWMGEWH7004VUFI) ─────────
+  // Derived from the SAME already-fetched dispatch window on every refresh (no
+  // new `wl` spawn) and purely display-only: it never clears/alters a
+  // `startOn`, claims work or changes a dispatch decision. `null` while a
+  // filter narrows the list — a filtered window cannot answer "is the WHOLE
+  // window not yet started?" (fail-safe: no warning rather than a false one).
+  let notStartedSummary: DispatchWindowStartSummary | null = null;
+
+  /**
+   * Recompute the not-yet-started account from the window the worklist just
+   * rendered. Skipped for any filtered/dispatch-derived view, whose items are
+   * not the canonical dispatch window.
+   */
+  const applyNotStartedState = (items: WorkItem[]): void => {
+    const filtered =
+      state.activeFilter !== null ||
+      state.activePriorityFilter !== null ||
+      state.activeDispatchFilter;
+    notStartedSummary = filtered
+      ? null
+      : summariseDispatchWindowStart(items, {
+          windowSize: resolveSprintViewWindow(loadSettings().browseItemCount ?? opts.browseItemCount),
+        });
+  };
+
   /**
    * Recompute the assignee-hold account from the window the worklist just
    * rendered. Skipped for any filtered/dispatch-derived view, whose items are
@@ -4410,6 +4493,9 @@ export async function runWorklistTui(
         // classifier keeps the TUI in step with the coordination log's
         // `all-window-items-held` token.
         applyAssigneeHoldState(newItems);
+        // Refresh the not-yet-started account from the SAME window
+        // (WL-0MWMGEWH7004VUFI): read-only marker/banner, no mutation.
+        applyNotStartedState(newItems);
         // Blocked-by rows survive refreshes (WL-0MV8Q5X8U004KKAP): the
         // blocker cache is keyed by item ID and invalidated per item only
         // when its payload signature changes (status/stage/updatedAt — see
@@ -5667,6 +5753,11 @@ export async function runWorklistTui(
       // Host-budget counter (AC4, WL-0MVXY0ZYW009NEJD): read-only
       // `implement n/max · audit n/max`, null when the budget is unavailable.
       hostBudgetStatusText(hostBudgetStatus),
+      // Not-yet-started surface (WL-0MWMGEWH7004VUFI): display-only header
+      // count + all-not-started banner, derived from the already-fetched
+      // window. Never clears/alters a `startOn`.
+      notStartedStatusText(notStartedSummary),
+      notStartedBannerText(notStartedSummary),
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

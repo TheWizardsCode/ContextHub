@@ -1716,6 +1716,32 @@ Rules:
   [Empty-offer & skipped-tier
   attribution](#empty-offer--skipped-tier-attribution-wl-0mvr8f-kmu009xted).
 
+### Scheduling: `startOn` and the not-started marker (WL-0MWMGEWH7004VUFI)
+
+Every work item carries a `startOn` scheduling field; the **effective start
+instant** is `startOn ?? createdAt` (WL-0MWMGEPY2004EDZ8). The Herdr plugin is
+parity-complete with the CLI's default filter (WL-0MWMGET8N009KG33):
+
+- **Never dispatched or claimed.** `classifyItemForDispatchDetail` refuses an
+  item whose effective start instant is still in the future with the stable
+  gate token `startOnNotReached`, at **every** tier (`intake`, `plan`,
+  `risk-effort`, `implement`, `audit`). The list-head pipeline
+  (`downtime-worker.dispatch-filter.ts`) therefore drops a future item from
+  its candidate set. The gate takes `now` as an explicit parameter, so it is
+  deterministic under a frozen clock; an unreadable instant fails **open**
+  (reads as started). The dispatcher's head read does **not** opt in to
+  not-yet-started items, so the CLI default filter and the gate agree.
+- **Visible read-only.** The worklist display opts in to not-yet-started items
+  so a scheduled item is surfaced rather than silently hidden. It carries the
+  per-row marker `[not started until <date>]`, the header count
+  `[not started: N]`, and — when **zero** window items have started — the
+  banner ``Not started — all N of M dispatch-window item(s) start after
+  <earliest>; no downtime dispatch possible``. The surface mirrors the
+  assignee-hold convention (`dispatch-window-start.ts`): derived from the
+  already-fetched window, no extra `wl` subprocess, no second ranking path,
+  and **strictly read-only** — it never claims an item, writes a status/stage,
+  or changes a `startOn`.
+
 ### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
 
 A marker is written **before** the pane spawns to prevent duplicate dispatch, and its readers exclude the item **while the item remains at the marker's dispatched-at stage**. That is correct for a healthy run (the agent advances the item and the stage change releases the marker), but a pane that spawns successfully and never advances the item — a crash, a manual close, a silent failure, or an agent that exits without progressing — left the marker standing **forever**. The item became permanently invisible to the tier that would retry it and could only leave the stage by completing the very step that would never be scheduled: a deadlock.

@@ -1834,7 +1834,11 @@ export async function main(): Promise<void> {
     try {
       const currentSettings = loadSettings();
       const count = clampBrowseItemCount(currentSettings.browseItemCount ?? defaultSettings.browseItemCount);
-      const items = await fetchNextItems(count);
+      // The WORKLIST is a read-only VIEW: it opts in to not-yet-started items
+      // so a scheduled item is visible with its `[not started until <date>]`
+      // marker (WL-0MWMGEWH7004VUFI). The DISPATCH head below deliberately
+      // does NOT opt in, so a future item is never dispatched or claimed.
+      const items = await fetchNextItems(count, undefined, { includeNotStarted: true });
       // The pane-existence marker (in-progress status + green-circle icon)
       // is applied by the worklist's `applyPaneMarkers` seam on the initial
       // load and every refresh (WL-0MV1BWETT005GSUJ); no separate

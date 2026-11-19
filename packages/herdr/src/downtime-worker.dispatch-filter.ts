@@ -262,6 +262,10 @@ export async function dispatchFromHerdrList(
       // info so a held item is excluded by `classifyItemForDispatch` here too.
       assignee: item.assignee,
       needsProducerReview: item.needsProducerReview,
+      // `startOn` scheduling gate (WL-0MWMGEWH7004VUFI): a future item is
+      // filtered out of the list-head candidate set at every tier.
+      startOn: item.startOn,
+      createdAt: item.createdAt,
     };
     const k = classifyItemForDispatch(info, now);
     if (k === null) continue;

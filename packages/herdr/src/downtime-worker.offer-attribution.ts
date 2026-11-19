@@ -54,6 +54,12 @@ export type DispatchGateToken =
   | 'assignee-hold'
   /** Status/stage shape is not dispatchable at any tier. */
   | 'not-dispatchable'
+  /**
+   * The item's effective start instant (`startOn ?? createdAt`) is still in
+   * the future — a scheduling gate, refused at every tier
+   * (WL-0MWMGEWH7004VUFI).
+   */
+  | 'startOnNotReached'
   /** Completed/in_review but a fresh audit already exists. */
   | 'audit-fresh'
   /** Completed/in_review but outside the audit recency window. */
@@ -97,6 +103,7 @@ export type ClassifyGateToken =
   | 'soft-deleted'
   | 'producer-review'
   | 'assignee-hold'
+  | 'startOnNotReached'
   | 'not-dispatchable'
   | 'audit-fresh'
   | 'audit-recency'

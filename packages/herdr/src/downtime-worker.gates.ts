@@ -36,6 +36,7 @@
  */
 
 import { isAuditFresh } from '@worklog/shared/icons';
+import { isNotStarted } from '@worklog/shared/predicates';
 import {
   DEFAULT_BROWSE_ITEM_COUNT,
   DOWNTIME_AUDIT_MIN_FREE_SLOTS,
@@ -630,6 +631,10 @@ export function computeAuditEligibleDepth(
       deletedBy: item.deletedBy,
       assignee: item.assignee,
       needsProducerReview: item.needsProducerReview,
+      // `startOn` scheduling gate (WL-0MWMGEWH7004VUFI): a future audit
+      // candidate must not count toward the audit-eligible depth.
+      startOn: item.startOn,
+      createdAt: item.createdAt,
     };
     if (classifyItemForDispatch(info, now) === 'audit') depth += 1;
   }
@@ -876,6 +881,9 @@ export async function flagBudgetExhausted(
  *  - Every other state (in_progress already claimed, completed with a
  *    fresh audit, past the recency window, above the effort cap,
  *    unknown status/stage) → null (never dispatched).
+ *  - An item whose effective start instant (`startOn ?? createdAt`) is still
+ *    in the future → null with the `startOnNotReached` gate, at EVERY tier
+ *    (WL-0MWMGEWH7004VUFI).
  *
  * `now` is injectable for deterministic tests.
  */
@@ -911,6 +919,15 @@ export function classifyItemForDispatchDetail(
   // human/agent (e.g. the producer) makes it non-dispatchable, and the
   // audit-tier claim's `--if-assignee ""` CAS would fail stale anyway.
   if (isAssigneeHeld(info)) return { kind: null, gate: 'assignee-hold' };
+  // `startOn` scheduling gate (WL-0MWMGEWH7004VUFI): an item whose effective
+  // start instant (`startOn ?? createdAt`) is still in the future must never
+  // be dispatched at ANY tier (intake, plan, risk-effort, implement, audit),
+  // even if a caller bypassed the CLI's default search filter. The shared
+  // predicate fails open on an unreadable instant, and `now` is injectable so
+  // the gate is deterministic under a frozen clock.
+  if (isNotStarted({ startOn: info.startOn, createdAt: info.createdAt }, now)) {
+    return { kind: null, gate: 'startOnNotReached' };
+  }
   const status = typeof info.status === 'string' ? info.status : '';
   const stage = typeof info.stage === 'string' ? info.stage : '';
   if (status === 'completed') {
