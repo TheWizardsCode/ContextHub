@@ -40,6 +40,7 @@ import {
   resolveBlockerToRoot,
   selectHighestPriorityBlocking,
 } from './database/next-pipeline.js';
+import type { CandidateExclusion } from './database/context.js';
 import { handleCriticalEscalation } from './database/critical-escalation.js';
 // Sort-index and audit modules — thin-delegate targets (WL-0MVOBP2Q2002ZYCF).
 // Method implementations moved here; the class members below delegate.
@@ -1593,9 +1594,14 @@ export class WorklogDatabase {
     stage?: string,
     includeInProgress: boolean = false,
     risk?: string,
-    effort?: string
+    effort?: string,
+    /**
+     * Hide items this read surface must not select — e.g. not-yet-started
+     * items (`startOn` in the future), WL-0MWMGET8N009KG33.
+     */
+    excludeItem?: CandidateExclusion
   ): NextWorkItemResult {
-    return findNextWorkItem(this.ctx, this.ctx.hooks, assignee, searchTerm, includeBlocked, stage, includeInProgress, risk, effort);
+    return findNextWorkItem(this.ctx, this.ctx.hooks, assignee, searchTerm, includeBlocked, stage, includeInProgress, risk, effort, excludeItem);
   }
 
 
@@ -1612,9 +1618,11 @@ export class WorklogDatabase {
     stage?: string,
     includeInProgress: boolean = false,
     risk?: string,
-    effort?: string
+    effort?: string,
+    /** Hide items this read surface must not select (see {@link CandidateExclusion}). */
+    excludeItem?: CandidateExclusion
   ): NextWorkItemResult[] {
-    return findNextWorkItems(this.ctx, this.ctx.hooks, count, assignee, searchTerm, includeBlocked, stage, includeInProgress, risk, effort);
+    return findNextWorkItems(this.ctx, this.ctx.hooks, count, assignee, searchTerm, includeBlocked, stage, includeInProgress, risk, effort, excludeItem);
   }
 
 

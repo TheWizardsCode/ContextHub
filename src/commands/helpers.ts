@@ -12,6 +12,10 @@ import { renderCliMarkdown, shouldUseFormattedOutput, isTty, resolveMarkdownEnab
 import { getStageLabel, getStatusLabel, loadStatusStageRules } from '../status-stage-rules.js';
 import { priorityIcon, statusIcon, priorityFallback, statusFallback, iconsEnabled } from '../theme.js';
 import type { Command } from 'commander';
+// Trailing `[not started until …]` marker (WL-0MWMGET8N009KG33): one shared
+// helper so every text surface that renders a title line agrees with the JSON
+// `notStarted: true` marker emitted by the read commands.
+import { notStartedSuffix } from '../not-started.js';
 
 // Priority ordering for sorting work items (higher number = higher priority)
 const PRIORITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 } as const;
@@ -84,7 +88,7 @@ export function sortByPriorityDateAndId(a: WorkItem, b: WorkItem): number {
 
 // Format title and id with consistent coloring: both title and id by priority
 export function formatTitleAndId(item: WorkItem, prefix: string = ''): string {
-  return `${prefix}${renderTitle(item)} ${theme.text.muted('-')} ${renderPriorityColouredId(item.id, item.priority)}`;
+  return `${prefix}${renderTitle(item)} ${theme.text.muted('-')} ${renderPriorityColouredId(item.id, item.priority)}${notStartedSuffix(item)}`;
 }
 
 // Render a work item ID coloured by priority (same as title, unknown falls back to medium/yellow)
@@ -434,7 +438,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // summary: truly minimal - just title, status, priority
   if (fmt === 'summary') {
     const lines: string[] = [];
-    lines.push(`${formatTitleOnly(item)} ${renderPriorityColouredId(item.id, item.priority)}`);
+    lines.push(`${formatTitleOnly(item)} ${renderPriorityColouredId(item.id, item.priority)}${notStartedSuffix(item)}`);
     const sLine = formatStatusWithIcon(item.status);
     lines.push(`Status: ${sLine} | Priority: ${formatPriorityWithIcon(item.priority)}`);
     return lines.join('\n');
@@ -447,7 +451,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     if (fmt === 'concise') {
       const lines: string[] = [];
       // First line: title + id (compact)
-      lines.push(`${formatTitleOnly(item)} ${renderPriorityColouredId(item.id, item.priority)}`);
+      lines.push(`${formatTitleOnly(item)} ${renderPriorityColouredId(item.id, item.priority)}${notStartedSuffix(item)}`);
     // Build metadata as a markdown table
     const metaRows: Array<[string, string]> = [];
     if (item.stage !== undefined) {
@@ -480,7 +484,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     // Build metadata as a markdown table (ID, Title, Status, SortIndex, Risk, Effort, Assignee, Audit, Parent)
     const metaRows: Array<[string, string]> = [];
     metaRows.push(['ID', renderPriorityColouredId(item.id, item.priority)]);
-    metaRows.push(['Title', formatTitleOnly(item)]);
+    metaRows.push(['Title', `${formatTitleOnly(item)}${notStartedSuffix(item)}`]);
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
       metaRows.push(['Status', `${formatStatusWithIcon(item.status)} · Stage: ${stageLabel} | Priority: ${formatPriorityWithIcon(item.priority)}`]);
@@ -507,7 +511,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
 
   // detail-pane: title + description + comments only (metadata is in the metadata pane)
   if (fmt === 'detail-pane') {
-    lines.push(renderTitle(item, '# '));
+    lines.push(renderTitle(item, '# ') + notStartedSuffix(item));
 
     if (item.description) {
       lines.push('');
@@ -533,7 +537,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   }
 
   // full output
-  lines.push(renderTitle(item, '# '));
+  lines.push(renderTitle(item, '# ') + notStartedSuffix(item));
   lines.push('');
   const issueTypeLabel = item.issueType && item.issueType.trim() !== '' ? item.issueType : 'unknown';
   // Build status/priority line with icons

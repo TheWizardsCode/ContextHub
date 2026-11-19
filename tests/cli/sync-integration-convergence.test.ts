@@ -120,7 +120,11 @@ function remoteKind(local: string): string | undefined {
 
 /** All local records keyed by id (title + status + description). */
 function localState(local: string): Map<string, { title: string; status: string; description: string }> {
-  const res = runCli(local, '--json', 'list', '--deleted');
+  // `--include-not-started`: the legacy snapshot fixtures are stamped ahead of
+  // the local clock, so their effective start instant (`startOn ?? createdAt`)
+  // is in the future and `wl list` hides them by default
+  // (WL-0MWMGET8N009KG33). This helper asserts convergence, not scheduling.
+  const res = runCli(local, '--json', 'list', '--deleted', '--include-not-started');
   expect(res.status, res.stderr).toBe(0);
   const parsed = JSON.parse(res.stdout);
   const items: Array<{ id: string; title: string; status: string; description: string }> =

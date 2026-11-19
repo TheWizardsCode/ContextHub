@@ -6,6 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { InProgressOptions } from '../cli-types.js';
 import type { WorkItemQuery, WorkItemStatus } from '../types.js';
 import { displayItemTree, humanFormatWorkItem, resolveFormat, sortByPriorityAndDate } from './helpers.js';
+import { markNotStarted, resolveNotStartedFilter } from '../not-started.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -25,7 +26,13 @@ export default function register(ctx: PluginContext): void {
         query.assignee = options.assignee;
       }
       const items = db.list(query);
-      
+
+      // `in_progress` is never filtered by `startOn`: a started item has
+      // already started, even when its scheduled instant lies in the future
+      // (WL-0MWMGET8N009KG33). The read still *marks* such rows, so an operator
+      // can see why an in-progress item is not yet dispatchable.
+      const markedItems = markNotStarted(items, resolveNotStartedFilter());
+
       if (utils.isJsonMode()) {
         // Enrich each work item with audit result data from the dedicated table.
         const auditMap = new Map<string, { readyToClose: boolean; auditedAt: string | null }>();
@@ -33,7 +40,7 @@ export default function register(ctx: PluginContext): void {
         for (const ar of allAudits) {
           auditMap.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null });
         }
-        const enrichedItems = items.map(item => {
+        const enrichedItems = markedItems.map(item => {
           const audit = auditMap.get(item.id);
           return {
             ...item,
@@ -51,12 +58,12 @@ export default function register(ctx: PluginContext): void {
         console.log(`\nFound ${items.length} in-progress work item(s):\n`);
         const format = resolveFormat(program);
         if (format.toLowerCase() === 'concise') {
-          displayItemTree(items);
+          displayItemTree(markedItems);
           console.log();
           return;
         }
 
-        const sortedItems = items.slice().sort(sortByPriorityAndDate);
+        const sortedItems = markedItems.slice().sort(sortByPriorityAndDate);
         sortedItems.forEach((item, index) => {
           console.log(humanFormatWorkItem(item, null, format));
           if (index < sortedItems.length - 1) console.log('');

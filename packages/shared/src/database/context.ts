@@ -203,6 +203,18 @@ export interface WriteHooks {
   debug(message: string): void;
 }
 
+/**
+ * Caller-supplied candidate exclusion predicate (WL-0MWMGET8N009KG33).
+ *
+ * A read surface may need to hide items for a reason the selection pipeline
+ * does not model — the `startOn` scheduling filter (`isNotStarted`) is the
+ * first such reason. The caller injects its decision instead: `true` means
+ * "this read must not select the item", so the *next eligible* item is chosen
+ * rather than a filtered-out one. Absent means "exclude nothing", leaving every
+ * pre-existing caller unchanged.
+ */
+export type CandidateExclusion = (item: WorkItem) => boolean;
+
 // ── Façade hooks used by the `wl next` selection modules ────────────────
 
 /**

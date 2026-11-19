@@ -70,6 +70,10 @@ export interface ListOptions {
   icons?: boolean;
   /** Comma-separated list of fields to include in output (id always included) */
   fields?: string;
+  /** Include items whose `startOn` is in the future (default: excluded) */
+  includeNotStarted?: boolean;
+  /** Include not-yet-started items starting before this ISO-8601 instant */
+  startsBefore?: string;
 }
 
 export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; icons?: boolean; exact?: boolean }
@@ -148,6 +152,10 @@ export interface NextOptions {
   reSortSync?: boolean;
   /** Recency policy hint for re-sort (prefer|avoid|ignore) */
   recencyPolicy?: string;
+  /** Include items whose `startOn` is in the future (default: excluded) */
+  includeNotStarted?: boolean;
+  /** Include not-yet-started items starting before this ISO-8601 instant */
+  startsBefore?: string;
 }
 export interface InProgressOptions { assignee?: string; prefix?: string }
 
@@ -197,7 +205,15 @@ export interface CommentShowOptions { prefix?: string }
 export interface CommentUpdateOptions { author?: string; comment?: string; commentFile?: string; references?: string; prefix?: string }
 export interface CommentDeleteOptions { prefix?: string }
 
-export interface RecentOptions { number?: string; children?: boolean; prefix?: string }
+export interface RecentOptions {
+  number?: string;
+  children?: boolean;
+  prefix?: string;
+  /** Include items whose `startOn` is in the future (default: excluded) */
+  includeNotStarted?: boolean;
+  /** Include not-yet-started items starting before this ISO-8601 instant */
+  startsBefore?: string;
+}
 export interface CloseOptions { reason?: string; author?: string; prefix?: string; force?: boolean }
 
 export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: boolean; reason?: string; deletedBy?: string }
@@ -259,6 +275,10 @@ export interface SearchOptions {
   prefix?: string;
   /** Comma-separated list of fields to include in output (id always included) */
   fields?: string;
+  /** Include items whose `startOn` is in the future (default: excluded) */
+  includeNotStarted?: boolean;
+  /** Include not-yet-started items starting before this ISO-8601 instant */
+  startsBefore?: string;
 }
 
 export interface UnlockOptions { force?: boolean }

@@ -397,8 +397,50 @@ Validation rules:
 
 `wl show <id>` is **never** filtered by `startOn`: an item is always retrievable
 by id, and a scheduled item shows its `Starts` instant in human output (the JSON
-surface always carries `startOn`). Default filtering of not-yet-started items in
-`list`/`search`/`next` and the claim guard are separate slices of the same epic.
+surface always carries `startOn`).
+
+#### Not-yet-started items are hidden by default (WL-0MWMGET8N009KG33)
+
+An item is **not yet started** when its effective start instant
+(`startOn`, or `createdAt` when unset, normalised to UTC) is still in the
+future. Every search surface hides such items by default:
+
+| Surface | Default behaviour |
+|---|---|
+| `wl list`, `wl search`, `wl recent` | not-yet-started rows excluded |
+| `wl next` | not-yet-started candidates (and blockers) are not selectable — the **next eligible started item** is chosen instead |
+| `wl worklist` | the exclusion applies to **every** subset (critical, review queue, in-progress roots, blocked roots and the browse feed) |
+| `wl in_progress` | never filtered: an `in-progress` item has already started, even when its `startOn` lies ahead (it is shown **marked**) |
+| `wl show <id>` | never filtered |
+
+The `next`/`worklist` browse feed resolves the filter once inside the shared
+selection (`src/worklist-selection.ts`), so `wl next`, `wl worklist` and the
+Herdr fetchers cannot disagree about which items exist for a read.
+
+Opt in with either flag (accepted by `list`, `search`, `next`, `recent` and
+`worklist`):
+
+- `--include-not-started` — show every not-yet-started item.
+- `--starts-before <ISO-8601>` — also an opt-in, and bounds the window to items
+  starting **strictly before** the given instant (same validation as
+  `--start-on`: a full timestamp with an explicit timezone). Combined with
+  `--include-not-started` the window is "not started **and** starting before
+  `<ISO>`".
+
+Opted-in rows are marked on every surface, in both output modes:
+
+- **Text** carries a trailing marker in the same bracketed style as the
+  worklist's `[held: N by Map]`:
+  `[not started until 2026-11-19T10:25:00.000Z]` (the effective `startOn`,
+  UTC `Z` form).
+- **JSON** carries `notStarted: true` alongside the effective `startOn` (the
+  field is absent on started rows, so existing payloads are unchanged).
+
+```sh
+wl list --include-not-started                       # every scheduled item
+wl list --starts-before 2026-12-01T00:00:00Z        # only those starting before December
+wl next --include-not-started --json                # work on scheduled items too
+```
 
 ### `reviewed` <id> [value]
 
@@ -888,6 +930,10 @@ Options:
 
 - `-n, --number <n>` — browse-feed window size (default `20`). Bounds **only**
   the `browse` subset; the four mandatory subsets are always complete.
+- `--include-not-started` — show not-yet-started items in every subset
+  (excluded by default; `in-progress` rows are always kept and marked).
+- `--starts-before <ISO-8601>` — opt in and bound the window to items starting
+  before this instant.
 - `--prefix <prefix>` — override the default work-item prefix.
 
 Payload (stable — the Herdr fetcher caches it verbatim and parses it directly,
@@ -1004,6 +1050,8 @@ Options:
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
 `-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by priority, stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with priority `critical` are partitioned into `Critical Group N` file-path conflict groups at the top. Non-critical `in_progress`/`plan_complete`/`intake_complete` items are partitioned into `Group N` file-path conflict groups; items with unknown/custom stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
 `--include-blocked` — Include dependency-blocked items (excluded by default).
+`--include-not-started` — Include not-yet-started items (`startOn` in the future), which are excluded by default (see *Scheduling with `startOn`*).
+`--starts-before <ISO-8601>` — Include not-yet-started items starting before this instant (opts in and bounds the window).
 `--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
 `--re-sort-sync` — Force a synchronous (blocking) re-sort when automatic re-sort is triggered. By default automatic re-sorts are run asynchronously to avoid blocking interactive commands.
 `--recency-policy <policy>` — Recency handling for the re-sort step: `prefer`, `avoid`, or `ignore` (optional; default: `ignore`).
@@ -1092,6 +1140,11 @@ Options:
 `-a, --assignee <assignee>` — Filter by assignee (optional).
 `--prefix <prefix>` — Override the default prefix (optional).
 
+An in-progress item is **never** filtered by `startOn` — a started item has
+already started, even if its scheduled instant is still in the future. Such a
+row is shown with the `[not started until …]` marker (and `notStarted: true` in
+JSON) so the reason it is not yet dispatchable is visible.
+
 Examples:
 
 ```sh
@@ -1107,6 +1160,8 @@ Options:
 
 `-n, --number <n>` — Number of recent items to show (optional).
 `-c, --children` — Also show children (optional).
+`--include-not-started` — Include items whose `startOn` is in the future (excluded by default; the filter is applied before the window is sliced).
+`--starts-before <ISO-8601>` — Include not-yet-started items starting before this instant.
 `--prefix <prefix>` — Override the default prefix (optional).
 
 Examples:
@@ -1133,6 +1188,8 @@ Options:
 `--stage <stage>` (optional)
 `--deleted` (optional) — Include items with `deleted` status in the output (hidden by default).
 `--needs-producer-review [value]` (optional; defaults to `true` when omitted; accepts true|false|yes|no)
+`--include-not-started` (optional) — Include items whose `startOn` is in the future (excluded by default).
+`--starts-before <ISO-8601>` (optional) — Include not-yet-started items starting before this instant
 `--prefix <prefix>` (optional)
 `--no-icons` (optional) — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
 `--json` (optional)
@@ -1199,6 +1256,8 @@ Options:
 `--deleted` (optional) — Include deleted items in results
 `--needs-producer-review [value]` (optional) — Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)
 `--issue-type <type>` (optional) — Filter by issue type
+`--include-not-started` (optional) — Include matches whose `startOn` is in the future (excluded by default; the ranked list is filtered after semantic fusion)
+`--starts-before <ISO-8601>` (optional) — Include not-yet-started matches starting before this instant
 `-l, --limit <n>` (optional) — Maximum number of results (default: 20)
 `--rebuild-index` (optional) — Rebuild the FTS index from scratch before searching
 `--semantic` (optional) — Enable hybrid lexical+semantic search. Blends FTS BM25

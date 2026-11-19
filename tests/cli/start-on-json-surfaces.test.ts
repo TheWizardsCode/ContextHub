@@ -66,7 +66,10 @@ describe('startOn JSON surfaces', () => {
   });
 
   it('list returns startOn for every item, defaulting to createdAt', async () => {
-    const payload = await runJson('list');
+    // `--include-not-started`: the scheduled fixture row is deliberately in the
+    // future, which every search surface hides by default
+    // (WL-0MWMGET8N009KG33). The projection contract is what this asserts.
+    const payload = await runJson('list --include-not-started');
 
     const scheduled = payload.workItems.find((item: any) => item.id === 'TEST-SCHEDULED');
     const defaulted = payload.workItems.find((item: any) => item.id === 'TEST-DEFAULT');
@@ -79,7 +82,9 @@ describe('startOn JSON surfaces', () => {
     // (the JSONL fixture import bypasses the FTS triggers). It emits its own
     // JSON payload, so the rebuild runs first and the search is then read.
     await execAsync(`tsx ${cliPath} --json search --rebuild-index`);
-    const payload = await runJson('search refresh');
+    // `--include-not-started`: the scheduled row is in the future and is hidden
+    // by default (WL-0MWMGET8N009KG33); the projection is what this asserts.
+    const payload = await runJson('search refresh --include-not-started');
 
     expect(payload.count).toBeGreaterThan(0);
     const scheduled = payload.workItems.find((item: any) => item.id === 'TEST-SCHEDULED');

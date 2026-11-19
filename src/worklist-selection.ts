@@ -22,6 +22,7 @@ import type { WorklogDatabase } from './database.js';
 import type { ForeignDependencyView, WorkItem } from './types.js';
 import { extractFilePaths, type GroupAssignment } from './commands/helpers.js';
 import { assignItemGroups, compareGroupedItems } from './commands/grouping.js';
+import { resolveNotStartedFilter } from './not-started.js';
 
 /** A work item enriched with the fields `wl next --json` adds per item. */
 export interface EnrichedNextWorkItem extends WorkItem {
@@ -31,6 +32,8 @@ export interface EnrichedNextWorkItem extends WorkItem {
   auditedAt: string | null;
   /** Number of direct children. */
   childCount: number;
+  /** Present (and `true`) only when the item is not yet started (`startOn` future). */
+  notStarted?: true;
 }
 
 /** One browse-feed entry — the shape `wl next --json` emits per result. */
@@ -65,6 +68,19 @@ export interface BrowseFeedOptions {
   includeInProgress?: boolean;
   /** Maximum parallel-safe groups when `count > 1` (default: 3). */
   groups?: number;
+  /**
+   * Show not-yet-started items (`startOn` in the future) instead of hiding
+   * them (default: hidden — WL-0MWMGET8N009KG33).
+   */
+  includeNotStarted?: boolean;
+  /**
+   * Epoch-ms upper bound for not-yet-started items: implies the opt-in and
+   * keeps only items starting strictly before it. Composes with
+   * `includeNotStarted` as "not started AND starting before".
+   */
+  startsBefore?: number | null;
+  /** Comparison instant (epoch ms); defaults to the call's `Date.now()`. */
+  now?: number;
 }
 
 /** Result of {@link selectBrowseFeed}. */
@@ -114,6 +130,19 @@ export function selectBrowseFeed(
   const includeBlocked = Boolean(options.includeBlocked);
   const includeInProgress = Boolean(options.includeInProgress);
 
+  // One resolved filter for the whole selection: `next`, the `worklist` browse
+  // subset and the Herdr fetchers therefore agree by construction about which
+  // not-yet-started items exist for this read (WL-0MWMGET8N009KG33). The
+  // exclusion is injected into the shared candidate pipeline, so the *next
+  // eligible* item is selected — never a future item that is then dropped,
+  // leaving a lower-priority started item unselected.
+  const notStarted = resolveNotStartedFilter({
+    includeNotStarted: options.includeNotStarted,
+    startsBefore: options.startsBefore,
+    now: options.now,
+  });
+  const excludeItem = (item: WorkItem): boolean => notStarted.hides(item);
+
   const rawResults: any[] = (db as any).findNextWorkItems
     ? (db as any).findNextWorkItems(
         count,
@@ -124,6 +153,7 @@ export function selectBrowseFeed(
         includeInProgress,
         options.risk,
         options.effort,
+        excludeItem,
       )
     : [
         db.findNextWorkItem(
@@ -134,6 +164,7 @@ export function selectBrowseFeed(
           includeInProgress,
           options.risk,
           options.effort,
+          excludeItem,
         ),
       ];
 
@@ -180,6 +211,10 @@ export function selectBrowseFeed(
       auditResult: auditResult?.readyToClose ?? null,
       auditedAt: auditResult?.auditedAt ?? null,
       childCount,
+      // The JSON marker alongside the effective `startOn` (AC): only present
+      // when the item really is not yet started, so every existing payload is
+      // byte-identical.
+      ...(notStarted.isNotStarted(wi) ? { notStarted: true as const } : {}),
     };
   };
 

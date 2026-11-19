@@ -9,6 +9,11 @@ import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
 import { selectBrowseFeed } from '../worklist-selection.js';
+import {
+  INCLUDE_NOT_STARTED_FLAG,
+  STARTS_BEFORE_FLAG,
+  resolveNotStartedFilterFromFlags,
+} from '../not-started.js';
 import { invalidateCacheForWrite } from '../read-cache-cli.js';
 import { resolveForeignItem } from '../cross-repo/foreign-store.js';
 import { unknownProjectRemediation } from '../cross-repo/project-registry.js';
@@ -72,13 +77,15 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--include-blocked', 'Include dependency-blocked items (excluded by default)')
     .option('--include-in-progress', 'Include in-progress items alongside open items')
+    .option(INCLUDE_NOT_STARTED_FLAG, 'Include items whose startOn is in the future (excluded by default)')
+    .option(`${STARTS_BEFORE_FLAG} <iso>`, 'Include not-yet-started items starting before this ISO-8601 instant')
     .option('--no-re-sort', 'Skip the automatic re-sort before selection (preserve current sortIndex order)')
     .option('--re-sort-sync', 'Force a synchronous re-sort when auto re-sort is run (blocks until complete)', false)
     .option('--recency-policy <policy>', 'Recency handling for score ordering during re-sort (prefer|avoid|ignore). Default: ignore', 'ignore')
     .option('-g, --groups <n>', 'Number of parallel-safe groups to identify (default: 3, only meaningful when -n > 1)', '3')
     .action(async (...rawArgs: any[]) => {
       // Normalize incoming args: commander may pass a Command instance
-      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'includeInProgress', 'reSort', 'reSortSync', 'recencyPolicy', 'groups', 'risk', 'effort']);
+      const normalized = normalizeActionArgs(rawArgs, ['assignee', 'stage', 'search', 'number', 'prefix', 'includeBlocked', 'includeInProgress', 'includeNotStarted', 'startsBefore', 'reSort', 'reSortSync', 'recencyPolicy', 'groups', 'risk', 'effort']);
       let options: any = normalized.options || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -158,6 +165,20 @@ export default function register(ctx: PluginContext): void {
       // `wl worklist` read so both commands produce the identical browse feed
       // (WL-0MVI0HX58009JJRF). `selectBrowseFeed` is a pure read — the auto
       // re-sort above remains the only write byproduct of `next`.
+      //
+      // The not-yet-started default exclusion (and its opt-in) is resolved here
+      // and enforced inside the shared selection, so the *next eligible* item
+      // is chosen rather than a future item being dropped after selection
+      // (WL-0MWMGET8N009KG33).
+      const notStartedFlags = resolveNotStartedFilterFromFlags(options);
+      if (!notStartedFlags.ok) {
+        output.error(notStartedFlags.message, {
+          success: false,
+          error: 'invalid-starts-before',
+          message: notStartedFlags.message,
+        });
+        process.exit(1);
+      }
       const selection = selectBrowseFeed(db, {
         count,
         assignee: options.assignee,
@@ -168,6 +189,9 @@ export default function register(ctx: PluginContext): void {
         includeBlocked,
         includeInProgress,
         groups: parseInt(String(options.groups || '3'), 10),
+        includeNotStarted: notStartedFlags.filter.optedIn,
+        startsBefore: notStartedFlags.filter.startsBeforeMs,
+        now: notStartedFlags.filter.now,
       });
 
       if (utils.isJsonMode()) {

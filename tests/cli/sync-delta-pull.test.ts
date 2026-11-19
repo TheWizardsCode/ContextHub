@@ -158,7 +158,12 @@ function remoteTip(local: string): { kind: string | undefined; lines: string[] }
 
 /** Pull the local DB contents via `wl list --json`. */
 function listItems(local: string): Array<{ id: string; title: string; description: string }> {
-  const res = runCli(local, '--json', 'list', '--status', 'open');
+  // `--include-not-started`: a peer publishes a delta 10 s ahead of the local
+  // clock, so its records' effective start instant (`startOn ?? createdAt`) is
+  // in the future and every search surface hides them by default
+  // (WL-0MWMGET8N009KG33). These assertions are about merge semantics, not
+  // scheduling, so the read opts in.
+  const res = runCli(local, '--json', 'list', '--status', 'open', '--include-not-started');
   expect(res.status, res.stderr).toBe(0);
   const parsed = JSON.parse(res.stdout);
   return parsed.workItems ?? parsed;
