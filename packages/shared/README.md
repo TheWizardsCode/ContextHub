@@ -9,12 +9,32 @@ the TUI extension.
 ```
 packages/shared/
   src/
-    database.ts         ← WorklogDatabase class (canonical data access)
+    database.ts         ← WorklogDatabase façade (canonical data access)
+    database/           ← one module per concern; the façade delegates
+      context.ts           shared types, context, id/prefix helpers, EdgeCache
+      work-items.ts        item CRUD + no-op-change detection
+      hierarchy.ts         children/descendants/depth queries
+      priority.ts          risk/effort ordinals, effective priority
+      next-pipeline.ts     `wl next` selection pipeline
+      critical-escalation.ts critical-escalation stage of `wl next`
+      sort.ts              score/sort-index assignment
+      audit.ts             audit result CRUD + freshness classification
+      dependencies.ts      dependency edges + blocked/open reconciliation
+      comments.ts          comment CRUD + activity timestamps
+      search.ts            FTS5 + semantic search
+      sync.ts              Git/JSONL sync, watermarks, dirty counts, auto-sync
+      import-export.ts     whole-store import/export (clear/getAll/import/upsert)
+      decomposition-guard.test.ts structural split invariants (size/acyclic/API)
     persistent-store.ts ← SqlitePersistentStore (SQLite backend)
     types.ts            ← Shared type definitions
     status-stage-rules.ts ← Status/stage normalization rules
   dist/                 ← Compiled output
 ```
+
+`database.ts` is a thin façade: every public member below the constructor is a
+delegating member with its original signature, and each concern's
+single-responsibility boundary is documented in its module header
+(WL-0MVGKGHNR0019OLT decomposition; closeout WL-0MVOBP8MC0093Y7T).
 
 ## Caching (Phase 5)
 

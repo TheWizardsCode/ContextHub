@@ -182,6 +182,33 @@ wl migrate jsonl --delete
 3. If no: Check for local JSONL (legacy migration)
 4. If JSONL exists: Import to SQLite, then delete JSONL
 
+### Shared data layer module map
+
+`packages/shared/src/database.ts` is the thin façade of the decomposed shared
+data layer (WL-0MVGKGHNR0019OLT; closeout WL-0MVOBP8MC0093Y7T): the
+`WorklogDatabase` class keeps every public member (identical signature) and
+each concern lives in its own module under `packages/shared/src/database/`:
+
+| Module | Responsibility |
+|---|---|
+| `context.ts` | shared context/type module (acyclic root): `WorklogDatabaseContext`, `EdgeCache`, id/prefix helpers, `laterTimestamp`, `GitTarget`/`SyncState`/service types |
+| `work-items.ts` | item CRUD, `updateIfMatches`, no-op-change detection (`hasWorkItemChanged`) |
+| `hierarchy.ts` | children/descendants/depth queries, priority cascade, parent demotion |
+| `priority.ts` | risk/effort ordinals, effective-priority cache |
+| `next-pipeline.ts` | `wl next` selection pipeline (candidate filters, blocker surfacing) |
+| `critical-escalation.ts` | critical-escalation stage of `wl next` |
+| `sort.ts` | score computation, sort-index assignment, `reSort` |
+| `audit.ts` | audit result CRUD, waiver, freshness classification |
+| `dependencies.ts` | dependency-edge CRUD, `blocked`/`open` reconciliation |
+| `comments.ts` | comment CRUD, activity timestamps, batch import/upsert |
+| `search.ts` | FTS5 search (ID-aware) + semantic index lifecycle |
+| `sync.ts` | Git/JSONL sync (`refreshFromGit`, `exportForSync`), watermarks, dirty counts, delta metadata, auto-sync triggers |
+| `import-export.ts` | whole-store snapshots: `clear`, `getAll*`, destructive `import`, non-destructive `upsertItems` |
+
+The extracted-module graph is acyclic (no module imports the façade) and every
+module is ≤ 1,000 lines — enforced by
+`packages/shared/src/database/decomposition-guard.test.ts`.
+
 ### Sync Command Flow
 1. Export SQLite data to temporary JSONL
 2. Acquire file lock

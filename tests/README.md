@@ -69,7 +69,8 @@ Tests live under the top-level `tests/` directory:
 
 ### Core unit tests (`tests/`)
 
-- **`database.test.ts`** — WorklogDatabase CRUD, queries, comments, parent-child relationships
+- **`database.test.ts`, `database-dependencies-import.test.ts`, `database-transactional-import-next.test.ts`, `database-next-pipeline.test.ts`, `database-sort-audit-sync.test.ts`** — WorklogDatabase CRUD, queries, comments, parent-child relationships, dependency edges, import/upsert, `wl next` selection, sorting, caching, JSONL bootstrap/export and audit ordering (mechanically split from the original `database.test.ts`; WL-0MVOBP8MC0093Y7T)
+- **`next-regression.test.ts`, `next-regression-escalation.test.ts`, `next-regression-stage-filters.test.ts`** — `wl next` regression scenarios (mechanically split from the original `next-regression.test.ts`; WL-0MVOBP8MC0093Y7T)
 - **`jsonl.test.ts`** — JSONL import/export, backward compatibility, round-trip integrity
 - **`sync.test.ts`** — Work item merging, field-level conflict resolution, tag/comment merging
 - **`sync-worktree.test.ts`** — Git worktree sync scenarios

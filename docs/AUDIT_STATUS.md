@@ -275,7 +275,7 @@ The `audit_results` row is the **sole consumer** of the audit verdict. No flow p
 - Config: `auditWriteEnabled` controls whether audit writes are allowed.
 - Storage: audit data is stored in the `audit_results` table with foreign key constraints and CASCADE DELETE semantics.
 - Migration: Use `wl doctor upgrade --confirm` to apply schema migrations on existing databases. Required columns such as `audit_results.fingerprint` are repaired automatically on open, so audit writes work even when doctor has not been run (WL-0MUEBQLRD00288VV).
-- Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, CRUD operations on the `audit_results` table, migration backfill, legacy column removal, and the atomic `updatedAt = auditedAt` freshness guarantee (`tests/database.test.ts` — audit-then-comment ordering and audit-text parity).
+- Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, CRUD operations on the `audit_results` table, migration backfill, legacy column removal, and the atomic `updatedAt = auditedAt` freshness guarantee (`tests/database-sort-audit-sync.test.ts` — audit-then-comment ordering and audit-text parity; split from `tests/database.test.ts`).
 
 ### Error Behavior
 
