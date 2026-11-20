@@ -3187,6 +3187,24 @@ describe('createListRenderer — uninitialised worklog banner (WL-0MW4P4GNV002V5
     expect(bannerLine).toContain('Second diagnostic line');
     expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
   });
+
+  it('renders the production uninitializedReport() copy naming the path and wl init (AC4a)', async () => {
+    // Wire the actual production message (not a hand-rolled fixture) into the
+    // renderer so the real wording is validated end-to-end: unresolved root
+    // → banner present with the path and `wl init`; resolved → no banner.
+    const { uninitializedReport } = await import('./index.settings.js');
+    const notice = uninitializedReport('/tmp/herdr-uninit');
+    expect(notice).toContain("Run 'wl init'");
+    expect(notice).not.toContain('worklog init');
+
+    const unresolved = renderNotice(notice);
+    expect(unresolved).toContain('/tmp/herdr-uninit');
+    expect(unresolved).toContain('wl init');
+    expect(unresolved).not.toContain('worklog init');
+
+    const resolved = renderNotice(null);
+    expect(resolved).not.toContain('No valid .worklog/');
+  });
 });
 
 // ── Chord-mode footer gating (WL-0MSGJDSMJ004128E) ─────────────────────

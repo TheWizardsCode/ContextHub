@@ -3710,7 +3710,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; hostBudgetPrompt?: HostBudgetPromptHost; readHostBudgetStatus?: () => Promise<HostBudgetStatus | null>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; hostBudgetPrompt?: HostBudgetPromptHost; readHostBudgetStatus?: () => Promise<HostBudgetStatus | null>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions; getUninitialisedNotice?: () => string | null; uninitialisedNotice?: string | null },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3737,6 +3737,13 @@ export async function runWorklistTui(
     readHostBudgetStatus: options?.readHostBudgetStatus,
     dbWatch: options?.dbWatch ?? watchDbChanges,
     dbWatchOptions: options?.dbWatchOptions,
+    // Uninitialised-worklog notice (WL-0MVTDEOOA003PLIV / WL-0MW4P52LB009J0DX):
+    // a persistent in-pane error naming the resolved path and the `wl init`
+    // fix. The getter is preferred so a `wl init` run after the pane opened
+    // clears the notice on the next refresh (the fetcher re-resolves and the
+    // closure returns null); the static value is a fallback for callers/tests.
+    getUninitialisedNotice: options?.getUninitialisedNotice,
+    uninitialisedNotice: options?.uninitialisedNotice ?? null,
   };
 
   let termSize = getTermSize();
@@ -5784,6 +5791,13 @@ export async function runWorklistTui(
       // window. Never clears/alters a `startOn`.
       notStartedStatusText(notStartedSummary),
       notStartedBannerText(notStartedSummary),
+      // Uninitialised-worklog notice (WL-0MVTDEOOA003PLIV / WL-0MW4P52LB009J0DX):
+      // read through the getter on every render so the banner clears on the
+      // first refresh after a `wl init` resolves the root. Rendered only while
+      // the list is empty (the renderer enforces that guard).
+      opts.getUninitialisedNotice
+        ? opts.getUninitialisedNotice()
+        : opts.uninitialisedNotice,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

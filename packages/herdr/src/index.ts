@@ -373,6 +373,7 @@ export { setHostCpuSamplerForTests } from './index.host-cpu.js';
 
 import {
   configureWorklogTarget,
+  refreshWorklogTarget,
   settings,
   uninitializedReport,
 } from './index.settings.js';
@@ -1763,11 +1764,20 @@ export async function main(): Promise<void> {
   const resolvedCwd = process.env.HERDR_RESOLVED_CWD;
   process.stderr.write(`[worklog-plugin] HERDR_RESOLVED_CWD='${resolvedCwd ?? '(not set)'}'\n`);
 
-  const wlRoot = configureWorklogTarget(resolvedCwd ?? process.cwd());
+  const startDir = resolvedCwd ?? process.cwd();
+  let wlRoot = configureWorklogTarget(startDir);
+  // Persistent in-pane uninitialised notice (WL-0MVTDEOOA003PLIV /
+  // WL-0MW4P52LB009J0DX): when no valid `.worklog/` resolves, the selection
+  // list renders this as a persistent error line naming the path and the
+  // `wl init` fix, so the pane is never a silent blank list. It is emitted to
+  // stderr as well for non-interactive / TUI-unavailable runs (same wording).
+  // Kept mutable so the fetcher can clear it once a `wl init` resolves the
+  // root on a subsequent refresh, without a plugin restart (AC1).
+  let uninitialisedNotice: string | null = wlRoot ? null : uninitializedReport(startDir);
   if (wlRoot) {
     process.stderr.write(`[worklog-plugin] wlRoot resolved: ${wlRoot}\n`);
-  } else {
-    process.stderr.write(uninitializedReport(resolvedCwd ?? process.cwd()));
+  } else if (uninitialisedNotice) {
+    process.stderr.write(uninitialisedNotice);
   }
 
   // Load shortcut config: bundled defaults merged with a project-local
@@ -1829,7 +1839,17 @@ export async function main(): Promise<void> {
     // the plugin's own CWD (which would show an unrelated project's items).
     // Return an empty list so the TUI shows the uninitialized/empty state.
     if (!wlRoot) {
-      return [];
+      // Re-resolve on refresh so a `wl init` run after the pane opened is
+      // picked up without a plugin restart (WL-0MVTDEOOA003PLIV /
+      // WL-0MW4P52LB009J0DX AC1). Presentation-only: same shared resolver, no
+      // semantics change.
+      wlRoot = refreshWorklogTarget(startDir);
+      if (!wlRoot) {
+        return [];
+      }
+      // A valid root now exists — clear the in-pane uninitialised notice so
+      // the renderer drops the error banner on this refresh.
+      uninitialisedNotice = null;
     }
     try {
       const currentSettings = loadSettings();
@@ -2016,6 +2036,10 @@ export async function main(): Promise<void> {
       cwd: targetCwd,
       showHelpText: runSettings.showHelpText,
       showIcons: runSettings.showIcons,
+      // Uninitialised-worklog notice (WL-0MVTDEOOA003PLIV /
+      // WL-0MW4P52LB009J0DX): read through a getter so the banner clears on
+      // the first refresh after a `wl init` resolves the root.
+      getUninitialisedNotice: () => uninitialisedNotice,
       downtimeWorker,
       downtimePollIntervalMs: runSettings.downtimePollIntervalMs,
       // Per-instance downtime toggle (`d` shortcut, parent WL-0MSZ4NSOE007AQEF):
