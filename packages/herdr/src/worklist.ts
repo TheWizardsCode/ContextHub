@@ -2344,6 +2344,13 @@ export function createListRenderer(getShowIcons?: () => boolean): (
    * renders no banner (and consumes no chrome row).
    */
   notStartedNotice?: string | null,
+  /**
+   * Notice rendered when no valid `.worklog/` can be resolved
+   * (WL-0MW4P4GNV002V532). A non-empty string renders a persistent red error
+   * banner while `displayRows` is empty; `null`/`undefined` renders nothing.
+   * Appended last so every earlier positional caller keeps its argument order.
+   */
+  uninitialisedNotice?: string | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -2399,6 +2406,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     notStartedStatus?: string | null,
     /** Banner copy for an all-not-yet-started dispatch window (WL-0MWMGEWH7004VUFI). */
     notStartedNotice?: string | null,
+    /** Persistent error when the worklog root is unresolved (WL-0MW4P4GNV002V532). */
+    uninitialisedNotice?: string | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -2557,6 +2566,23 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (notStartedNotice) {
       const bannerText = `⚠ ${notStartedNotice}`;
       const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
+    }
+    // Uninitialised-worklog banner (WL-0MW4P4GNV002V532): when no valid
+    // `.worklog/` can be resolved the caller supplies a notice and the list is
+    // genuinely empty. Render a persistent red error line (the stderr
+    // diagnostic is lost once the pane takes over the screen) so the operator
+    // is never left staring at a silent blank list. Display-only: the caller
+    // clears the notice on the next refresh once a valid root resolves. Only
+    // shown while the list is empty — a populated list makes the notice
+    // irrelevant. Newlines are collapsed so a multi-line diagnostic (the
+    // non-interactive `uninitializedReport()`) still occupies exactly one
+    // chrome row and the `rows - 1` pane invariant holds (WL-0MSAAON63003N6LO).
+    if (uninitialisedNotice && displayRows.length === 0) {
+      const singleLine = uninitialisedNotice.replace(/\s+/g, ' ').trim();
+      const bannerText = `⚠ ${singleLine}`;
+      const bannerLine = `${ANSI.bg(196)}${ANSI.fg(231)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
       bannerCount++;
     }
