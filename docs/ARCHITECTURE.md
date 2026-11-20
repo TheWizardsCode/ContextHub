@@ -279,8 +279,12 @@ state and is NOT valid — run `wl init` to repair it.
    continues to the filesystem root.
 4. **Return `undefined`** when no valid root exists. Callers decide how to
    surface the uninitialized state: the `wl` CLI falls back to
-   `<cwd>/.worklog` (it initializes on demand); the herdr plugin reports
-   the uninitialized state and shows an empty worklist.
+   `<cwd>/.worklog` (it initializes on demand); the herdr plugin renders a
+   persistent in-pane error that names the resolved path and instructs the
+   operator to run `wl init` — the selection list is never a silent blank
+   view, and the error clears on the next refresh once a `wl init` resolves
+   the root. The same message is written to stderr for non-interactive /
+   TUI-unavailable runs.
 
 ### Documented behavior change
 
