@@ -5,9 +5,11 @@
  *
  * `host-dispatch-budget.admission.ts` is the dispatcher's admission read (fail
  * CLOSED: an unreadable ledger refuses the tick). This module is the other
- * half of the contract: the path an operator takes when they fire
- * `/skill:implement` or `/skill:audit` BY HAND from the worklist. A human is
- * present and owns the decision, so the fail direction differs deliberately
+ * half of the contract: the path an operator takes when they fire a
+ * `/skill:<kind>` BY HAND from the worklist — ANY capped kind (`implement`,
+ * `audit`, `plan`, `intake`, `risk-effort`). An uncapped kind short-circuits
+ * this gate entirely (no quota check, no prompt, no reservation, no ledger
+ * entry). A human is present and owns the decision, so the fail direction differs deliberately
  * (parent design, documented in `docs/dev/downtime-dispatcher.md`):
  *
  *  - **at / over cap** → ask first (the F4 dialog): cancel ⇒ NO claim, NO pane
@@ -23,10 +25,11 @@
  *  - **unresolvable coordination dir** → proceed silently: no machine dir
  *    means no ledger and no new failure mode (parent AC11).
  *
- * Counting semantics are the ledger's, never re-derived here: the implement
- * tier uses `liveCount` (pane-derived freshness since WL-0MW9VQ08W000SN63 —
- * a confirmed implement with a pane in the machine-wide live pane list
- * counts regardless of heartbeat age). The audit tier quotes the pane-aware
+ * Counting semantics are the ledger's, never re-derived here: every
+ * non-audit tier (`implement`, `plan`, `intake`, `risk-effort`) uses
+ * `liveCount` (pane-derived freshness since WL-0MW9VQ08W000SN63 — a
+ * confirmed dispatch with a pane in the machine-wide live pane list counts
+ * regardless of heartbeat age). The audit tier quotes the pane-aware
  * DISPLAY count the worklist header shows (`auditDisplayCount` →
  * `reduceAuditDisplayCounts`), so the over-quota dialog never claims an audit
  * is running when its pane is gone (WL-0MW8IQNY7003JIOL). Admission itself is
@@ -34,7 +37,7 @@
  * rule.
  *
  * The pane read is the tri-state (WL-0MW9VQX5T001GCUP): a FAILED read is
- * UNKNOWN, not "no panes". On unknown the implement tier counts by the
+ * UNKNOWN, not "no panes". On unknown the non-audit tiers count by the
  * freshness rule (never reaps — a broken herdr read cannot delete ledger
  * state) and the audit display falls back to the freshness-only count,
  * so the gate stays fail-open exactly as documented above.
@@ -44,7 +47,6 @@
  */
 
 import {
-  DEFAULT_HOST_BUDGET_CONFIG,
   HOST_BUDGET_STALE_WINDOW_MS,
   auditDisplayCount,
   livePaneIdSet,
@@ -73,18 +75,22 @@ export const HOST_BUDGET_UNREADABLE_NOTICE =
 
 /**
  * The budget tier an agent command belongs to, or `undefined` when the
- * command is outside the budget (plan / intake / effort-and-risk / shell).
+ * command is outside the budget (shell / scheduled dispatch).
  *
- * `/skill:implement` covers the whole implement family
+ * Maps all five capped kinds (`HostBudgetKind`): the implement family
  * (`/skill:implement`, `/skill:implement-single`, `/skill:implementall`);
- * `/skill:audit` is the audit tier. Prefix matching on the first token keeps
- * the mapping independent of any trailing work-item id (which is extracted
- * separately by `extractWorkItemId`).
+ * `/skill:audit` (audit tier); `/skill:plan` (plan tier); `/skill:intake`
+ * (intake tier); `/skill:risk-effort` (risk-effort tier). Prefix matching on
+ * the first token keeps the mapping independent of any trailing work-item id
+ * (which is extracted separately by `extractWorkItemId`).
  */
 export function budgetKindForAgentCommand(command: string): HostBudgetKind | undefined {
   const firstToken = command.trim().split(/\s+/)[0] ?? '';
   if (firstToken.startsWith('/skill:implement')) return 'implement';
   if (firstToken.startsWith('/skill:audit')) return 'audit';
+  if (firstToken.startsWith('/skill:plan')) return 'plan';
+  if (firstToken.startsWith('/skill:intake')) return 'intake';
+  if (firstToken.startsWith('/skill:risk-effort')) return 'risk-effort';
   return undefined;
 }
 
@@ -98,7 +104,7 @@ export interface InteractiveAgentDispatchDeps {
    * Machine-wide live pane read — the tri-state (WL-0MW9VQX5T001GCUP):
    * `{ok:true}` carries an AUTHORITATIVE list, `{ok:false}` means pane
    * liveness UNKNOWN. Unknown must never be treated as "no panes": the
-   * implement tier falls back to the freshness rule and nothing is ever
+   * non-audit tiers fall back to the freshness rule and nothing is ever
    * reaped on this state.
    */
   readLivePanes(): Promise<HostBudgetLivePanesResult>;
@@ -136,11 +142,11 @@ export interface InteractiveAgentDispatchPreparation {
  * for the unresolvable-coordination-dir case is handled by the caller via
  * `noLedger`, because that case must NOT produce a notice (parent AC11).
  *
- * The implement tier uses the admission rule `liveCount` (pane-derived
- * freshness since WL-0MW9VQ08W000SN63: a confirmed implement whose pane is
- * in the live list counts regardless of heartbeat age). The audit tier quotes
- * the pane-aware DISPLAY count the worklist header shows
- * (WL-0MW8IQNY7003JIOL): a confirmed audit whose pane is gone must not
+ * The non-audit tiers (`implement`, `plan`, `intake`, `risk-effort`) use the
+ * admission rule `liveCount` (pane-derived freshness since WL-0MW9VQ08W000SN63:
+ * a confirmed dispatch whose pane is in the live list counts regardless of
+ * heartbeat age). The audit tier quotes the pane-aware DISPLAY count the
+ * worklist header shows (WL-0MW8IQNY7003JIOL): a confirmed audit whose pane is gone must not
  * inflate the dialog, so the operator sees the same number on both surfaces.
  * Admission itself is untouched — the dispatcher
  * still uses `freshCount`/`readAuditBudgetState` (fail-closed, freshness-
@@ -166,6 +172,19 @@ type CountReadout =
   | { state: 'noLedger' }
   | { state: 'unreadable' };
 
+/**
+ * Whether a kind uses the live-count rule (implement + plan/intake/risk-effort)
+ * or the audit-display rule.
+ *
+ * The live-count rule (`readHostBudgetLiveWork`) counts ledger entries PLUS
+ * live dispatcher panes with no entry. The audit-display rule
+ * (`auditDisplayCount`) excludes confirmed entries whose pane has disappeared,
+ * so the over-quota dialog never claims an audit is running when its pane is gone.
+ */
+function usesLiveCountRule(kind: HostBudgetKind): boolean {
+  return kind !== 'audit';
+}
+
 function readTierCount(
   kind: HostBudgetKind,
   max: number,
@@ -176,12 +195,13 @@ function readTierCount(
   // A disabled tier (`max 0`) admits nothing, so the count is irrelevant —
   // the prompt still quotes the documented 0/0 evidence.
   if (max === 0) return { state: 'counted', live: 0 };
-  if (kind === 'implement') {
-    // The ONE in-flight rule (WL-0MWFJDD8R005F5BV): ledger entries PLUS live
-    // dispatcher panes no entry accounts for — the same figure admission and
-    // the header use. `livePanes` `undefined` = pane liveness UNKNOWN
-    // (WL-0MW9VQX5T001GCUP): the rule then counts by freshness and NEVER reaps,
-    // so the gate cannot delete a stale-but-live entry.
+
+  if (usesLiveCountRule(kind)) {
+    // Live-count rule (implement + plan + intake + risk-effort): ledger
+    // entries PLUS live dispatcher panes with no entry — the same figure
+    // admission and the header use. `livePanes` `undefined` = pane liveness
+    // UNKNOWN (WL-0MW9VQX5T001GCUP): the rule then counts by freshness and
+    // NEVER reaps, so the gate cannot delete a stale-but-live entry.
     const result = readHostBudgetLiveWork(kind, livePanes, opts);
     if (!result.ok) {
       if (!result.unknown && result.reason === 'no-coordination-dir') {
@@ -244,10 +264,16 @@ export async function prepareInteractiveAgentDispatch(
 
   const budgetOptions: HostBudgetOptions = { ...deps.budget };
   const { config } = readBudgetConfig(budgetOptions);
-  const max =
-    kind === 'implement'
-      ? (config.implement ?? DEFAULT_HOST_BUDGET_CONFIG.implement)
-      : (config.audit ?? DEFAULT_HOST_BUDGET_CONFIG.audit);
+  // Resolve the kind's cap: absent from config and default means uncapped
+  // — the gate short-circuits (no quota check, no prompt, no reservation,
+  // no ledger entry). Capped kinds proceed to the ledger read.
+  const max = config[kind];
+  if (max === undefined) {
+    // Uncapped kind: no quota check, no reservation, no ledger entry — the
+    // claim path proceeds unchanged (AC uncapped).
+    await deps.claim(command);
+    return { proceed: true, kind, reserved: false };
+  }
   // Fail-open liveness read: a pane-list hiccup must not block a human. The
   // tri-state (WL-0MW9VQX5T001GCUP) distinguishes UNKNOWN (`undefined` here)
   // from an authoritative empty list: unknown falls back to the freshness rule
