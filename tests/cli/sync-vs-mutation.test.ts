@@ -213,6 +213,28 @@ function createItem(local: string, title: string): string {
   return id;
 }
 
+/** Path of the store's advisory lock file (see `getLockPathForJsonl`). */
+function lockPath(local: string): string {
+  return path.join(local, '.worklog', 'worklog-data.jsonl.lock');
+}
+
+/**
+ * Back-date a held lock's `acquiredAt` past `DEFAULT_MAX_LOCK_AGE_MS`
+ * (5 minutes) **without** changing its holder PID or hostname, so the holder
+ * stays a live same-host process whose lock merely *looks* old.
+ *
+ * Before SA-0MVL7YG2S009L6PU this made a live sync's lock "stale" and let a
+ * second writer steal it mid-operation. The fix makes a same-host live PID
+ * authoritative regardless of age, so the back-dated lock is never stolen.
+ * Deterministic: no sleeping.
+ */
+function backdateLock(local: string): void {
+  const p = lockPath(local);
+  const info = JSON.parse(fs.readFileSync(p, 'utf8'));
+  info.acquiredAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  fs.writeFileSync(p, JSON.stringify(info));
+}
+
 describe('wl sync vs concurrent mutation (lost-update race)', () => {
   let s: Setup;
 
@@ -833,4 +855,73 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     expect(after.workItem.status).toBe('open');
     expect(after.workItem.stage).toBe('plan_complete');
   }, 60000);
+
+  it('SA-0MVL7YG2S009L6PU: a live sync with an age-expired same-host lock is never stolen', async () => {
+    const id = createItem(s.local, 'Age-expired live-lock target');
+
+    // Seed the remote so the second sync has a watermark baseline.
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+
+    // Park a sync inside `git fetch`: it has taken its local snapshot and is
+    // holding the store lock with a LIVE same-host PID (this test process).
+    const sync = spawnCli(s.local, ['--json', 'sync', '--if-idle'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    // The holder is alive on this host, but its lock looks older than
+    // DEFAULT_MAX_LOCK_AGE_MS. Before the fix this let a second writer steal
+    // the lock mid-sync; after the fix a same-host live PID is authoritative
+    // and is never age-expired.
+    backdateLock(s.local);
+
+    const held = JSON.parse(fs.readFileSync(lockPath(s.local), 'utf8')) as {
+      pid: number;
+      hostname: string;
+      acquiredAt: string;
+    };
+    expect(held.hostname).toBe(os.hostname());
+
+    // (1) A second auto-sync (`--if-idle`) must SKIP rather than steal the
+    // lock: it yields `skipped: true` and exits 0 — no second writer runs.
+    const idleRetry = runCli(s.local, ['--json', 'sync', '--if-idle'], fixtureGitEnv());
+    expect(idleRetry.status, idleRetry.stderr).toBe(0);
+    const idleParsed = JSON.parse(idleRetry.stdout) as { skipped?: boolean };
+    expect(idleParsed.skipped).toBe(true);
+
+    // The back-dated lock file is still the parked sync's — it was not
+    // unlinked/stolen by the `--if-idle` contender.
+    const afterIdle = JSON.parse(fs.readFileSync(lockPath(s.local), 'utf8')) as {
+      pid: number;
+      acquiredAt: string;
+    };
+    expect(afterIdle.pid).toBe(held.pid);
+    expect(afterIdle.acquiredAt).toBe(held.acquiredAt);
+
+    // (2) A mutating command must WAIT on the still-held lock (the normal
+    // path) rather than steal it: it completes only after the sync releases.
+    // We start it while the sync is parked, then release the sync and await
+    // the mutation — its update must be the only write, applied after the
+    // sync's write-back, so nothing is clobbered.
+    const mutation = (async () => {
+      const upd = spawnCli(
+        s.local,
+        ['--json', 'update', id, '-s', 'in_progress', '--no-re-sort'],
+        fixtureGitEnv(),
+      );
+      const updRes = await upd.done;
+      expect(updRes.status, updRes.stderr).toBe(0);
+    })();
+
+    // Deterministically release the parked fetch; the mutation then proceeds.
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The mutation survived the sync: the parked sync's pre-claim snapshot did
+    // not revert the in-progress transition, because the second writer never
+    // ran concurrently (it waited for the lock).
+    const after = showItem(s.local, id);
+    expect(after.workItem.status, 'mutation must survive the long sync').toBe('in-progress');
+  }, 90000);
 });
