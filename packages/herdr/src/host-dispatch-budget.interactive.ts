@@ -30,13 +30,13 @@
  * DISPLAY count the worklist header shows (`auditDisplayCount` →
  * `reduceAuditDisplayCounts`), so the over-quota dialog never claims an audit
  * is running when its pane is gone (WL-0MW8IQNY7003JIOL). Admission itself is
- * unchanged and still uses the marker-compatible `freshCount`/`readAuditBudgetState`
+ * unchanged and still uses the freshness-only `freshCount`/`readAuditBudgetState`
  * rule.
  *
  * The pane read is the tri-state (WL-0MW9VQX5T001GCUP): a FAILED read is
  * UNKNOWN, not "no panes". On unknown the implement tier counts by the
  * freshness rule (never reaps — a broken herdr read cannot delete ledger
- * state) and the audit display falls back to the marker-compatible count,
+ * state) and the audit display falls back to the freshness-only count,
  * so the gate stays fail-open exactly as documented above.
  *
  * The gate runs BEFORE the claim and BEFORE any pane/background spawn, so a
@@ -143,13 +143,13 @@ export interface InteractiveAgentDispatchPreparation {
  * (WL-0MW8IQNY7003JIOL): a confirmed audit whose pane is gone must not
  * inflate the dialog, so the operator sees the same number on both surfaces.
  * Admission itself is untouched — the dispatcher
- * still uses `freshCount`/`readAuditBudgetState` (fail-closed, marker-
- * compatible). This read is non-mutating: unlike `freshCount` it never reaps
+ * still uses `freshCount`/`readAuditBudgetState` (fail-closed, freshness-
+ * only). This read is non-mutating: unlike `freshCount` it never reaps
  * or rewrites the ledger.
  *
  * `livePanes` of `undefined` = pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP):
  * the implement branch counts by the freshness rule and never reaps, the
- * audit branch falls back to the marker-compatible count — a failed pane
+ * audit branch falls back to the freshness-only count — a failed pane
  * read must neither delete entries nor invent a zero.
  */
 type CountReadout =
@@ -217,7 +217,6 @@ function readTierCount(
     livePanes === undefined ? undefined : livePaneIdSet(livePanes),
     now,
     windowMs,
-    dir,
   );
   return { state: 'counted', live };
 }

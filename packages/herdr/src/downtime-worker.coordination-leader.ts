@@ -458,7 +458,7 @@ async function dispatchFromCoordinationGated(
   // Audit-budget hold (WL-0MWDDHVF2004PTYX): the first offer refused by the
   // proxy-derived AUDIT budget (`audit-budget-saturated` /
   // `audit-budget-unknown`, or the legacy `host-budget-audit` /
-  // `audit-host-saturated`). Mirrors `hostBudgetHold` — the offer is KEPT, the
+  // `host-budget-audit`). Mirrors `hostBudgetHold` — the offer is KEPT, the
   // hold is neutral (no strike, no cooldown, no attempt-budget charge), and
   // the tick ends on the refusal. Recorded SEPARATELY so the terminal chain
   // can rank it ABOVE an implement refusal: an audit refusal with
@@ -769,7 +769,7 @@ async function dispatchFromCoordinationGated(
         // `host-budget-unknown` from an implement admission) records
         // `hostBudgetHold`; an AUDIT refusal (`audit-budget-saturated` /
         // `audit-budget-unknown` + `detail`, or the legacy `host-budget-audit`
-        // / `audit-host-saturated`) records `auditBudgetHold` on its own rung
+        // / `host-budget-audit`) records `auditBudgetHold` on its own rung
         // so it is NEVER masked by `host-budget-implement` (AC1/AC2) — and is
         // attributed in the per-offer rejection payload with the `audit-budget`
         // gate token (AC5).

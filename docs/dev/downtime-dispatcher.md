@@ -337,7 +337,7 @@ with a fairness guard so no instance can monopolise leadership.
 **only after** the coordination offer scan yields no dispatchable candidate —
 i.e. the same terminal-reason set the view can produce (`no-candidate`,
 `review-queue-hold`, `code-freeze`, `fresh-audit-skip`, `audit-in-flight`,
-`audit-host-saturated`, `in-flight-hold`, or a genuinely empty view). It never
+`host-budget-audit`, `in-flight-hold`, or a genuinely empty view). It never
 runs when a normal in-view/coordination offer dispatched. Blocked audit-batch
 continuations reuse these tokens unchanged and add the batch metadata — see
 *Decision-log entries: audit-batch tokens & metadata* under *Log schema*.
@@ -1383,8 +1383,8 @@ refusal. The header/dialog still read the pane-aware display count
 
 **One-release legacy flag (AC3).** `HERDR_AUDIT_LOCAL_BUDGET=1` restores the
 pre-change **pre-proxy** decision for the audit tier — `budget.json`
-`maxAudit` + the local `dispatch-budget.json` ledger, with the legacy tokens
-`audit-host-saturated` (cap `1`) / `host-budget-audit` (any other cap) /
+`maxAudit` + the local `dispatch-budget.json` ledger, with the tokens
+`host-budget-audit` (at every cap, including the `maxAudit: 1` default) /
 `host-budget-unknown` (unreadable ledger) — and never consults the proxy. It is
 read per tick, and the legacy path writes an `audit-budget-legacy` decision
 entry so a host still running the escape hatch is visible in the log. It is an
@@ -3012,8 +3012,7 @@ entered and the next idle tick re-checks (as with `audit-budget-saturated`).
 | audit | proxy availability read `available: false` | skip that audit candidate and keep scanning (neutral) | `audit-budget-saturated` | `budget-audit` |
 | audit | proxy read not `ok` — `endpoint-absent` / `unreachable` / `unparsable`, or the seam is absent | **fail closed** — skip that audit candidate and keep scanning, recording the failing exchange as `detail` | `audit-budget-unknown` | `budget-unknown` |
 | audit (one-release legacy path, `HERDR_AUDIT_LOCAL_BUDGET=1`) | fresh entries (no live-pane requirement) **<** `maxAudit` | admit + reserve (pre-proxy behaviour) | `audit-budget-legacy` (warning entry, once per tick) | — |
-| audit (legacy path) | at cap with `maxAudit: 1` (default) | skip that candidate and keep scanning | `audit-host-saturated` (byte-identical to the retired marker) | `budget-audit` |
-| audit (legacy path) | at cap with any other `maxAudit` (including `0`) | skip that candidate and keep scanning | `host-budget-audit` | `budget-audit` |
+| audit (legacy path) | at cap at ANY `maxAudit` (including the `1` default and `0`) | skip that candidate and keep scanning | `host-budget-audit` | `budget-audit` |
 | audit (either path) | the proxy verdict and the local (observability-only) ledger disagree about capacity | decision unchanged — the proxy wins; ONE evidence entry with both sides' figures | `audit-budget-divergence` | — |
 | implement | ledger exists but cannot be trusted (corrupt/unreadable bytes, or the reservation lock/I/O failed) | **fail closed** — skip that candidate and keep scanning, then rewrite the ledger from the live pane list **when the pane read succeeded**; an unknown pane read (failed `hostBudgetLivePanes`) skips the rewrite so the corrupt ledger is never replaced by an empty one (WL-0MW9VQX5T001GCUP) | `host-budget-unknown` | `budget-unknown` |
 | audit (legacy path) | ledger exists but cannot be trusted | **fail closed** — skip that candidate and keep scanning (pre-proxy semantics) | `host-budget-unknown` | `budget-unknown` |
@@ -3034,13 +3033,13 @@ to the next candidate ONLY for an allow-listed **continuable hold**:
   or a marker write was rolled back; the candidate is neutral, so the scan
   steps on (the audit-batch continuation ends instead — see below).
 - **neutral budget refusal** — `host-budget-implement`, `host-budget-audit`,
-  `host-budget-unknown`, `audit-budget-saturated`, `audit-budget-unknown`,
-  `audit-host-saturated`: the candidate is budgeted, but a prep candidate
+  `host-budget-unknown`, `audit-budget-saturated`, `audit-budget-unknown`:
+  the candidate is budgeted, but a prep candidate
   ranked behind it (`plan` / `intake` / `risk-effort`) is not, so the scan
   records the hold (reason + `{live, max}`) and keeps scanning. The hold is
   recorded on TWO rungs (WL-0MWDDHVF2004PTYX): an **audit** refusal
-  (`audit-budget-*`, or the legacy `host-budget-audit` /
-  `audit-host-saturated`) lands on `HeadScanHolds.auditBudget` (carrying the
+  (`audit-budget-*`, or `host-budget-audit`) lands on
+  `HeadScanHolds.auditBudget` (carrying the
   failing exchange as `detail` when the proxy read failed closed), an
   **implement/host** refusal on `HeadScanHolds.hostBudget` — so the leader's
   terminal chain can rank an audit refusal ABOVE an implement one: a tick
@@ -3235,26 +3234,12 @@ audit cap of 1 — the `active-audit` marker in `machine-coordination.ts` — is
 single-flight by construction; the ledger is count-aware, so one mechanism now
 serves `maxAudit: 1` (identical behaviour) and `maxAudit: 2…N`.
 
-- **One release of read-compatibility.** A non-stale `active-audit` file
-  written by an OLDER herdr instance is read as **one synthetic audit entry**
-  by `freshCount('audit')`. This version **never creates and never removes**
-  the file — its writers were deleted with the change, so no code path can
-  resurrect the marker or mask a ledger bug.
-- **Mixed-version safety argument.** During a rolling upgrade some instances
-  on the host still run the marker-based version. Without the legacy read, an
-  old instance's live audit would be invisible to a new instance's ledger
-  count, and the host could run two audits against a `maxAudit: 1`
-  configuration — the duplicate-dispatch failure the original marker existed
-  to prevent. Counting the marker as one entry keeps the union of both
-  mechanisms conservative (at most `maxAudit`), at the cost of an old-instance
-  audit being counted but never ledger-released (bounded by the 2 h staleness
-  window, the same lease the marker always had).
-- **Removal schedule.** The legacy readers (`readActiveAuditMarker`,
-  `isHostAuditActive`) and the synthetic-entry count are removed in the
-  release **after** the host-wide budget generalisation ships — once every
-  instance on the host is expected to run a budget-aware version. The
-  authoritative wording lives in the `machine-coordination.ts` module comment;
-  this schedule is the operator-facing record.
+- **Retired surface deleted (WL-0MWF34IEP00221NU).** The read-compatibility
+  window is over: the marker readers, the synthetic audit entry and the
+  marker types are deleted, not kept behind a compat shim. A leftover
+  `active-audit` file on a mixed-version host is ignored entirely — the
+  machine-scoped ledger (and, for admission, the proxy) is the only authority,
+  so no code path can resurrect the marker or mask a ledger bug.
 
 **Superseded for the audit tier: the proxy owns the audit budget
 (WL-0MW95GBEG005ERHS).** The ledger unification above superseded the marker,
@@ -3275,8 +3260,9 @@ The ledger shape was chosen to make it additive: every entry already carries
 `{ version: 1, entries: [...] }` document (a config-side `window` alongside
 `maxImplement`/`maxAudit`, plus a time-filtered reduction beside
 `reduceLedgerCounts`) without a new file, a new lock or a second counting
-path. Capping the `plan` / `intake` / `risk-effort` tiers is likewise out of
-scope (`kind` is recorded, so extending is trivial). **Multi-machine
+path. (Capping the `plan` / `intake` / `risk-effort` tiers is no longer out
+of scope: the host budget now covers every dispatch kind — see *Host-wide
+dispatch budget — gate table, defaults and scope*.) **Multi-machine
 coordination is no longer out of scope for the audit budget:** the local
 ledger remains single-machine, and the **proxy-owned audit budget queried over
 HTTP** (`GET {proxyUrl}/llama/local/audit/availability`) is the cross-machine
@@ -3308,14 +3294,14 @@ disagree:
 
 | Surface | What it shows | Source |
 |---|---|---|
-| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement` for implement; `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier; the legacy `host-budget-audit` / `host-budget-unknown` / `audit-host-saturated` under `HERDR_AUDIT_LOCAL_BUDGET=1`) plus a `budget` evidence figure (`live`/`max` for the tier) and, on a fail-closed audit read, the failing exchange as `detail` (`http-404` / `timeout` / `network` / `bad-body` / `seam-absent`) — the decision entry names the broken proxy contract without reading code (WL-0MWDDHVF2004PTYX AC3); plus the `audit-budget-divergence` / `audit-budget-legacy` evidence entries | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
+| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-implement` for implement; `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier; `host-budget-audit` / `host-budget-unknown` under `HERDR_AUDIT_LOCAL_BUDGET=1`) plus a `budget` evidence figure (`live`/`max` for the tier) and, on a fail-closed audit read, the failing exchange as `detail` (`http-404` / `timeout` / `network` / `bad-body` / `seam-absent`) — the decision entry names the broken proxy contract without reading code (WL-0MWDDHVF2004PTYX AC3); plus the `audit-budget-divergence` / `audit-budget-legacy` evidence entries | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
 | Herdr header token | `budget-implement` / `budget-audit` / `budget-unknown`, from the shared `decisionHeaderToken` mapping, so the header says *why* the tick stopped — consistent with `contention` / `slot-owner` / `saturated` | `downtime-worker.constants.ts` |
 | stderr skip line | `[worklog-plugin] Downtime <tier> tier skipped: <reason> (live=n, max=m)` (`tier` is `budget` for `audit-budget-unknown` / `host-budget-unknown`) | `hostBudgetSkipLine` (`host-budget-status.ts`) |
 | Worklist header counter | read-only `[budget: implement n/max · audit n/max]`, rendered from already-available state; it never spawns `wl`, never mutates and never changes a dispatch decision, and renders nothing when the budget is unavailable (no chrome in the common case) | `readHostBudgetStatus` (`host-budget-status.ts`) |
 
 `readHostBudgetStatus` counts with the **same pure reductions admission
 uses** (`reduceLedgerCounts` for the implement pane-derived live-pane rule,
-`reduceMarkerCounts` + `legacyActiveAuditCount` for the audit rule), so the
+`reduceFreshCounts` / `reduceAuditDisplayCounts` for the audit rule), so the
 counter, the header token, the stderr line and the decision entry quote the
 same ledger and the same caps. The display read is deliberately non-mutating
 (it excludes stale entries without reaping them — a TUI render must never
@@ -3373,28 +3359,24 @@ semantics, so `maxAudit: 1` behaves exactly as before) against `maxAudit` and
 returns `{ ok: true, active: true, source: 'host-wide', reason, budget }`
 without any `wl` call, so the audit tier is skipped host-wide. The reported
 reason token is:
-  - **`audit-host-saturated`** at `maxAudit: 1` (default) — unchanged for
-    existing consumers and decision-log tooling;
-  - **`host-budget-audit`** at every other cap, including `maxAudit: 0`
-    (live/max `0/0`);
+  - **`host-budget-audit`** at EVERY cap, including `maxAudit: 1` (default)
+    and `maxAudit: 0` (live/max `0/0`);
   - **`host-budget-unknown`** when an unreadable ledger had to be rewritten
     from the live pane list (fail-closed; the next tick can decide again).
-  All three are neutral **holds on one candidate** — never `no-candidate`, so
+  All of these are neutral **holds on one candidate** — never `no-candidate`, so
   the no-candidate cooldown is not entered and the next idle tick re-checks.
   The head scan records the hold and keeps scanning, so a `plan`/`intake`
   candidate behind the refused audit can still dispatch this tick.
-- **Legacy read-compatibility (exactly one release).** A non-stale
-`active-audit` file written by an OLDER herdr instance is counted as ONE
-synthetic audit entry, so a mixed-version host can never double-dispatch.
-This version never creates and never removes the file. The decision, the
-mixed-version rationale and the removal schedule are recorded in the
-`machine-coordination.ts` module comment; the consolidated gate table,
-machine-dir file table, default rationale, fail directions and removal
-schedule live in *Host-wide dispatch budget — gate table, defaults and scope*
-above (**F6**, WL-0MVXY10QH0020V7S).
-- **Staleness:** an entry whose `heartbeatAt` is at/older than
-`DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS` (default **2 h**, the same constant) is
-reaped on read, so a crashed audit pane can never block the host indefinitely.
+- **Legacy marker removed (WL-0MWF34IEP00221NU).** The one-release
+read-compatibility window is closed: a non-stale `active-audit` file written
+by an OLDER herdr instance is no longer counted as a synthetic audit entry,
+and no reader, writer or remover of the file remains. The consolidated gate
+table, machine-dir file table, default rationale and fail directions live in
+*Host-wide dispatch budget — gate table, defaults and scope* above (**F6**,
+WL-0MVXY10QH0020V7S).
+- **Staleness:** an entry whose `heartbeatAt` is at/older than the 2 h
+`HOST_BUDGET_STALE_WINDOW_MS` (`host-dispatch-budget.ts`) is reaped on read,
+so a crashed audit pane can never block the host indefinitely.
 
 **Relationship to the existing guards** (defence in depth — the host-wide
 gate is the *outermost* audit-concurrency guard, never a replacement):
@@ -3402,7 +3384,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 | Guard | Scope | Sees | Action |
 |---|---|---|---|
 | **Proxy-owned audit budget** (default, WL-0MW95GBEG005ERHS) | cross-machine, every ContextHub host sharing the one local GPU | the proxy's audit cap and live audit leases (`GET {proxyUrl}/llama/local/audit/availability`) | skip that audit candidate and keep scanning; reason `audit-budget-saturated`; a non-`ok` read fails closed as `audit-budget-unknown` |
-| **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip that audit candidate and keep scanning; reason `audit-host-saturated` (`maxAudit: 1`) / `host-budget-audit` / `host-budget-unknown` |
+| **Host-wide ledger** (one-release legacy path) | machine-wide, all projects/instances | `maxAudit` fresh audit reservations from ANY project on this host | skip that audit candidate and keep scanning; reason `host-budget-audit` / `host-budget-unknown` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
 | **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |
 | **`AUDIT_PHASE2_PARALLELISM=1`** (always) | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots (fully serial Phase 2) |
@@ -3412,8 +3394,8 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 [maxAudit=<cap>,] freeSlots=…, contentionQueueDepth=…)`. For the default
 proxy path the reason is `audit-budget-saturated` (or `audit-budget-unknown`)
 and `concurrentAudits` is the **proxy's** live-lease count against its cap; for
-the one-release legacy path it is `audit-host-saturated` / `host-budget-audit`
-/ `host-budget-unknown` and the count is the ledger's observed live audit
+the one-release legacy path it is `host-budget-audit` /
+`host-budget-unknown` and the count is the ledger's observed live audit
 count. The skip is recorded (rate-limited) in
 `.worklog/downtime-coordination.log` via the shared no-dispatch decision log
 under the reported reason token, with the poll's `freeSlots`/`totalSlots`/
@@ -3431,14 +3413,14 @@ old single-machine note in `machine-coordination.ts`; see *Proxy-derived audit
 admission* above.
 
 **Tests.** `host-dispatch-budget.machine.test.ts` pins the audit matrix
-(`maxAudit` 0/1/2), the legacy-marker synthetic entry, the release points and
-the fail-closed self-heal; `host-dispatch-budget.test.ts` pins the
-marker-semantics counting (`freshCount`, `reduceMarkerCounts`); `index.test.ts`
+(`maxAudit` 0/1/2), the release points and the fail-closed self-heal;
+`host-dispatch-budget.test.ts` pins the freshness-only counting
+(`freshCount`, `reduceFreshCounts`); `index.test.ts`
 exercises the real `createDowntimeDeps` wiring (`getActiveAudit` reads the
 ledger cap, `recordDispatch` no longer writes the marker, `recordPaneClose`
 releases the audit reservation); `downtime-worker.dispatch.test.ts` pins the
 claim-pipeline admission and its release paths; `machine-coordination.test.ts`
-pins the retired marker's read-only compatibility surface.
+pins the coordination-dir resolver (the retired marker surface is gone).
 
 ### Interactive over-quota confirmation — user-fired dispatches
 ### (WL-0MVXY0Z93002HKCZ F4, parent WL-0MVXWQFGV000D2AB)
@@ -3633,7 +3615,7 @@ optimisation, never a relaxation of the idle-duration gate.
 **Observability.** Accepted continuations log the observation token
 `audit-batch-continue`; a silently deactivated batch logs `audit-batch-end`
 (cap/depth). Blocked/held continuations reuse the existing refusal token
-(`audit-in-flight`, `audit-host-saturated`, `code-freeze`, `slot-owned`,
+(`audit-in-flight`, `host-budget-audit`, `code-freeze`, `slot-owned`,
 `proxy-contention`, `review-queue-hold`, `no-candidate`, `slots-unavailable`)
 and gain the additive `auditBatchDepth` / `auditBatchCap` /
 `auditBatchRemaining` metadata — see *Decision-log entries: audit-batch tokens
@@ -4744,8 +4726,8 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
 | `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — records each root's LAST DISPATCH; the least-recently-dispatched root starts the offer ordering and the registered-root sweep. Selection is a pure read; only a consumed offer charges the cursor (WL-0MTJDX4M4007YH5U, WL-0MWFIZ8H5005FVNN; fail-open) |
 | `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight `implement`/`audit` dispatch (WL-0MVXY0WQF0069YDJ); audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
-| `~/.herdr/downtime/budget.json` | Optional per-tier caps `{ "maxImplement": 2, "maxAudit": 1 }` (absent → those defaults; `0` disables a tier; `HERDR_HOST_MAX_IMPLEMENT`/`HERDR_HOST_MAX_AUDIT` override). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
-| `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired** (WL-0MVXY0XPF006YUHA F2): a non-stale file written by an older instance is still read as ONE synthetic audit entry; this version never creates or removes it |
+| `~/.herdr/downtime/budget.json` | Optional per-kind caps as a map over kinds, e.g. `{ "implement": 2, "audit": 1, "plan": 3 }` (absent → the `implement: 2` / `audit: 1` defaults, every other kind uncapped; `0` disables a kind; `HERDR_HOST_MAX_<KIND>` overrides — the single env vocabulary). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
+| `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired and deleted** (WL-0MVXY0XPF006YUHA F2, WL-0MWF34IEP00221NU): no reader, writer or remover remains; a leftover file is ignored entirely |
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
 | `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning + every dispatch decision — successful dispatches and `no-dispatch` refusals alike, carrying the per-project fairness fields `selectedRoot` / `dispatchingRoot` / `consecutiveRunLength` / `outcome` (per worklog; rotating, 500 entries/file × 4 files ≈ ≥ 24 h — see [Retention & rotation](#rolling-log-trimming-retention--rotation)) |
 | `<worklog-root>/.worklog/downtime-dispatches.log` | Dispatched items (per worklog, retained; includes `anchor-unavailable` neutral no-dispatch) |
@@ -4799,21 +4781,21 @@ likewise re-read live every tick and clamped on load
   rather than silently trusting a per-host cap. Check the proxy URL reachability
   and version; the `detail` on the decision entry names the failing exchange.
   **Fallback for one release:** set `HERDR_AUDIT_LOCAL_BUDGET=1` to restore
-  the pre-proxy `budget.json` `maxAudit` + local-ledger decision (the legacy
-  `audit-host-saturated` / `host-budget-audit` / `host-budget-unknown`
-  tokens, and an `audit-budget-legacy` warning entry), or upgrade the proxy.
-- **Audits skipped with `audit-host-saturated` / `host-budget-audit`
+  the pre-proxy `budget.json` `maxAudit` + local-ledger decision (the
+  `host-budget-audit` / `host-budget-unknown` tokens, and an
+  `audit-budget-legacy` warning entry), or upgrade the proxy.
+- **Audits skipped with `host-budget-audit`
   (the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path only):** the local
   ledger reports `maxAudit` fresh audit reservations, so an audit is already
   running — possibly dispatched by another project's dispatcher. Inspect the
   ledger (`cat ~/.herdr/downtime/dispatch-budget.json`), the legacy cap (`cat
   ~/.herdr/downtime/budget.json`) and the decision log
-  (`grep -E 'audit-host-saturated|host-budget-audit' <root>/.worklog/downtime-coordination.log`).
+  (`grep -E 'host-budget-audit' <root>/.worklog/downtime-coordination.log`).
   `host-budget-unknown` means the ledger was unreadable and had to be rewritten
   from the live pane list — check for a hand-edited/corrupt
-  `dispatch-budget.json`. A leftover `active-audit` file only counts while it is
-  fresh (one synthetic entry; it is never written or removed by this version).
-  Remove `HERDR_AUDIT_LOCAL_BUDGET` to return to the proxy-owned budget.
+  `dispatch-budget.json`. A leftover `active-audit` file is ignored entirely
+  (its readers were deleted). Remove `HERDR_AUDIT_LOCAL_BUDGET` to return to
+  the proxy-owned budget.
   Set `HERDR_COORDINATION_DIR` when testing to avoid the live machine dir.
 - **Diagnosing wl errors with per-strike logs (WL-0MTJPYM53003ORCV):**
   when the downtime worker encounters CLI errors, it now logs a **structured
@@ -4878,8 +4860,8 @@ tokens below.
 | `audit-batch-end` | An armed batch ended **silently** after a successful audit dispatch (cap reached / depth dropped). Emitted at most once per batch-ending dispatch, never for a refusal. | Same three fields plus `auditBatchEndReason: 'cap' \| 'depth'`. |
 
 **Blocked/held continuations reuse the existing tokens unchanged** —
-`audit-in-flight` and `audit-host-saturated` / `host-budget-audit` /
-`host-budget-unknown` (host-budget blocks), `slot-owned`,
+`audit-in-flight` and `host-budget-audit` / `host-budget-unknown`
+(host-budget blocks), `slot-owned`,
 `proxy-contention`, `code-freeze`, `review-queue-hold`, `no-candidate`,
 `slots-unavailable` — and gain `auditBatchDepth` / `auditBatchCap` /
 `auditBatchRemaining` (the budget still available when the continuation was

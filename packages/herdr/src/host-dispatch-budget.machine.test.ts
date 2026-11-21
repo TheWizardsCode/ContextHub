@@ -20,11 +20,9 @@
  *  - AC4: `maxImplement: 0` disables the tier host-wide (refused `0/0`).
  *  - Parent AC11: an unresolvable coordination dir degrades to no ledger.
  *
- *  - F2 AC1/AC3: the audit matrix — `maxAudit` 0/1/2, `maxAudit: 1` keeping the
- *    retired marker's single-flight token, `maxAudit: 2` admitting two and
- *    refusing the third with `host-budget-audit`.
- *  - F2 AC2: a non-stale legacy `active-audit` marker counts as ONE synthetic
- *    audit entry; a stale one is ignored and the file is never removed.
+ *  - F2 AC1/AC3: the audit matrix — `maxAudit` 0/1/2, `maxAudit: 1` enforcing
+ *    single-flight, `maxAudit: 2` admitting two and refusing the third, all
+ *    with the unified `host-budget-audit` token.
  *  - F2 AC5: every release point (pane close / dispatch failure / claim
  *    rollback — all `releaseHostDispatch`) frees the audit slot, and a stale
  *    entry is reaped by the 2 h rule.

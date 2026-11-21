@@ -25,8 +25,8 @@
  *    kind is disabled with a `0` cap). One token per capped kind
  *    (WL-0MWF34932000SNTX F2): `host-budget-implement`, `host-budget-audit`,
  *    `host-budget-plan`, `host-budget-intake`, `host-budget-risk-effort`.
- *    The retired marker's `audit-host-saturated` token is DELETED by the
- *    follow-up removal slice — the audit tier reports `host-budget-audit` at
+ *    The retired marker's saturated token was DELETED by the removal slice
+ *    (WL-0MWF34IEP00221NU): the audit tier reports `host-budget-audit` at
  *    every cap, including the `maxAudit: 1` default;
  *  - `host-budget-unknown` — the ledger could not be trusted (lock contention
  *    or an I/O failure); the dispatcher failed closed;

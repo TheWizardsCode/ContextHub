@@ -23,8 +23,8 @@
  * — WL-0MW9VQ08W000SN63: a confirmed implement with a live pane counts
  * regardless of heartbeat age —,
  * `reduceAuditDisplayCounts` for the audit tier's pane-aware DISPLAY rule, or
- * the marker-compatible `reduceMarkerCounts` when no live pane list is
- * supplied, plus `legacyActiveAuditCount`). There is therefore no second
+ * the freshness-only `reduceFreshCounts` when no live pane list is
+ * supplied). There is therefore no second
  * counting or ranking path: the decision log's `budget` evidence, the header
  * token, the stderr line and the worklist counter are all quoting the ledger
  * through one set of rules.
@@ -236,15 +236,12 @@ export function readHostBudgetStatus(
   // (WL-0MW8IQNY7003JIOL). A confirmed entry whose pane is gone is a dead
   // audit and must not render as in flight. `undefined` live panes (UNKNOWN,
   // WL-0MW9VQX5T001GCUP) cannot distinguish "gone" from "unknown", so both
-  // tiers fall back to the freshness rule rather than inventing a zero. The
-  // legacy `active-audit` marker is included as one synthetic entry, exactly
-  // as before.
+  // tiers fall back to the freshness rule rather than inventing a zero.
   const audit = auditDisplayCount(
     read.ledger.entries,
     opts.livePanes === undefined ? undefined : livePaneIdSet(opts.livePanes),
     now,
     windowMs,
-    dir,
   );
   const { config } = readBudgetConfig(ledgerOptions);
   return summariseHostBudget(

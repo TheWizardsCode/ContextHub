@@ -139,7 +139,7 @@ describe('continuable-hold predicate (WL-0MWBT76WY00298AY AC1)', () => {
       expect(isContinuableHoldOutcome({ reason })).toBe(true);
     }
     // The allow-list is the union of the two documented families.
-    expect(LOST_CLAIM_REASONS.size + HOST_BUDGET_HOLD_REASONS.size).toBe(11);
+    expect(LOST_CLAIM_REASONS.size + HOST_BUDGET_HOLD_REASONS.size).toBe(10);
     expect([...HOST_BUDGET_HOLD_REASONS]).toEqual([
       'host-budget-implement',
       'host-budget-audit',
@@ -149,17 +149,16 @@ describe('continuable-hold predicate (WL-0MWBT76WY00298AY AC1)', () => {
       'host-budget-unknown',
       'audit-budget-saturated',
       'audit-budget-unknown',
-      'audit-host-saturated',
     ]);
   });
 
   it('splits the budget holds into the AUDIT rung and the implement/host rung (WL-0MWDDHVF2004PTYX AC2)', () => {
-    // The audit rung: proxy-derived audit tokens plus the legacy audit tokens.
+    // The audit rung: proxy-derived audit tokens plus the ledger's
+    // `host-budget-audit`.
     expect([...AUDIT_BUDGET_HOLD_REASONS]).toEqual([
       'audit-budget-saturated',
       'audit-budget-unknown',
       'host-budget-audit',
-      'audit-host-saturated',
     ]);
     for (const reason of AUDIT_BUDGET_HOLD_REASONS) {
       expect(isAuditBudgetHoldReason(reason)).toBe(true);

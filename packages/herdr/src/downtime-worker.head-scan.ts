@@ -118,7 +118,7 @@ export interface HeadScanHolds {
    *
    * The proxy-owned rung of the budget hold: `audit-budget-saturated` /
    * `audit-budget-unknown` (or the legacy `host-budget-audit` /
-   * `audit-host-saturated`), recorded SEPARATELY from the implement hold so
+   * `host-budget-audit`), recorded SEPARATELY from the implement hold so
    * the caller's terminal chain can rank an audit refusal ABOVE an
    * implement refusal — a refuse with `detail: 'http-404'` is a broken proxy
    * contract, not an ambient implement-cap statement (AC2). `detail` names

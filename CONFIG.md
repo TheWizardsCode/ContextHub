@@ -242,9 +242,8 @@ contending for the one local `llama-server` GPU.
   configuration** (sibling llm item `LP-0MW95FYMH006XYNK`) — raising
   `maxAudit` has no effect on default audit admission.
 - **Fallback for one release:** `HERDR_AUDIT_LOCAL_BUDGET=1` restores the
-  pre-proxy `maxAudit` + local-ledger decision (with the legacy
-  `audit-host-saturated` / `host-budget-audit` / `host-budget-unknown` tokens
-  and an `audit-budget-legacy` warning entry).
+  pre-proxy `maxAudit` + local-ledger decision (with the `host-budget-audit` /
+  `host-budget-unknown` tokens and an `audit-budget-legacy` warning entry).
 
 The **implement tier** (`maxImplement`, `HERDR_HOST_MAX_IMPLEMENT` and the
 per-instance-free machine ledger) is unchanged.

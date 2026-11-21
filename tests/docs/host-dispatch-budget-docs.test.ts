@@ -9,8 +9,7 @@
  *  - the gate table (both tiers plus the `host-budget-unknown` fail-closed row),
  *  - the machine-dir file-table entries and the module-table row,
  *  - the deliberate per-path fail directions,
- *  - the audit-cap unification (one release of read-compatibility, the
- *    mixed-version argument and the removal schedule),
+ *  - the audit-cap unification and the legacy marker surface's deletion,
  *  - the `maxImplement: 2` rationale and the WL-0MU2EP6JL006A1U3 boundary,
  *  - the README's machine-scoped statement and interactive-dialog behaviour,
  *  - CONFIG.md's env vars / file location / defaults / clamps / `0` semantics,
@@ -61,9 +60,9 @@ describe('downtime-dispatcher deep-dive documents the host-wide budget', () => {
       /\| `~\/\.herdr\/downtime\/dispatch-budget\.json` \|/,
     );
     expect(dispatcherDoc).toMatch(/\| `~\/\.herdr\/downtime\/budget\.json` \|/);
-    // The retired marker is documented as read-only, not silently dropped.
+    // The retired marker is documented as retired/ignored, not silently dropped.
     expect(dispatcherDoc).toMatch(/\| `~\/\.herdr\/downtime\/active-audit` \|/);
-    expect(dispatcherDoc).toContain('Retired');
+    expect(dispatcherDoc).toContain('Retired and deleted');
   });
 
   it('has a gate table covering both tiers with the budget reason tokens', () => {
@@ -71,7 +70,6 @@ describe('downtime-dispatcher deep-dive documents the host-wide budget', () => {
       'host-budget-implement',
       'host-budget-audit',
       'host-budget-unknown',
-      'audit-host-saturated',
     ]) {
       expect(dispatcherDoc).toContain(token);
     }
@@ -94,16 +92,15 @@ describe('downtime-dispatcher deep-dive documents the host-wide budget', () => {
     );
   });
 
-  it('records the audit-cap unification, mixed-version safety and removal schedule', () => {
+  it('records the audit-cap unification and the legacy marker surface deletion', () => {
     expect(dispatcherDoc).toContain('retired in favour of the ledger');
-    expect(dispatcherDoc).toContain('One release of read-compatibility');
-    expect(dispatcherDoc).toContain('one synthetic audit entry');
-    expect(dispatcherDoc).toContain('Mixed-version safety argument');
-    expect(dispatcherDoc).toContain('Removal schedule');
-    // The schedule must say WHEN the read goes away, not just that it will.
-    expect(dispatcherDoc).toMatch(
-      /release \*\*after\*\* the host-wide budget generalisation ships/,
-    );
+    expect(dispatcherDoc).toMatch(/Retired surface deleted/);
+    expect(dispatcherDoc).toContain('ignored entirely');
+    // The one-release read-compatibility window is over; the doc must not
+    // still promise a synthetic marker entry or a future removal date.
+    expect(dispatcherDoc).not.toContain('One release of read-compatibility');
+    expect(dispatcherDoc).not.toContain('one synthetic audit entry');
+    expect(dispatcherDoc).not.toContain('Mixed-version safety argument');
   });
 
   it('records the conservative maxImplement default and the WL-0MU2EP6JL006A1U3 boundary', () => {

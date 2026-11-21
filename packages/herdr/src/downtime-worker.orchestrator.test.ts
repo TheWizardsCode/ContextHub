@@ -2739,7 +2739,7 @@ describe('audit-batch worker loop (parent AC6e)', () => {
       const cwd = tmp.make('herdr-audit-batch-held-');
       const markers: Array<Record<string, unknown>> = [];
       // The first dispatch sees no active audit; the continuation is blocked
-      // by the HOST-WIDE marker (the previous audit is still running).
+      // by the HOST-WIDE budget (the previous audit is still running).
       const getActiveAudit = vi
         .fn()
         .mockResolvedValueOnce({ ok: true, active: false })
@@ -2791,11 +2791,12 @@ describe('audit-batch worker loop (parent AC6e)', () => {
 
       const heldDecisions = recordDecision.mock.calls
         .map((call) => call[0] as Record<string, unknown>)
-        .filter((entry) => entry.reason === 'audit-host-saturated');
+        .filter((entry) => entry.reason === 'host-budget-audit');
       expect(heldDecisions).toHaveLength(1);
-      // The EXISTING token is unchanged; the batch metadata is additive.
+      // The unified `host-budget-audit` token is reported; the batch metadata
+      // is additive.
       expect(heldDecisions[0]).toMatchObject({
-        reason: 'audit-host-saturated',
+        reason: 'host-budget-audit',
         auditBatchDepth: 3,
         auditBatchCap: 3,
         auditBatchRemaining: 2,
@@ -2803,8 +2804,9 @@ describe('audit-batch worker loop (parent AC6e)', () => {
       expect(heldDecisions[0].freeSlots).toBe(4);
       expect(heldDecisions[0].totalSlots).toBe(4);
       expect(heldDecisions[0].ownerPresent).toBe(false);
-      // A refusal still drives the header blocking token (unchanged).
-      expect(worker.blockReason).toBe('audit-host-saturated');
+      // A refusal still drives the header blocking token (the unified
+      // `host-budget-audit` reason maps to `budget-audit`).
+      expect(worker.blockReason).toBe('budget-audit');
       // A refusal is the signal: no extra `audit-batch-end` line for it.
       const endDecisions = recordDecision.mock.calls
         .map((call) => call[0] as Record<string, unknown>)
@@ -2819,7 +2821,7 @@ describe('audit-batch worker loop (parent AC6e)', () => {
       await worker.tick();
       const heldAfter = recordDecision.mock.calls
         .map((call) => call[0] as Record<string, unknown>)
-        .filter((entry) => entry.reason === 'audit-host-saturated');
+        .filter((entry) => entry.reason === 'host-budget-audit');
       expect(heldAfter).toHaveLength(1);
     } finally {
       vi.useRealTimers();

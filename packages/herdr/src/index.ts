@@ -1192,11 +1192,10 @@ export function createDowntimeDeps(
         return false;
       }
       // 3. Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
-      // AC2): the machine-scoped dispatch-budget ledger is the audit-tier
-      // authority now, reserved in the claim→marker→spawn choke point. This
-      // version never writes nor removes the legacy `active-audit` file; a
-      // non-stale file written by an older instance is still counted as one
-      // synthetic audit entry on read (mixed-version safety).
+      // AC2) and its marker surface is DELETED (WL-0MWF34IEP00221NU AC5): the
+      // machine-scoped dispatch-budget ledger is the audit-tier authority,
+      // reserved in the claim→marker→spawn choke point. Nothing reads, writes
+      // or removes a legacy `active-audit` file any more.
       return true;
     },
     async recordError(event: DowntimeErrorEvent): Promise<void> {
@@ -1228,10 +1227,9 @@ export function createDowntimeDeps(
         // fail-closed: audit logging must never crash the worker
       }
       // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
-      // AC2): a failed audit spawn releases the machine-scoped LEDGER entry in
-      // the claim pipeline's spawn-failure path
-      // (`releaseHostBudgetForFailure`), so this version neither writes nor
-      // removes the legacy `active-audit` file.
+      // AC2) and its marker surface is DELETED (WL-0MWF34IEP00221NU AC5): a
+      // failed audit spawn releases the machine-scoped LEDGER entry in the
+      // claim pipeline's spawn-failure path (`releaseHostBudgetForFailure`).
     },
     async recordDispatchEnrichment(event: DowntimeDispatchEnrichmentEvent): Promise<void> {
       // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6): append a second
@@ -1316,8 +1314,8 @@ export function createDowntimeDeps(
     // throws.
     async recordPaneClose(entry, cwd: string): Promise<void> {
       // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
-      // AC2): the audit slot is released by the dispatch-budget ledger release
-      // below. The legacy `active-audit` file is never removed by this version.
+      // AC2) and its marker surface is DELETED (WL-0MWF34IEP00221NU AC5): the
+      // audit slot is released by the dispatch-budget ledger release below.
       //
       // Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3 AC3): a closed pane
       // gives its OWN machine-wide slot back. Since WL-0MWFJD5T4003OM91 the

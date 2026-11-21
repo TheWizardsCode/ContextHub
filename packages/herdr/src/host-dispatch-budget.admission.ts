@@ -61,12 +61,11 @@
  *    A reserved-but-unspawned entry is invisible until its pane id is
  *    confirmed.
  *  - **audit** ALONE counts fresh entries with NO live-pane requirement
- *    (`freshCount`), which is exactly the semantics of the retired host-wide
- *    `active-audit` marker: the slot is held from the reservation until a
- *    release point fires (audit pane close, dispatch/spawn failure, claim
- *    rollback) and is released by the 2 h staleness window. That is what makes
- *    `maxAudit: 1` indistinguishable from the marker it replaces. A non-stale
- *    legacy marker file is counted as one synthetic entry on read.
+ *    (`freshCount`), the over-hold the retired host-wide `active-audit` marker
+ *    used: the slot is held from the reservation until a release point fires
+ *    (audit pane close, dispatch/spawn failure, claim rollback) and is released
+ *    by the 2 h staleness window, so `maxAudit: 1` behaves exactly as the
+ *    marker did.
  *
  * ## Uncapped kinds admit without bookkeeping (parent AC2)
  *
@@ -172,20 +171,6 @@ export const HOST_BUDGET_IMPLEMENT_REFUSAL = HOST_BUDGET_IMPLEMENT_REASON;
 /** Refusal reason: the audit tier is at/over its machine-wide cap. */
 export const HOST_BUDGET_AUDIT_REFUSAL = HOST_BUDGET_AUDIT_REASON;
 
-/**
- * Refusal reason: the AUDIT tier is at its cap with `maxAudit: 1`
- * (WL-0MVXY0XPF006YUHA F2 AC1). The legacy marker produced this token, so the
- * default single-flight case stays byte-identical in the decision log and
- * every existing consumer of `audit-host-saturated` keeps working.
- *
- * NO LONGER PRODUCED (WL-0MWF34932000SNTX F2): the audit tier reports
- * `host-budget-audit` at every cap, including the `maxAudit: 1` default. The
- * constant and its remaining literal consumers are deleted by the follow-up
- * token-removal slice (WL-0MWF34IEP00221NU); keeping the export until then
- * lets the frozen decision-log vocabulary compile unchanged.
- */
-export const HOST_BUDGET_AUDIT_SATURATED_REFUSAL = 'audit-host-saturated';
-
 /** Refusal reason: the ledger could not be trusted (lock/I-O failure). */
 export const HOST_BUDGET_UNKNOWN_REFUSAL = HOST_BUDGET_UNKNOWN_REASON;
 
@@ -203,7 +188,6 @@ export type HostBudgetRefusalReason =
   | typeof HOST_BUDGET_IMPLEMENT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_REFUSAL
   | (typeof HOST_BUDGET_KIND_REASONS)[keyof typeof HOST_BUDGET_KIND_REASONS]
-  | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL
   | typeof HOST_BUDGET_CORRUPT_REFUSAL
   | typeof AUDIT_BUDGET_SATURATED_REASON
@@ -213,7 +197,6 @@ export type HostBudgetRefusalReason =
 /** The refusal tokens the AUDIT tier can report (never `host-budget-implement`). */
 export type HostBudgetAuditRefusalReason =
   | typeof HOST_BUDGET_AUDIT_REFUSAL
-  | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL
   | typeof HOST_BUDGET_CORRUPT_REFUSAL
   | typeof AUDIT_BUDGET_SATURATED_REASON
@@ -390,7 +373,7 @@ export interface HostBudgetAuditStateOptions extends HostBudgetOptions {
  * `atCap` is the single admission answer: `true` means the audit tier admits no
  * further dispatch this tick. `reason` is the token the dispatcher reports —
  * `host-budget-audit` at EVERY cap (WL-0MWF34932000SNTX F2 removed the
- * `maxAudit: 1` → `audit-host-saturated` special-case) and
+ * `maxAudit: 1` special-case; WL-0MWF34IEP00221NU deleted the retired token) and
  * `host-budget-unknown` / `host-budget-corrupt` for an untrustworthy ledger.
  * `live`/`max` are the reported evidence (`0/0` for a disabled tier).
  */
@@ -592,8 +575,7 @@ function emitAuditBudgetEvent(
  *  1. resolve the effective cap (`budget.json` + env, default `maxAudit: 1`);
  *  2. `max === 0` ⇒ at cap with `live`/`max` `0/0` and `host-budget-audit`
  *     (AC3 — a disabled tier is refused whatever the ledger holds);
- *  3. count fresh audit entries (no live-pane requirement, plus a non-stale
- *     legacy marker as one synthetic entry);
+ *  3. count fresh audit entries (no live-pane requirement);
  *  4. unreadable ledger ⇒ report `host-budget-corrupt` (bytes untouched, no
  *     repair — WL-0MWFJD8ZO000J1R8); a lock/I-O failure reports
  *     `host-budget-unknown`;
@@ -601,7 +583,7 @@ function emitAuditBudgetEvent(
  *     no ledger and no new failure mode (parent AC11);
  *  6. at/over cap ⇒ `host-budget-audit` at EVERY cap, including the
  *     `maxAudit: 1` default (WL-0MWF34932000SNTX F2 removed the retired
- *     marker's `audit-host-saturated` special-case).
+ *     marker's saturated-token special-case).
  */
 export function readAuditBudgetState(
   opts: HostBudgetAuditStateOptions,
@@ -642,9 +624,9 @@ export function readAuditBudgetState(
       live: count.count,
       max,
       // WL-0MWF34932000SNTX F2: ONE token for every cap. The retired marker's
-      // `audit-host-saturated` special-case at `max === 1` is gone, so the
-      // audit tier and the three other capped kinds share the same
-      // `host-budget-<kind>` vocabulary.
+      // saturated-token special-case at `max === 1` is gone, so the audit tier
+      // and the three other capped kinds share the same `host-budget-<kind>`
+      // vocabulary.
       reason: HOST_BUDGET_AUDIT_REFUSAL,
     };
   }

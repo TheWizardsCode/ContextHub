@@ -134,9 +134,9 @@ describe('machineCoordinationDirExists', () => {
 
 // ── Retired host-wide audit marker ─────────────────────────────────────
 //
-// The `active-audit` marker reader surface and its synthetic ledger count are
-// retired by the host-dispatch-budget generalisation
-// (WL-0MW50EHZ6007QBPB AC5): the machine-scoped ledger is the only
-// audit-budget authority, and F3 deletes the reader surface outright. Its
-// read-compatibility tests are removed here in the tests-first slice so no
-// test references a symbol the target contract no longer has.
+// The retired `active-audit` marker reader surface and its synthetic ledger
+// count are deleted by WL-0MWF34IEP00221NU (host-dispatch-budget
+// generalisation, WL-0MW50EHZ6007QBPB AC5): the machine-scoped ledger is the
+// only audit-budget authority. Its read-compatibility tests were removed in
+// the tests-first slice so no test references a symbol the contract no longer
+// has.

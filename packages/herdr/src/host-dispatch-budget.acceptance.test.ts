@@ -550,7 +550,7 @@ describe('AC3 — maxAudit replaces the hard-coded single-flight', () => {
       expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
 
       // Second audit: the unified token (WL-0MWF34932000SNTX F2 removed the
-      // retired marker's `audit-host-saturated` special-case at maxAudit: 1).
+      // retired marker's saturated-token special-case at maxAudit: 1).
       const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: INSTANCE_A_ROOT });
       expect(second).toMatchObject({
         dispatched: false,
@@ -1421,7 +1421,7 @@ describe('pane-derived freshness: stale-but-live implement entries (WL-0MW9VQ08W
 //
 // Contract pinned here (parent ACs 1, 2, 4, 5, 8):
 //  - a capped kind admits below its cap and refuses at/over it with the
-//    unified `host-budget-<kind>` token (no `audit-host-saturated` anywhere);
+//    unified `host-budget-<kind>` token (the retired saturated token is gone);
 //  - an uncapped kind always admits, never reserves and never writes a ledger
 //    entry (no reserve/release bookkeeping);
 //  - the per-kind kill switch `0` refuses with `0/0` evidence;
@@ -1545,7 +1545,7 @@ describe('generalised-budget admission matrix (T1 contract; F2 green)', () => {
     });
   });
 
-  it('the audit refusal token is unified on host-budget-audit (no audit-host-saturated)', async () => {
+  it('the audit refusal token is unified on host-budget-audit (the retired token is gone)', async () => {
     await withMachineDir((dir) => {
       writeKindCaps(dir, { audit: 1 });
       writeBudgetLedger(dir, [

@@ -78,9 +78,9 @@ describe('host-budget reason tokens and header mapping (AC1/AC2)', () => {
     for (const reason of HOST_BUDGET_DECISION_REASONS) {
       expect(isHostBudgetDecisionReason(reason)).toBe(true);
     }
-    // Everything else — including the retired marker's own token — is not a
+    // Everything else — including the retired marker's old token — is not a
     // budget token, so no budget copy is emitted for it.
-    for (const other of ['audit-host-saturated', 'no-candidate', '', null, undefined, 1]) {
+    for (const other of ['audit-budget-saturated', 'no-candidate', '', null, undefined, 1]) {
       expect(isHostBudgetDecisionReason(other)).toBe(false);
     }
   });
@@ -99,9 +99,7 @@ describe('host-budget reason tokens and header mapping (AC1/AC2)', () => {
     // The AUDIT tier's proxy-derived tokens quote the SAME header segments
     // (`budget-audit` / `budget-unknown`) — the documented decision-reason
     // table, so the header says why the audit tier stopped without one
-    // segment per source (WL-0MWDDHVF2004PTYX AC8). The legacy
-    // `audit-host-saturated` token keeps its raw header token (pinned by the
-    // orchestrator suite).
+    // segment per source (WL-0MWDDHVF2004PTYX AC8).
     expect(decisionHeaderToken('audit-budget-saturated')).toBe('budget-audit');
     expect(decisionHeaderToken('audit-budget-unknown')).toBe('budget-unknown');
     // AC2 consistency: the capacity-shaped stops keep their tokens, so an
@@ -147,7 +145,7 @@ describe('hostBudgetSkipLine (AC3)', () => {
   });
 
   it('emits nothing for a non-budget reason (existing copy is unchanged)', () => {
-    expect(hostBudgetSkipLine('audit-host-saturated', { live: 1, max: 1 })).toBeNull();
+    expect(hostBudgetSkipLine('audit-budget-saturated', { live: 1, max: 1 })).toBeNull();
     expect(hostBudgetSkipLine('no-candidate')).toBeNull();
   });
 });

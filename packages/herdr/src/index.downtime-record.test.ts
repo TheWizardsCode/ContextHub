@@ -34,21 +34,12 @@ setupHostCpuPin();
 // End-to-end coverage of the real `createDowntimeDeps` wiring: the
 // machine-scoped dispatch-budget ledger (machine coordination dir, resolved via
 // HERDR_COORDINATION_DIR) must make `getActiveAudit` report a host-wide skip for
-// ANY project on the host, a non-stale legacy `active-audit` marker must be
-// counted as ONE synthetic audit entry (read-compatibility), and the legacy
-// marker must never be written or removed again.
+// ANY project on the host. On the default proxy-derived path the ledger and
+// `budget.json` never gate the audit tier.
 // ---------------------------------------------------------------------------
 
 describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
   const originalCoordinationDir = process.env.HERDR_COORDINATION_DIR;
-
-  /** Write the legacy marker verbatim, as an older herdr instance would. */
-  function writeLegacyMarker(dir: string, instanceId = 'other-instance'): void {
-    writeFileSync(
-      join(dir, 'active-audit'),
-      JSON.stringify({ instanceId, dispatchedAt: new Date().toISOString() }),
-    );
-  }
 
   /** Write `<machine dir>/budget.json` with an explicit `maxAudit`. */
   function writeMaxAudit(dir: string, maxAudit: number): void {
@@ -121,7 +112,6 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     // One vocabulary: the proxy path never emits the legacy host-budget tokens.
     const reason = (result as { reason?: string }).reason;
     expect(reason).not.toBe('host-budget-audit');
-    expect(reason).not.toBe('audit-host-saturated');
   });
 
   it('budget.json maxAudit (including 0) does not influence the proxy-path decision (AC1)', async () => {
@@ -250,12 +240,11 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     expect(wlCalls(mockExec)).toHaveLength(1);
   });
 
-  it('ignores the retired host-wide marker and per-host cap on the proxy path (AC1)', async () => {
-    // A fresh legacy marker (an older herdr instance) and a maxAudit:1 config
-    // must NOT gate the audit tier: the proxy's verdict is authoritative.
+  it('ignores the per-host cap on the proxy path (AC1)', async () => {
+    // A maxAudit:1 config must NOT gate the audit tier: the proxy's verdict is
+    // authoritative.
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeLegacyMarker(coordinationDir, 'older-instance');
     writeMaxAudit(coordinationDir, 1);
 
     setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);

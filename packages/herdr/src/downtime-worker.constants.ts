@@ -258,8 +258,7 @@ export function decisionHeaderToken(reason: string): string {
       // The AUDIT tier's proxy-derived token `audit-budget-saturated` quotes
       // the same header segment `budget-audit` as the ledger's
       // `host-budget-audit` (the documented decision-reason table,
-      // WL-0MWDDHVF2004PTYX AC8). The legacy `audit-host-saturated` token
-      // keeps its raw header token, pinned by the orchestrator suite.
+      // WL-0MWDDHVF2004PTYX AC8).
     case 'audit-budget-saturated':
       return 'budget-audit';
     // Every other capped kind has its own `budget-<kind>` segment

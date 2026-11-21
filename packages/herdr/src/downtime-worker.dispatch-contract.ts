@@ -332,7 +332,7 @@ export interface DowntimeHostBudgetAdmission {
    * additionally proxy-derived (WL-0MWAMSK9H005BOHD) and reports the proxy's
    * own vocabulary (`audit-budget-saturated` / `audit-budget-unknown`); only
    * the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path reports
-   * `host-budget-audit` / `audit-host-saturated` / `host-budget-unknown`.
+   * `host-budget-audit` / `host-budget-unknown`.
    */
   reason?: string;
   /**
@@ -581,10 +581,10 @@ export interface DowntimeDispatchOutcome {
    * machine-wide Dispatcher anchor pane could not be provisioned — neutral
    * "no dispatch this cycle", never a fallback to the leader's pane) |
    * 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
-   * in flight) | 'audit-host-saturated' (WL-0MUIVE0YG000UVIA: the
-   * machine-wide active-audit marker shows an audit running on this host —
-   * dispatched by ANY project/instance — so the audit tier is deferred
-   * host-wide) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
+   * in flight) | 'host-budget-audit' (WL-0MUIVE0YG000UVIA: the
+   * machine-wide dispatch-budget ledger shows the audit tier at its cap on
+   * this host — dispatched by ANY project/instance — so the audit tier is
+   * deferred host-wide) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
    * was recorded during interim). When `reason` is 'wl-error', `error`
    * may carry the underlying wl/CLI error details (timeout, SQLITE_BUSY,
    * parse failure, stderr) for the three-strike pause log.
@@ -611,12 +611,10 @@ export interface DowntimeDispatchOutcome {
    * WL-0MVXY0XPF006YUHA F2):
    * `host-budget-implement` (the ledger reports the implement tier at or over
    * its machine-wide cap, or the tier is disabled with `maxImplement: 0`),
-   * `host-budget-audit` (the same for the audit tier at any cap other than 1,
-   * including the `maxAudit: 0` kill switch) and `host-budget-unknown` (the
+   * `host-budget-audit` (the same for the audit tier at EVERY cap, including
+   * the `maxAudit: 0` kill switch) and `host-budget-unknown` (the
    * ledger could not be read: the dispatcher fails closed and rewrites it from
-   * the live pane list). The audit tier keeps the retired marker's token
-   * `audit-host-saturated` at its `maxAudit: 1` default, so existing consumers
-   * and logs are unchanged. All of these are NEUTRAL skips — no strike, no
+   * the live pane list). All of these are NEUTRAL skips — no strike, no
    * attempt budget, no no-candidate cooldown — so the next idle tick re-checks
    * as soon as a slot frees. `budget` carries the `live`/`max` evidence.
    *
@@ -811,7 +809,7 @@ export const LOST_CLAIM_REASONS: ReadonlySet<string> = new Set([
  *  - `host-budget-<kind>` for every capped kind (implement, audit, plan,
  *    intake, risk-effort) plus `host-budget-unknown` (the ledger path), and
  *  - `audit-budget-saturated` / `audit-budget-unknown` (the proxy-owned
- *    availability verdict) plus the one-release legacy `audit-host-saturated`.
+ *    availability verdict).
  *
  * This set is the UNION allow-list that keeps every budget refusal a
  * continuable hold; the terminal-reason precedence further splits it into
@@ -831,14 +829,13 @@ export const HOST_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
   'host-budget-unknown',
   'audit-budget-saturated',
   'audit-budget-unknown',
-  'audit-host-saturated',
 ]);
 
 /**
  * The AUDIT tier's budget-refusal tokens — the subset of
  * {@link HOST_BUDGET_HOLD_REASONS} that names a refusal of the audit tier
- * (proxy-derived `audit-budget-*`, plus the one-release legacy
- * `host-budget-audit` / `audit-host-saturated`). A refusal quoted with one of
+ * (proxy-derived `audit-budget-*`, plus the ledger's `host-budget-audit`).
+ * A refusal quoted with one of
  * these is a statement about the AUDIT tier and therefore OUTRANKS an
  * implement-tier refusal in the terminal-reason precedence
  * (WL-0MWDDHVF2004PTYX AC2): an audit refusal with `detail: 'http-404'` is a
@@ -852,7 +849,6 @@ export const AUDIT_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
   'audit-budget-saturated',
   'audit-budget-unknown',
   'host-budget-audit',
-  'audit-host-saturated',
 ]);
 
 /** True when `reason` is one of the host-budget refusal tokens. */

@@ -86,8 +86,8 @@ export type DispatchGateToken =
   | 'slots-unavailable'
   /**
    * The proxy-derived AUDIT budget refused the audit offer
-   * (`audit-budget-saturated` / `audit-budget-unknown`, or the legacy
-   * `host-budget-audit` / `audit-host-saturated`) — the per-offer counterpart
+   * (`audit-budget-saturated` / `audit-budget-unknown`, or the ledger's
+   * `host-budget-audit`) — the per-offer counterpart
    * of the `auditBudgetHold` terminal hold (WL-0MWDDHVF2004PTYX AC5).
    */
   | 'audit-budget'
