@@ -308,18 +308,27 @@ describe('file-lock', () => {
       releaseFileLock(lockPath);
     });
 
-    it('should still remove an age-expired lock when skipIfLocked is set', () => {
-      const expiredInfo: FileLockInfo = {
-        pid: process.pid, // alive, but lock is older than maxLockAge
+    it('should NOT remove an age-expired lock with a live same-host PID when skipIfLocked is set', () => {
+      // A same-host lock whose holder PID is alive is authoritative: age does
+      // NOT make it stale. A `wl sync --if-idle` caller must therefore skip
+      // (throw LockBusyError) rather than steal a live sync's lock — the
+      // long-operation lost-update hazard (SA-0MWGPSHC6008N02L).
+      const liveOldInfo: FileLockInfo = {
+        pid: process.pid, // alive holder on this host
         hostname: os.hostname(),
         acquiredAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(), // 10 min old
       };
-      fs.writeFileSync(lockPath, JSON.stringify(expiredInfo));
+      fs.writeFileSync(lockPath, JSON.stringify(liveOldInfo));
 
       expect(() => {
         acquireFileLock(lockPath, { skipIfLocked: true, timeout: 5000, maxLockAge: 300000 });
-      }).not.toThrow();
-      releaseFileLock(lockPath);
+      }).toThrow(LockBusyError);
+
+      // The live holder's lock is left untouched.
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+      expect(info.acquiredAt).toBe(liveOldInfo.acquiredAt);
     });
   });
 
@@ -456,24 +465,68 @@ describe('file-lock', () => {
   });
 
   describe('age-based lock expiry', () => {
-    it('should remove a lock older than maxLockAge even if PID is alive', () => {
-      // Write a lock file with current PID (alive) but acquiredAt 6 minutes ago
-      const oldLockInfo: FileLockInfo = {
-        pid: process.pid,
+    it('should NOT remove a lock older than maxLockAge when the same-host PID is alive', () => {
+      // A same-host live holder is authoritative: age alone never makes its
+      // lock stale, so a live (but slow) holder keeps the lock for its whole
+      // operation and a second writer cannot steal it mid-flight
+      // (SA-0MWGPSHC6008N02L — the long-operation lost-update hazard).
+      const oldLiveLockInfo: FileLockInfo = {
+        pid: process.pid, // alive holder on this host
         hostname: os.hostname(),
         acquiredAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(), // 6 minutes ago
       };
-      fs.writeFileSync(lockPath, JSON.stringify(oldLockInfo));
+      fs.writeFileSync(lockPath, JSON.stringify(oldLiveLockInfo));
 
-      // Should succeed: lock is older than default 5-minute threshold
+      // Acquisition must fail: the live holder's lock is never age-expired.
+      expect(() => {
+        acquireFileLock(lockPath, { timeout: 100 });
+      }).toThrow(/Failed to acquire file lock/);
+
+      // The live holder's lock is left untouched (same PID, same timestamp).
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.pid).toBe(process.pid);
+      expect(info.acquiredAt).toBe(oldLiveLockInfo.acquiredAt);
+    });
+
+    it('should keep an age-expired lock in place when the same-host PID is alive', () => {
+      // Explicit same-host-live-authoritative case: a lock well beyond the
+      // configured maxLockAge whose holder PID is alive on this host is NOT
+      // removed. This is the regression guard for the fixed age-expiry branch.
+      const liveOldInfo: FileLockInfo = {
+        pid: process.pid,
+        hostname: os.hostname(),
+        acquiredAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1 hour old
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(liveOldInfo));
+
+      expect(() => {
+        acquireFileLock(lockPath, { timeout: 100, maxLockAge: 1000 });
+      }).toThrow(/Failed to acquire file lock/);
+
+      // Lock file unchanged — the live holder still owns it.
+      const content = fs.readFileSync(lockPath, 'utf-8');
+      const info: FileLockInfo = JSON.parse(content);
+      expect(info.acquiredAt).toBe(liveOldInfo.acquiredAt);
+    });
+
+    it('should age-expire an old foreign-host lock (PID liveness untrustworthy)', () => {
+      // Foreign-host locks cannot have their PID checked, so age-expiry still
+      // reclaims them exactly as before the fix.
+      const oldForeignLockInfo: FileLockInfo = {
+        pid: 999999,
+        hostname: 'some-other-host-that-is-not-this-one',
+        acquiredAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(), // 6 minutes ago
+      };
+      fs.writeFileSync(lockPath, JSON.stringify(oldForeignLockInfo));
+
+      // Should succeed: foreign-host lock is age-expired and replaced.
       acquireFileLock(lockPath, { timeout: 5000 });
 
       const content = fs.readFileSync(lockPath, 'utf-8');
       const info: FileLockInfo = JSON.parse(content);
       expect(info.pid).toBe(process.pid);
-      // Verify acquiredAt is recent (not the old one)
-      const age = Date.now() - new Date(info.acquiredAt).getTime();
-      expect(age).toBeLessThan(5000);
+      expect(info.hostname).toBe(os.hostname());
 
       releaseFileLock(lockPath);
     });
@@ -546,21 +599,24 @@ describe('file-lock', () => {
       }).toThrow(/Failed to acquire file lock/);
     });
 
-    it('should respect a custom maxLockAge option', () => {
-      // Write a lock 2 seconds old with an alive PID
+    it('should respect a custom maxLockAge option for a foreign-host lock', () => {
+      // Age-expiry is now the foreign-host fallback (a same-host live PID is
+      // authoritative and never age-expired), so the custom maxLockAge option
+      // is exercised through a foreign-host lock.
       const recentLockInfo: FileLockInfo = {
-        pid: process.pid,
-        hostname: os.hostname(),
+        pid: 999999,
+        hostname: 'some-other-host-that-is-not-this-one',
         acquiredAt: new Date(Date.now() - 2000).toISOString(), // 2 seconds ago
       };
       fs.writeFileSync(lockPath, JSON.stringify(recentLockInfo));
 
-      // With a 1-second maxLockAge, this 2-second-old lock should be treated as stale
+      // With a 1-second maxLockAge, this 2-second-old foreign lock is stale
       acquireFileLock(lockPath, { timeout: 5000, maxLockAge: 1000 });
 
       const content = fs.readFileSync(lockPath, 'utf-8');
       const info: FileLockInfo = JSON.parse(content);
       expect(info.pid).toBe(process.pid);
+      expect(info.hostname).toBe(os.hostname());
       // Verify it's a new lock, not the old one
       const age = Date.now() - new Date(info.acquiredAt).getTime();
       expect(age).toBeLessThan(5000);
@@ -1492,10 +1548,12 @@ process.exit(0);
     });
 
     it('should log stale lock cleanup reason when lock is age-expired', () => {
-      // Create a lock file that's older than maxLockAge
+      // Age-expiry is now the foreign-host fallback (a same-host live PID is
+      // authoritative and never age-expired), so this exercises the age-expired
+      // diagnostic path through a foreign-host lock.
       const oldLock: FileLockInfo = {
-        pid: process.pid, // alive PID but too old
-        hostname: os.hostname(),
+        pid: 99999,
+        hostname: 'some-other-host-that-is-not-this-one',
         acquiredAt: new Date(Date.now() - 600_000).toISOString(), // 10 min ago
       };
       fs.writeFileSync(lockPath, JSON.stringify(oldLock));
