@@ -594,6 +594,12 @@ dispatches; the other herdr instances coordinate instead of polling:
     a transient herdr hiccup can neither wipe the ledger's record of running
     work nor silently under-count it, and it never refuses a tick on its own
     (the fail-open admission rationale is preserved).
+  - **Counting asymmetry is audit-only** — every kind except `audit` counts
+    only fresh entries whose pane is in the machine-wide live pane list, so its
+    slot frees as soon as the pane leaves that list; `audit` keeps the
+    marker-era over-hold (fresh ledger entries with no live-pane requirement,
+    held until a release point or the 2 h stale window). An uncapped kind is
+    never counted and never recorded in the ledger.
   - **Audit tier is proxy-derived (cross-machine)** — the audit budget and the
     live audit-lease registry are **owned by the proxy** (the one local
     `llama-server` GPU every ContextHub host shares), and herdr queries

@@ -11,9 +11,11 @@
  * configurable per-kind cap, so a host budget is authoritative across every
  * herdr instance and project on the machine.
  *
- * Enforcement lives elsewhere: the dispatcher's admission read and both tiers'
- * wiring are in `host-dispatch-budget.admission.ts` (implement tier F3, audit
- * tier F2 — which also replaces the retired host-wide `active-audit` marker),
+ * Enforcement lives elsewhere: the dispatcher's admission read (one generic
+ * path for every capped kind) and the per-kind wiring are in
+ * `host-dispatch-budget.admission.ts` (implement tier F3, audit tier F2 — which
+ * also replaces the retired host-wide `active-audit` marker — generalised to
+ * every `DowntimeSkillKind` by WL-0MWF34932000SNTX F2),
  * consumable per-kind caps come from `readBudgetConfig`, and the interactive
  * over-quota dialog / observability surfaces are F4/F5.
  *

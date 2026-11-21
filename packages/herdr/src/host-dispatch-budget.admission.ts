@@ -104,8 +104,10 @@
  * and released (idempotently) on every abort path and on pane close; stale
  * entries are reaped by the ledger's own `liveCount` read (AC8).
  *
- * scope: both tiers enforce here — the implement tier (F3) and the audit tier
- * (F2). The audit tier's pre-check (`readAuditBudgetState`, consumed by
+ * scope: every capped kind enforces here — the implement family (F3), the audit
+ * tier (F2) and the generalised plan/intake/risk-effort kinds
+ * (WL-0MWF34932000SNTX F2); an uncapped kind is admitted without a reservation.
+ * The audit tier's pre-check (`readAuditBudgetState`, consumed by
  * `getActiveAudit`) is a READ, never a reservation: the authoritative
  * reservation still happens once, in the claim→marker→spawn choke point, so a
  * refusal before selection and a refusal at admission agree.

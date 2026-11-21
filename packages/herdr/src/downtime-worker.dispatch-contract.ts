@@ -228,17 +228,18 @@ export interface DowntimeDispatchDeps {
    * WL-0MVXY0XPF006YUHA F2): the ONE machine-scoped ledger read per dispatch
    * attempt, called in `dispatchClaimedTier` immediately before the dispatch
    * marker is written so both dispatcher paths funnel through it (F3 AC1).
-   * Applies to the `implement` and `audit` kinds — plan/intake/risk-effort are
-   * never budgeted. Optional — absent means no host budget (legacy/test callers
-   * stay byte-identical).
+   * Applies to EVERY `HostBudgetKind` (implement, audit, plan, intake,
+   * risk-effort): a capped kind is enforced, an uncapped kind is admitted
+   * without a reservation (WL-0MWF34932000SNTX F2). Optional — absent means
+   * no host budget (legacy/test callers stay byte-identical).
    */
   admitHostDispatch?(
     input: DowntimeHostBudgetAdmissionInput,
   ): Promise<DowntimeHostBudgetAdmission>;
   /**
    * Record the spawned pane id on a reserved budget entry (AC3 "confirm").
-   * Countable in the ledger's liveness rules for the implement tier (the audit
-   * tier counts a fresh entry regardless, as the retired marker did).
+   * Countable in the ledger's liveness rules for every non-audit kind (the
+   * audit kind counts a fresh entry regardless, as the retired marker did).
    * Best-effort.
    */
   confirmHostDispatch?(
@@ -380,7 +381,7 @@ export interface DowntimeHostBudgetAdmission {
  * rather than deleting whichever entry happens to share the item id.
  */
 export interface DowntimeHostBudgetRelease {
-  /** Entry kind (`implement`/`audit`); omitted by the pane-close path. */
+  /** Entry kind (`HostBudgetKind`); omitted by the pane-close path. */
   kind?: DowntimeDispatchKind;
   /** The confirmed pane this release owns. */
   paneId?: string;

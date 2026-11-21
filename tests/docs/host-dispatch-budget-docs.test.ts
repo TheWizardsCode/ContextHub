@@ -6,11 +6,13 @@
  * behaviour under test. These assertions pin the facts an operator or future
  * maintainer must be able to find without re-deriving them from source:
  *
- *  - the gate table (both tiers plus the `host-budget-unknown` fail-closed row),
+ *  - the gate table (every capped kind plus the `host-budget-unknown`
+ *    fail-closed row and the uncapped-kind row),
  *  - the machine-dir file-table entries and the module-table row,
  *  - the deliberate per-path fail directions,
  *  - the audit-cap unification and the legacy marker surface's deletion,
- *  - the `maxImplement: 2` rationale and the WL-0MU2EP6JL006A1U3 boundary,
+ *  - the kind-map defaults (`implement: 2` / `audit: 1`, others uncapped), the
+ *    audit-only over-hold rule and the WL-0MU2EP6JL006A1U3 boundary,
  *  - the README's machine-scoped statement and interactive-dialog behaviour,
  *  - CONFIG.md's env vars / file location / defaults / clamps / `0` semantics,
  *  - the rolling-window out-of-scope note and its additive `window` slot,
@@ -65,21 +67,32 @@ describe('downtime-dispatcher deep-dive documents the host-wide budget', () => {
     expect(dispatcherDoc).toContain('Retired and deleted');
   });
 
-  it('has a gate table covering both tiers with the budget reason tokens', () => {
+  it('has a gate table covering every dispatch kind with the budget reason tokens', () => {
+    // Every capped kind's unified refusal token (WL-0MW50EHZ6007QBPB) plus the
+    // tier-ambiguous unknown token.
     for (const token of [
       'host-budget-implement',
       'host-budget-audit',
+      'host-budget-plan',
+      'host-budget-intake',
+      'host-budget-risk-effort',
       'host-budget-unknown',
     ]) {
       expect(dispatcherDoc).toContain(token);
     }
-    // Both tier rows, and the unknown row that applies to either tier.
-    expect(dispatcherDoc).toMatch(/\| implement \|/);
+    // The generalised rows: an uncapped kind admits with no bookkeeping, every
+    // other non-audit kind enforces its own cap, the audit tier keeps its
+    // proxy-derived rows, and the unknown row applies to any kind.
+    expect(dispatcherDoc).toMatch(/\| any kind absent from `budget\.json` \|/);
+    expect(dispatcherDoc).toMatch(/\| any capped kind except `audit`/);
     expect(dispatcherDoc).toMatch(/\| audit \|/);
-    expect(dispatcherDoc).toMatch(/\| either \|/);
+    expect(dispatcherDoc).toMatch(/\| any kind \|/);
     // The header tokens the herdr header shows for each refusal.
     expect(dispatcherDoc).toContain('`budget-implement`');
     expect(dispatcherDoc).toContain('`budget-audit`');
+    expect(dispatcherDoc).toContain('`budget-plan`');
+    expect(dispatcherDoc).toContain('`budget-intake`');
+    expect(dispatcherDoc).toContain('`budget-risk-effort`');
     expect(dispatcherDoc).toContain('`budget-unknown`');
   });
 
@@ -103,8 +116,9 @@ describe('downtime-dispatcher deep-dive documents the host-wide budget', () => {
     expect(dispatcherDoc).not.toContain('Mixed-version safety argument');
   });
 
-  it('records the conservative maxImplement default and the WL-0MU2EP6JL006A1U3 boundary', () => {
-    expect(dispatcherDoc).toContain('`maxImplement` defaults to 2');
+  it('records the conservative implement default and the WL-0MU2EP6JL006A1U3 boundary', () => {
+    // The kind map's defaults: implement 2, audit 1, everything else uncapped.
+    expect(dispatcherDoc).toContain('`implement: 2`, `audit: 1`');
     expect(dispatcherDoc).toContain('host work-in-flight');
     expect(dispatcherDoc).toContain('WL-0MU2EP6JL006A1U3');
     expect(dispatcherDoc).toContain('7 panes queued on 1 slot');
@@ -162,9 +176,15 @@ describe('CONFIG.md documents the host budget configuration', () => {
     expect(configDoc).toContain('~/.herdr/downtime');
   });
 
-  it('documents defaults, clamps and the 0-per-tier kill switch', () => {
-    expect(configDoc).toMatch(/`maxImplement`\s*\|\s*`2`/);
-    expect(configDoc).toMatch(/`maxAudit`\s*\|\s*`1`/);
+  it('documents defaults, clamps and the per-kind kill switch', () => {
+    // The kind map: implement 2 / audit 1, other kinds uncapped, legacy aliases
+    // still read, and the generalised env vocabulary.
+    expect(configDoc).toMatch(/\| `budget\.json` → `<kind>`[^|]*\|[^|]*`implement` `2`, `audit` `1`/);
+    expect(configDoc).toMatch(/`maxImplement` \(legacy alias\)`? \| `2`/);
+    expect(configDoc).toMatch(/`maxAudit` \(legacy alias\)`? \| `1`/);
+    expect(configDoc).toContain('uncapped');
+    expect(configDoc).toContain('HERDR_HOST_MAX_<KIND>');
+    expect(configDoc).toContain('HERDR_HOST_MAX_PLAN');
     expect(configDoc).toContain('0`–`32');
     expect(configDoc).toContain('kill switch');
   });
