@@ -402,8 +402,8 @@ describe('unreadable ledger (AC8)', () => {
 //
 // The interactive over-quota dialog for the audit tier must quote the same
 // pane-aware display count the worklist header shows (`reduceAuditDisplayCounts`),
-// not the admission-compatible count (`freshCount` / `reduceMarkerCounts`), so
-// the two operator-facing surfaces never disagree.
+// not the admission-compatible over-hold count (`freshCount`), so the two
+// operator-facing surfaces never disagree.
 
 describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
   /** A stale heartbeat (older than the 2 h staleness window). */

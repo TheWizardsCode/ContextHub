@@ -32,7 +32,6 @@ import {
   freshCount,
   isEntryStale,
   isOverQuota,
-  legacyActiveAuditCount,
   liveCount,
   livePaneIdSet,
   parseBudgetConfig,
@@ -42,14 +41,12 @@ import {
   reduceAuditDisplayCounts,
   reduceClosedPaneSweep,
   reduceLedgerCounts,
-  reduceMarkerCounts,
   release,
   reserve,
   resolveBudgetConfig,
   sweepClosedPanes,
   type HostBudgetEntry,
 } from './host-dispatch-budget.js';
-import { DOWNTIME_HOST_AUDIT_MARKER_FILE } from './machine-coordination.js';
 import {
   budgetLedgerPath as fixtureLedgerPath,
   makeBudgetEntry,
@@ -321,8 +318,8 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
   it('keeps the freshness rule for the AUDIT tier inside the shared reduction', () => {
     // Pane-derived freshness is implement-scoped (AC5): a stale-but-live
     // AUDIT entry is retained but not counted by this reduction (the audit
-    // tier's authoritative counts are reduceMarkerCounts /
-    // reduceAuditDisplayCounts).
+    // tier's authoritative counts come from `freshCount` — the audit-only
+    // over-hold — and the pane-aware `reduceAuditDisplayCounts`).
     const staleAudit = entry({
       kind: 'audit',
       itemId: 'WL-AUDIT-LONG',
@@ -366,46 +363,6 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
     expect(reduction.counts).toEqual({ implement: 1, audit: 1 });
     expect(reduction.reaped).toEqual([]);
     expect(reduction.retained).toHaveLength(3);
-  });
-});
-
-describe('reduceMarkerCounts (pure marker-semantics reduction)', () => {
-  const entry = (overrides: Partial<HostBudgetEntry>): HostBudgetEntry =>
-    makeBudgetEntry(overrides) as HostBudgetEntry;
-
-  it('counts fresh entries per kind with NO live-pane requirement (reserve→spawn window)', () => {
-    const entries = [
-      entry({ kind: 'implement', itemId: 'WL-A', paneId: 'p1' }),
-      entry({ kind: 'audit', itemId: 'WL-B' }),
-      entry({ kind: 'audit', itemId: 'WL-C', paneId: 'p3' }),
-    ];
-    const reduction = reduceMarkerCounts(entries, NOW);
-    // The retired marker counted a dispatch from the moment it was written, so
-    // an audit reservation without a confirmed pane counts immediately.
-    expect(reduction.counts).toEqual({ implement: 1, audit: 2 });
-    expect(reduction.reaped).toEqual([]);
-    expect(reduction.retained).toHaveLength(3);
-  });
-
-  it('reaps a stale entry even while its pane is still alive (staleness is the release)', () => {
-    const longRunning = entry({
-      kind: 'audit',
-      itemId: 'WL-LONG',
-      paneId: 'p1',
-      heartbeatAt: new Date(NOW - 3 * HOUR).toISOString(),
-    });
-    const reduction = reduceMarkerCounts([longRunning], NOW);
-    expect(reduction.counts).toEqual({ implement: 0, audit: 0 });
-    expect(reduction.reaped.map((e) => e.itemId)).toEqual(['WL-LONG']);
-  });
-
-  it('treats an age of exactly the stale window as stale (isHostAuditActive parity)', () => {
-    const boundary = entry({
-      kind: 'audit',
-      itemId: 'WL-BOUNDARY',
-      heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS).toISOString(),
-    });
-    expect(reduceMarkerCounts([boundary], NOW).counts.audit).toBe(0);
   });
 });
 
@@ -1269,17 +1226,9 @@ describe('readBudgetConfig', () => {
   });
 });
 
-// ── Audit-tier counting and legacy marker read-compatibility ───────────
+// ── Audit-tier counting — the audit-only over-hold (AC5) ────────────────
 
-describe('freshCount — audit-tier admission read (WL-0MVXY0XPF006YUHA F2)', () => {
-  /** Write a legacy `active-audit` marker file as an older instance would. */
-  function writeLegacyMarker(dir: string, dispatchedAt: string): void {
-    writeFileSync(
-      join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE),
-      JSON.stringify({ instanceId: 'older-instance', dispatchedAt }),
-    );
-  }
-
+describe('freshCount — the audit-only over-hold (T1/SKILL AC5)', () => {
   it('counts fresh audits with no live pane and reaps the stale entry from disk', () =>
     withMachineDir((dir) => {
       writeBudgetLedger(dir, [
@@ -1297,8 +1246,10 @@ describe('freshCount — audit-tier admission read (WL-0MVXY0XPF006YUHA F2)', ()
         }),
       ]);
 
-      // The audit tier ignores pane liveness entirely: the fresh entry counts
-      // even though its pane is not in any live list (the marker semantics).
+      // The audit tier is the ONLY over-hold: it ignores pane liveness
+      // entirely, so the fresh entry counts even though its pane is not in any
+      // live list, and the 2 h stale window is its only time-based release.
+      // Every other kind counts by live-pane presence (AC5).
       expect(freshCount('audit', { now: NOW })).toEqual({
         ok: true,
         kind: 'audit',
@@ -1312,39 +1263,111 @@ describe('freshCount — audit-tier admission read (WL-0MVXY0XPF006YUHA F2)', ()
       expect(read.ledger.entries.map((entry) => entry.itemId)).toEqual(['WL-FRESH']);
     }));
 
-  it('counts a non-stale legacy active-audit marker as ONE synthetic audit entry', () =>
+  it.fails('an OPEN plan/intake/risk-effort entry never counts as an audit hold (kind-scoped)', () =>
     withMachineDir((dir) => {
-      writeLegacyMarker(dir, new Date(NOW - HOUR).toISOString());
-
+      // NOTE: today the ledger normaliser rejects a non-implement/audit kind as
+      // corrupt, so this spec is red on TWO counts until F1 generalises the
+      // ledger to hold every kind — then it pins the audit-only over-hold (F2).
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'plan' as never, itemId: 'WL-PLAN' }),
+        makeBudgetEntry({ kind: 'intake' as never, itemId: 'WL-INTAKE' }),
+        makeBudgetEntry({ kind: 'risk-effort' as never, itemId: 'WL-RISK' }),
+      ]);
+      // The over-hold is audit-only (AC5): a fresh non-audit reservation must
+      // never be counted by the audit read, whatever its kind.
       expect(freshCount('audit', { now: NOW })).toMatchObject({
         ok: true,
-        count: 1,
-        counts: { implement: 0, audit: 1 },
-      });
-      // Read-only: counting a legacy marker never rewrites the ledger file.
-      expect(existsSync(budgetLedgerPath(dir))).toBe(false);
-    }));
-
-  it('ignores a stale legacy marker and never removes the file', () =>
-    withMachineDir((dir) => {
-      writeLegacyMarker(dir, new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString());
-
-      expect(freshCount('audit', { now: NOW })).toMatchObject({ ok: true, count: 0 });
-      // Retirement contract: the file is neither counted nor deleted.
-      expect(existsSync(join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE))).toBe(true);
-    }));
-
-  it('never counts the legacy marker for the implement tier', () =>
-    withMachineDir((dir) => {
-      writeLegacyMarker(dir, new Date(NOW).toISOString());
-      expect(freshCount('implement', { now: NOW })).toMatchObject({
-        ok: true,
         count: 0,
-        counts: { implement: 0, audit: 0 },
       });
     }));
+});
 
-  it('legacyActiveAuditCount is 0 for an unresolvable dir', () => {
-    expect(legacyActiveAuditCount(null)).toBe(0);
+// ── Generalised-budget test matrix (T1, parent WL-0MW50EHZ6007QBPB) ────────
+//
+// Tests-first slice: these specs pin the TARGET generalised contract — every
+// `DowntimeSkillKind` configurable, an absent kind UNLIMITED (no invented
+// default cap), audit-only over-hold, unified `host-budget-<kind>` refusal
+// tokens. They are committed RED as vitest `it.fails(...)` (the repo's
+// documented TDD pattern — see `coordination-registered-root-sweep.test.ts` /
+// `downtime-worker.clamps.test.ts`) so the suite stays green while the
+// contract is red; F1–F5 flip `it.fails(` → `it(` as each slice lands.
+
+describe('generalised config — kind-named caps, absent = unlimited (T1 → F1)', () => {
+  it.fails('defaults stay implement: 2 / audit: 1 and every other kind is uncapped', () => {
+    // F1: DEFAULT_HOST_BUDGET_CONFIG becomes the kind-named shape; plan,
+    // intake and risk-effort are ABSENT (unlimited) — no default cap invented.
+    expect({ ...DEFAULT_HOST_BUDGET_CONFIG }).toEqual({ implement: 2, audit: 1 });
   });
+
+  it.fails('accepts a kind-named cap for plan / intake / risk-effort', () => {
+    const result = parseBudgetConfig({ plan: 1, intake: 2, 'risk-effort': 3 });
+    expect(result.config).toMatchObject({ plan: 1, intake: 2, 'risk-effort': 3 });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it.fails('treats a kind absent from budget.json as uncapped', () => {
+    const config = parseBudgetConfig({ implement: 3, audit: 2 }).config as unknown as Record<
+      string,
+      unknown
+    >;
+    // The kind-named schema replaces the fixed two-key shape: implement/audit
+    // are present, every other kind is absent (uncapped), and no legacy
+    // `max*` key survives in the resolved config.
+    expect(config).not.toHaveProperty('maxImplement');
+    expect(config).not.toHaveProperty('maxAudit');
+    expect(config).not.toHaveProperty('plan');
+    expect(config).not.toHaveProperty('intake');
+    expect(config).not.toHaveProperty('risk-effort');
+  });
+
+  it.fails('keeps reading the legacy max* keys (read-compat)', () => {
+    // Existing operator files ({ maxImplement, maxAudit }) keep their meaning.
+    expect(parseBudgetConfig({ maxImplement: 4, maxAudit: 2 }).config).toMatchObject({
+      implement: 4,
+      audit: 2,
+    });
+  });
+});
+
+describe('counting asymmetry — audit over-hold, every other kind live-pane (T1 → F2)', () => {
+  // These specs first need F1's kind-generalised ledger (today a plan/intake/
+  // risk-effort entry is rejected as an unknown kind) and then pin F2's
+  // counting rule: audit is the ONLY over-hold (`freshCount`, 2 h release),
+  // every other kind counts by live pane (`liveCount`, pane-derived freshness).
+  const kindPane = (
+    kind: 'plan' | 'intake' | 'risk-effort',
+    itemId: string,
+  ): { paneId: string; title: string } => ({
+    paneId: `p-${kind}-${itemId}`,
+    title: `Downtime triggered ${kind} - ${itemId}`,
+  });
+
+  it.fails('a non-audit kind frees its slot when the pane leaves the live list (liveCount)', () =>
+    withMachineDir((dir) => {
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'plan' as never, itemId: 'WL-PLAN', paneId: 'p-gone' }),
+      ]);
+      // A fresh plan entry whose pane is NOT in the trusted live list must not
+      // count — its slot frees when the pane closes (AC5), and the generalised
+      // counts map reports `0` for the kind rather than an absent key.
+      expect(liveCount('plan' as never, [], { now: NOW })).toMatchObject({ ok: true, count: 0 });
+    }));
+
+  it.fails('a non-audit kind keeps pane-derived freshness: a stale-but-live plan entry counts', () =>
+    withMachineDir((dir) => {
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'plan' as never,
+          itemId: 'WL-PLAN-LONG',
+          paneId: 'p-plan-long',
+          heartbeatAt: new Date(NOW - 3 * HOUR).toISOString(),
+        }),
+      ]);
+      // Only audit releases on the 2 h heartbeat window; every other kind is
+      // released by its PANE leaving the live list, so a live long run still
+      // counts (AC5 — the generalised pane-derived freshness rule).
+      expect(liveCount('plan' as never, [kindPane('plan', 'WL-PLAN-LONG')], { now: NOW })).toMatchObject(
+        { ok: true, count: 1 },
+      );
+    }));
 });

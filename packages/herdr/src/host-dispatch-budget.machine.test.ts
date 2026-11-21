@@ -67,8 +67,6 @@ import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js'
 import { AUDIT_BUDGET_DIVERGENCE_REASON, AUDIT_BUDGET_LEGACY_REASON } from './downtime-log-budget.js';
 import { HOST_BUDGET_CONFIG_FILE, isLegacyAuditBudgetEnabled } from './host-dispatch-budget.js';
 import {
-  DOWNTIME_HOST_AUDIT_MARKER_FILE,
-  readActiveAuditMarker,
 } from './machine-coordination.js';
 import {
   budgetLedgerPath,
@@ -317,14 +315,6 @@ function auditAdmit(
   );
 }
 
-/** Write the legacy `active-audit` marker file verbatim. */
-function writeLegacyMarker(dir: string, dispatchedAt: string): void {
-  writeFileSync(
-    join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE),
-    JSON.stringify({ instanceId: 'older-instance', dispatchedAt }),
-  );
-}
-
 describe('host dispatch budget — audit tier (F2)', () => {
   it('AC1: maxAudit=1 reproduces the single-flight exactly — second audit refused with the legacy token', () =>
     withMachineDir((dir) => {
@@ -389,45 +379,6 @@ describe('host dispatch budget — audit tier (F2)', () => {
       });
       // A disabled tier never reserves (the ledger is not even created).
       expect(readBudgetLedger(dir)).toBeNull();
-    }));
-
-  it('AC2: a non-stale legacy marker counts as ONE synthetic audit entry', () =>
-    withMachineDir((dir) => {
-      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
-      writeLegacyMarker(dir, new Date().toISOString());
-
-      // A mixed-version host: an older instance still runs the marker-based
-      // single-flight, so this instance must not dispatch a second audit.
-      expect(readAuditBudgetState({ livePanes: [] })).toEqual({
-        atCap: true,
-        live: 1,
-        max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
-      });
-      expect(auditAdmit('WL-NEW', [])).toMatchObject({
-        admitted: false,
-        live: 1,
-        max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
-      });
-      // Counting a legacy marker never writes a ledger entry for it.
-      expect(readBudgetLedger(dir)).toBeNull();
-    }));
-
-  it('AC2: a stale legacy marker is ignored and the file is left in place', () =>
-    withMachineDir((dir) => {
-      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
-      writeLegacyMarker(
-        dir,
-        new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-      );
-
-      expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
-      expect(auditAdmit('WL-NEW', [])).toMatchObject({ admitted: true, live: 0, max: 1 });
-      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-NEW']);
-      // Retirement: the stale file is neither counted nor deleted (an operator
-      // or the older instance owns it).
-      expect(readActiveAuditMarker(dir)).not.toBeNull();
     }));
 
   it('AC5: every release point (pane close, dispatch failure, claim rollback) frees the slot by identity', () =>

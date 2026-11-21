@@ -5547,3 +5547,59 @@ describe('2/2 implement-cap regression (parent AC7)', () => {
     expect(after?.lastUpdated).toBe(entry.lastUpdated);
   });
 });
+
+// ── Host-wide dispatch budget — generalised kinds (T1 contract) ────────
+//
+// Tests-first slice for WL-0MW50EHZ6007QBPB (parent AC1/AC8): the
+// COORDINATION-LEADER path (`dispatchFromCoordination`) must consult admission
+// for plan / intake / risk-effort exactly as it does for implement/audit, and
+// honour a unified `host-budget-<kind>` refusal on the offer it selected.
+// Committed RED as vitest `it.fails(...)` — the repo's documented TDD pattern
+// (see `coordination-registered-root-sweep.test.ts`) — so the suite stays
+// green while the contract is red; F2 flips them to `it` once the generic
+// admission lands.
+describe('host-wide dispatch budget — generalised kinds (T1 contract; RED until F2)', () => {
+  const OFFERS = [
+    { kind: 'plan', stage: 'intake_complete' },
+    { kind: 'intake', stage: 'idea' },
+    // A retired-stage offer is dispatched as a risk-effort evaluation.
+    { kind: 'risk-effort', stage: 'in_progress' },
+  ] as const;
+
+  for (const { kind, stage } of OFFERS) {
+    it.fails(`consults admission for a ${kind} offer and honours host-budget-${kind}`, async () => {
+      const admitHostDispatch = vi.fn().mockResolvedValue({
+        admitted: false,
+        live: 1,
+        max: 1,
+        reason: `host-budget-${kind}`,
+      });
+      const deps = makeCoordinationDeps({
+        admitHostDispatch,
+        fetchItem: vi.fn().mockResolvedValue({
+          ok: true,
+          info: itemInfo({ id: `WL-${kind}`, status: 'open', stage }),
+        }),
+      });
+
+      const outcome = await dispatchFromCoordination(
+        deps,
+        [makeEntry('inst-1', `WL-${kind}`)],
+        { model: 'plan', cwd: '/repo', coordinationDir: testDir },
+      );
+
+      expect(admitHostDispatch).toHaveBeenCalledWith({
+        itemId: `WL-${kind}`,
+        kind,
+        // The offer's OWN worklog root (the cross-root claim invariant).
+        cwd: '/worklog/root',
+      });
+      expect(outcome).toMatchObject({
+        dispatched: false,
+        reason: `host-budget-${kind}`,
+        budget: { live: 1, max: 1 },
+      });
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    });
+  }
+});

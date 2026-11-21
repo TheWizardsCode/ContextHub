@@ -1410,3 +1410,155 @@ describe('pane-derived freshness: stale-but-live implement entries (WL-0MW9VQ08W
     });
   });
 });
+
+// ── Generalised-budget admission matrix (T1, parent WL-0MW50EHZ6007QBPB) ───
+//
+// Tests-first slice: the specs below pin the TARGET generalised contract for
+// the three kinds the budget does not cover today (plan / intake /
+// risk-effort) plus the unified refusal vocabulary and the audit-only
+// over-hold. They are committed RED as vitest `it.fails(...)` — the repo's
+// documented TDD pattern (see `coordination-registered-root-sweep.test.ts`) —
+// so the suite stays green while the contract is red; F1–F5 flip
+// `it.fails(` → `it(` as each slice lands.
+//
+// Contract pinned here (parent ACs 1, 2, 4, 5, 8):
+//  - a capped kind admits below its cap and refuses at/over it with the
+//    unified `host-budget-<kind>` token (no `audit-host-saturated` anywhere);
+//  - an uncapped kind always admits, never reserves and never writes a ledger
+//    entry (no reserve/release bookkeeping);
+//  - the per-kind kill switch `0` refuses with `0/0` evidence;
+//  - the audit tier's refusal token is unified on `host-budget-audit`.
+describe('generalised-budget admission matrix (T1 contract; RED until F1–F5)', () => {
+  /** Write kind-named caps (the F1 on-disk schema: `{ "plan": 1 }`). */
+  function writeKindCaps(dir: string, caps: Record<string, number>): void {
+    writeFileSync(budgetConfigPath(dir), JSON.stringify(caps) + '\n', 'utf8');
+  }
+
+  /** A live pane of `kind` owned by `itemId` (the dispatcher pane convention). */
+  function kindPane(kind: string, itemId: string): HostBudgetLivePane {
+    return { paneId: `p-${kind}-${itemId}`, title: `Downtime triggered ${kind} - ${itemId}` };
+  }
+
+  const CAPPED_KINDS = ['plan', 'intake', 'risk-effort'] as const;
+
+  for (const kind of CAPPED_KINDS) {
+    it.fails(`a capped ${kind} kind admits below its cap and records the reservation`, async () => {
+      await withMachineDir((dir) => {
+        writeKindCaps(dir, { [kind]: 1 });
+        const admission = admitHostDispatch(
+          {
+            kind: kind as never,
+            itemId: `WL-${kind}-below`,
+            instanceId: 'instance-a',
+            root: INSTANCE_A_ROOT,
+          },
+          { dir, now: T0, env: CLEAN_ENV, livePanes: [] },
+        );
+
+        expect(admission).toMatchObject({ admitted: true, live: 0, max: 1 });
+        // A capped kind IS ledger-bookkept (unlike an uncapped one).
+        const ledger = readBudget({ dir, now: T0, env: CLEAN_ENV });
+        expect(ledger.ok).toBe(true);
+        if (!ledger.ok) return;
+        expect(ledger.ledger.entries.map((entry) => entry.kind)).toContain(kind);
+      });
+    });
+
+    it.fails(`a capped ${kind} kind refuses at its cap with the unified host-budget-${kind} token`, async () => {
+      await withMachineDir((dir) => {
+        writeKindCaps(dir, { [kind]: 1 });
+        const admission = admitHostDispatch(
+          {
+            kind: kind as never,
+            itemId: `WL-${kind}-at-cap`,
+            instanceId: 'instance-a',
+            root: INSTANCE_A_ROOT,
+          },
+          {
+            dir,
+            now: T0,
+            env: CLEAN_ENV,
+            livePanes: [kindPane(kind, `WL-live-${kind}`)],
+          },
+        );
+
+        expect(admission).toMatchObject({
+          admitted: false,
+          live: 1,
+          max: 1,
+          reason: `host-budget-${kind}`,
+        });
+      });
+    });
+
+    it.fails(`the per-kind kill switch 0 refuses ${kind} with 0/0 evidence`, async () => {
+      await withMachineDir((dir) => {
+        writeKindCaps(dir, { [kind]: 0 });
+        const admission = admitHostDispatch(
+          {
+            kind: kind as never,
+            itemId: `WL-${kind}-killed`,
+            instanceId: 'instance-a',
+            root: INSTANCE_A_ROOT,
+          },
+          { dir, now: T0, env: CLEAN_ENV, livePanes: [] },
+        );
+
+        expect(admission).toMatchObject({
+          admitted: false,
+          live: 0,
+          max: 0,
+          reason: `host-budget-${kind}`,
+        });
+      });
+    });
+  }
+
+  it.fails('an uncapped kind always admits, never reserves and never writes a ledger entry', async () => {
+    await withMachineDir((dir) => {
+      // Only implement/audit are configured; every other kind is unlimited.
+      writeKindCaps(dir, { implement: 2, audit: 1 });
+      const admission = admitHostDispatch(
+        {
+          kind: 'intake' as never,
+          itemId: 'WL-intake-uncapped',
+          instanceId: 'instance-a',
+          root: INSTANCE_A_ROOT,
+        },
+        {
+          dir,
+          now: T0,
+          env: CLEAN_ENV,
+          // Even a crowd of live intake panes cannot refuse an uncapped kind.
+          livePanes: [
+            kindPane('intake', 'WL-i1'),
+            kindPane('intake', 'WL-i2'),
+            kindPane('intake', 'WL-i3'),
+          ],
+        },
+      );
+
+      expect(admission).toMatchObject({ admitted: true });
+      // AC2: no reserve/release bookkeeping for an uncapped kind.
+      const ledger = readBudget({ dir, now: T0, env: CLEAN_ENV });
+      expect(ledger.ok).toBe(true);
+      if (!ledger.ok) return;
+      expect(ledger.ledger.entries).toHaveLength(0);
+    });
+  });
+
+  it.fails('the audit refusal token is unified on host-budget-audit (no audit-host-saturated)', async () => {
+    await withMachineDir((dir) => {
+      writeKindCaps(dir, { audit: 1 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'audit', itemId: 'WL-AUD-LIVE', paneId: 'p:a' }),
+      ]);
+      // The one-release legacy read (the only path that still compares a local
+      // audit count with a cap) must report the unified budget token at every
+      // cap — the `maxAudit: 1` saturated special-case is gone (AC5).
+      const state = readAuditBudgetState({ dir, now: T0, env: CLEAN_ENV, livePanes: [] });
+      expect(state.atCap).toBe(true);
+      expect(state.reason).toBe('host-budget-audit');
+    });
+  });
+});

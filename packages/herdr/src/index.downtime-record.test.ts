@@ -13,7 +13,6 @@ import { fileURLToPath } from 'node:url';
 import { createDowntimeDeps } from './index.js';
 import { DISPATCHER_ASSIGNEE } from './index.claim.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE } from './downtime-log.js';
-import { readActiveAuditMarker, isHostAuditActive } from './machine-coordination.js';
 import {
   freshCount,
   HOST_BUDGET_CONFIG_FILE,
@@ -268,25 +267,6 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     expect(result).toEqual({ ok: true, active: false, source: 'proxy' });
   });
 
-  it('recordDispatch never writes the retired host-wide marker for an audit dispatch (AC2)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    await deps.recordDispatch({
-      itemId: 'WL-AUD',
-      kind: 'audit',
-      dispatchedAt: new Date().toISOString(),
-      cwd,
-    });
-
-    // The ledger (reserved in the claim pipeline) is the authority now; the
-    // legacy file is never created again.
-    expect(readActiveAuditMarker(coordinationDir)).toBeNull();
-  });
-
   it('recordPaneClose releases the audit ledger reservation (AC5)', async () => {
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
@@ -321,35 +301,6 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     // The host-wide audit slot is given back: the ledger no longer holds the
     // reservation, whatever the lifecycle outcome.
     expect(freshCount('audit')).toMatchObject({ ok: true, count: 0 });
-  });
-
-  it('recordPaneClose never removes a legacy marker file (AC2)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeLegacyMarker(coordinationDir, 'older-instance');
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    for (const kind of ['audit', 'plan'] as const) {
-      await deps.recordPaneClose(
-        {
-          entryType: 'pane-close',
-          timestamp: new Date().toISOString(),
-          itemId: 'WL-AUD',
-          itemTitle: 'Audited item',
-          paneId: 'w1:p2',
-          kind,
-          outcome: kind === 'audit' ? 'audit-passed' : 'closed-as-plan-complete',
-          reasonCode: 'none',
-          closed: true,
-        },
-        cwd,
-      );
-    }
-
-    // Retirement: this version does not remove the file either — read-
-    // compatibility lasts until the file goes stale.
-    expect(isHostAuditActive(coordinationDir)).toBe(true);
   });
 
   it('recordPaneClose releases the host dispatch-budget reservation (F3 AC3)', async () => {
@@ -440,27 +391,6 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     expect(read.ledger.entries[0].paneId).toBe('w1:p9');
   });
 
-  it('recordDispatchFailure never removes a legacy marker file (AC2)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeLegacyMarker(coordinationDir, 'older-instance');
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    await deps.recordDispatchFailure({
-      itemId: 'WL-AUD',
-      kind: 'audit',
-      dispatchedAt: new Date().toISOString(),
-      cwd,
-      error: 'spawn ENOENT',
-      exitCode: null,
-    });
-
-    // The ledger reservation is released by the claim pipeline's spawn-failure
-    // path (asserted in downtime-worker.dispatch.test.ts); the legacy file is
-    // left to go stale.
-    expect(isHostAuditActive(coordinationDir)).toBe(true);
-  });
 });
 
 describe('createDowntimeDeps recordDispatch', () => {
