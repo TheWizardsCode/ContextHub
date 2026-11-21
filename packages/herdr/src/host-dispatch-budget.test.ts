@@ -99,23 +99,29 @@ describe('parseBudgetConfig', () => {
   it('yields today\'s defaults (2 implements, 1 audit) when the file is absent', () => {
     for (const raw of [undefined, null]) {
       const result = parseBudgetConfig(raw);
-      expect(result.config).toEqual({ maxImplement: 2, maxAudit: 1 });
+      expect(result.config).toEqual({ implement: 2, audit: 1 });
       expect(result.warnings).toEqual([]);
     }
-    expect(DEFAULT_HOST_BUDGET_CONFIG).toEqual({ maxImplement: 2, maxAudit: 1 });
+    expect(DEFAULT_HOST_BUDGET_CONFIG).toEqual({ implement: 2, audit: 1 });
   });
 
-  it('accepts a partial document and fills the absent tier from the defaults', () => {
+  it('configures only the kinds a present document names (absent = uncapped)', () => {
+    // A kind absent from the file is uncapped — no default cap is invented for
+    // it. The legacy `max*` keys still configure their kind for read-compat.
     expect(parseBudgetConfig({ maxImplement: 3 })).toEqual({
-      config: { maxImplement: 3, maxAudit: 1 },
+      config: { implement: 3 },
       warnings: [],
     });
-    expect(parseBudgetConfig({ maxAudit: 0 }).config).toEqual({ maxImplement: 2, maxAudit: 0 });
+    expect(parseBudgetConfig({ maxAudit: 0 }).config).toEqual({ audit: 0 });
+    expect(parseBudgetConfig({ implement: 1, 'risk-effort': 2 }).config).toEqual({
+      implement: 1,
+      'risk-effort': 2,
+    });
   });
 
   it('ignores unknown extra keys (additive format evolution)', () => {
     expect(parseBudgetConfig({ maxImplement: 1, futureWindow: '24h' })).toEqual({
-      config: { maxImplement: 1, maxAudit: 1 },
+      config: { implement: 1 },
       warnings: [],
     });
   });
@@ -123,7 +129,7 @@ describe('parseBudgetConfig', () => {
   it('falls back to defaults with a warning for a non-object document', () => {
     for (const raw of [[], 'nope', 42, true]) {
       const result = parseBudgetConfig(raw);
-      expect(result.config).toEqual({ maxImplement: 2, maxAudit: 1 });
+      expect(result.config).toEqual({ implement: 2, audit: 1 });
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain('not a JSON object');
     }
@@ -131,29 +137,42 @@ describe('parseBudgetConfig', () => {
 
   it('keeps the default for an invalid tier value and warns (never half-applies garbage)', () => {
     const result = parseBudgetConfig({ maxImplement: '2', maxAudit: -1 });
-    expect(result.config).toEqual({ maxImplement: 2, maxAudit: 1 });
+    expect(result.config).toEqual({ implement: 2, audit: 1 });
     expect(result.warnings).toHaveLength(2);
     expect(result.warnings[0]).toContain('maxImplement');
     expect(result.warnings[1]).toContain('maxAudit');
 
     const nonFinite = parseBudgetConfig({ maxImplement: Number.NaN, maxAudit: 2 });
-    expect(nonFinite.config).toEqual({ maxImplement: 2, maxAudit: 2 });
+    expect(nonFinite.config).toEqual({ implement: 2, audit: 2 });
     expect(nonFinite.warnings).toHaveLength(1);
+
+    // A kind with no default is left uncapped rather than given an invented one.
+    const uncapped = parseBudgetConfig({ plan: 'three' });
+    expect(uncapped.config).toEqual({});
+    expect(uncapped.warnings[0]).toContain('plan');
   });
 
   it('clamps an over-large configured cap to HOST_BUDGET_MAX', () => {
     expect(parseBudgetConfig({ maxImplement: 1e9, maxAudit: 7 }).config).toEqual({
-      maxImplement: HOST_BUDGET_MAX,
-      maxAudit: 7,
+      implement: HOST_BUDGET_MAX,
+      audit: 7,
     });
   });
 });
 
 describe('applyBudgetEnvOverrides / resolveBudgetConfig', () => {
-  const base = { maxImplement: 2, maxAudit: 1 };
+  const base = { implement: 2, audit: 1 };
 
   it('leaves the config alone when the variables are unset or empty', () => {
-    for (const env of [{}, { HERDR_HOST_MAX_IMPLEMENT: '', HERDR_HOST_MAX_AUDIT: '   ' }, undefined]) {
+    for (const env of [
+      {},
+      {
+        [HOST_BUDGET_ENV_KEYS.implement]: '',
+        [HOST_BUDGET_ENV_KEYS.audit]: '   ',
+        [HOST_BUDGET_ENV_KEYS.plan]: '',
+      },
+      undefined,
+    ]) {
       const result = applyBudgetEnvOverrides(base, env ?? cleanEnv);
       expect(result.config).toEqual(base);
       expect(result.warnings).toEqual([]);
@@ -165,13 +184,29 @@ describe('applyBudgetEnvOverrides / resolveBudgetConfig', () => {
       [HOST_BUDGET_ENV_KEYS.implement]: ' 4 ',
       [HOST_BUDGET_ENV_KEYS.audit]: '0',
     });
-    expect(result.config).toEqual({ maxImplement: 4, maxAudit: 0 });
+    expect(result.config).toEqual({ implement: 4, audit: 0 });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('configures a kind the file left uncapped', () => {
+    const result = applyBudgetEnvOverrides(base, {
+      [HOST_BUDGET_ENV_KEYS.plan]: '3',
+      [HOST_BUDGET_ENV_KEYS.intake]: '1',
+      [HOST_BUDGET_ENV_KEYS['risk-effort']]: '2',
+    });
+    expect(result.config).toEqual({
+      implement: 2,
+      audit: 1,
+      plan: 3,
+      intake: 1,
+      'risk-effort': 2,
+    });
     expect(result.warnings).toEqual([]);
   });
 
   it('clamps an over-large env value', () => {
     expect(
-      applyBudgetEnvOverrides(base, { [HOST_BUDGET_ENV_KEYS.implement]: '999' }).config.maxImplement,
+      applyBudgetEnvOverrides(base, { [HOST_BUDGET_ENV_KEYS.implement]: '999' }).config.implement,
     ).toBe(HOST_BUDGET_MAX);
   });
 
@@ -188,10 +223,10 @@ describe('applyBudgetEnvOverrides / resolveBudgetConfig', () => {
 
   it('composes file values and env overrides (env wins)', () => {
     const resolved = resolveBudgetConfig(
-      { maxImplement: 5, maxAudit: 2 },
+      { implement: 5, audit: 2 },
       { [HOST_BUDGET_ENV_KEYS.implement]: '1' },
     );
-    expect(resolved.config).toEqual({ maxImplement: 1, maxAudit: 2 });
+    expect(resolved.config).toEqual({ implement: 1, audit: 2 });
     expect(resolved.warnings).toEqual([]);
   });
 });
@@ -255,7 +290,7 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
       ),
       NOW,
     );
-    expect(reduction.counts).toEqual({ implement: 2, audit: 1 });
+    expect(reduction.counts).toEqual({ implement: 2, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 });
     expect(reduction.reaped).toEqual([]);
     expect(reduction.retained).toHaveLength(3);
   });
@@ -268,7 +303,7 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
       heartbeatAt: new Date(NOW - HOST_BUDGET_STALE_WINDOW_MS - 1).toISOString(),
     });
     const reduction = reduceLedgerCounts([crashed], livePaneIdSet([]), NOW);
-    expect(reduction.counts).toEqual({ implement: 0, audit: 0 });
+    expect(reduction.counts).toEqual({ implement: 0, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 });
     expect(reduction.reaped.map((e) => e.itemId)).toEqual(['WL-CRASH']);
     expect(reduction.retained).toEqual([]);
   });
@@ -276,7 +311,7 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
   it('retains but does not count a fresh entry that has no live pane yet (spawn window)', () => {
     const pending = entry({ itemId: 'WL-PENDING', paneId: 'p1' });
     const reduction = reduceLedgerCounts([pending], livePaneIdSet([]), NOW);
-    expect(reduction.counts).toEqual({ implement: 0, audit: 0 });
+    expect(reduction.counts).toEqual({ implement: 0, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 });
     expect(reduction.reaped).toEqual([]);
     expect(reduction.retained).toHaveLength(1);
   });
@@ -295,7 +330,7 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
     // AC1: a confirmed implement entry whose pane is in the live list is
     // counted regardless of heartbeat age — a >2 h run must not silently drop
     // out of the cap while its pane is demonstrably alive.
-    expect(reduction.counts).toEqual({ implement: 1, audit: 0 });
+    expect(reduction.counts).toEqual({ implement: 1, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 });
     expect(reduction.reaped).toEqual([]);
     expect(reduction.retained).toHaveLength(1);
   });
@@ -311,7 +346,7 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
       livePaneIdSet(makeLivePaneList([{ paneId: 'p1', itemId: 'WL-5H' }])),
       NOW,
     );
-    expect(reduction.counts).toEqual({ implement: 1, audit: 0 });
+    expect(reduction.counts).toEqual({ implement: 1, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 });
     expect(reduction.reaped).toEqual([]);
   });
 
@@ -331,7 +366,7 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
       livePaneIdSet(makeLivePaneList([{ paneId: 'p1', itemId: 'WL-AUDIT-LONG' }])),
       NOW,
     );
-    expect(reduction.counts).toEqual({ implement: 0, audit: 0 });
+    expect(reduction.counts).toEqual({ implement: 0, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 });
     expect(reduction.reaped).toEqual([]);
     expect(reduction.retained).toHaveLength(1);
   });
@@ -360,7 +395,7 @@ describe('reduceLedgerCounts (pure ledger→counts reduction)', () => {
       entry({ kind: 'audit', itemId: 'WL-SPAWNING' }),
     ];
     const reduction = reduceLedgerCounts(entries, undefined, NOW);
-    expect(reduction.counts).toEqual({ implement: 1, audit: 1 });
+    expect(reduction.counts).toEqual({ implement: 1, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 });
     expect(reduction.reaped).toEqual([]);
     expect(reduction.retained).toHaveLength(3);
   });
@@ -388,7 +423,7 @@ describe('reduceAuditDisplayCounts (pane-aware audit DISPLAY reduction)', () => 
       }),
     ];
     const reduction = reduceAuditDisplayCounts(entries, live, NOW);
-    expect(reduction.counts).toEqual({ implement: 0, audit: 2 });
+    expect(reduction.counts).toEqual({ implement: 0, audit: 2, plan: 0, intake: 0, 'risk-effort': 0 });
     expect(reduction.retained.map((e) => e.itemId)).toEqual(['WL-LIVE', 'WL-SPAWNING']);
     expect(reduction.reaped.map((e) => e.itemId)).toEqual(['WL-DEAD', 'WL-STALE']);
   });
@@ -398,6 +433,9 @@ describe('reduceAuditDisplayCounts (pane-aware audit DISPLAY reduction)', () => 
     expect(reduceAuditDisplayCounts(entries, live, NOW).counts).toEqual({
       implement: 0,
       audit: 0,
+      plan: 0,
+      intake: 0,
+      'risk-effort': 0,
     });
   });
 
@@ -435,7 +473,7 @@ describe('reduceClosedPaneSweep (pure dead-pane sweep)', () => {
     const reduction = reduceClosedPaneSweep(entries, live, NOW);
     expect(reduction.reaped.map((e) => e.itemId)).toEqual(['WL-DEAD']);
     expect(reduction.retained.map((e) => e.itemId)).toEqual(['WL-SPAWNING', 'WL-LIVE']);
-    expect(reduction.counts).toEqual({ implement: 0, audit: 1 });
+    expect(reduction.counts).toEqual({ implement: 0, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 });
   });
 });
 
@@ -493,8 +531,8 @@ describe('readBudget', () => {
       '{"version":1}', // missing entries
       '{"version":1,"entries":{}}', // entries not an array
       '{"version":1,"entries":[{}]}', // malformed entry
-      // A valid entry whose kind is outside the v1 tiers would be miscounted.
-      `{"version":1,"entries":[{"kind":"plan","itemId":"WL-A","instanceId":"i","root":"/r","startedAt":"${new Date(NOW).toISOString()}","heartbeatAt":"${new Date(NOW).toISOString()}"}]}`,
+      // A valid entry whose kind is outside the budget kinds is corrupt.
+      `{"version":1,"entries":[{"kind":"bogus","itemId":"WL-A","instanceId":"i","root":"/r","startedAt":"${new Date(NOW).toISOString()}","heartbeatAt":"${new Date(NOW).toISOString()}"}]}`,
       // An invalid paneId shape.
       `{"version":1,"entries":[{"kind":"audit","itemId":"WL-A","instanceId":"i","root":"/r","paneId":7,"startedAt":"${new Date(NOW).toISOString()}","heartbeatAt":"${new Date(NOW).toISOString()}"}]}`,
     ];
@@ -644,7 +682,7 @@ describe('reserve / release', () => {
         reserve({ kind: 'implement', itemId: '', instanceId: 'i', root: '/r' }).ok,
       ).toBe(false);
       const badKind = reserve({
-        kind: 'plan' as unknown as 'implement',
+        kind: 'bogus' as unknown as 'implement',
         itemId: 'WL-A',
         instanceId: 'i',
         root: '/r',
@@ -831,7 +869,7 @@ describe('reap and liveCount', () => {
         ok: true,
         kind: 'implement',
         count: 1,
-        counts: { implement: 1, audit: 1 },
+        counts: { implement: 1, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 },
       });
       // The stale, pane-less entry is gone from disk — dispatch can resume.
       const read = readBudget();
@@ -849,7 +887,7 @@ describe('reap and liveCount', () => {
     await withMachineDir((dir) => {
       seedMixedLedger(dir);
       const result = reap(panes, { now: NOW });
-      expect(result).toEqual({ ok: true, reaped: 1, counts: { implement: 1, audit: 1 } });
+      expect(result).toEqual({ ok: true, reaped: 1, counts: { implement: 1, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 } });
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toContain('WL-LIVE');
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).not.toContain('WL-CRASHED');
 
@@ -857,7 +895,7 @@ describe('reap and liveCount', () => {
       expect(reap(panes, { now: NOW })).toEqual({
         ok: true,
         reaped: 0,
-        counts: { implement: 1, audit: 1 },
+        counts: { implement: 1, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 },
       });
     });
   });
@@ -902,7 +940,7 @@ describe('reap and liveCount', () => {
           ok: true,
           kind: 'implement',
           count: 1,
-          counts: { implement: 1, audit: 1 },
+          counts: { implement: 1, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 },
         });
         expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toContain('WL-CRASHED');
       } finally {
@@ -991,12 +1029,12 @@ describe('unknown pane liveness (WL-0MW9VQX5T001GCUP)', () => {
         ok: true,
         kind: 'implement',
         count: 1,
-        counts: { implement: 1, audit: 1 },
+        counts: { implement: 1, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 },
       });
       expect(reap(undefined, { now: NOW })).toEqual({
         ok: true,
         reaped: 0,
-        counts: { implement: 1, audit: 1 },
+        counts: { implement: 1, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 },
       });
       expect(readFileSync(budgetLedgerPath(dir), 'utf8')).toBe(before);
     });
@@ -1009,7 +1047,7 @@ describe('unknown pane liveness (WL-0MW9VQX5T001GCUP)', () => {
       // A SUCCESSFUL empty read is authoritative: the crashed entry is reaped
       // exactly as before the tri-state change — existing behaviour preserved.
       const result = reap([], { now: NOW });
-      expect(result).toEqual({ ok: true, reaped: 1, counts: { implement: 0, audit: 0 } });
+      expect(result).toEqual({ ok: true, reaped: 1, counts: { implement: 0, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 } });
       const read = readBudget();
       expect(read.ok).toBe(true);
       if (!read.ok) return;
@@ -1040,7 +1078,7 @@ describe('sweepClosedPanes — confirmed entries whose pane closed', () => {
         }),
       ]);
       const result = sweepClosedPanes(panes, { now: NOW });
-      expect(result).toEqual({ ok: true, reaped: 1, counts: { implement: 0, audit: 0 } });
+      expect(result).toEqual({ ok: true, reaped: 1, counts: { implement: 0, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 } });
       const read = readBudget();
       expect(read.ok).toBe(true);
       if (!read.ok) return;
@@ -1061,7 +1099,7 @@ describe('sweepClosedPanes — confirmed entries whose pane closed', () => {
       expect(sweepClosedPanes(panes, { now: NOW })).toEqual({
         ok: true,
         reaped: 0,
-        counts: { implement: 0, audit: 1 },
+        counts: { implement: 0, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 },
       });
       expect(sweepClosedPanes(panes, { now: NOW })).toMatchObject({ reaped: 0 });
     });
@@ -1101,7 +1139,7 @@ describe('sweepClosedPanes — confirmed entries whose pane closed', () => {
       expect(sweepClosedPanes(panes, { now: NOW })).toMatchObject({
         ok: true,
         reaped: 0,
-        counts: { implement: 1, audit: 0 },
+        counts: { implement: 1, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 },
       });
     });
   });
@@ -1137,7 +1175,7 @@ describe('readBudgetConfig', () => {
   it('uses the defaults when budget.json is absent', async () => {
     await withMachineDir(() => {
       expect(readBudgetConfig({ env: cleanEnv })).toEqual({
-        config: { maxImplement: 2, maxAudit: 1 },
+        config: { implement: 2, audit: 1 },
         warnings: [],
       });
     });
@@ -1148,14 +1186,14 @@ describe('readBudgetConfig', () => {
       expect(budgetConfigPath(dir)).toBe(join(dir, HOST_BUDGET_CONFIG_FILE));
       writeFileSync(join(dir, HOST_BUDGET_CONFIG_FILE), JSON.stringify({ maxImplement: 3, maxAudit: 0 }));
       expect(readBudgetConfig({ env: cleanEnv })).toEqual({
-        config: { maxImplement: 3, maxAudit: 0 },
+        config: { implement: 3, audit: 0 },
         warnings: [],
       });
 
       writeFileSync(join(dir, HOST_BUDGET_CONFIG_FILE), JSON.stringify({ maxImplement: 1e9, maxAudit: 4 }));
       expect(readBudgetConfig({ env: cleanEnv }).config).toEqual({
-        maxImplement: HOST_BUDGET_MAX,
-        maxAudit: 4,
+        implement: HOST_BUDGET_MAX,
+        audit: 4,
       });
     });
   });
@@ -1166,7 +1204,7 @@ describe('readBudgetConfig', () => {
       const result = readBudgetConfig({
         env: { [HOST_BUDGET_ENV_KEYS.implement]: '4', [HOST_BUDGET_ENV_KEYS.audit]: '0' },
       });
-      expect(result.config).toEqual({ maxImplement: 4, maxAudit: 0 });
+      expect(result.config).toEqual({ implement: 4, audit: 0 });
       expect(result.warnings).toEqual([]);
     });
   });
@@ -1177,18 +1215,18 @@ describe('readBudgetConfig', () => {
 
       writeFileSync(file, '{ not json');
       const invalidJson = readBudgetConfig({ env: cleanEnv });
-      expect(invalidJson.config).toEqual({ maxImplement: 2, maxAudit: 1 });
+      expect(invalidJson.config).toEqual({ implement: 2, audit: 1 });
       expect(invalidJson.warnings).toHaveLength(1);
       expect(invalidJson.warnings[0]).toContain('not valid JSON');
 
       writeFileSync(file, JSON.stringify(['nope']));
       const wrongShape = readBudgetConfig({ env: cleanEnv });
-      expect(wrongShape.config).toEqual({ maxImplement: 2, maxAudit: 1 });
+      expect(wrongShape.config).toEqual({ implement: 2, audit: 1 });
       expect(wrongShape.warnings[0]).toContain('not a JSON object');
 
       writeFileSync(file, JSON.stringify({ maxImplement: 'two' }));
       const invalidTier = readBudgetConfig({ env: cleanEnv });
-      expect(invalidTier.config).toEqual({ maxImplement: 2, maxAudit: 1 });
+      expect(invalidTier.config).toEqual({ implement: 2 });
       expect(invalidTier.warnings).toHaveLength(1);
       expect(invalidTier.warnings[0]).toContain('maxImplement');
     });
@@ -1198,7 +1236,7 @@ describe('readBudgetConfig', () => {
     await withMachineDir((dir) => {
       mkdirSync(join(dir, HOST_BUDGET_CONFIG_FILE), { recursive: true });
       const result = readBudgetConfig({ env: cleanEnv });
-      expect(result.config).toEqual({ maxImplement: 2, maxAudit: 1 });
+      expect(result.config).toEqual({ implement: 2, audit: 1 });
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain('unreadable');
     });
@@ -1209,7 +1247,7 @@ describe('readBudgetConfig', () => {
       dir: null,
       env: { [HOST_BUDGET_ENV_KEYS.implement]: '1' },
     });
-    expect(result.config).toEqual({ maxImplement: 1, maxAudit: 1 });
+    expect(result.config).toEqual({ implement: 1, audit: 1 });
     expect(result.warnings).toHaveLength(1);
     expect(result.warnings[0]).toContain('coordination dir unresolvable');
   });
@@ -1221,7 +1259,7 @@ describe('readBudgetConfig', () => {
       seedBudgetLedger(dir, [makeBudgetEntry({ itemId: 'WL-A', paneId: 'pane-1' })]);
       writeFileSync(join(dir, HOST_BUDGET_CONFIG_FILE), JSON.stringify({ maxImplement: 0 }));
       expect(readBudget().ok).toBe(true);
-      expect(readBudgetConfig({ env: cleanEnv }).config).toEqual({ maxImplement: 0, maxAudit: 1 });
+      expect(readBudgetConfig({ env: cleanEnv }).config).toEqual({ implement: 0 });
     });
   });
 });
@@ -1254,7 +1292,7 @@ describe('freshCount — the audit-only over-hold (T1/SKILL AC5)', () => {
         ok: true,
         kind: 'audit',
         count: 1,
-        counts: { implement: 0, audit: 1 },
+        counts: { implement: 0, audit: 1, plan: 0, intake: 0, 'risk-effort': 0 },
       });
       // ...and the stale entry was released by the 2 h rule.
       const read = readBudget();
@@ -1263,11 +1301,11 @@ describe('freshCount — the audit-only over-hold (T1/SKILL AC5)', () => {
       expect(read.ledger.entries.map((entry) => entry.itemId)).toEqual(['WL-FRESH']);
     }));
 
-  it.fails('an OPEN plan/intake/risk-effort entry never counts as an audit hold (kind-scoped)', () =>
+  it('an OPEN plan/intake/risk-effort entry never counts as an audit hold (kind-scoped)', () =>
     withMachineDir((dir) => {
-      // NOTE: today the ledger normaliser rejects a non-implement/audit kind as
-      // corrupt, so this spec is red on TWO counts until F1 generalises the
-      // ledger to hold every kind — then it pins the audit-only over-hold (F2).
+      // F1' has generalised the ledger normaliser, so every kind is a valid
+      // entry; this spec pins the audit-only over-hold (the rest of the rule
+      // lands in F2).
       writeBudgetLedger(dir, [
         makeBudgetEntry({ kind: 'plan' as never, itemId: 'WL-PLAN' }),
         makeBudgetEntry({ kind: 'intake' as never, itemId: 'WL-INTAKE' }),
@@ -1287,25 +1325,26 @@ describe('freshCount — the audit-only over-hold (T1/SKILL AC5)', () => {
 // Tests-first slice: these specs pin the TARGET generalised contract — every
 // `DowntimeSkillKind` configurable, an absent kind UNLIMITED (no invented
 // default cap), audit-only over-hold, unified `host-budget-<kind>` refusal
-// tokens. They are committed RED as vitest `it.fails(...)` (the repo's
-// documented TDD pattern — see `coordination-registered-root-sweep.test.ts` /
-// `downtime-worker.clamps.test.ts`) so the suite stays green while the
-// contract is red; F1–F5 flip `it.fails(` → `it(` as each slice lands.
+// tokens. The config/ledger specs below were committed RED as vitest
+// `it.fails(...)` (the repo's documented TDD pattern — see
+// `coordination-registered-root-sweep.test.ts` /
+// `downtime-worker.clamps.test.ts`); F1 flipped them to plain `it`s, and the
+// remaining counting-asymmetry spec stays RED until F2.
 
 describe('generalised config — kind-named caps, absent = unlimited (T1 → F1)', () => {
-  it.fails('defaults stay implement: 2 / audit: 1 and every other kind is uncapped', () => {
+  it('defaults stay implement: 2 / audit: 1 and every other kind is uncapped', () => {
     // F1: DEFAULT_HOST_BUDGET_CONFIG becomes the kind-named shape; plan,
     // intake and risk-effort are ABSENT (unlimited) — no default cap invented.
     expect({ ...DEFAULT_HOST_BUDGET_CONFIG }).toEqual({ implement: 2, audit: 1 });
   });
 
-  it.fails('accepts a kind-named cap for plan / intake / risk-effort', () => {
+  it('accepts a kind-named cap for plan / intake / risk-effort', () => {
     const result = parseBudgetConfig({ plan: 1, intake: 2, 'risk-effort': 3 });
     expect(result.config).toMatchObject({ plan: 1, intake: 2, 'risk-effort': 3 });
     expect(result.warnings).toEqual([]);
   });
 
-  it.fails('treats a kind absent from budget.json as uncapped', () => {
+  it('treats a kind absent from budget.json as uncapped', () => {
     const config = parseBudgetConfig({ implement: 3, audit: 2 }).config as unknown as Record<
       string,
       unknown
@@ -1320,7 +1359,7 @@ describe('generalised config — kind-named caps, absent = unlimited (T1 → F1)
     expect(config).not.toHaveProperty('risk-effort');
   });
 
-  it.fails('keeps reading the legacy max* keys (read-compat)', () => {
+  it('keeps reading the legacy max* keys (read-compat)', () => {
     // Existing operator files ({ maxImplement, maxAudit }) keep their meaning.
     expect(parseBudgetConfig({ maxImplement: 4, maxAudit: 2 }).config).toMatchObject({
       implement: 4,
@@ -1342,7 +1381,7 @@ describe('counting asymmetry — audit over-hold, every other kind live-pane (T1
     title: `Downtime triggered ${kind} - ${itemId}`,
   });
 
-  it.fails('a non-audit kind frees its slot when the pane leaves the live list (liveCount)', () =>
+  it('a non-audit kind frees its slot when the pane leaves the live list (liveCount)', () =>
     withMachineDir((dir) => {
       writeBudgetLedger(dir, [
         makeBudgetEntry({ kind: 'plan' as never, itemId: 'WL-PLAN', paneId: 'p-gone' }),

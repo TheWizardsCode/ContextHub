@@ -58,9 +58,11 @@
 import * as fs from 'node:fs';
 
 import {
+  DEFAULT_HOST_BUDGET_CONFIG,
   HOST_BUDGET_STALE_WINDOW_MS,
   auditDisplayCount,
   budgetLedgerPath,
+  emptyHostBudgetCounts,
   livePaneIdSet,
   readBudget,
   readBudgetConfig,
@@ -119,8 +121,11 @@ export function summariseHostBudget(
   if (counts === null || counts === undefined) return null;
   if (config === null || config === undefined) return null;
   return {
-    implement: { live: counts.implement, max: config.maxImplement },
-    audit: { live: counts.audit, max: config.maxAudit },
+    implement: {
+      live: counts.implement,
+      max: config.implement ?? DEFAULT_HOST_BUDGET_CONFIG.implement,
+    },
+    audit: { live: counts.audit, max: config.audit ?? DEFAULT_HOST_BUDGET_CONFIG.audit },
   };
 }
 
@@ -235,7 +240,7 @@ export function readHostBudgetStatus(
   );
   const { config } = readBudgetConfig(ledgerOptions);
   return summariseHostBudget(
-    { implement: implement.live, audit },
+    { ...emptyHostBudgetCounts(), implement: implement.live, audit },
     config,
   );
 }

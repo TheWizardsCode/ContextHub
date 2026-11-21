@@ -67,8 +67,8 @@ export const DISPATCH_BUDGET_FILE = 'dispatch-budget.json';
 /** Ledger document schema version. */
 export const DISPATCH_BUDGET_VERSION = 1;
 
-/** Dispatch tiers the budget covers (v1: implement + audit only). */
-export type FakeBudgetKind = 'implement' | 'audit';
+/** Dispatch kinds the budget covers (every `DowntimeSkillKind` member). */
+export type FakeBudgetKind = 'implement' | 'audit' | 'plan' | 'intake' | 'risk-effort';
 
 /** One raw ledger entry, byte-for-byte the production on-disk shape. */
 export interface FakeBudgetEntry {

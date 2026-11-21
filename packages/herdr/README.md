@@ -276,7 +276,7 @@ The plugin respects the following environment variables:
 - `WL_COUNT` — Number of work items to fetch (default: 20, now superseded by `browseItemCount` in settings)
 - `HERDR_SOCKET_PATH` — Path to the herdr Unix socket used by the event subscription (default `~/.config/herdr/herdr.sock`). When unset/unreachable the plugin falls back to polling.
 - `HERDR_COORDINATION_DIR` — Machine coordination directory override (default `~/.herdr/downtime`); the host dispatch-budget ledger and its `budget.json` live here.
-- `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — Per-tier machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. Values clamp to `0`–`32`; `0` disables that tier host-wide (a per-tier kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`). `HERDR_HOST_MAX_IMPLEMENT` governs the implement tier; **`maxAudit` / `HERDR_HOST_MAX_AUDIT` are implement-tier-only for audit admission** — the audit budget is owned by the proxy (below), and `maxAudit` is only the one-release legacy cap and the local observability figure. See *Host-wide dispatch budget* under the downtime worker.
+- `HERDR_HOST_MAX_<KIND>` — Per-kind machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. One key per dispatch kind: `HERDR_HOST_MAX_IMPLEMENT`, `HERDR_HOST_MAX_AUDIT`, `HERDR_HOST_MAX_PLAN`, `HERDR_HOST_MAX_INTAKE`, `HERDR_HOST_MAX_RISK_EFFORT`. Values clamp to `0`–`32`; `0` disables that kind host-wide (a per-kind kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`; every other kind is uncapped unless configured). `HERDR_HOST_MAX_IMPLEMENT` governs the implement tier; **`audit` / `HERDR_HOST_MAX_AUDIT` are implement-tier-only for audit admission** — the audit budget is owned by the proxy (below), and `audit` is only the one-release legacy cap and the local observability figure. See *Host-wide dispatch budget* under the downtime worker.
 - `HERDR_AUDIT_LOCAL_BUDGET` — **one-release** escape hatch (`=1`) restoring the pre-proxy audit decision (`budget.json` `maxAudit` + the local ledger, never consulting the proxy). It is removed in the release after the proxy side (`LP-0MW95FYMH006XYNK`) ships. Unset → the proxy-owned audit budget is authoritative. The proxy URL is `downtimeProxyUrl` in `~/.config/herdr/worklog-plugin.json` (default `http://192.168.0.199:8000`), the same URL the status poller and reserve client use.
 
 #### Plugin Settings (config file)
@@ -571,16 +571,18 @@ dispatches; the other herdr instances coordinate instead of polling:
   proxy-derived by WL-0MW95GBEG005ERHS)** — the operator can cap how many
   agent panes this **machine** runs at once, regardless of how many herdr
   instances or projects are open.
-  - **Implement tier** — a machine-scoped ledger
+  - **Per-kind cap** — a machine-scoped ledger
     (`~/.herdr/downtime/dispatch-budget.json`, one entry per in-flight
-    dispatch) with the cap in `~/.herdr/downtime/budget.json` (`maxImplement:
-    2`; `0` disables the tier host-wide), overridable by
-    `HERDR_HOST_MAX_IMPLEMENT` — **not** a per-instance `settings.json` key,
+    dispatch) with the caps in `~/.herdr/downtime/budget.json` as a map over
+    kinds (`{ "implement": 2, "audit": 1, "plan": 3 }`; a kind absent from
+    the file is uncapped; the legacy `maxImplement` / `maxAudit` keys are still
+    read; `0` disables a kind host-wide), overridable by
+    `HERDR_HOST_MAX_<KIND>` — **not** a per-instance `settings.json` key,
     deliberately: a host cap stored per instance drifts by construction (which
     is why `downtimeRequiredFreeSlots` cannot express it), while one elected
     leader already dispatches for every root so a machine file is
     authoritative. Dispatcher-fired work over quota is a neutral skip
-    (`host-budget-implement`), never a prompt and never a `no-candidate`
+    (`host-budget-<kind>`), never a prompt and never a `no-candidate`
     cooldown; an unreadable ledger **fails closed** there
     (`host-budget-unknown`). The self-healing rewrite from the live pane list
     runs only when the pane read **succeeded**; a failed/unparseable pane read

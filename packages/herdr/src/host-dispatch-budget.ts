@@ -6,14 +6,15 @@
  * THIS HEADER COMMENT IS THE CONTRACT OF RECORD.
  * ─────────────────────────────────────────────────────────────────────────
  *
- * One machine-scoped record of every in-flight `implement` and `audit`
- * dispatch, plus a configurable per-tier cap, so a host budget is
- * authoritative across every herdr instance and project on the machine.
+ * One machine-scoped record of every in-flight budgeted dispatch (any
+ * {@link HostBudgetKind}, i.e. every `DowntimeSkillKind` member), plus a
+ * configurable per-kind cap, so a host budget is authoritative across every
+ * herdr instance and project on the machine.
  *
  * Enforcement lives elsewhere: the dispatcher's admission read and both tiers'
  * wiring are in `host-dispatch-budget.admission.ts` (implement tier F3, audit
  * tier F2 — which also replaces the retired host-wide `active-audit` marker),
- * consumable per-tier caps come from `readBudgetConfig`, and the interactive
+ * consumable per-kind caps come from `readBudgetConfig`, and the interactive
  * over-quota dialog / observability surfaces are F4/F5.
  *
  * ## Audit admission authority (WL-0MW95GBEG005ERHS)
@@ -37,15 +38,19 @@
  *    `host-dispatch-budget.audit.ts` from inside the ledger lock. Bounded by
  *    the coordination-log retention policy; fail-open, so it can never block
  *    a dispatch or change a decision (WL-0MWFJDGXQ001OXP8).
- *  - `budget.json` — the per-tier caps (read-only here; the operator writes it):
- *    `{ "maxImplement": 2, "maxAudit": 1 }`. `maxImplement` governs the
- *    implement tier; `maxAudit` is the legacy/observability figure only (see
- *    the audit-admission-authority note above).
+ *  - `budget.json` — the per-kind caps (read-only here; the operator writes it)
+ *    as a map over kinds, e.g. `{ "implement": 2, "audit": 1, "plan": 3 }`.
+ *    A kind ABSENT from the file is uncapped (no default cap is invented).
+ *    The legacy `maxImplement` / `maxAudit` keys are still read, so existing
+ *    operator files keep their meaning. The legacy `maxAudit` figure is the
+ *    observability-only audit cap (see the audit-admission-authority note
+ *    above).
  *
  * ## Ledger shape (version 1)
  *
  *     { "version": 1,
- *       "entries": [ { "kind": "implement" | "audit",
+ *       "entries": [ { "kind": "implement" | "audit" | "plan" | "intake"
+ *                            | "risk-effort",
  *                      "itemId": "WL-…",
  *                      "instanceId": "…",
  *                      "paneId": "…"?,          // absent until a pane exists
@@ -172,16 +177,18 @@
  *
  * ## Configuration
  *
- * Resolution order: `budget.json` → defaults (`maxImplement: 2`,
- * `maxAudit: 1`, the pre-proxy single-flight figure kept for the one-release
- * legacy path and for local observability) →
- * `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` env override → clamp to
- * `0..HOST_BUDGET_MAX`. `0` disables that tier host-wide (a per-tier kill
- * switch) on the paths that read these caps (the implement tier always; the
- * audit tier only under the one-release legacy flag — the proxy owns the
- * default audit cap). A malformed `budget.json` falls back to the defaults and
- * records a warning instead of throwing; an unresolvable coordination dir
- * yields defaults + env and never throws.
+ * Resolution order: `budget.json` (a map over kinds; an absent kind is
+ * uncapped) → defaults (`implement: 2`, `audit: 1`; every other kind absent,
+ * hence uncapped) → `HERDR_HOST_MAX_<KIND>` env override → clamp to
+ * `0..HOST_BUDGET_MAX`. The two original names
+ * (`HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT`) remain the env keys
+ * for those kinds. `0` disables that kind host-wide (a per-kind kill switch)
+ * on the paths that read these caps (the implement tier always; the audit
+ * tier only under the one-release legacy flag — the proxy owns the default
+ * audit cap). A malformed `budget.json` never throws: an invalid value for a
+ * defaulted kind keeps that default with a warning, any other invalid value is
+ * left uncapped. An unresolvable coordination dir yields defaults + env and
+ * never throws.
  *
  * ## Layering
  *
@@ -219,11 +226,32 @@ export const DISPATCH_BUDGET_VERSION = 1;
 /** Budget configuration file name inside the machine coordination dir. */
 export const HOST_BUDGET_CONFIG_FILE = 'budget.json';
 
-/** Env override keys, per tier. */
+/** Every dispatch kind the host budget can cap. */
+export const HOST_BUDGET_KINDS = [
+  'implement',
+  'audit',
+  'plan',
+  'intake',
+  'risk-effort',
+] as const satisfies readonly HostBudgetKind[];
+
+/** Env override key for each kind (`HERDR_HOST_MAX_<KIND>`). */
 export const HOST_BUDGET_ENV_KEYS = {
   implement: 'HERDR_HOST_MAX_IMPLEMENT',
   audit: 'HERDR_HOST_MAX_AUDIT',
-} as const;
+  plan: 'HERDR_HOST_MAX_PLAN',
+  intake: 'HERDR_HOST_MAX_INTAKE',
+  'risk-effort': 'HERDR_HOST_MAX_RISK_EFFORT',
+} as const satisfies Record<HostBudgetKind, string>;
+
+/**
+ * Legacy `budget.json` keys still honoured for operator-file compatibility
+ * (kind-named keys win when both are present).
+ */
+export const LEGACY_HOST_BUDGET_CONFIG_KEYS = {
+  implement: 'maxImplement',
+  audit: 'maxAudit',
+} as const satisfies Partial<Record<HostBudgetKind, string>>;
 
 /** Ceiling for a configured cap — guards typos/overflow, never a policy. */
 export const HOST_BUDGET_MAX = 32;
@@ -245,11 +273,27 @@ export const HOST_BUDGET_MAX = 32;
  */
 export const HERDR_AUDIT_LOCAL_BUDGET_ENV = 'HERDR_AUDIT_LOCAL_BUDGET';
 
-/** Today's behaviour preserved: two implements, one audit. */
-export const DEFAULT_HOST_BUDGET_CONFIG: Readonly<HostBudgetConfig> = Object.freeze({
-  maxImplement: 2,
-  maxAudit: 1,
-});
+/**
+ * Default kind map: two implements, one audit. Every other kind is absent
+ * from the map and therefore uncapped — no default cap is invented for a kind
+ * the operator has not configured.
+ */
+export const DEFAULT_HOST_BUDGET_CONFIG = Object.freeze({
+  implement: 2,
+  audit: 1,
+}) satisfies HostBudgetConfig;
+
+/**
+ * The default cap for `kind`, or `undefined` when that kind is uncapped by
+ * default (every kind except `implement` / `audit`).
+ */
+export function defaultHostBudgetCap(kind: HostBudgetKind): number | undefined {
+  return kind === 'implement'
+    ? DEFAULT_HOST_BUDGET_CONFIG.implement
+    : kind === 'audit'
+      ? DEFAULT_HOST_BUDGET_CONFIG.audit
+      : undefined;
+}
 
 /**
  * Staleness window for heartbeat-based reaping: the existing 2 h convention
@@ -261,8 +305,8 @@ export const HOST_BUDGET_STALE_WINDOW_MS = DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS;
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-/** Dispatch tiers the budget covers (v1: implement + audit only). */
-export type HostBudgetKind = 'implement' | 'audit';
+/** Dispatch kinds the budget covers (every `DowntimeSkillKind` member). */
+export type HostBudgetKind = 'implement' | 'audit' | 'plan' | 'intake' | 'risk-effort';
 
 /** One in-flight dispatch, exactly the on-disk shape. */
 export interface HostBudgetEntry {
@@ -295,11 +339,12 @@ export interface HostBudgetLedger {
   entries: HostBudgetEntry[];
 }
 
-/** Per-tier caps. */
-export interface HostBudgetConfig {
-  maxImplement: number;
-  maxAudit: number;
-}
+/**
+ * Per-kind caps. A kind ABSENT from the map is uncapped: admission admits it
+ * on budget grounds without reserving a ledger entry and no cap is invented
+ * for it.
+ */
+export type HostBudgetConfig = Partial<Record<HostBudgetKind, number>>;
 
 /** A resolved configuration plus any non-fatal warnings. */
 export interface HostBudgetConfigResult {
@@ -449,11 +494,8 @@ export type ReleaseResult =
 /** Result of {@link replaceBudget} (`count` = entries written). */
 export type ReplaceBudgetResult = { ok: true; count: number } | HostBudgetFailure;
 
-/** Live counts per tier. */
-export interface HostBudgetCounts {
-  implement: number;
-  audit: number;
-}
+/** Live counts per kind. Every kind is present, defaulting to 0. */
+export type HostBudgetCounts = Record<HostBudgetKind, number>;
 
 /** Result of {@link reap}. */
 export type ReapResult =
@@ -487,49 +529,86 @@ export function clampHostBudget(value: unknown, fallback: number): number {
   return Math.min(Math.round(value), HOST_BUDGET_MAX);
 }
 
+/** Type guard for a {@link HostBudgetKind} (`unknown` input from JSON/env). */
+export function isHostBudgetKind(value: unknown): value is HostBudgetKind {
+  return (
+    typeof value === 'string' &&
+    (HOST_BUDGET_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/** A zero count for every kind — the starting point for every reduction. */
+export function emptyHostBudgetCounts(): HostBudgetCounts {
+  return {
+    implement: 0,
+    audit: 0,
+    plan: 0,
+    intake: 0,
+    'risk-effort': 0,
+  };
+}
+
 /**
- * Parse a raw `budget.json` document (already JSON-parsed) into a config.
+ * Parse a raw `budget.json` document (already JSON-parsed) into a kind map.
  *
  * Absent (`undefined`/`null`) means "no file": the defaults, no warning.
- * A non-object, an invalid per-tier value (wrong type, non-finite, negative)
- * keeps the default for that tier and records a warning — a malformed file
- * must never throw, and never half-apply a nonsense cap. Unknown extra keys
- * are ignored (additive format evolution).
+ * For a document that IS present, only the kinds it names are configured — a
+ * kind absent from the file is uncapped (no default cap is invented). A
+ * kind-named key wins over its legacy `max*` alias. An invalid value records
+ * a warning and keeps the default for a defaulted kind (`implement`/`audit`),
+ * or leaves any other kind uncapped: a malformed file must never throw, and
+ * never half-apply a nonsense cap. Unknown extra keys are ignored (additive
+ * format evolution).
  */
 export function parseBudgetConfig(raw: unknown): HostBudgetConfigResult {
-  const defaults: HostBudgetConfig = { ...DEFAULT_HOST_BUDGET_CONFIG };
-  if (raw === undefined || raw === null) return { config: defaults, warnings: [] };
+  if (raw === undefined || raw === null) {
+    return { config: { ...DEFAULT_HOST_BUDGET_CONFIG }, warnings: [] };
+  }
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return {
-      config: defaults,
+      config: { ...DEFAULT_HOST_BUDGET_CONFIG },
       warnings: ['budget.json is not a JSON object; falling back to defaults'],
     };
   }
   const doc = raw as Record<string, unknown>;
   const warnings: string[] = [];
-  const tier = (key: keyof HostBudgetConfig): number => {
+  const config: HostBudgetConfig = {};
+  for (const kind of HOST_BUDGET_KINDS) {
+    const legacyKey = (LEGACY_HOST_BUDGET_CONFIG_KEYS as Partial<
+      Record<HostBudgetKind, string>
+    >)[kind];
+    // Kind-named key wins over the legacy alias when both are present.
+    const key =
+      doc[kind] !== undefined
+        ? kind
+        : legacyKey !== undefined && doc[legacyKey] !== undefined
+          ? legacyKey
+          : undefined;
+    if (key === undefined) continue;
     const value = doc[key];
-    if (value === undefined) return defaults[key];
+    const fallback = defaultHostBudgetCap(kind);
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
       warnings.push(
-        `budget.json ${key} is not a non-negative number; using ${defaults[key]}`,
+        `budget.json ${key} is not a non-negative number; ` +
+          (fallback === undefined ? 'leaving the kind uncapped' : `using ${fallback}`),
       );
-      return defaults[key];
+      if (fallback !== undefined) config[kind] = fallback;
+      continue;
     }
-    return clampHostBudget(value, defaults[key]);
-  };
-  return {
-    config: { maxImplement: tier('maxImplement'), maxAudit: tier('maxAudit') },
-    warnings,
-  };
+    config[kind] = clampHostBudget(value, fallback ?? 0);
+  }
+  return { config, warnings };
 }
 
 /**
- * Apply `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` over a config.
+ * Apply `HERDR_HOST_MAX_<KIND>` over a config.
  *
- * Unset and empty values are "no override". A non-numeric or negative value
- * is ignored with a warning (keeping the file/default value). A valid value
- * is clamped to `[0, HOST_BUDGET_MAX]`, so `0` is the documented kill switch.
+ * One env key per kind (`HERDR_HOST_MAX_IMPLEMENT`, `HERDR_HOST_MAX_AUDIT`,
+ * `HERDR_HOST_MAX_PLAN`, `HERDR_HOST_MAX_INTAKE`,
+ * `HERDR_HOST_MAX_RISK_EFFORT`). Unset and empty values are "no override". A
+ * non-numeric or negative value is ignored with a warning (keeping the
+ * file/default figure). A valid value is clamped to `[0, HOST_BUDGET_MAX]`, so
+ * `0` is the documented per-kind kill switch.
  */
 export function applyBudgetEnvOverrides(
   config: HostBudgetConfig,
@@ -537,23 +616,23 @@ export function applyBudgetEnvOverrides(
 ): HostBudgetConfigResult {
   const next: HostBudgetConfig = { ...config };
   const warnings: string[] = [];
-  const override = (
-    key: keyof HostBudgetConfig,
-    envKey: string,
-  ): void => {
+  for (const kind of HOST_BUDGET_KINDS) {
+    const envKey = HOST_BUDGET_ENV_KEYS[kind];
     const raw = env[envKey];
-    if (raw === undefined) return;
+    if (raw === undefined) continue;
     const trimmed = raw.trim();
-    if (trimmed.length === 0) return;
+    if (trimmed.length === 0) continue;
     const parsed = Number(trimmed);
     if (!Number.isFinite(parsed) || parsed < 0) {
-      warnings.push(`${envKey}="${raw}" is not a non-negative number; keeping ${next[key]}`);
-      return;
+      const kept = next[kind];
+      warnings.push(
+        `${envKey}="${raw}" is not a non-negative number; ` +
+          (kept === undefined ? 'leaving the kind uncapped' : `keeping ${kept}`),
+      );
+      continue;
     }
-    next[key] = clampHostBudget(parsed, next[key]);
-  };
-  override('maxImplement', HOST_BUDGET_ENV_KEYS.implement);
-  override('maxAudit', HOST_BUDGET_ENV_KEYS.audit);
+    next[kind] = clampHostBudget(parsed, next[kind] ?? defaultHostBudgetCap(kind) ?? 0);
+  }
   return { config: next, warnings };
 }
 
@@ -652,7 +731,7 @@ export function isImplementPaneFresh(
 }
 
 /**
- * Reduce a ledger against a live pane list: per-tier live counts, surviving
+ * Reduce a ledger against a live pane list: per-kind live counts, surviving
  * entries and entries to reap (see the liveness table in the header).
  *
  * `livePaneIds` of `undefined` means pane liveness is UNKNOWN (a failed or
@@ -672,7 +751,7 @@ export function reduceLedgerCounts(
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
-  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const counts = emptyHostBudgetCounts();
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
@@ -724,7 +803,7 @@ export function reduceMarkerCounts(
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
-  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const counts = emptyHostBudgetCounts();
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
@@ -771,7 +850,7 @@ export function reduceAuditDisplayCounts(
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
-  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const counts = emptyHostBudgetCounts();
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
@@ -819,7 +898,7 @@ export function reduceClosedPaneSweep(
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
-  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const counts = emptyHostBudgetCounts();
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
@@ -886,7 +965,7 @@ function ioError(): HostBudgetFailure {
 function normalizeLedgerEntry(raw: unknown): HostBudgetEntry | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
-  if (o.kind !== 'implement' && o.kind !== 'audit') return null;
+  if (!isHostBudgetKind(o.kind)) return null;
   if (typeof o.itemId !== 'string' || o.itemId.length === 0) return null;
   if (typeof o.instanceId !== 'string' || o.instanceId.length === 0) return null;
   if (typeof o.root !== 'string') return null;
@@ -1141,7 +1220,7 @@ export function reserve(
   if (
     input.itemId.length === 0 ||
     input.instanceId.length === 0 ||
-    (input.kind !== 'implement' && input.kind !== 'audit')
+    !isHostBudgetKind(input.kind)
   ) {
     return { ok: false, unknown: false, reason: 'invalid-input' };
   }
@@ -1592,7 +1671,7 @@ export function freshCount(
 }
 
 /**
- * Resolve the effective per-tier caps from `budget.json` + env overrides.
+ * Resolve the effective per-kind caps from `budget.json` + env overrides.
  *
  * Never throws. A missing file is silent (defaults); malformed/unreadable
  * content records a warning and uses defaults; an unresolvable coordination

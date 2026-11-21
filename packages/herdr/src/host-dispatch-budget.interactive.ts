@@ -44,6 +44,7 @@
  */
 
 import {
+  DEFAULT_HOST_BUDGET_CONFIG,
   HOST_BUDGET_STALE_WINDOW_MS,
   auditDisplayCount,
   livePaneIdSet,
@@ -244,7 +245,10 @@ export async function prepareInteractiveAgentDispatch(
 
   const budgetOptions: HostBudgetOptions = { ...deps.budget };
   const { config } = readBudgetConfig(budgetOptions);
-  const max = kind === 'implement' ? config.maxImplement : config.maxAudit;
+  const max =
+    kind === 'implement'
+      ? (config.implement ?? DEFAULT_HOST_BUDGET_CONFIG.implement)
+      : (config.audit ?? DEFAULT_HOST_BUDGET_CONFIG.audit);
   // Fail-open liveness read: a pane-list hiccup must not block a human. The
   // tri-state (WL-0MW9VQX5T001GCUP) distinguishes UNKNOWN (`undefined` here)
   // from an authoritative empty list: unknown falls back to the freshness rule

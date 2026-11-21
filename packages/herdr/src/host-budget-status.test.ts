@@ -139,15 +139,25 @@ describe('hostBudgetSkipLine (AC3)', () => {
 
 describe('summariseHostBudget / hostBudgetStatusText (AC4)', () => {
   it('pairs the observed counts with the resolved caps', () => {
-    expect(summariseHostBudget({ implement: 1, audit: 0 }, { maxImplement: 2, maxAudit: 1 })).toEqual({
+    expect(
+      summariseHostBudget(
+        { implement: 1, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 },
+        { implement: 2, audit: 1 },
+      ),
+    ).toEqual({
       implement: { live: 1, max: 2 },
       audit: { live: 0, max: 1 },
     });
   });
 
   it('is null when either half is unavailable (never a fabricated zero)', () => {
-    expect(summariseHostBudget(null, { maxImplement: 2, maxAudit: 1 })).toBeNull();
-    expect(summariseHostBudget({ implement: 0, audit: 0 }, null)).toBeNull();
+    expect(summariseHostBudget(null, { implement: 2, audit: 1 })).toBeNull();
+    expect(
+      summariseHostBudget(
+        { implement: 0, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 },
+        null,
+      ),
+    ).toBeNull();
     expect(summariseHostBudget(undefined, undefined)).toBeNull();
   });
 

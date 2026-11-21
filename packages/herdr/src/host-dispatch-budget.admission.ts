@@ -106,6 +106,7 @@
  */
 
 import {
+  DEFAULT_HOST_BUDGET_CONFIG,
   freshCount,
   HERDR_AUDIT_LOCAL_BUDGET_ENV,
   isLegacyAuditBudgetEnabled,
@@ -502,7 +503,7 @@ export function readAuditLocalEvidence(
   const count = freshCount('audit', opts);
   if (!count.ok) return null;
   const { config } = readBudgetConfig(opts);
-  return { live: count.count, maxAudit: config.maxAudit };
+  return { live: count.count, maxAudit: config.audit ?? DEFAULT_HOST_BUDGET_CONFIG.audit };
 }
 
 /**
@@ -582,7 +583,7 @@ export function readAuditBudgetState(
     env: opts.env,
   };
   const { config } = readBudgetConfig(ledgerOptions);
-  const max = config.maxAudit;
+  const max = config.audit ?? DEFAULT_HOST_BUDGET_CONFIG.audit;
   if (max === 0) {
     // AC3: disabled tier — refused host-wide with the documented 0/0 evidence.
     return { atCap: true, live: 0, max: 0, reason: HOST_BUDGET_AUDIT_REFUSAL };
@@ -840,7 +841,7 @@ export function admitHostDispatch(
   }
 
   const { config } = readBudgetConfig(ledgerOptions);
-  const max = config.maxImplement;
+  const max = config.implement ?? DEFAULT_HOST_BUDGET_CONFIG.implement;
   if (max === 0) {
     // AC4: disabled tier — refused host-wide with the documented 0/0 evidence.
     return { admitted: false, live: 0, max: 0, reason: refuseReason(input.kind) };
