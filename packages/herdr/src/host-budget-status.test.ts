@@ -176,6 +176,19 @@ describe('summariseHostBudget / hostBudgetStatusText (AC4)', () => {
     expect(summariseHostBudget(undefined, undefined)).toBeNull();
   });
 
+  it('lists only configured (capped) kinds — an uncapped kind is never listed', () => {
+    expect(
+      summariseHostBudget(
+        { implement: 1, audit: 0, plan: 2, intake: 5, 'risk-effort': 4 },
+        { implement: 2, audit: 1, plan: 3 },
+      ),
+    ).toEqual({
+      implement: { live: 1, max: 2 },
+      audit: { live: 0, max: 1 },
+      plan: { live: 2, max: 3 },
+    });
+  });
+
   it('renders `implement n/max · audit n/max`, and nothing when unavailable', () => {
     expect(
       hostBudgetStatusText({
@@ -185,6 +198,22 @@ describe('summariseHostBudget / hostBudgetStatusText (AC4)', () => {
     ).toBe('[budget: implement 1/2 · audit 0/1]');
     expect(hostBudgetStatusText(null)).toBeNull();
     expect(hostBudgetStatusText(undefined)).toBeNull();
+  });
+
+  it('renders one segment per configured kind, in the canonical kind order', () => {
+    expect(
+      hostBudgetStatusText({
+        implement: { live: 1, max: 2 },
+        audit: { live: 0, max: 1 },
+        plan: { live: 0, max: 3 },
+        'risk-effort': { live: 1, max: 2 },
+      }),
+    ).toBe('[budget: implement 1/2 · audit 0/1 · plan 0/3 · risk-effort 1/2]');
+    // A kind configured on its own renders alone — no implement/audit chrome is
+    // invented for caps the operator never set.
+    expect(hostBudgetStatusText({ plan: { live: 1, max: 2 } })).toBe('[budget: plan 1/2]');
+    // No configured kind ⇒ no segment at all.
+    expect(hostBudgetStatusText({})).toBeNull();
   });
 });
 
@@ -411,6 +440,72 @@ describe('readHostBudgetStatus — one read-only reader (AC5)', () => {
         implement: { live: 0, max: 0 },
         audit: { live: 1, max: 3 },
       });
+    });
+  });
+
+  it('counts every configured kind by its own rule and omits uncapped kinds', async () => {
+    await withMachineDir((dir) => {
+      // plan is capped by the operator; intake/risk-effort are left uncapped.
+      writeCaps(dir, { implement: 2, audit: 1, plan: 3 });
+      writeBudgetLedger(dir, [
+        // Stale heartbeat but a live pane: the non-audit live-pane rule counts
+        // it regardless of age.
+        makeBudgetEntry({
+          kind: 'plan',
+          itemId: 'WL-PLAN',
+          paneId: 'pane-plan',
+          heartbeatAt: new Date(NOW - 5 * HOUR).toISOString(),
+        }),
+        // An uncapped kind is never counted, even with a live pane.
+        makeBudgetEntry({
+          kind: 'intake',
+          itemId: 'WL-INTAKE',
+          paneId: 'pane-intake',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+
+      const status = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList([
+          { paneId: 'pane-plan', title: 'Downtime triggered plan - WL-PLAN' },
+          { paneId: 'pane-intake', title: 'Downtime triggered intake - WL-INTAKE' },
+        ]),
+        now: NOW,
+        env: cleanEnv,
+      });
+      expect(status).toEqual({
+        implement: { live: 0, max: 2 },
+        audit: { live: 0, max: 1 },
+        plan: { live: 1, max: 3 },
+      });
+      expect(hostBudgetStatusText(status)).toBe('[budget: implement 0/2 · audit 0/1 · plan 1/3]');
+    });
+  });
+
+  it('renders a per-kind kill switch as 0/0 and a kind-only config on its own', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { plan: 0 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'plan',
+          itemId: 'WL-PLAN',
+          paneId: 'pane-plan',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      const status = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList([
+          { paneId: 'pane-plan', title: 'Downtime triggered plan - WL-PLAN' },
+        ]),
+        now: NOW,
+        env: cleanEnv,
+      });
+      // The kill switch is `plan: 0`; a budget.json that names only plan leaves
+      // implement/audit uncapped, so the header names plan alone.
+      expect(status).toEqual({ plan: { live: 0, max: 0 } });
+      expect(hostBudgetStatusText(status)).toBe('[budget: plan 0/0]');
     });
   });
 

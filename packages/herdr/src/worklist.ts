@@ -3817,7 +3817,7 @@ export async function runWorklistTui(
   const refreshPaneMarkers = async (): Promise<void> => {
     await applyPaneMarkers(state.allItems());
     // The budget counter is refreshed with the pane list it depends on
-    // (the implement tier's live-pane rule), so the two can never be read at
+    // (every non-audit kind's live-pane rule), so the two can never be read at
     // materially different times on the same cadence (AC4/AC5).
     await refreshHostBudgetStatus();
     render();
