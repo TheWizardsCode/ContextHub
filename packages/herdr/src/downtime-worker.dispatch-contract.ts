@@ -301,8 +301,9 @@ export interface DowntimeDispatchDeps {
 export interface DowntimeHostBudgetAdmissionInput {
   itemId: string;
   /**
-   * Dispatch kind. The `implement` and `audit` kinds are budgeted; the pipeline
-   * only calls the seam for those two.
+   * Dispatch kind. Every `HostBudgetKind` (implement, audit, plan, intake,
+   * risk-effort) is offered to the generic admission seam; whether it is
+   * CAPPED is decided by the budget config (WL-0MWF34932000SNTX F2).
    */
   kind: DowntimeDispatchKind;
   /** Worklog root the dispatch operates on. */
@@ -315,14 +316,22 @@ export interface DowntimeHostBudgetAdmissionInput {
  */
 export interface DowntimeHostBudgetAdmission {
   admitted: boolean;
+  /**
+   * `false` on an UNCAPPED kind's admission (WL-0MWF34932000SNTX F2): the kind
+   * has no configured cap, so it was admitted without a ledger reservation and
+   * the pipeline must not confirm/release an entry for it. Absent on a capped
+   * kind (and on every refusal), preserving the pre-generalisation shape.
+   */
+  capped?: boolean;
   live: number;
   max: number;
   /**
-   * Refusal token. The implement tier uses `host-budget-implement` /
-   * `host-budget-unknown`. The audit tier is proxy-derived
-   * (WL-0MWAMSK9H005BOHD) and reports the proxy's own vocabulary
-   * (`audit-budget-saturated` / `audit-budget-unknown`); only the one-release
-   * `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path still reports
+   * Refusal token. Every capped kind reports its unified
+   * `host-budget-<kind>` token (implement, audit, plan, intake, risk-effort)
+   * or `host-budget-unknown` / `host-budget-corrupt`. The audit tier is
+   * additionally proxy-derived (WL-0MWAMSK9H005BOHD) and reports the proxy's
+   * own vocabulary (`audit-budget-saturated` / `audit-budget-unknown`); only
+   * the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path reports
    * `host-budget-audit` / `audit-host-saturated` / `host-budget-unknown`.
    */
   reason?: string;
@@ -794,13 +803,13 @@ export const LOST_CLAIM_REASONS: ReadonlySet<string> = new Set([
 
 /**
  * Host-budget refusals: the machine-wide dispatch budget (or the proxy-owned
- * audit-budget verdict) refused this BUDGETED candidate (`implement` /
- * `audit`). Every token below is emitted by the same admission seam
- * (`dispatchClaimedTier`) with the same neutral contract — `{live, max}`
+ * audit-budget verdict) refused this CAPPED candidate (any `HostBudgetKind`,
+ * WL-0MWF34932000SNTX F2). Every token below is emitted by the same admission
+ * seam (`dispatchClaimedTier`) with the same neutral contract — `{live, max}`
  * evidence, no strike, no cooldown, no attempt budget — so all of them are
  * continuable holds:
- *  - `host-budget-implement` / `host-budget-audit` / `host-budget-unknown`
- *    (the ledger path), and
+ *  - `host-budget-<kind>` for every capped kind (implement, audit, plan,
+ *    intake, risk-effort) plus `host-budget-unknown` (the ledger path), and
  *  - `audit-budget-saturated` / `audit-budget-unknown` (the proxy-owned
  *    availability verdict) plus the one-release legacy `audit-host-saturated`.
  *
@@ -810,13 +819,15 @@ export const LOST_CLAIM_REASONS: ReadonlySet<string> = new Set([
  * tier was refused") and the implement/host rung below it
  * (WL-0MWDDHVF2004PTYX AC2).
  *
- * Prep work (`plan` / `intake` / `risk-effort`) is never budget-gated, which
- * is exactly why a refusal must not end the scan: the prep candidate ranked
- * behind the refused budgeted candidate is still dispatchable.
+ * A refusal must never end the scan: the candidates ranked behind the refused
+ * one are still dispatchable (the motivating 2/2 prep-starvation regression).
  */
 export const HOST_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
   'host-budget-implement',
   'host-budget-audit',
+  'host-budget-plan',
+  'host-budget-intake',
+  'host-budget-risk-effort',
   'host-budget-unknown',
   'audit-budget-saturated',
   'audit-budget-unknown',

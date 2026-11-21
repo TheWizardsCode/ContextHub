@@ -1864,12 +1864,11 @@ describe('host-wide dispatch budget — audit tier (F2)', () => {
 // dispatcher path (`dispatchDowntimeWork`) must consult admission for plan /
 // intake / risk-effort exactly as it does for implement/audit, and honour a
 // unified `host-budget-<kind>` refusal (no spawn, no marker, claim rolled
-// back). Committed RED as vitest `it.fails(...)` — the repo's documented TDD
-// pattern (see `coordination-registered-root-sweep.test.ts`) — so the suite
-// stays green while the contract is red; F2 flips them to `it` once the
-// generic admission lands.
-describe('host-wide dispatch budget — generalised kinds (T1 contract; RED until F2)', () => {
-  it.fails('consults admission for a plan dispatch and honours host-budget-plan', async () => {
+// back). Committed RED as vitest `it.fails(...)` (the repo's documented TDD
+// pattern); F2 (WL-0MWF34932000SNTX) flipped them to plain `it`s once the
+// generic admission landed.
+describe('host-wide dispatch budget — generalised kinds (T1 contract; F2 green)', () => {
+  it('consults admission for a plan dispatch and honours host-budget-plan', async () => {
     const admitHostDispatch = vi.fn().mockResolvedValue({
       admitted: false,
       live: 1,
@@ -1901,7 +1900,7 @@ describe('host-wide dispatch budget — generalised kinds (T1 contract; RED unti
     expect(deps.recordDispatch).not.toHaveBeenCalled();
   });
 
-  it.fails('consults admission for an intake dispatch and honours host-budget-intake', async () => {
+  it('consults admission for an intake dispatch and honours host-budget-intake', async () => {
     const admitHostDispatch = vi.fn().mockResolvedValue({
       admitted: false,
       live: 1,
@@ -1909,10 +1908,16 @@ describe('host-wide dispatch budget — generalised kinds (T1 contract; RED unti
       reason: 'host-budget-intake',
     });
     const deps = makeDeps({
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id: 'WL-INTAKE', title: 'Intake me', stage: 'idea', status: 'open' },
-      }),
+      // Tier 2 (intake_complete → plan) must answer empty so the idea tier
+      // (`intake`) is the one that dispatches.
+      getNextItem: vi.fn(async (stage: string) =>
+        stage === 'idea'
+          ? {
+              ok: true as const,
+              candidate: { id: 'WL-INTAKE', title: 'Intake me', stage: 'idea', status: 'open' },
+            }
+          : { ok: true as const, candidate: null },
+      ),
       admitHostDispatch,
       releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
     });
@@ -1932,7 +1937,7 @@ describe('host-wide dispatch budget — generalised kinds (T1 contract; RED unti
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 
-  it.fails('consults admission for a risk-effort dispatch and honours host-budget-risk-effort', async () => {
+  it('consults admission for a risk-effort dispatch and honours host-budget-risk-effort', async () => {
     // A plan_complete item missing risk/effort classifies as `risk-effort` on
     // the Herdr-head scan (the production ranking path).
     const riskItem = {

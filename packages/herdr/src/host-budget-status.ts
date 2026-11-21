@@ -82,6 +82,11 @@ import {
   type HostBudgetDecisionReason,
   type HostBudgetEvidence,
 } from './downtime-log.js';
+import {
+  HOST_BUDGET_INTAKE_REASON,
+  HOST_BUDGET_PLAN_REASON,
+  HOST_BUDGET_RISK_EFFORT_REASON,
+} from './downtime-log-budget.js';
 
 /** One tier's observed in-flight count and configured cap. */
 export type HostBudgetTierStatus = HostBudgetEvidence;
@@ -148,6 +153,9 @@ export function hostBudgetStatusText(
 const TIER_LABEL_BY_REASON: Readonly<Record<HostBudgetDecisionReason, string>> = {
   [HOST_BUDGET_IMPLEMENT_REASON]: 'implement',
   [HOST_BUDGET_AUDIT_REASON]: 'audit',
+  [HOST_BUDGET_PLAN_REASON]: 'plan',
+  [HOST_BUDGET_INTAKE_REASON]: 'intake',
+  [HOST_BUDGET_RISK_EFFORT_REASON]: 'risk-effort',
   // `host-budget-unknown` can come from either tier (the ledger could not be
   // trusted), so the line names the budget itself rather than guessing a tier.
   [HOST_BUDGET_UNKNOWN_REASON]: 'budget',

@@ -5515,8 +5515,13 @@ describe('2/2 implement-cap regression (parent AC7)', () => {
     const deps = makeCoordinationDeps({
       getReviewQueueCount: vi.fn().mockResolvedValue(0),
       // Machine-wide implement ledger at the cap (2/2): any implement
-      // dispatch is refused with the neutral hold.
-      admitHostDispatch: vi.fn().mockResolvedValue({ admitted: false, live: 2, max: 2, reason: 'host-budget-implement' }),
+      // dispatch is refused with the neutral hold. Every other kind is offered
+      // to the same generic admission (WL-0MWF34932000SNTX F2) and is uncapped.
+      admitHostDispatch: vi.fn(async (input: { kind: string }) =>
+        input.kind === 'implement'
+          ? { admitted: false as const, live: 2, max: 2, reason: 'host-budget-implement' }
+          : { admitted: true as const, live: 0, max: 0, capped: false },
+      ),
       fetchItem: fetchById({
         'WL-IMP': { id: 'WL-IMP', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' },
         'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
@@ -5554,11 +5559,10 @@ describe('2/2 implement-cap regression (parent AC7)', () => {
 // COORDINATION-LEADER path (`dispatchFromCoordination`) must consult admission
 // for plan / intake / risk-effort exactly as it does for implement/audit, and
 // honour a unified `host-budget-<kind>` refusal on the offer it selected.
-// Committed RED as vitest `it.fails(...)` — the repo's documented TDD pattern
-// (see `coordination-registered-root-sweep.test.ts`) — so the suite stays
-// green while the contract is red; F2 flips them to `it` once the generic
-// admission lands.
-describe('host-wide dispatch budget — generalised kinds (T1 contract; RED until F2)', () => {
+// Committed RED as vitest `it.fails(...)` (the repo's documented TDD pattern);
+// F2 (WL-0MWF34932000SNTX) flipped them to plain `it`s once the generic
+// admission landed.
+describe('host-wide dispatch budget — generalised kinds (T1 contract; F2 green)', () => {
   const OFFERS = [
     { kind: 'plan', stage: 'intake_complete' },
     { kind: 'intake', stage: 'idea' },
@@ -5567,7 +5571,7 @@ describe('host-wide dispatch budget — generalised kinds (T1 contract; RED unti
   ] as const;
 
   for (const { kind, stage } of OFFERS) {
-    it.fails(`consults admission for a ${kind} offer and honours host-budget-${kind}`, async () => {
+    it(`consults admission for a ${kind} offer and honours host-budget-${kind}`, async () => {
       const admitHostDispatch = vi.fn().mockResolvedValue({
         admitted: false,
         live: 1,

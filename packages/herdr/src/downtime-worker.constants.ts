@@ -19,6 +19,11 @@ import {
   HOST_BUDGET_UNKNOWN_REASON,
   type HostBudgetEvidence,
 } from './downtime-log.js';
+import {
+  HOST_BUDGET_INTAKE_REASON,
+  HOST_BUDGET_PLAN_REASON,
+  HOST_BUDGET_RISK_EFFORT_REASON,
+} from './downtime-log-budget.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -257,6 +262,15 @@ export function decisionHeaderToken(reason: string): string {
       // keeps its raw header token, pinned by the orchestrator suite.
     case 'audit-budget-saturated':
       return 'budget-audit';
+    // Every other capped kind has its own `budget-<kind>` segment
+    // (WL-0MWF34932000SNTX F2): the operator can tell WHICH kind's host cap
+    // stopped the tick.
+    case HOST_BUDGET_PLAN_REASON:
+      return 'budget-plan';
+    case HOST_BUDGET_INTAKE_REASON:
+      return 'budget-intake';
+    case HOST_BUDGET_RISK_EFFORT_REASON:
+      return 'budget-risk-effort';
     case HOST_BUDGET_UNKNOWN_REASON:
     // A corrupt/unreadable ledger is a ledger-trust failure like the lock/I-O
     // arm, so it quotes the same header segment (WL-0MWFJD8ZO000J1R8).

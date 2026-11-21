@@ -1328,8 +1328,8 @@ describe('freshCount — the audit-only over-hold (T1/SKILL AC5)', () => {
 // tokens. The config/ledger specs below were committed RED as vitest
 // `it.fails(...)` (the repo's documented TDD pattern — see
 // `coordination-registered-root-sweep.test.ts` /
-// `downtime-worker.clamps.test.ts`); F1 flipped them to plain `it`s, and the
-// remaining counting-asymmetry spec stays RED until F2.
+// `downtime-worker.clamps.test.ts`); F1 flipped the config/ledger specs and
+// F2 (WL-0MWF34932000SNTX) flipped the counting-asymmetry spec to plain `it`s.
 
 describe('generalised config — kind-named caps, absent = unlimited (T1 → F1)', () => {
   it('defaults stay implement: 2 / audit: 1 and every other kind is uncapped', () => {
@@ -1392,20 +1392,20 @@ describe('counting asymmetry — audit over-hold, every other kind live-pane (T1
       expect(liveCount('plan' as never, [], { now: NOW })).toMatchObject({ ok: true, count: 0 });
     }));
 
-  it.fails('a non-audit kind keeps pane-derived freshness: a stale-but-live plan entry counts', () =>
+  it('a non-audit kind keeps pane-derived freshness: a stale-but-live plan entry counts', () =>
     withMachineDir((dir) => {
       writeBudgetLedger(dir, [
         makeBudgetEntry({
           kind: 'plan' as never,
-          itemId: 'WL-PLAN-LONG',
-          paneId: 'p-plan-long',
+          itemId: 'WL-PLANLONG',
+          paneId: 'p-plan-WL-PLANLONG',
           heartbeatAt: new Date(NOW - 3 * HOUR).toISOString(),
         }),
       ]);
       // Only audit releases on the 2 h heartbeat window; every other kind is
       // released by its PANE leaving the live list, so a live long run still
       // counts (AC5 — the generalised pane-derived freshness rule).
-      expect(liveCount('plan' as never, [kindPane('plan', 'WL-PLAN-LONG')], { now: NOW })).toMatchObject(
+      expect(liveCount('plan' as never, [kindPane('plan', 'WL-PLANLONG')], { now: NOW })).toMatchObject(
         { ok: true, count: 1 },
       );
     }));

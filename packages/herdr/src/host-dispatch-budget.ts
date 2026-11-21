@@ -711,23 +711,25 @@ export function livePaneIdSet(
 }
 
 /**
- * True when a confirmed entry with a live pane counts for the implement tier
- * (WL-0MW9VQ08W000SN63 pane-derived freshness — the ONE counting rule).
+ * True when a confirmed entry with a live pane counts for a NON-AUDIT kind
+ * (WL-0MW9VQ08W000SN63 pane-derived freshness — the ONE counting rule;
+ * generalised to every capped kind by WL-0MWF34932000SNTX F2).
  *
- * The implement tier treats a confirmed entry (non-empty `paneId`) whose pane
- * is in the trusted live list as fresh REGARDLESS of heartbeat age: the pane
- * is conclusive evidence the dispatch is still in flight, and `heartbeatAt`
- * is only written at `reserve`/`confirmHostDispatch` (there is no refresh
- * path), so a >2 h implement would otherwise silently drop out of the counter
- * and the cap while its pane is demonstrably alive. The audit tier keeps the
- * freshness rule (staleness is its release; see {@link reduceMarkerCounts}).
+ * Every kind except `audit` treats a confirmed entry (non-empty `paneId`)
+ * whose pane is in the trusted live list as fresh REGARDLESS of heartbeat age:
+ * the pane is conclusive evidence the dispatch is still in flight, and
+ * `heartbeatAt` is only written at `reserve`/`confirmHostDispatch` (there is no
+ * refresh path), so a >2 h dispatch would otherwise silently drop out of the
+ * counter and the cap while its pane is demonstrably alive. The audit tier is
+ * the ONLY over-hold: it keeps the freshness rule (staleness is its release;
+ * see {@link reduceMarkerCounts}). That asymmetry is deliberate (parent AC4).
  */
-export function isImplementPaneFresh(
+export function isPaneDerivedFresh(
   entry: { kind: HostBudgetKind },
   hasLivePane: boolean,
   stale: boolean,
 ): boolean {
-  return hasLivePane && (entry.kind === 'implement' || !stale);
+  return hasLivePane && (entry.kind !== 'audit' || !stale);
 }
 
 /**
@@ -772,14 +774,15 @@ export function reduceLedgerCounts(
       continue;
     }
     retained.push(entry);
-    // Pane-derived freshness (WL-0MW9VQ08W000SN63): for the IMPLEMENT tier a
-    // confirmed entry whose pane is in the trusted live list is counted
-    // REGARDLESS of heartbeat age — a live pane is conclusive evidence the
-    // dispatch is still in flight, and `heartbeatAt` is only written at
-    // reserve/confirm (no refresh path), so a >2 h implement must not silently
-    // drop out of the cap. The AUDIT tier keeps the freshness rule here (its
-    // authoritative counts live in reduceMarkerCounts / reduceAuditDisplayCounts).
-    if (isImplementPaneFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
+    // Pane-derived freshness (WL-0MW9VQ08W000SN63, generalised by
+    // WL-0MWF34932000SNTX F2): for EVERY kind except `audit` a confirmed entry
+    // whose pane is in the trusted live list is counted REGARDLESS of heartbeat
+    // age — a live pane is conclusive evidence the dispatch is still in flight,
+    // and `heartbeatAt` is only written at reserve/confirm (no refresh path),
+    // so a >2 h dispatch must not silently drop out of the cap. The AUDIT tier
+    // keeps the freshness rule here (its authoritative counts live in
+    // reduceMarkerCounts / reduceAuditDisplayCounts) and is the only over-hold.
+    if (isPaneDerivedFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }
@@ -906,16 +909,16 @@ export function reduceClosedPaneSweep(
       typeof entry.paneId === 'string' && entry.paneId.length > 0;
     const hasLivePane = confirmed && livePaneIds.has(entry.paneId as string);
     const stale = isEntryStale(entry, now, staleWindowMs);
-    // Pane-derived freshness for the implement tier (WL-0MW9VQ08W000SN63):
-    // a stale-but-live implement entry is retained, never reaped on staleness.
-    const staleForImplement =
-      stale && (entry.kind !== 'implement' || !hasLivePane);
-    if (staleForImplement || (confirmed && !hasLivePane)) {
+    // Pane-derived freshness for every non-audit kind (WL-0MW9VQ08W000SN63,
+    // generalised by WL-0MWF34932000SNTX F2): a stale-but-live entry is
+    // retained, never reaped on staleness. Audit keeps the 2 h release.
+    const staleDespiteLivePane = stale && (entry.kind === 'audit' || !hasLivePane);
+    if (staleDespiteLivePane || (confirmed && !hasLivePane)) {
       reaped.push(entry);
       continue;
     }
     retained.push(entry);
-    if (isImplementPaneFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
+    if (isPaneDerivedFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }

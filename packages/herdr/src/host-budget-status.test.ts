@@ -67,6 +67,9 @@ describe('host-budget reason tokens and header mapping (AC1/AC2)', () => {
     expect([...HOST_BUDGET_DECISION_REASONS]).toEqual([
       'host-budget-implement',
       'host-budget-audit',
+      'host-budget-plan',
+      'host-budget-intake',
+      'host-budget-risk-effort',
       'host-budget-unknown',
       // The ledger exists but cannot be trusted (WL-0MWFJD8ZO000J1R8): the
       // decision log names the corruption so an operator repair is actionable.
@@ -85,6 +88,10 @@ describe('host-budget reason tokens and header mapping (AC1/AC2)', () => {
   it('maps each token to its own header token, distinct from capacity tokens', () => {
     expect(decisionHeaderToken(HOST_BUDGET_IMPLEMENT_REASON)).toBe('budget-implement');
     expect(decisionHeaderToken(HOST_BUDGET_AUDIT_REASON)).toBe('budget-audit');
+    // Every other capped kind has its own segment (WL-0MWF34932000SNTX F2).
+    expect(decisionHeaderToken('host-budget-plan')).toBe('budget-plan');
+    expect(decisionHeaderToken('host-budget-intake')).toBe('budget-intake');
+    expect(decisionHeaderToken('host-budget-risk-effort')).toBe('budget-risk-effort');
     expect(decisionHeaderToken(HOST_BUDGET_UNKNOWN_REASON)).toBe('budget-unknown');
     // A corrupt ledger is a whole-budget failure: same header segment as the
     // unknown arm, distinct decision-log token.
@@ -114,6 +121,16 @@ describe('hostBudgetSkipLine (AC3)', () => {
     );
     expect(hostBudgetSkipLine(HOST_BUDGET_AUDIT_REASON, { live: 1, max: 1 })).toBe(
       '[worklog-plugin] Downtime audit tier skipped: host-budget-audit (live=1, max=1)',
+    );
+    // Any capped kind's unified token names that kind (WL-0MWF34932000SNTX F2).
+    expect(hostBudgetSkipLine('host-budget-plan', { live: 1, max: 1 })).toBe(
+      '[worklog-plugin] Downtime plan tier skipped: host-budget-plan (live=1, max=1)',
+    );
+    expect(hostBudgetSkipLine('host-budget-intake', { live: 1, max: 1 })).toBe(
+      '[worklog-plugin] Downtime intake tier skipped: host-budget-intake (live=1, max=1)',
+    );
+    expect(hostBudgetSkipLine('host-budget-risk-effort', { live: 1, max: 1 })).toBe(
+      '[worklog-plugin] Downtime risk-effort tier skipped: host-budget-risk-effort (live=1, max=1)',
     );
   });
 

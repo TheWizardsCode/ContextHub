@@ -21,11 +21,13 @@
  * (`decisionHeaderToken`) and the stderr skip line can never drift into a
  * second spelling of the same refusal.
  *
- *  - `host-budget-implement` — the implement tier is at/over `maxImplement`
- *    (or the tier is disabled with `maxImplement: 0`);
- *  - `host-budget-audit` — the same for the audit tier at any cap other than 1
- *    (the retired marker's `audit-host-saturated` token is kept at cap 1 so
- *    existing consumers are unchanged — it is NOT one of these tokens);
+ *  - `host-budget-<kind>` — the kind is at/over its configured cap (or the
+ *    kind is disabled with a `0` cap). One token per capped kind
+ *    (WL-0MWF34932000SNTX F2): `host-budget-implement`, `host-budget-audit`,
+ *    `host-budget-plan`, `host-budget-intake`, `host-budget-risk-effort`.
+ *    The retired marker's `audit-host-saturated` token is DELETED by the
+ *    follow-up removal slice — the audit tier reports `host-budget-audit` at
+ *    every cap, including the `maxAudit: 1` default;
  *  - `host-budget-unknown` — the ledger could not be trusted (lock contention
  *    or an I/O failure); the dispatcher failed closed;
  *  - `host-budget-corrupt` — the ledger EXISTS but cannot be read as a valid
@@ -36,8 +38,36 @@
 export const HOST_BUDGET_IMPLEMENT_REASON = 'host-budget-implement';
 /** Audit-tier counterpart of {@link HOST_BUDGET_IMPLEMENT_REASON}. */
 export const HOST_BUDGET_AUDIT_REASON = 'host-budget-audit';
+/** Plan-tier counterpart of {@link HOST_BUDGET_IMPLEMENT_REASON}. */
+export const HOST_BUDGET_PLAN_REASON = 'host-budget-plan';
+/** Intake-tier counterpart of {@link HOST_BUDGET_IMPLEMENT_REASON}. */
+export const HOST_BUDGET_INTAKE_REASON = 'host-budget-intake';
+/** Risk-effort-tier counterpart of {@link HOST_BUDGET_IMPLEMENT_REASON}. */
+export const HOST_BUDGET_RISK_EFFORT_REASON = 'host-budget-risk-effort';
 /** The ledger could not be trusted (fail closed). */
 export const HOST_BUDGET_UNKNOWN_REASON = 'host-budget-unknown';
+
+/**
+ * The per-kind budget refusal tokens (WL-0MWF34932000SNTX F2).
+ *
+ * One map so admission can name a kind's cap refusal without a two-kind
+ * switch: a capped kind refuses with `host-budget-<kind>`, and an uncapped
+ * kind can never produce one.
+ */
+export const HOST_BUDGET_KIND_REASONS = {
+  implement: HOST_BUDGET_IMPLEMENT_REASON,
+  audit: HOST_BUDGET_AUDIT_REASON,
+  plan: HOST_BUDGET_PLAN_REASON,
+  intake: HOST_BUDGET_INTAKE_REASON,
+  'risk-effort': HOST_BUDGET_RISK_EFFORT_REASON,
+} as const;
+
+/** The dispatch kinds the budget covers, as a value union. */
+export type HostBudgetReasonKind = keyof typeof HOST_BUDGET_KIND_REASONS;
+
+/** The `host-budget-<kind>` refusal token for one budget kind. */
+export type HostBudgetKindReason =
+  (typeof HOST_BUDGET_KIND_REASONS)[HostBudgetReasonKind];
 
 /**
  * The ledger exists but cannot be trusted (corrupt/unreadable bytes). Fail
@@ -50,6 +80,9 @@ export const HOST_BUDGET_CORRUPT_REASON = 'host-budget-corrupt';
 export const HOST_BUDGET_DECISION_REASONS = [
   HOST_BUDGET_IMPLEMENT_REASON,
   HOST_BUDGET_AUDIT_REASON,
+  HOST_BUDGET_PLAN_REASON,
+  HOST_BUDGET_INTAKE_REASON,
+  HOST_BUDGET_RISK_EFFORT_REASON,
   HOST_BUDGET_UNKNOWN_REASON,
   HOST_BUDGET_CORRUPT_REASON,
 ] as const;

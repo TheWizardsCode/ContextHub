@@ -84,7 +84,8 @@ function budgetRefusal(kind: 'implement' | 'audit', reason: string, live = 2, ma
   return vi.fn(async (input: { kind: string }) =>
     input.kind === kind
       ? { admitted: false as const, live, max, reason }
-      : { admitted: true as const, live: 0, max },
+      : // Every other kind is uncapped by default (WL-0MWF34932000SNTX F2).
+        { admitted: true as const, live: 0, max: 0, capped: false },
   );
 }
 
@@ -149,8 +150,9 @@ describe('cross-tick starve replay — dispatchFromHerdrList (AC1/AC2)', () => {
         expect.stringContaining('/skill:plan WL-PLAN'),
         expect.anything(),
       );
-      // The refused implement was never claimed or spawned, and the budget
-      // seam is only consulted for the budgeted kind.
+      // The refused implement was never claimed or spawned; the admission seam
+      // is consulted for EVERY kind now (WL-0MWF34932000SNTX F2) and reports
+      // the plan as uncapped, so nothing is reserved for it.
       expect(deps.spawnAgentPane).not.toHaveBeenCalledWith(
         expect.stringContaining('/skill:implement'),
         expect.anything(),
@@ -158,8 +160,8 @@ describe('cross-tick starve replay — dispatchFromHerdrList (AC1/AC2)', () => {
       expect(admitHostDispatch).toHaveBeenCalledWith(
         expect.objectContaining({ kind: 'implement', itemId: 'WL-IMP' }),
       );
-      expect(admitHostDispatch).not.toHaveBeenCalledWith(
-        expect.objectContaining({ kind: 'plan' }),
+      expect(admitHostDispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'plan', itemId: 'WL-PLAN' }),
       );
     }
   });

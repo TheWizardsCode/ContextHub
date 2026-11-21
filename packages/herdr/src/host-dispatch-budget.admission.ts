@@ -1,7 +1,8 @@
 /**
  * packages/herdr/src/host-dispatch-budget.admission.ts — the dispatcher's
- * host-wide admission read for the implement and audit tiers
- * (WL-0MVXY0YG7009JMHI F3, WL-0MVXY0XPF006YUHA F2, parent WL-0MVXWQFGV000D2AB).
+ * host-wide admission read for every capped dispatch kind
+ * (WL-0MVXY0YG7009JMHI F3, WL-0MVXY0XPF006YUHA F2, parent WL-0MVXWQFGV000D2AB;
+ * kind-generalised by WL-0MWF34932000SNTX F2, parent WL-0MW50EHZ6007QBPB).
  *
  * Single responsibility: turn the machine-scoped ledger (F1,
  * `host-dispatch-budget.ts`) plus the live pane list into exactly ONE
@@ -51,19 +52,29 @@
  * RELEASE (read per tick, documented in `host-dispatch-budget.ts`) and marks
  * the legacy path in the decision log.
  *
- * ## Per-tier counting (deliberate asymmetry)
+ * ## Per-kind counting (deliberate asymmetry)
  *
- *  - **implement** counts entries whose pane is in the live pane list
- *    (`liveCount`) — pane-derived freshness since WL-0MW9VQ08W000SN63: a
- *    confirmed entry with a live pane counts regardless of heartbeat age. A
- *    reserved-but-unspawned entry is invisible until its pane id is confirmed.
- *  - **audit** counts fresh entries with NO live-pane requirement
+ *  - **every kind except audit** counts entries whose pane is in the live
+ *    pane list (`liveCount`) — pane-derived freshness since
+ *    WL-0MW9VQ08W000SN63: a confirmed entry with a live pane counts regardless
+ *    of heartbeat age, and its slot frees when the pane leaves the live list.
+ *    A reserved-but-unspawned entry is invisible until its pane id is
+ *    confirmed.
+ *  - **audit** ALONE counts fresh entries with NO live-pane requirement
  *    (`freshCount`), which is exactly the semantics of the retired host-wide
  *    `active-audit` marker: the slot is held from the reservation until a
  *    release point fires (audit pane close, dispatch/spawn failure, claim
  *    rollback) and is released by the 2 h staleness window. That is what makes
  *    `maxAudit: 1` indistinguishable from the marker it replaces. A non-stale
  *    legacy marker file is counted as one synthetic entry on read.
+ *
+ * ## Uncapped kinds admit without bookkeeping (parent AC2)
+ *
+ * A kind ABSENT from `budget.json` (and from the default map — every kind
+ * except `implement` / `audit`) is unlimited (WL-0MWF34932000SNTX F2):
+ * `admitHostDispatch` admits it with `capped: false` and touches no ledger
+ * entry, so no reserve/release/confirm bookkeeping runs for it and it can
+ * never produce a budget refusal token.
  *
  * ## Fail directions (deliberate, parent AC9)
  *
@@ -137,6 +148,7 @@ import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js'
 import {
   AUDIT_BUDGET_DIVERGENCE_REASON,
   AUDIT_BUDGET_LEGACY_REASON,
+  HOST_BUDGET_KIND_REASONS,
   type AuditBudgetDivergence,
   type AuditBudgetLocalEvidence,
 } from './downtime-log-budget.js';
@@ -144,24 +156,33 @@ import {
 export type { HostBudgetLivePane, HostBudgetLivePanesResult } from './host-dispatch-budget.js';
 
 /**
- * Refusal reason: the tier is at/over its machine-wide cap.
+ * Refusal reason: the kind is at/over its machine-wide cap.
  *
- * The three budget tokens are defined by the decision log's vocabulary of
- * record (`downtime-log.ts`, WL-0MVXY0ZYW009NEJD F5) and re-exported here under
+ * The budget tokens are defined by the decision log's vocabulary of record
+ * (`downtime-log-budget.ts`, WL-0MVXY0ZYW009NEJD F5) and re-exported here under
  * the names admission has always used — one spelling, so the decision entry,
  * the header token and the stderr skip line can never drift.
+ *
+ * Since WL-0MWF34932000SNTX F2 every capped kind has its own token via
+ * {@link HOST_BUDGET_KIND_REASONS}; {@link HOST_BUDGET_IMPLEMENT_REFUSAL} and
+ * {@link HOST_BUDGET_AUDIT_REFUSAL} remain the two long-standing aliases.
  */
 export const HOST_BUDGET_IMPLEMENT_REFUSAL = HOST_BUDGET_IMPLEMENT_REASON;
 
-/** Refusal reason: the tier is at/over its machine-wide cap (audit tier). */
+/** Refusal reason: the audit tier is at/over its machine-wide cap. */
 export const HOST_BUDGET_AUDIT_REFUSAL = HOST_BUDGET_AUDIT_REASON;
 
 /**
  * Refusal reason: the AUDIT tier is at its cap with `maxAudit: 1`
  * (WL-0MVXY0XPF006YUHA F2 AC1). The legacy marker produced this token, so the
  * default single-flight case stays byte-identical in the decision log and
- * every existing consumer of `audit-host-saturated` keeps working; the audit
- * tier uses `host-budget-audit` at every other cap.
+ * every existing consumer of `audit-host-saturated` keeps working.
+ *
+ * NO LONGER PRODUCED (WL-0MWF34932000SNTX F2): the audit tier reports
+ * `host-budget-audit` at every cap, including the `maxAudit: 1` default. The
+ * constant and its remaining literal consumers are deleted by the follow-up
+ * token-removal slice (WL-0MWF34IEP00221NU); keeping the export until then
+ * lets the frozen decision-log vocabulary compile unchanged.
  */
 export const HOST_BUDGET_AUDIT_SATURATED_REFUSAL = 'audit-host-saturated';
 
@@ -181,6 +202,7 @@ export const HOST_BUDGET_CORRUPT_REFUSAL = HOST_BUDGET_CORRUPT_REASON;
 export type HostBudgetRefusalReason =
   | typeof HOST_BUDGET_IMPLEMENT_REFUSAL
   | typeof HOST_BUDGET_AUDIT_REFUSAL
+  | (typeof HOST_BUDGET_KIND_REASONS)[keyof typeof HOST_BUDGET_KIND_REASONS]
   | typeof HOST_BUDGET_AUDIT_SATURATED_REFUSAL
   | typeof HOST_BUDGET_UNKNOWN_REFUSAL
   | typeof HOST_BUDGET_CORRUPT_REFUSAL
@@ -288,9 +310,16 @@ export type AuditBudgetLogEvent =
 /** The admission verdict. `live`/`max` are the evidence the caller reports. */
 export interface HostBudgetAdmission {
   admitted: boolean;
+  /**
+   * `false` on an UNCAPPED kind's admission (WL-0MWF34932000SNTX F2): the kind
+   * has no configured cap, so it was admitted without a reservation and the
+   * caller must not confirm/release a ledger entry for it. Absent on a capped
+   * kind (or a refusal), preserving the pre-generalisation verdict shape.
+   */
+  capped?: boolean;
   /** Live dispatches of this kind (before this dispatch starts). */
   live: number;
-  /** The tier's configured cap. */
+  /** The tier's configured cap (`0` on an uncapped kind — see `capped`). */
   max: number;
   /** Present only on a refusal. */
   reason?: HostBudgetRefusalReason;
@@ -334,7 +363,7 @@ export interface HostBudgetAdmission {
 }
 
 function refuseReason(kind: HostBudgetKind): HostBudgetRefusalReason {
-  return kind === 'audit' ? HOST_BUDGET_AUDIT_REFUSAL : HOST_BUDGET_IMPLEMENT_REFUSAL;
+  return HOST_BUDGET_KIND_REASONS[kind];
 }
 
 /**
@@ -360,10 +389,10 @@ export interface HostBudgetAuditStateOptions extends HostBudgetOptions {
  *
  * `atCap` is the single admission answer: `true` means the audit tier admits no
  * further dispatch this tick. `reason` is the token the dispatcher reports —
- * `audit-host-saturated` at `maxAudit: 1` (the legacy marker token, AC1),
- * `host-budget-audit` for every other cap (AC3) and `host-budget-unknown` for a
- * fail-closed unreadable ledger (AC6). `live`/`max` are the reported evidence
- * (`0/0` for a disabled tier).
+ * `host-budget-audit` at EVERY cap (WL-0MWF34932000SNTX F2 removed the
+ * `maxAudit: 1` → `audit-host-saturated` special-case) and
+ * `host-budget-unknown` / `host-budget-corrupt` for an untrustworthy ledger.
+ * `live`/`max` are the reported evidence (`0/0` for a disabled tier).
  */
 export interface HostBudgetAuditState {
   atCap: boolean;
@@ -570,8 +599,9 @@ function emitAuditBudgetEvent(
  *     `host-budget-unknown`;
  *  5. unresolvable coordination dir ⇒ not at cap: with no machine dir there is
  *     no ledger and no new failure mode (parent AC11);
- *  6. at/over cap ⇒ `audit-host-saturated` when `max === 1`, otherwise
- *     `host-budget-audit` (AC1/AC3).
+ *  6. at/over cap ⇒ `host-budget-audit` at EVERY cap, including the
+ *     `maxAudit: 1` default (WL-0MWF34932000SNTX F2 removed the retired
+ *     marker's `audit-host-saturated` special-case).
  */
 export function readAuditBudgetState(
   opts: HostBudgetAuditStateOptions,
@@ -611,10 +641,11 @@ export function readAuditBudgetState(
       atCap: true,
       live: count.count,
       max,
-      // AC1: the single-flight default keeps the marker's reason token; any
-      // other cap reports the budget's own token (AC3).
-      reason:
-        max === 1 ? HOST_BUDGET_AUDIT_SATURATED_REFUSAL : HOST_BUDGET_AUDIT_REFUSAL,
+      // WL-0MWF34932000SNTX F2: ONE token for every cap. The retired marker's
+      // `audit-host-saturated` special-case at `max === 1` is gone, so the
+      // audit tier and the three other capped kinds share the same
+      // `host-budget-<kind>` vocabulary.
+      reason: HOST_BUDGET_AUDIT_REFUSAL,
     };
   }
   return { atCap: false, live: count.count, max };
@@ -803,28 +834,36 @@ function admitAuditDispatch(
 }
 
 /**
- * One admission decision for one dispatch attempt.
+ * One admission decision for one dispatch attempt, for EVERY dispatch kind
+ * (WL-0MWF34932000SNTX F2).
  *
  * Never throws; every outcome is expressed as `admitted` plus the `live`/`max`
- * evidence. The implement tier follows the original order:
+ * evidence. The order for a capped, non-audit kind is the original one:
  *
- *  1. resolve the effective cap (config + env, defaults absent a file);
- *  2. `max === 0` ⇒ refuse immediately with `live`/`max` `0/0` (AC4 — a
- *     disabled tier is refused regardless of what the ledger holds);
- *  3. count live dispatches (reaping stale, pane-less entries on read — but
- *     with an UNKNOWN pane list (`livePanes: undefined`) the freshness rule
- *     counts and nothing is reaped, WL-0MW9VQX5T001GCUP);
- *  4. unreadable ledger ⇒ refuse `host-budget-corrupt` with the bytes
+ *  1. resolve the kind's effective cap (config + env; defaults apply only to
+ *     `implement` / `audit`, so every other kind is ABSENT ⇒ uncapped);
+ *  2. an ABSENT cap ⇒ admit WITHOUT a reservation and with `capped: false`
+ *     (parent AC2: no ledger bookkeeping for an uncapped kind);
+ *  3. `max === 0` ⇒ refuse immediately with `live`/`max` `0/0` (AC4 — a
+ *     disabled kind is refused regardless of what the ledger holds);
+ *  4. count live dispatches by the kind's counting rule — `liveCount` for
+ *     every kind except `audit` (parent AC4: pane-derived freshness) —
+ *     reaping stale, pane-less entries on read, but with an UNKNOWN pane list
+ *     (`livePanes: undefined`) the freshness rule counts and nothing is
+ *     reaped (WL-0MW9VQX5T001GCUP);
+ *  5. unreadable ledger ⇒ refuse `host-budget-corrupt` with the bytes
  *     untouched (never repaired from a read — WL-0MWFJD8ZO000J1R8); a
  *     lock/I-O failure is `host-budget-unknown`;
- *  5. at/over cap ⇒ refuse with the observed `live`/`max` (AC2);
- *  6. otherwise reserve the slot and admit.
+ *  6. at/over cap ⇒ refuse with the observed `live`/`max` and the kind's
+ *     unified `host-budget-<kind>` token (AC2);
+ *  7. otherwise reserve the slot and admit.
  *
  * The audit tier is proxy-derived (WL-0MWAMSK9H005BOHD): it maps the
  * availability read through {@link decideAuditAvailability}, the same helper
  * the dispatcher's pre-check uses, and reserves locally ONLY for observability
  * — never to refuse. The one-release `HERDR_AUDIT_LOCAL_BUDGET=1` path keeps
- * the pre-change local decision.
+ * the pre-change local decision and is the only path that compares
+ * `freshCount` with a cap.
  */
 export function admitHostDispatch(
   input: HostBudgetAdmissionInput,
@@ -836,12 +875,18 @@ export function admitHostDispatch(
     staleWindowMs: opts.staleWindowMs,
     env: opts.env,
   };
+  const { config } = readBudgetConfig(ledgerOptions);
+  // Parent AC2: a kind absent from the config is UNLIMITED. Admit it without
+  // touching the ledger — never reserve/release/confirm bookkeeping.
+  const configured = config[input.kind];
+  if (configured === undefined) {
+    return { admitted: true, live: 0, max: 0, capped: false };
+  }
   if (input.kind === 'audit') {
     return admitAuditDispatch(input, opts, ledgerOptions);
   }
 
-  const { config } = readBudgetConfig(ledgerOptions);
-  const max = config.implement ?? DEFAULT_HOST_BUDGET_CONFIG.implement;
+  const max = configured;
   if (max === 0) {
     // AC4: disabled tier — refused host-wide with the documented 0/0 evidence.
     return { admitted: false, live: 0, max: 0, reason: refuseReason(input.kind) };
@@ -902,7 +947,8 @@ export function admitHostDispatch(
     };
   }
   // The union figure (WL-0MWFJDD8R005F5BV) AND the release identity
-  // (WL-0MWFJD5T4003OM91) belong on the same verdict.
+  // (WL-0MWFJD5T4003OM91) belong on the same verdict. `capped` stays absent
+  // so a capped admission keeps its pre-generalisation shape.
   return {
     admitted: true,
     live: count.live,

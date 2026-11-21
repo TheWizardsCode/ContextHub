@@ -75,7 +75,12 @@ import {
   type AuditBudgetLogEvent,
   type HostBudgetLivePanesResult,
 } from './host-dispatch-budget.admission.js';
-import { isLegacyAuditBudgetEnabled, sweepClosedPanes } from './host-dispatch-budget.js';
+import {
+  isHostBudgetKind,
+  isLegacyAuditBudgetEnabled,
+  readBudgetConfig,
+  sweepClosedPanes,
+} from './host-dispatch-budget.js';
 import {
   auditLeaseSessionId,
   createAuditLeaseClient,
@@ -1559,6 +1564,15 @@ export function createDowntimeDeps(
       this: DowntimeWorkerDeps,
       input,
     ) {
+      // WL-0MWF34932000SNTX F2: an uncapped kind (or a non-budget kind)
+      // admits WITHOUT a reservation and without reading the live pane list —
+      // no ledger bookkeeping, no budget refusal token (parent AC2).
+      if (!isHostBudgetKind(input.kind)) {
+        return { admitted: true, live: 0, max: 0, capped: false };
+      }
+      if (readBudgetConfig().config[input.kind] === undefined) {
+        return { admitted: true, live: 0, max: 0, capped: false };
+      }
       const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
       const audit = input.kind === 'audit';
       // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN):
@@ -1591,7 +1605,7 @@ export function createDowntimeDeps(
       }
       return admitHostBudgetDispatch(
         {
-          kind: audit ? 'audit' : 'implement',
+          kind: input.kind,
           itemId: input.itemId,
           instanceId: `herdr:${process.pid}`,
           root: input.cwd,
@@ -1613,7 +1627,7 @@ export function createDowntimeDeps(
       );
     },
     async confirmHostDispatch(itemId, kind, paneId, cwd): Promise<void> {
-      if (kind !== 'implement' && kind !== 'audit') return;
+      if (!isHostBudgetKind(kind)) return;
       try {
         confirmHostBudgetDispatch({
           kind,
@@ -1632,7 +1646,7 @@ export function createDowntimeDeps(
       releaseHostBudgetDispatch(
         {
           itemId,
-          ...(release?.kind === 'implement' || release?.kind === 'audit'
+          ...(release?.kind !== undefined && isHostBudgetKind(release.kind)
             ? { kind: release.kind }
             : {}),
           ...(release?.paneId !== undefined ? { paneId: release.paneId } : {}),

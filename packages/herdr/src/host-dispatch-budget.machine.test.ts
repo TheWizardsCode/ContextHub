@@ -48,7 +48,6 @@ import {
   decideAuditAvailability,
   decideAuditLeaseAdmission,
   HOST_BUDGET_AUDIT_REFUSAL,
-  HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
   HOST_BUDGET_CORRUPT_REFUSAL,
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
@@ -316,7 +315,7 @@ function auditAdmit(
 }
 
 describe('host dispatch budget — audit tier (F2)', () => {
-  it('AC1: maxAudit=1 reproduces the single-flight exactly — second audit refused with the legacy token', () =>
+  it('AC1: maxAudit=1 enforces single-flight exactly — second audit refused with host-budget-audit', () =>
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
       const panes = makeLivePaneList([auditPane('pane-1', 'WL-A')]);
@@ -325,13 +324,13 @@ describe('host dispatch budget — audit tier (F2)', () => {
       // audit tier counts a fresh reservation immediately (marker semantics).
       expect(auditAdmit('WL-A', panes)).toMatchObject({ admitted: true, live: 0, max: 1 });
 
-      // The second audit is refused at the cap, with the retired marker's reason
-      // token (existing consumers keep working) and the observed evidence.
+      // The second audit is refused at the cap with the unified token (F2
+      // removed the maxAudit: 1 special-case) and the observed evidence.
       expect(auditAdmit('WL-B', panes)).toEqual({
         admitted: false,
         live: 1,
         max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
       });
       // A refusal never reserves.
       expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-A']);
@@ -451,7 +450,7 @@ describe('host dispatch budget — audit tier (F2)', () => {
       expect(readBudgetLedger(dir)).toBeNull();
 
       // The explicit repair is the recovery: the running audit pane becomes an
-      // entry and the pre-check reports the real single-flight token.
+      // entry and the pre-check reports the unified single-flight token.
       const repaired = repairBudgetLedgerFromPanes(livePanes, {
         instanceId: 'operator',
         root: '/repo/test',
@@ -461,7 +460,7 @@ describe('host dispatch budget — audit tier (F2)', () => {
         atCap: true,
         live: 1,
         max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
       });
     }));
 });
@@ -668,7 +667,7 @@ describe('host dispatch budget — proxy-derived audit admission (WL-0MWAMSK9H00
           { livePanes: [], env: LEGACY_AUDIT_ENV, auditAvailability: availability, onAuditBudgetEvent: sink },
         );
 
-      // Local at cap: the LEGACY token and the local figures decide, even
+      // Local at cap: the unified local token and the local figures decide,
       // though the proxy would admit (the proxy is not consulted).
       writeBudgetLedger(dir, [
         makeBudgetEntry({ kind: 'audit', itemId: 'WL-RUN', heartbeatAt: new Date().toISOString() }),
@@ -677,7 +676,7 @@ describe('host dispatch budget — proxy-derived audit admission (WL-0MWAMSK9H00
         admitted: false,
         live: 1,
         max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
       });
       // The legacy path is marked in the decision log; no divergence entry.
       expect(events).toEqual([
