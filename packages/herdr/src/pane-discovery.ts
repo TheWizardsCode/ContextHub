@@ -109,6 +109,13 @@ export interface HerdrPaneRecord {
   label?: string;
   agent?: string;
   agentStatus?: string;
+  /**
+   * Tab the pane lives in (from `tab_id` / `tabId`). Carried so consumers can
+   * scope a liveness check to one tab without a second pane read — the ship
+   * guard uses it to reject a second Ship command while a live pane occupies
+   * the `Ship` tab (WL-0MW6FIZYI0003QEU).
+   */
+  tabId?: string;
   /** Pane working directory (worklog-root hint for cross-root resume). */
   cwd?: string;
   /** Raw `agent_session` field (session log path + agent metadata). */
@@ -248,6 +255,9 @@ export function parseHerdrPaneListOutput(raw: string): HerdrPaneRecord[] | null 
     label: pane.label,
     agent: pane.agent,
     agentStatus: pane.agentStatus,
+    // Only present when herdr reported a tab id; omitting it keeps the record
+    // shape byte-identical for every existing consumer/test (WL-0MW6FIZYI0003QEU).
+    ...(pane.tabId !== undefined ? { tabId: pane.tabId } : {}),
     cwd: pane.cwd,
     agentSession: pane.agentSession,
   }));

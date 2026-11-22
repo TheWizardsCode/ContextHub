@@ -15,7 +15,9 @@ import { describe, it, expect } from 'vitest';
 import {
   parseWorklogWorkItemIds,
   listBlockingPanes,
+  findActiveShipPanes,
   formatBlockedNotice,
+  formatActiveShipNotice,
   runShipGuard,
   type BlockingPane,
   type ShipGuardResult,
@@ -30,7 +32,7 @@ function wlListJson(ids: string[]): string {
 
 // ── Fixture: herdr pane list --json output ────────────────────────────────
 
-function paneListJson(panes: { paneId: string; label?: string; agent?: string; agentStatus?: string }[]): string {
+function paneListJson(panes: { paneId: string; label?: string; agent?: string; agentStatus?: string; tabId?: string }[]): string {
   return JSON.stringify({ result: { panes } });
 }
 
@@ -368,5 +370,74 @@ describe('AC: blocked notice content', () => {
     ];
     const notice = formatBlockedNotice(panes);
     expect(notice).toContain('Downtime implement WL-0MUDEGBGO00609RV');
+  });
+});
+
+// ── Ship-tab liveness: second Ship command rejection (WL-0MW6FIZYI0003QEU) ──
+
+const SHIP_TAB = 'w9:tShip';
+
+function shipPaneListJson(
+  panes: { paneId: string; label?: string; agent?: string; agentStatus?: string; tabId?: string }[],
+): string {
+  return paneListJson(panes);
+}
+
+describe('findActiveShipPanes (WL-0MW6FIZYI0003QEU AC2)', () => {
+  it('finds a live agent pane in the Ship tab (tabId mapping forwarded)', () => {
+    const output = shipPaneListJson([
+      { paneId: 'p1', label: 'Manually triggered ship Release the moon', agent: 'pi', agentStatus: 'working', tabId: SHIP_TAB },
+    ]);
+    const result = runShipGuard(wlListJson([]), output, SHIP_TAB);
+    expect(result.activeShipPanes).toEqual([
+      { paneId: 'p1', label: 'Manually triggered ship Release the moon' },
+    ]);
+  });
+
+  it('does not block a Ship-tab pane whose agent has exited', () => {
+    const output = shipPaneListJson([
+      { paneId: 'p1', label: 'Manually triggered ship', agent: 'pi', agentStatus: 'done', tabId: SHIP_TAB },
+      { paneId: 'p2', label: 'Manually triggered ship', agent: 'pi', agentStatus: 'exited', tabId: SHIP_TAB },
+    ]);
+    expect(runShipGuard(wlListJson([]), output, SHIP_TAB).activeShipPanes).toEqual([]);
+  });
+
+  it('does not block a live pane in a different tab', () => {
+    const output = shipPaneListJson([
+      { paneId: 'p1', label: 'Manually triggered ship', agent: 'pi', agentStatus: 'working', tabId: 'w9:tOther' },
+    ]);
+    expect(runShipGuard(wlListJson([]), output, SHIP_TAB).activeShipPanes).toEqual([]);
+  });
+
+  it('does not block when the Ship tab id is unknown (fail-open)', () => {
+    const output = shipPaneListJson([
+      { paneId: 'p1', label: 'Manually triggered ship', agent: 'pi', agentStatus: 'working', tabId: SHIP_TAB },
+    ]);
+    expect(runShipGuard(wlListJson([]), output, null).activeShipPanes).toEqual([]);
+    expect(runShipGuard(wlListJson([]), output, undefined).activeShipPanes).toEqual([]);
+    expect(findActiveShipPanes([], SHIP_TAB)).toEqual([]);
+  });
+
+  it('reports no active Ship panes when the pane query fails (fail-safe, ok:false)', () => {
+    const result = runShipGuard(wlListJson([]), 'not json', SHIP_TAB);
+    expect(result.ok).toBe(false);
+    expect(result.activeShipPanes).toEqual([]);
+  });
+});
+
+describe('formatActiveShipNotice (WL-0MW6FIZYI0003QEU AC2)', () => {
+  it('names the running release and how to retry', () => {
+    const notice = formatActiveShipNotice([
+      { paneId: 'p1', label: 'Manually triggered ship Release the moon' },
+    ]);
+    expect(notice).toContain('already running');
+    expect(notice).toContain('Manually triggered ship Release the moon');
+    expect(notice).toContain('p1');
+    expect(notice).toContain('Wait for the running release');
+  });
+
+  it('is pure', () => {
+    const panes = [{ paneId: 'p1' }];
+    expect(formatActiveShipNotice(panes)).toBe(formatActiveShipNotice(panes));
   });
 });

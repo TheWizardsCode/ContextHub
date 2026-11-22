@@ -2620,6 +2620,33 @@ the **left of the extensions/Worklog tab**:
   interactive call sites (`index.ts` → `resolveInteractiveItemAnchor*`) pass
   `'left-of-extensions'`.
 
+**Ship release tab (WL-0MW6FIZYI0003QEU).** The Ship It shortcut dispatches
+`/skill:ship release`, a **global** command carrying no work-item ID, so the
+item-ID anchor path would return `null` and split the current tab. On this
+path only, `index.ts::onCommand` calls `interactiveTabLabel(extractedItemId,
+ShipIt)` (in `index.interactive.ts`) to substitute the literal label
+**`Ship`** for the missing item ID and then reuses the SAME
+`resolveInteractiveItemAnchorAfterAdmission` / `getItemTabAnchor` machinery —
+the `Ship` tab is created on first use and reused thereafter, and a fresh tab
+is placed left of the extensions tab. The release pane is opened with
+`--focus` (the ship dialog passes `focus: true`; `index.ts` also forces it on
+the ship route). The freshly created `Ship` tab's placeholder root pane is
+closed after the release pane spawns, using the same create-vs-reuse signal
+and fail-safe liveness check as item tabs (the ship dispatch has no work-item
+ID, so an explicit pane-id-capture path exists for cleanup only).
+
+**Second Ship rejection.** The Ship Guard query
+(`createProductionShipGuardQuery`) additionally resolves the invoking
+workspace's `Ship` tab id (`herdr tab list --workspace <ws>`, matched by the
+exact label) and passes it to `runShipGuard`. `findActiveShipPanes` treats a
+**live** agent pane whose `tab_id` matches that tab as blocking, so a second
+`S` → confirm while the first release is still running shows the existing
+`⛔ SHIP MODE BLOCKED` notice and never opens the confirmation dialog or
+spawns a second pane. A dead/exited pane or the bare placeholder root pane
+does not block. Tab-id resolution is fail-open: an absent workspace, a CLI
+error or an unparseable tab list yields `shipTabId: null` and the guard simply
+cannot detect an active release (placement still works).
+
 
 ### Request priority (`X-Priority`) on dispatched panes
 

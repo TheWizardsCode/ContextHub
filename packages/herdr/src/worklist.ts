@@ -20,7 +20,9 @@ import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
 import { AgentTracker } from './agent-tracker.js';
 import { readCodeFreezeState, readCodeFreezeStatus, writeCodeFreezeMarker, clearCodeFreezeMarker } from './code-freeze.js';
-import { runShipGuard, formatBlockedNotice } from './ship-guard.js';
+import { runShipGuard, formatBlockedNotice, formatActiveShipNotice } from './ship-guard.js';
+import { parseTabListOutput } from './dispatcher-anchor.cli-parsers.js';
+import { resolveInteractiveWorkspaceId } from './index.interactive.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   stageColor,
@@ -111,6 +113,7 @@ import {
   DRAG_THRESHOLD_CELLS,
   PRIORITY_MAP,
   SHIP_IT_COMMAND,
+  SHIP_TAB_LABEL,
   STAGES,
   STAGE_COLORS,
   STAGE_MAP,
@@ -145,6 +148,7 @@ export {
   DOUBLE_CLICK_WINDOW_MS,
   DRAG_THRESHOLD_CELLS,
   SHIP_IT_COMMAND,
+  SHIP_TAB_LABEL,
   STAGES,
   STAGE_MAP,
 } from './worklist.constants.js';
@@ -3113,6 +3117,20 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
 }
 
 /**
+ * Raw CLI outputs for the Ship Guard, plus the resolved `Ship` tab id.
+ *
+ * `shipTabId` is `null` when the tab does not exist (or cannot be read); the
+ * guard then simply cannot detect an active release — a fail-open resolution
+ * that never blocks placement (WL-0MW6FIZYI0003QEU).
+ */
+export interface ShipGuardQueryResult {
+  worklogOutput: string | null;
+  paneOutput: string | null;
+  /** The `Ship` tab's id, or null when it does not exist / cannot be read. */
+  shipTabId?: string | null;
+}
+
+/**
  * Build the production Ship Guard query seam (WL-0MUD6DDZC007ZSIW): runs
  * `wl list --json --fields id` and `herdr pane list` and returns their raw
  * stdout, or null for whichever query failed. A null output makes the guard
@@ -3125,13 +3143,23 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
  * longer risks Node's `maxBuffer` and will not re-break as the worklog grows
  * (WL-0MUEK7H39008VVUF). The `maxBuffer` is raised as a defensive backstop.
  *
+ * Ship-tab liveness (WL-0MW6FIZYI0003QEU): the query also resolves the id of
+ * the invoking workspace's `Ship` tab (when it exists) via `herdr tab list`,
+ * so the guard can reject a second Ship command while a live pane occupies
+ * that tab. Resolution is fail-open — an absent workspace, a CLI error or an
+ * unparseable list yields `shipTabId: null` and the guard simply cannot
+ * detect an active release (placement still works).
+ *
  * @param cwd - Project root (contains `.worklog/`); when provided the wl
  *   query targets that root explicitly. When omitted the module-configured
  *   worklog dir is used.
+ * @param workspaceId - The invoking workspace whose `Ship` tab is resolved.
+ *   Defaults to the workspace in the plugin environment.
  */
 export function createProductionShipGuardQuery(
   cwd?: string,
-): () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> {
+  workspaceId?: string,
+): () => Promise<ShipGuardQueryResult> {
   // IDs-only worklog query: bounded payload, resilient as the worklog grows.
   const worklogArgs = ['list', '--json', '--fields', 'id'];
   // Generous backstop; the --fields id projection keeps the real payload tiny.
@@ -3140,6 +3168,7 @@ export function createProductionShipGuardQuery(
     const exec = getExecFileAsync();
     let worklogOutput: string | null = null;
     let paneOutput: string | null = null;
+    let shipTabId: string | null = null;
     try {
       const wlArgs = cwd ? buildWlArgsForRoot(cwd, worklogArgs) : buildWlArgs(worklogArgs);
       const { stdout } = await exec('wl', wlArgs, {
@@ -3161,7 +3190,25 @@ export function createProductionShipGuardQuery(
     } catch {
       paneOutput = null;
     }
-    return { worklogOutput, paneOutput };
+    try {
+      // Resolve lazily so tests/injections that pin the workspace stay
+      // deterministic; the environment is only read when no id is supplied.
+      const ws = workspaceId ?? resolveInteractiveWorkspaceId() ?? '';
+      if (ws !== '') {
+        const herdrBin = resolveHerdrBin();
+        const { stdout } = await exec(herdrBin, ['tab', 'list', '--workspace', ws], {
+          encoding: 'utf8',
+          maxBuffer: SHIP_GUARD_MAX_BUFFER,
+        });
+        const tabs = parseTabListOutput(stdout);
+        shipTabId = tabs?.find((tab) => tab.label === SHIP_TAB_LABEL)?.tabId ?? null;
+      }
+    } catch {
+      // Fail-open: an unreadable tab list leaves shipTabId null — the guard
+      // cannot detect an active release, but it never blocks placement.
+      shipTabId = null;
+    }
+    return { worklogOutput, paneOutput, shipTabId };
   };
 }
 
@@ -3710,7 +3757,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; hostBudgetPrompt?: HostBudgetPromptHost; readHostBudgetStatus?: () => Promise<HostBudgetStatus | null>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions; getUninitialisedNotice?: () => string | null; uninitialisedNotice?: string | null },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<ShipGuardQueryResult>; hostBudgetPrompt?: HostBudgetPromptHost; readHostBudgetStatus?: () => Promise<HostBudgetStatus | null>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions; getUninitialisedNotice?: () => string | null; uninitialisedNotice?: string | null },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3732,7 +3779,7 @@ export async function runWorklistTui(
     maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
-    shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd),
+    shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd, resolveInteractiveWorkspaceId() ?? undefined),
     hostBudgetPrompt: options?.hostBudgetPrompt,
     readHostBudgetStatus: options?.readHostBudgetStatus,
     dbWatch: options?.dbWatch ?? watchDbChanges,
@@ -4683,7 +4730,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle, undefined, opts.onRefresh);
+          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle, undefined, opts.onRefresh, true);
           if (result === 'noop' || result === 'blocked') {
             // Dispatch was a no-op: best-effort clear the marker WE wrote so
             // a release that never started cannot leave a stale freeze
@@ -4723,23 +4770,33 @@ export async function runWorklistTui(
    * exist.
    */
   const openShipItDialogGuarded = async (model?: string): Promise<void> => {
-    let query: { worklogOutput: string | null; paneOutput: string | null };
+    let query: ShipGuardQueryResult;
     try {
       query = await opts.shipGuardQuery();
     } catch {
       query = { worklogOutput: null, paneOutput: null };
     }
     const queryFailed = query.worklogOutput === null || query.paneOutput === null;
-    const result = runShipGuard(query.worklogOutput ?? '', query.paneOutput ?? '');
-    if (queryFailed || !result.ok || result.blockingPanes.length > 0) {
-      // Pass the guard's reason so the notice names WHICH query failed
-      // (worklog vs pane list) rather than a generic message
-      // (WL-0MUEK7H39008VVUF AC3).
-      blockedNotice = formatBlockedNotice(
-        result.blockingPanes,
-        queryFailed || !result.ok,
-        result.reason,
-      );
+    const result = runShipGuard(
+      query.worklogOutput ?? '',
+      query.paneOutput ?? '',
+      query.shipTabId,
+    );
+    const activeShip = result.activeShipPanes.length > 0;
+    if (queryFailed || !result.ok || result.blockingPanes.length > 0 || activeShip) {
+      // Rejection notices, most specific first:
+      //  - an active release in the `Ship` tab blocks a second Ship command
+      //    (WL-0MW6FIZYI0003QEU AC2);
+      //  - otherwise the existing project-pane guard notice names WHICH
+      //    query failed (worklog vs pane list) rather than a generic message
+      //    (WL-0MUEK7H39008VVUF AC3).
+      blockedNotice = activeShip
+        ? formatActiveShipNotice(result.activeShipPanes)
+        : formatBlockedNotice(
+            result.blockingPanes,
+            queryFailed || !result.ok,
+            result.reason,
+          );
       shipItDialog = null;
       render();
       return;

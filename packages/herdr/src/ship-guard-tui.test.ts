@@ -129,7 +129,11 @@ function makeItem(id: string, stage?: string): WorkItem {
 // Guard-query fixtures
 // ---------------------------------------------------------------------------
 
-type GuardQuery = () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>;
+type GuardQuery = () => Promise<{
+  worklogOutput: string | null;
+  paneOutput: string | null;
+  shipTabId?: string | null;
+}>;
 
 /** Realistic project work-item IDs (the ID regex needs 6+ chars after the dash). */
 const TEST_ITEM = 'WL-0MUDEGBGO00609RV';
@@ -147,6 +151,7 @@ interface PaneFixture {
   label?: string;
   agent?: string;
   agentStatus?: string;
+  tabId?: string;
 }
 
 /** `herdr pane list` output carrying `panes`. */
@@ -158,14 +163,19 @@ function paneList(panes: PaneFixture[]): string {
         label: p.label,
         agent: p.agent,
         agent_status: p.agentStatus,
+        ...(p.tabId !== undefined ? { tab_id: p.tabId } : {}),
       })),
     },
   });
 }
 
 /** A guard query returning the given raw CLI outputs. */
-function guardQuery(worklogOutput: string | null, paneOutput: string | null): GuardQuery {
-  return async () => ({ worklogOutput, paneOutput });
+function guardQuery(
+  worklogOutput: string | null,
+  paneOutput: string | null,
+  shipTabId?: string | null,
+): GuardQuery {
+  return async () => ({ worklogOutput, paneOutput, shipTabId });
 }
 
 /** A guard query with no project panes — the ship dialog may open. */
@@ -426,6 +436,99 @@ describe('Ship Guard — pre-dialog gate (WL-0MUDELHIH009O0AX)', () => {
     await press('q');
     await p;
   });
+
+  // ── Second Ship command while a release is active (WL-0MW6FIZYI0003QEU AC2) ──
+
+  const SHIP_TAB_ID = 'w9:tShip';
+
+  it('rejects a second Ship command while a live pane occupies the Ship tab', async () => {
+    const onCommand = vi.fn();
+    const p = startTui(onCommand, [makeItem('WL-TEST-1')], guardQuery(
+      worklog([TEST_ITEM]),
+      paneList([
+        {
+          paneId: 'pShip',
+          label: 'Manually triggered ship Release the moon',
+          agent: 'pi',
+          agentStatus: 'working',
+          tabId: SHIP_TAB_ID,
+        },
+      ]),
+      SHIP_TAB_ID,
+    ));
+    await tick();
+
+    dataHandler?.(Buffer.from('S'));
+    await tick();
+    await tick();
+
+    // No confirmation dialog; the blocked notice names the active release.
+    expect(shipDialogShowing()).toBe(false);
+    expect(blockedNoticeShowing()).toBe(true);
+    const out = stripAnsi(lastRender());
+    expect(out).toContain('already running');
+    expect(out).toContain('Manually triggered ship Release the moon');
+    expect(onCommand).not.toHaveBeenCalled();
+
+    // Typing ship + Enter while blocked must not dispatch a second pane.
+    for (const ch of 'ship') dataHandler?.(Buffer.from(ch));
+    await tick();
+    dataHandler?.(Buffer.from('\r'));
+    await tick();
+    await tick();
+    expect(onCommand).not.toHaveBeenCalled();
+
+    await press('q');
+    await press('q');
+    await p;
+  });
+
+  it('does NOT block a dead pane in the Ship tab (only live panes block)', async () => {
+    const onCommand = vi.fn();
+    const p = startTui(onCommand, [makeItem('WL-TEST-1')], guardQuery(
+      worklog([TEST_ITEM]),
+      paneList([
+        { paneId: 'pShip', label: 'Manually triggered ship', agent: 'pi', agentStatus: 'done', tabId: SHIP_TAB_ID },
+        { paneId: 'pRoot', label: '', agent: undefined, agentStatus: undefined, tabId: SHIP_TAB_ID },
+      ]),
+      SHIP_TAB_ID,
+    ));
+    await tick();
+
+    dataHandler?.(Buffer.from('S'));
+    await tick();
+    await tick();
+
+    expect(blockedNoticeShowing()).toBe(false);
+    expect(shipDialogShowing()).toBe(true);
+
+    await press('\x1b');
+    await press('q');
+    await p;
+  });
+
+  it('does NOT block a live pane in a different tab (only the Ship tab blocks)', async () => {
+    const onCommand = vi.fn();
+    const p = startTui(onCommand, [makeItem('WL-TEST-1')], guardQuery(
+      worklog([TEST_ITEM]),
+      paneList([
+        { paneId: 'pOther', label: 'Manually triggered ship', agent: 'pi', agentStatus: 'working', tabId: 'w9:tOther' },
+      ]),
+      SHIP_TAB_ID,
+    ));
+    await tick();
+
+    dataHandler?.(Buffer.from('S'));
+    await tick();
+    await tick();
+
+    expect(blockedNoticeShowing()).toBe(false);
+    expect(shipDialogShowing()).toBe(true);
+
+    await press('\x1b');
+    await press('q');
+    await p;
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -463,6 +566,7 @@ describe('Ship Guard — freeze on confirm (WL-0MUDELHIH009O0AX)', () => {
       undefined,
       undefined,
       'Item WL-TEST-1',
+      true,
     );
     // The marker existed at dispatch time (ordering proof) and remains after
     // a successful dispatch — the ship skill clears it on release exit.

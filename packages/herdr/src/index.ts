@@ -50,7 +50,7 @@ import {
 import { applyActivePaneMarkers, createProductionHydratorDeps } from './hydrator.js';
 import { resolveHerdrBin } from './herdr-bin.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
-import { runWorklistTui, getTermSize } from './worklist.js';
+import { runWorklistTui, getTermSize, SHIP_IT_COMMAND } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import {
@@ -314,6 +314,7 @@ import {
   closeInteractiveTabRootPane,
   defaultInteractiveClosePane,
   defaultInteractiveLiveTrackedPanesResolver,
+  interactiveTabLabel,
   resolveInteractiveItemAnchor,
   resolveInteractiveItemAnchorAfterAdmission,
   resolveInteractiveWorkspaceId,
@@ -322,6 +323,7 @@ import {
 export {
   closeInteractiveTabRootPane,
   defaultInteractiveLiveTrackedPanesResolver,
+  interactiveTabLabel,
   resolveInteractiveItemAnchor,
   resolveInteractiveItemAnchorAfterAdmission,
   resolveInteractiveWorkspaceId,
@@ -2132,6 +2134,18 @@ export async function main(): Promise<void> {
         // no ID, no workspace, or any resolution/creation failure yields
         // `undefined`, so the scripts keep today's current-pane split (AC5).
         const interactiveItemId = shouldOpenPane ? extractWorkItemId(command) : undefined;
+        // Ship It dispatch placement (WL-0MW6FIZYI0003QEU): `/skill:ship
+        // release` is a GLOBAL command carrying no work-item ID, so the
+        // item-ID anchor lookup would return null and split the CURRENT
+        // pane/tab. Substituting the `Ship` tab label on this path only
+        // places the release pane in its dedicated tab (created on first
+        // use, reused thereafter) through the SAME `getItemTabAnchor`
+        // machinery — no parallel tab-provisioning path. Fail-open: an
+        // unresolvable tab still falls back to the current-pane split.
+        const shipDispatch = shouldOpenPane && command.trim() === SHIP_IT_COMMAND;
+        const interactiveAnchorLabel = shouldOpenPane
+          ? interactiveTabLabel(interactiveItemId, shipDispatch)
+          : undefined;
         // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF, AC7): populated only
         // when the item tab is PROVISIONED. A reused tab leaves this null, so a
         // reused live anchor is never considered for cleanup. Combined with the
@@ -2150,11 +2164,11 @@ export async function main(): Promise<void> {
         const interactiveWorkspaceId = resolveInteractiveWorkspaceId(process.env) ?? '';
         const resolveInteractiveAnchorForShellRoute =
           async (): Promise<ItemTabAnchor | null> =>
-            interactiveItemId !== undefined
+            interactiveAnchorLabel !== undefined
               ? resolveInteractiveItemAnchor(
                   targetCwd,
                   interactiveWorkspaceId,
-                  interactiveItemId,
+                  interactiveAnchorLabel,
                   undefined,
                   onCreateItemTabAnchor,
                   'left-of-extensions',
@@ -2264,7 +2278,7 @@ export async function main(): Promise<void> {
             budgetPreparation.proceed,
             targetCwd,
             interactiveWorkspaceId,
-            interactiveItemId,
+            interactiveAnchorLabel,
             undefined,
             onCreateItemTabAnchor,
             'left-of-extensions',
@@ -2275,7 +2289,16 @@ export async function main(): Promise<void> {
           // succeeds, then record the work-item ↔ pane association
           // fire-and-forget. Commands without an ID are not tracked (AC6).
           const itemId = extractWorkItemId(command);
-          const paneIdFile = itemId
+          // Pane-ID capture (WL-0MSBQUJQX005RAT9) also drives the fail-safe
+          // placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF): capture
+          // whenever the dispatch carries an item ID OR this dispatch
+          // provisioned a FRESH tab. The ship dispatch has no item ID but
+          // creates the `Ship` tab on first use, so its placeholder root pane
+          // must be closed too (WL-0MW6FIZYI0003QEU). The closure keeps the
+          // create-vs-reuse read out of TypeScript's stale `null` narrowing.
+          const needsPaneIdCapture = (): boolean =>
+            itemId !== undefined || createdItemTabAnchor !== null;
+          const paneIdFile = needsPaneIdCapture()
             ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}.json`)
             : undefined;
           // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): build the pane
@@ -2283,6 +2306,11 @@ export async function main(): Promise<void> {
           // title/id, then pass it via --pane-name so the pi pane is
           // identifiable among other panes.
           const paneName = buildManuallyTriggeredPaneTitle(command, paneTitle, itemId);
+          // Focus (WL-0MT70LC6B009TL3Q): the Ship It release is normally
+          // dispatched with `focus: true` (the operator wants to watch the
+          // release run). Force it here as well so any ship dispatch that
+          // reaches this path is focused (WL-0MW6FIZYI0003QEU AC3).
+          const effectiveFocus = shipDispatch ? true : focus;
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           // The `model` from the shortcut entry (if any) is forwarded as
@@ -2295,7 +2323,7 @@ export async function main(): Promise<void> {
               model,
               paneIdFile,
               paneName,
-              focus,
+              effectiveFocus,
               interactiveAnchor?.paneId,
               requestPriority,
             ),
@@ -2314,21 +2342,30 @@ export async function main(): Promise<void> {
             },
           );
           child.unref(); // Allow the parent to exit independently
-          if (itemId && paneIdFile) {
+          if (paneIdFile) {
             // Fire-and-forget: polling must never block the TUI loop. A
             // missing file (split failed) is a no-op — no entry recorded.
             // Once the pane id is captured (proving the split succeeded) the
             // freshly-created item tab's placeholder root pane is closed
             // (fail-safe; WL-0MUYI3K8H007MPKF, AC7).
-            void capturePaneIdFromFile(itemId, paneIdFile, (wid, pid) =>
-              agentTracker.recordAgentForWorkItem(wid, pid, command),
-            ).then((capturedPaneId) => {
+            //
+            // Only item-carrying dispatches record a work-item ↔ pane
+            // association; the ship dispatch's capture exists solely for the
+            // root-pane cleanup (WL-0MW6FIZYI0003QEU).
+            void capturePaneIdFromFile(itemId ?? '', paneIdFile, (wid, pid) => {
+              if (itemId === undefined) return;
+              return agentTracker.recordAgentForWorkItem(wid, pid, command);
+            }).then((capturedPaneId) => {
               if (capturedPaneId !== undefined) {
                 // Confirm the reservation with the live pane id so the
                 // implement tier counts this user-fired dispatch (its
                 // liveness rule needs a pane in the machine-wide pane list).
                 // Best-effort: a failing seam never affects the dispatch.
-                if (budgetPreparation.reserved && budgetPreparation.kind !== undefined) {
+                if (
+                  itemId !== undefined &&
+                  budgetPreparation.reserved &&
+                  budgetPreparation.kind !== undefined
+                ) {
                   try {
                     confirmHostBudgetDispatch({
                       kind: budgetPreparation.kind,

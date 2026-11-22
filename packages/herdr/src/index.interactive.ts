@@ -43,6 +43,34 @@ import {
 // predicate — one liveness definition across the in-flight resolution, the
 // reaper, the ship guard and the interactive live-pane resolver.
 import { isPaneAgentLive } from './pane-discovery.js';
+import { SHIP_TAB_LABEL } from './worklist.constants.js';
+
+/**
+ * Resolve the tab label for an interactive agent dispatch
+ * (WL-0MW6FIZYI0003QEU).
+ *
+ * The normal path keys the item-ID tab on the command's work-item ID. The
+ * Ship It release (`/skill:ship release`) is a *global* command carrying no
+ * work-item ID, so the interactive item-ID anchor lookup would return `null`
+ * and fall back to the current-pane split. Substituting the literal
+ * {@link SHIP_TAB_LABEL} on this path only places the release pane in a
+ * dedicated `Ship` tab (created on first use, reused thereafter) with no
+ * change to any other command. An extracted item ID always wins — the ship
+ * substitution is a fallback for the missing ID, never an override.
+ *
+ * @param extractedItemId The command's work-item ID (from `extractWorkItemId`).
+ * @param isShipDispatch True when this dispatch is the Ship It release.
+ * @returns The tab label to resolve/create, or `undefined` when the dispatch
+ *   has no tab placement (the fail-open current-pane split).
+ */
+export function interactiveTabLabel(
+  extractedItemId: string | undefined,
+  isShipDispatch: boolean,
+): string | undefined {
+  if (extractedItemId !== undefined && extractedItemId !== '') return extractedItemId;
+  if (isShipDispatch) return SHIP_TAB_LABEL;
+  return undefined;
+}
 
 /**
  * Resolve the workspace that should host an interactive item-ID tab

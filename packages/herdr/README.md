@@ -1453,9 +1453,20 @@ Semantics:
   never blocked or dropped. **Adopted (reused) tabs are never moved** — a
   reused tab's position is the operator's own arrangement. Automated
   (downtime dispatcher) tabs keep today's right-side placement unchanged.
+- **Ship release tab** (WL-0MW6FIZYI0003QEU) — the Ship It shortcut
+  (`/skill:ship release`) is a **global** command carrying no work-item ID,
+  so it would otherwise fall back to the current-pane split. On this path
+  only, the plugin substitutes the literal tab label **`Ship`** for the
+  missing item ID and reuses the same create-or-reuse machinery: the release
+  pane lands in a `Ship` tab (created on first use, reused thereafter),
+  placed left of the extensions tab when fresh, and the release pane is
+  focused/zoomed on open (`--focus`). A second Ship command while the first
+  release is still live in the `Ship` tab is rejected by the Ship Guard (see
+  [Ship It confirmation dialog](#ship-it-confirmation-dialog)).
 - **No-ID panes unchanged** — commands with no work-item association (the
   unbound **Open Pi Agent** action, the `P n` blank-prompt session, generic
-  commands) still split the current pane in the current tab.
+  commands) still split the current pane in the current tab. The Ship
+  release is the only no-ID command with an explicit tab label.
 - **Root-pane cleanup** — when a dispatch creates a fresh item tab, the
   tab's placeholder root pane (used only as the first split anchor) is closed
   once the new pane has spawned. Cleanup is **fail-safe** (the anchor is
@@ -2869,6 +2880,7 @@ The Ship It shortcut (`S`, Shift+s) triggers a **dev→main release** via the sh
 
 - The dialog shows a prompt ("Ship it? Type 'ship' to confirm, Esc to cancel") and reflects your typed input with a block cursor.
 - Type `ship` (case-insensitive: `ship`, `Ship`, `SHIP`, …) and press **Enter** to dispatch `/skill:ship release` via the standard command-routing path — a global release, so **no work item id** is substituted. A "Sent" toast confirms.
+- **Dedicated `Ship` tab, focused on open** (WL-0MW6FIZYI0003QEU): the release pane is placed in a tab labelled exactly `Ship` in the invoking workspace — created on first use (immediately left of the Worklog/extensions tab) and reused thereafter — instead of splitting the current tab. The new pane is focused/zoomed so the operator immediately sees the release run. Placement is fail-open: if the `Ship` tab cannot be resolved or created, the dispatch falls back to the current-pane split. See [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - Typing anything else and pressing **Enter** clears the input buffer and keeps the dialog open so you can retry — nothing is dispatched.
 - **Esc** dismisses the dialog and returns to the selection list without dispatching anything.
 - While the dialog is open all keys are consumed by it (modal input); navigation resumes after Esc.
@@ -2880,13 +2892,14 @@ Before the confirmation dialog opens, the plugin runs a **Ship Guard** to make s
 - The guard lists every **live** agent pane machine-wide (`herdr pane list`) and matches work-item IDs embedded in pane labels against the actual set of work-item IDs in the current project's worklog. The worklog query requests **only** the `id` field (`wl list --json --fields id`) — the guard needs the ID set alone, so the payload stays small (~100 KB for ~2.3 k items instead of the full ~8.5 MB worklog) and cannot overflow Node's process buffer as the worklog grows (WL-0MUEK7H39008VVUF). A pane blocks when it carries a project work-item ID **and** its agent is live (present, status not `done`/`exited`).
 - If any pane blocks, the dialog is **not** opened. A full-pane modal notice (`⛔ SHIP MODE BLOCKED`) lists the offending work-item IDs and pane labels, and tells the operator to close those panes and retry. The notice is dismissed with `Esc`, `Enter`, or `q`; nothing is dispatched.
 - A pane whose agent is absent, `done`, or `exited` does **not** block, even when its label carries a project work-item ID. Work-item IDs from a different project do not block (membership is by ID, not prefix).
+- **One release at a time** (WL-0MW6FIZYI0003QEU): the guard also rejects a second Ship command while the first release is still active. A live agent pane inside the `Ship` tab (resolved from the invoking workspace's tab list) blocks the same way: the confirmation dialog never opens, a `⛔ SHIP MODE BLOCKED` notice names the running release, and no second pi pane is spawned. A dead/exited pane in the `Ship` tab — or the tab's bare placeholder root pane — does not block. Tab resolution is fail-open: if the tab list cannot be read, the guard cannot detect an active release and placement still works.
 - **Fail safe:** if `wl list` or `herdr pane list` is unavailable, the guard cannot verify the pane state and the dialog is **not** opened. The notice names **which** query failed (`worklog list unavailable` vs `pane list unavailable`) so the operator knows what to retry, rather than pretending the project is clear.
 
 ### Code Freeze on confirm
 
 Typing `ship` + Enter writes the Code Freeze marker **before** `/skill:ship release` is dispatched, so the freeze applies from the moment of confirmation (WL-0MUD6DDZC007ZSIW). The write is atomic (temp file + rename). If the dispatch fails — `onCommand` throws (e.g. no agent pane available) or the dispatch is a no-op — the plugin best-effort removes the marker **it wrote** and surfaces the error, so a release that never started cannot leave a stale freeze. A marker that was already active (written by the ship skill) is owned by the ship skill: the plugin neither overwrites nor clears it. The ship skill remains the authority that clears the marker on release exit.
 
-Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). `ship-guard.ts` holds the pure guard (project-ID set, blocking-pane filter, blocked-notice formatter) and `worklist.ts` gates `openShipItDialog()` on it and writes/clears the marker on confirm. The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
+Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). `ship-guard.ts` holds the pure guard (project-ID set, blocking-pane filter, active-`Ship`-tab filter, blocked-notice formatters) and `worklist.ts` gates `openShipItDialog()` on it and writes/clears the marker on confirm. The Ship dispatch resolves its `Ship` tab through the shared interactive item-tab machinery (`interactiveTabLabel` substitutes the label for the missing work-item id) and forwards `--anchor`/`--focus` to `send-to-pi.sh`. The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
 
 > **Behavior change:** the former manual-sync `S` binding (immediate `wl sync` with a toast) was removed; background auto-sync on the timer is unchanged.
 
