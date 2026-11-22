@@ -237,6 +237,15 @@ The project uses [Vitest](https://vitest.dev/) with the following settings in `v
 
 See [tests/README.md](tests/README.md) for detailed testing documentation.
 
+**Shared-build precondition.** `tests/**` load `@worklog/shared` from
+`packages/shared/dist` (gitignored build output), so a run against a build older
+than `packages/shared/src` would exercise stale shared code. Vitest therefore
+runs a once-per-run preflight (`tests/global-setup.ts`) that aborts before any
+test file with one message naming the resolved `packages/shared` directory, the
+artefact mtimes and the remedy — `npm run build:shared` from that repository
+root. It never rebuilds for you. See
+[docs/dev/pre-push-hook.md](docs/dev/pre-push-hook.md#shared-build-precondition-for-full-suite-evidence-wl-0mw8g1x3v007cgae).
+
 ### Test Suite Runtime
 
 Test runtime is dominated by **per-spawn TypeScript transpilation**, not by

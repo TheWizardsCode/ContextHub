@@ -17,7 +17,10 @@
  * loads is at least as new as the newest shared source file. It never rebuilds
  * and never writes: it returns `null` (proceed) or one actionable diagnostic
  * naming the resolved directory, the mtimes and the rebuild command. The
- * run-once `globalSetup` wiring that calls it lives in a sibling item.
+ * run-once wiring that calls it is `tests/global-setup.ts`, registered as
+ * `globalSetup` in `vitest.config.ts` (WL-0MWHD4GU3003ZE7Q); its contract —
+ * including the fail-open boundary and the mtime trade-off — is documented in
+ * `docs/dev/pre-push-hook.md` and `docs/dev/test-suite-baseline.md`.
  *
  * ## Resolution, not guessing
  *

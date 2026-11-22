@@ -207,6 +207,26 @@ See [`wl-shared-dist-diagnostic.md`](./wl-shared-dist-diagnostic.md) for the
 for the end-to-end verification of the worktree `node_modules` (pre-farm and
 farm eras).
 
+#### The test run checks this for you (WL-0MW8G1X3V007CGAE)
+
+Agent shells are not the only consumer that can be fooled by a stale build: a
+test run that resolves an out-of-date `packages/shared/dist` exercises old
+shared code and reports phantom failures. Vitest therefore runs a
+once-per-invocation `globalSetup` (`tests/global-setup.ts`) that compares the
+**resolved** `dist/worklog-paths.js` mtime with the newest build input under the
+**resolved** `packages/shared/src` and aborts before any test file with one
+message naming that directory, both mtimes and
+`cd <repo root> && npm run build:shared`.
+
+For worktree work that means: a run in a farmed worktree judges the worktree's
+own build (so `npm run build` in the worktree is the precondition), and a run
+whose farm link points at the main checkout judges — and names — the main
+checkout's build instead of wrongly blaming the worktree. The trade-off (mtime
+is a heuristic; content hashing is out of scope) and the full contract are in
+[test-suite-baseline.md](./test-suite-baseline.md#shared-workspace-build-guarded-not-remembered-wl-0mw8g1x3v007cgae)
+and
+[pre-push-hook.md](./pre-push-hook.md#shared-build-precondition-for-full-suite-evidence-wl-0mw8g1x3v007cgae).
+
 ### Constraints
 
 - **Never run `npm install` in a worktree.** `<worktree>/node_modules` is a

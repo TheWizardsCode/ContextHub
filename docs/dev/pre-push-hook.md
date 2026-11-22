@@ -74,6 +74,68 @@ existing entry is never overwritten (SA-0MVTFMB7K002Y1F3, WL-0MV20XXWE00466FP).
 - A missing `run_tests.py` **hard-fails**: silently skipping would reproduce
   the unenforced-gate gap this hook closes.
 
+## Shared-build precondition for full-suite evidence (WL-0MW8G1X3V007CGAE)
+
+A full-suite verdict only describes the pushed commit if the shared workspace
+build the run **resolves** is at least as new as its sources. `tests/**` reach
+`@worklog/shared` through the package `exports` map into
+`packages/shared/dist/` — **gitignored build output** — so a checkout whose
+build predates a change under `packages/shared/src` runs the OLD shared code
+and reports failures for work that is already correct and merged. This is the
+same failure class as the stale root `dist/` (WL-0MVH44JRR000A23U), one
+workspace over.
+
+Every vitest invocation therefore runs a **once-per-run preflight** before any
+test file is collected (`globalSetup` in `vitest.config.ts` →
+`tests/global-setup.ts`, verdict in `tests/shared-dist-guard.ts`). Because it is
+`globalSetup`, not `setupFiles`, it costs one `packages/shared/src` walk per
+run rather than one per test file.
+
+- **Fresh** means the resolved artefact
+  (`packages/shared/dist/worklog-paths.js`) has an mtime **greater than or
+  equal to** the newest build input under `packages/shared/src` (recursively).
+  Generated/declaration files are excluded, mirroring `isDistFresh()`:
+  `src/version.ts` is rewritten by `scripts/generate-version.cjs` after `tsc`,
+  and `*.d.ts` is compiler output only.
+- **Stale or missing** aborts the run with one actionable message naming the
+  resolved `packages/shared` directory, the stale artefact's mtime versus the
+  newest source mtime (or the missing artefact path), and the exact remedy:
+  `cd <that repository root> && npm run build:shared`. The message reaches the
+  hook's failure tail, so the agent sees the precondition, not a code defect.
+- **Resolution, not guessing.** Freshness is judged on the package the run
+  actually loads (through `node_modules/@worklog/shared`, symlinks followed),
+  and the named repository root is derived from that package — so a run from a
+  linked worktree names the checkout that owns the build it loads.
+- **Never rebuild.** The preflight only `stat`s; the suite must not mutate the
+  checkout (the live-repo mutation guard would report it) and a silent rebuild
+  would make the suite pass against a build nobody asked for. Run the printed
+  command yourself; `implement.py finish`'s own `npm run build` already does
+  this before it tests, which is why gated runs are never affected.
+- **Fail-open.** An unresolvable package with no discoverable repository root,
+  a package outside a `packages/` workspace, and an unreadable directory all
+  proceed silently — the guard may only fire for a genuinely stale or absent
+  artefact.
+- **mtime is a heuristic** (accepted in WL-0MW8G1X3V007CGAE): a branch switch
+  or a restored file can make `src` look newer than `dist` without a content
+  change — a false positive that costs one `npm run build:shared` — and a
+  copied `dist` can carry an older mtime with newer content. Content hashing
+  is deliberately out of scope.
+
+Recovery detail (including the missing/wiped-package case and
+`scripts/repair-shared-package.sh`) lives in
+[wl-shared-dist-diagnostic.md](./wl-shared-dist-diagnostic.md) — that document
+covers the `wl` CLI's fail-fast diagnostic; this section covers the test run.
+No separate machinery is needed for the suite: the preflight links the same
+rebuild command.
+
+> **Rebuild, then `--force` once.** `run_tests.py` caches a verdict per git
+> state, and a rebuild does not change git state — so a run that aborted on the
+> preflight can be replayed from cache after you have rebuilt. Re-run the first
+> suite once with `run_tests.py --force` (or `--no-cache`) to record the fresh
+> verdict; subsequent runs hit the refreshed entry. The cache key and the
+> reason a rebuild is invisible to it are the runner's own behaviour
+> (WL-0MWRZZ98Y007RKZ4), not this guard's.
+
 ## The type check rides the full suite (WL-0MWKQ51G0006F3KV)
 
 `npm run typecheck` (root, `packages/shared` and `packages/herdr`) is the first

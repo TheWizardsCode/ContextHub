@@ -300,7 +300,10 @@ The two package suites resolve `@worklog/shared` through the worktree's own
 `npm run build` must run **in the worktree** before the suite — building only
 the main checkout leaves the worktree's `packages/shared/dist` absent and every
 `@worklog/shared/<subpath>` import fails to resolve. This is a worktree-setup
-prerequisite, not a suite defect.
+prerequisite, not a suite defect. Since WL-0MW8G1X3V007CGAE the run-once
+preflight states the same precondition up front instead of leaving it to 344
+failed imports — see
+[Shared workspace build: guarded, not remembered](#shared-workspace-build-guarded-not-remembered-wl-0mw8g1x3v007cgae).
 
 ### The typecheck gate (WL-0MWKQ51G0006F3KV)
 
@@ -808,6 +811,60 @@ commit that registered the `worklist` command — the source was correct.
   checkout's suite for the tests that legitimately exercise the built
   artefact, and the guard keeps a forgotten rebuild from silently producing
   false failures.
+
+##### Shared workspace build: guarded, not remembered (WL-0MW8G1X3V007CGAE)
+
+The same standing rule now covers the **workspace** build. `tests/**` resolve
+`@worklog/shared` through the package `exports` map into
+`packages/shared/dist/` (gitignored), so a checkout whose shared build
+predates a `packages/shared/src` change exercised the OLD shared code and
+reported failures for work already correct and merged — repeatedly, because
+`npm test` never rebuilt it.
+
+That is no longer silent: `vitest.config.ts` registers a **once-per-run**
+`globalSetup` (`tests/global-setup.ts`, verdict in
+`tests/shared-dist-guard.ts`) that, before any test file is collected, compares
+the mtime of the **resolved** `dist/worklog-paths.js` with the newest build
+input under the **resolved** `packages/shared/src`, and aborts with one message
+naming that directory, the two mtimes and `cd <repo root> && npm run build:shared`.
+
+- **Resolve, don't guess.** The check follows `node_modules/@worklog/shared`
+  (symlinks included) and derives the repository root from the resolved
+  package, so it judges — and names — the build the run actually loads. With
+  the worktree link farm shipped (`SA-0MVMZBJGT00718ZO`, see
+  [worktree-isolation.md](./worktree-isolation.md#the-link-farm-shipped))
+  that is the worktree's own package; before it, a worktree run named the main
+  checkout's build, which is exactly the case a worktree-local comparison would
+  have got backwards.
+- **One check per run, never per test file.** `setupFiles` runs per test file
+  (344 of them); this lives in `globalSetup`, so the `src` walk happens once.
+- **Never rebuild, never write.** The preflight only `stat`s — an in-run build
+  would mutate the checkout the live-repo guard reports, and would make a green
+  suite evidence of a build nobody asked for. `implement.py finish` already runs
+  `npm run build` (shared first) before its tests, so gated runs are unaffected.
+- **Fail-open.** An unresolvable package with no discoverable repository root,
+  a package outside a `packages/` workspace, an unreadable directory, and a
+  missing/unreadable `src` all proceed silently; only a genuinely stale or
+  absent artefact fires.
+- **mtime is a heuristic.** A branch switch or a restored file can make `src`
+  look newer than `dist` without a content change (one wasted
+  `npm run build:shared`), and a copied `dist` can carry an older mtime with
+  newer content. Content hashing is deliberately out of scope.
+- **After rebuilding, `--force` once.** `run_tests.py` caches a verdict per git
+  state and a rebuild does not change git state, so the first post-rebuild run
+  can replay the aborted verdict from cache; `--force` (or `--no-cache`) records
+  the fresh one. That is the runner's cache key (WL-0MWRZZ98Y007RKZ4), not this
+  guard.
+
+Recovery detail — including a wiped `packages/shared` tree and
+`scripts/repair-shared-package.sh` — is in
+[wl-shared-dist-diagnostic.md](./wl-shared-dist-diagnostic.md); the
+full-suite contract that depends on this precondition is in
+[pre-push-hook.md](./pre-push-hook.md#shared-build-precondition-for-full-suite-evidence-wl-0mw8g1x3v007cgae).
+Coverage: `tests/unit/shared-dist-freshness.test.ts` (stale, fresh, missing,
+no-repo-root, worktree resolution; temp-dir fixtures with controlled mtimes) and
+`tests/unit/shared-dist-global-setup.test.ts` (the run-once wiring and the
+abort message).
 
 ### Results — canonical suite (`.pi/test-config.json`)
 

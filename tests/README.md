@@ -35,6 +35,17 @@ node ./scripts/test-timings.cjs
 > [docs/dev/test-suite-baseline.md](../docs/dev/test-suite-baseline.md#test-gates)
 > for the gate reference, coverage table and measured runtimes.
 
+> **Shared-build precondition.** Tests import `@worklog/shared` from
+> `packages/shared/dist` — gitignored build output — so a run whose build
+> predates `packages/shared/src` would exercise stale shared code and report
+> phantom failures. A once-per-run `globalSetup` (`tests/global-setup.ts`,
+> wired in `vitest.config.ts`) aborts before any test file with one message
+> naming the resolved `packages/shared` directory, the artefact and source
+> mtimes, and the remedy: `npm run build:shared` from that repository root. It
+> never rebuilds for you. Fail-open: a checkout it cannot judge runs normally.
+> See
+> [docs/dev/pre-push-hook.md](../docs/dev/pre-push-hook.md#shared-build-precondition-for-full-suite-evidence-wl-0mw8g1x3v007cgae).
+
 ## Per-test timings
 
 Use `npm run test:timings` (or `node ./scripts/test-timings.cjs`) to run Vitest with the JSON reporter and write `test-timings.json` at the repository root.
