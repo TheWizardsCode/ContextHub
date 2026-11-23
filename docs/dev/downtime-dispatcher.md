@@ -1460,7 +1460,7 @@ raised by a setting or env var.
 to the one-release legacy local-budget path (`HERDR_AUDIT_LOCAL_BUDGET=1`)
 for the audit tier; with the proxy still granting `cap: 1`, an audit relief
 dispatch remains `audit-budget-saturated` because herdr never invents a second
-lease. The implement arm is not blocked on this dependency.
+lease. The implement arm is not blocked on this dependency. (AUDIT RELIEF SCOPING — the code marker lives in `admitAuditDispatch`; a future proxy contract that grants a relief cap is the only thing that may lift it.)
 
 **Surfaces.** The decision entry carries
 `budgetRelief: { kind, baseCap, effectiveCap, blockedPaneIds, reason, until }`

@@ -827,6 +827,15 @@ function admitAuditDispatch(
   opts: HostBudgetAdmissionOptions,
   ledgerOptions: HostBudgetOptions,
 ): HostBudgetAdmission {
+  // AUDIT RELIEF SCOPING (WL-0MWTAD9NV000IVK5 AC6, option 2): budget relief
+  // for the audit tier is LEGACY-LOCAL-MODE ONLY (`HERDR_AUDIT_LOCAL_BUDGET=1`).
+  // The proxy-derived branch below MUST NOT call `resolveReliefForKind`: the
+  // lease is the only admission decision and herdr never invents a second
+  // lease, so a proxy `cap: 1` verdict must still refuse `audit-budget-saturated`
+  // while an audit is model-blocked. A future proxy contract that grants a
+  // relief cap via `/llama/local/audit/availability` + the atomic lease is the
+  // ONLY thing that may lift this; it needs no blocking work item on this repo
+  // (recorded as a documented dependency on WL-0MWTAD9NV000IVK5).
   if (isLegacyAuditBudgetEnabled(ledgerOptions.env ?? process.env)) {
     emitAuditBudgetEvent(opts, {
       event: 'legacy',
