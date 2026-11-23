@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.1.0 (2026-11-23)
+> **Release focus:** This release focuses on reliability and workflow stability, fixing crashes and false test failures while ensuring work items can't vanish or block sessions. It also adds practical improvements like restoring deleted items with full history, scheduled unlocks, fairer dispatch across projects, and automatic standup podcasts.
+### Features
+- Broken builds are now caught before release, so the Worklog pane keeps working. (WL-0MWKQ51G0006F3KV)
+- Accidentally deleted work items can now be restored with all their history and children intact. (WL-0MWMRNL2W003W5R3)
+- Schedule work items to unlock at a set time, so timed tasks never start early. (WL-0MWM0FDZK007BAD0)
+- High-priority work now always appears above lower-priority items in the sprint view. (WL-0MWMQ6AV6007ZUNK)
+- Listen to each project's daily standup as a podcast episode, published automatically. (WL-0MVYZ458V004GRF8)
+- Finished sessions now free their work slot immediately, so new jobs start without waiting. (WL-0MWJVY6NR001E0FS)
+- Concise item views now show the parent ID, so you can trace hierarchy at a glance. (WL-0MW5M5GUF0051D4N)
+- Herdr now shows a clear "run wl init" error instead of a blank worklist when a project isn't set up. (WL-0MVTDEOOA003PLIV)
+- Decision logs now show whether stale slot counts or details caused a dispatch block, making outages easier to diagnose. (WL-0MW1VITA8009RLHQ)
+- You can now set concurrency limits for any dispatch type, not just implement and audit. (WL-0MW50EHZ6007QBPB)
+- Releases now open in a dedicated Ship tab, and you can't start a second release while one is running. (WL-0MW6FIZYI0003QEU)
+### Bug Fixes
+- Fixes a crash that stopped the Worklog pane from opening. (WL-0MWKQ4DO2004C03A)
+- Idle dispatch time is now shared fairly across all projects, so one busy project can't hog every slot. (WL-0MWFIZ8H5005FVNN)
+- Work items can no longer vanish from all views when their parent is deleted. (WL-0MWFMKWZA005ZT4T)
+- Old scratch worktrees no longer block clean sessions, so epic runs keep moving. (WL-0MWQLHDOS006CAIH)
+- Finishing your work is no longer blocked by other sessions editing the shared checkout. (WL-0MWFKDFFA009N3OC)
+- Test runs now warn you when an outdated build is causing false failures, so a red suite means real bugs. (WL-0MW8G1X3V007CGAE)
+- Test runs no longer report false failures when another process updates code mid-run. (WL-0MVSPZ1FH000RWET)
+### Other
+- Search, sync and import/export now run from focused modules, keeping the public API and behaviour unchanged. (WL-0MVOBP8MC0093Y7T)
+- Code quality backlog is now clear, so future updates should be more stable and reliable. (WL-0MW4W9TIZ003V79D)
+- Improved internal test tooling reliability for smoother game updates. (WL-0MWHUVPTS000YJ50)
+
 ## v1.0.30 (2026-11-17)
 > **Release focus:** This release focuses on making dispatch faster and more reliable by fixing stalled and bouncing work items, improving recovery after restarts, and ensuring idle capacity is shared fairly across projects. It also raises the concurrent implement-task limit from two to six, surfaces blockers and clearer stall reasons, and tightens audit and worklog handling to prevent double-booking and stray edits.
 ### Features
