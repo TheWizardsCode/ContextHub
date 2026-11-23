@@ -731,6 +731,49 @@ Recorded intake distribution (873): `audit-budget-saturated` 588 (67 %),
    root-cause read cannot be re-derived after the fact. A durable (or longer
    retention) refusal log is needed before the next overnight post-mortem.
 
+### Remediation plan and follow-up items (WL-0MWTBJEI2008UGUR, child of WL-0MWTAD1KM0081UUD)
+
+The provenance audit (above) and the prep-supply window are the evidence base
+for parent AC4. The remediation is **planned only** in this item: no
+`needsProducerReview` flag was cleared, no skill file was edited and no
+dispatcher behaviour changed. Four follow-up work items, one per bucket, were
+created under WL-0MWTAD1KM0081UUD:
+
+| Bucket | Follow-up | Owner / queue | Evidence rows | Depends on |
+|---|---|---|---|---|
+| 4a stale-flag clearing | WL-0MWTVPJAN003GLAV | dispatcher maintainer / operator | AC2 row 5 (`AH-0MWLLPA1Q0006U2P`, `can-clear-now`); group counts 1 / 17 | WL-0MWTBJAV7002ZZQI (`can-clear-now` grouping) |
+| 4b producer interview batching | WL-0MWTVPK65009NTER | producer | AC2 rows 1–4, 6–18 (`needs-producer-input`, 17 rows) | WL-0MWTBJAV7002ZZQI (`needs-producer-input` grouping) |
+| 4c skill changes | WL-0MWTVPL1A005KB4D | skill maintenance (SorraAgents `skill/`) | 16/18 flagged rows `question-loop`; `interview/SKILL.md` §4, `plan/SKILL.md`, `intake/SKILL.md` handoff text | none |
+| 4d prep seeding | WL-0MWTVPM0D009FMG3 | dispatcher maintainer / operator | AC1 per-root table (all six roots >=1 offerable; 123/416); root cause item 1 ("no prep supply" refuted) | none |
+
+**Why each bucket.** 4a clears only the single row the rule proves clearable
+(`AH-0MWLLPA1Q0006U2P`, dependency-held, no recorded question); the 17 rows with
+an unanswered question are 4b's batch. 4c prevents recurrence: 16 of the 18
+flagged rows are `question-loop` sourced, so routine clarifying questions must
+not set the persistent hold. 4d is a guard, not a correction: the six active
+roots all had at least one offerable prep item at the recorded 10:15Z clock, so
+it seeds only a root a live read finds empty.
+
+**Dependency edges.** 4a and 4b depend on the provenance audit's two groupings
+(WL-0MWTBJAV7002ZZQI); 4c and 4d have no blocking prerequisite. The edges are
+satisfied because the audit is completed.
+
+**Duplicate check.** Each follow-up records the `wl search` terms and results
+it was checked against. No item duplicates the clearing run, the producer
+interview batch, the routine-question skill rule or the prep-seeding run; the
+nearest matches are the completed flag-mechanism items
+(WL-0MV82CHGQ000HAZZ, WL-0MTIAL65N004T22F, WL-0MVAMS4RO000H3B0,
+WL-0MUH765F1003FKRK, WL-0MUH7ACKJ0024VGF) and the offer-mechanism items
+(WL-0MWDDHQON0015T3P, WL-0MWFJ8R1P005G1H1).
+
+**No-behaviour-change evidence (planning-only gate).** Immediately before and
+after creating the follow-ups and updating the parent description, the
+`--needs-producer-review` set and the `status=in-progress` set were captured for
+all six active roots (`wl --worklog-dir <root>/.worklog list --json …`). Both
+sets were byte-identical before and after: no flag was cleared, no assignee was
+written, no dispatch marker was created. The four new items are `open` /
+`intake_complete` and do not enter either set.
+
 ### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
 
 The leader keeps ONE entry per instance and iterates the offers **inside** it:
