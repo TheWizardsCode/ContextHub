@@ -35,6 +35,9 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.pane.ts` | Pane identity, in-flight resolution, spawn invocation, pane-lifecycle monitor | `buildDowntimePaneArgs`, `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` |
 | `downtime-worker.gates.ts` | Every "may the worker dispatch X?" decision (holds, depth, attempt budget, classification) | `classifyItemForDispatch`, `evaluateCriticalFirstGuard`, `readReviewQueueGate`, `isAttemptBudgetExhausted` |
 | `downtime-worker.prep-supply.ts` | The READ-ONLY per-root prep-supply bucket classification (measurement vocabulary only — no I/O, no dispatch decision) | `PREP_SUPPLY_BUCKETS`, `classifyPrepSupplyItem`, `classifyPrepSupplyWindow` |
+| `downtime-worker.prep-supply-report.ts` | The READ-ONLY per-root prep-supply report: merges the worklist read with the full per-root fallback, assembles the stable payload and renders the table (no I/O — reads arrive through an injected seam) | `buildPrepSupplyReport`, `collectPrepSupplyReport`, `renderPrepSupplyReportJson`, `renderPrepSupplyReportTable` |
+| `downtime-worker.prep-supply-source.ts` | The report's ONLY I/O half: `wl worklist`/`wl list` reads, batched dependency edges (in-process, `wl dep list` fallback), rolling dispatch log | `createPrepSupplyReportDeps`, `parseWorklistItems`, `parseListItems`, `PREP_SUPPLY_FALLBACK_STATUSES` |
+| `prep-supply-report-cli.ts` | The `worklog-prep-supply` operator CLI (`--root`, `--now`, `--json`) over the report core | `main`, `parsePrepSupplyArgs`, `PREP_SUPPLY_USAGE` |
 | `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
 | `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
 | `downtime-worker.dispatch-cpu-gate.ts` | Host-CPU dispatch gate (host-utilisation seam) | `CPU_SATURATED_REASON` |
@@ -230,6 +233,86 @@ bucket quotes the module that owns it.
 subprocess, no file write, and it never mutates its input. A regression test
 asserts the classified dispatch decisions are identical with and without the
 module loaded, so the measurement can never licence a behaviour change.
+
+### Prep-supply report command (WL-0MWTBJ7G1004Y29B, child of WL-0MWTAD1KM0081UUD)
+
+The classifier above answers *why* one item is refused; this command answers
+*how much prep work a root could actually offer, and why not* — repeatably,
+from data instead of a hand-classified sample. It is the AC1/AC2 measurement
+the parent investigation (WL-0MWTAD1KM0081UUD) and its evidence children
+(WL-0MWTBJ9AM003MLLL, WL-0MWTBJAV7002ZZQI, WL-0MWTBJGBS0085DG1) are built on:
+`docs/dev/downtime-dispatcher.md` section *Prep-supply buckets* defines the
+nine buckets, and that table is the single source of truth for their meaning.
+
+```bash
+# Every registered active root, frozen at the overnight window's evaluation
+# instant, machine payload only:
+npx tsx packages/herdr/src/prep-supply-report-cli.ts --json \
+  --now 2026-11-23T10:15:00Z
+
+# Explicit roots (repeatable) — the replay the recorded table must cite:
+npx tsx packages/herdr/src/prep-supply-report-cli.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/SorraAgents \
+  --now 2026-11-23T10:15:00Z
+```
+
+`worklog-prep-supply` is the built (`packages/herdr/package.json` `bin`) form of
+the same entry point.
+
+**Inputs — the worklist gap and its fallback.** `wl worklist --json` (the
+consolidated read the Herdr worklist already issues) is read first, and wins on
+item fields when an item is present in it. That payload has **no prep-stage
+subset**: it covers the browse feed (default 20 items) plus the critical /
+review-queue / in-progress-root / blocked-root subsets, so a prep item outside
+that coverage is invisible to it. The gap is closed by a full per-root fallback
+read, one `wl list --json` per prep stage, which also carries the dependency
+edges the worklist payload lacks (read in one batched in-process pass, falling
+back to `wl dep list <id> --json` per item):
+
+```bash
+wl list --json --status open,blocked,in-progress,input-needed,completed \
+  --stage idea|intake_complete --include-not-started
+```
+
+`--include-not-started` is required — the CLI's default search hides future
+`startOn` items, and hiding them would silently empty the `startOn` bucket. The
+report merges the two sources by item id and emits the per-root coverage
+(`worklistItems`, `fullItems`, `mergedItems`, `worklistOnly`, `fullOnly`) so the
+gap is measured rather than assumed. The rolling dispatch log
+(`<root>/.worklog/downtime-dispatches.log`) supplies the marker, attempt-budget
+and cooldown evidence.
+
+**Buckets and output.** Every root reports a count per bucket (all nine, zero
+when empty), the item ids per bucket, and the `offerable` ids spelled out —
+plus the excluded items (`soft-deleted` / `terminal-status` /
+`not-prep-stage`) so nothing silently disappears. Default output is the human
+table followed by the JSON payload; `--json` emits the payload alone. Both are
+**stable and diffable**: roots sorted by path, buckets alphabetical (the
+primary-cause precedence lives in the classifier's documented table, not in this
+output's key order), item ids lexicographic within a bucket. Two runs with the
+same `--now` are byte-identical, which is what makes a window comparable in
+review.
+
+**Replay.** `--now <iso>` freezes the evaluation instant; omitted, it defaults
+to the wall clock. `--root <path>` is repeatable; omitted, the roots come from
+the `downtimeWorklogRoots` active-root registry in
+`~/.config/herdr/worklog-plugin.json`. The command resolves that path without
+`getDefaultSettingsPath()` (which would create the config directory), so even a
+missing config is a pure read.
+
+**Strictly read-only.** No `wl` write, no marker/flag/assignee mutation, no
+dispatch decision: `downtime-worker.prep-supply-report.ts` performs no I/O at
+all (reads arrive through an injected seam), and a regression test asserts the
+dispatcher's `classifyItemForDispatchDetail` set over the fixture is
+byte-identical before and after a report run. The report quotes the
+classifier's own gate token per item (`verdicts[].classifierGate`) instead of
+paraphrasing it.
+
+**Exit codes.** `0` success; `1` one or more roots failed to read (the other
+roots are still reported, and the failure is named in the payload and on
+stderr); `2` usage error or no roots available. An unreadable source is never
+rendered as an empty, healthy-looking bucket set.
 
 ### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
 
