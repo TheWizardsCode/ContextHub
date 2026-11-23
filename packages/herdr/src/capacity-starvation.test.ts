@@ -31,7 +31,7 @@ describe('isCapacityRefusal (WL-0MVKNC2N50025HXE)', () => {
 
   it('does not treat non-capacity outcomes or observations as capacity refusals', () => {
     for (const reason of ['no-candidate', 'review-queue-hold', 'code-freeze', 'wl-error',
-      'audit-in-flight', 'audit-host-saturated', 'idle-age-pending', 'idle-age-qualified',
+      'audit-in-flight', 'host-budget-audit', 'idle-age-pending', 'idle-age-qualified',
       'audit-batch-continue', 'audit-batch-end', 'stalled-resume', 'capacity-starved',
       'cpu-saturated']) {
       expect(isCapacityRefusal(reason)).toBe(false);

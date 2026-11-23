@@ -113,25 +113,30 @@ Section exists but no valid paths:
 | Stage | Required? |
 |---|---|
 | `idea` | No (optional) |
-| `plan_complete` | **Should** include (groups items into `Group N`) |
-| `intake_complete` | **Should** include (groups items into `Group N`) |
-| `intake_complete` | **Should** include (groups items into `Group N`) |
-| `plan_complete` | **Should** include (groups items into `Group N`) |
+| `plan_complete` | **Should** include (groups items into `<Band> Group N`) |
+| `intake_complete` | **Should** include (groups items into `<Band> Group N`) |
+| `intake_complete` | **Should** include (groups items into `<Band> Group N`) |
+| `plan_complete` | **Should** include (groups items into `<Band> Group N`) |
 | `in_review` | No |
 
 ### Group display order
 
-`wl next -n N` displays groups in this order (WL-0MSAK8YLB0025EGW):
+`wl next -n N` displays groups in this bucket order (WL-0MWMQ6AV6007ZUNK,
+extending WL-0MSAK8YLB0025EGW):
 
 1. **Critical Group N** — `critical` priority items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
-2. **Group N** — non-critical `plan_complete` + `intake_complete` items partitioned by file-path conflicts. Within each group, items sort by **priority first (high → medium → low)**, then by stage sub-order (`plan_complete` → `intake_complete` → remaining, no headings between sub-groups), then by id. The same within-group ordering applies inside each `Critical Group N`.
-3. **Idea** — single group, sorted by priority.
-4. **Other** — single group for all remaining items (safety net for unknown/custom stages and stale stage/status combinations; empty for all canonical stages in the default selection list).
-5. **In Review** — single group (last).
+2. **High, Medium and Low bands**, in that order, each contributing in turn:
+   - **<Band> Group N** — the band's actively-worked (`status: in-progress`), `plan_complete` and `intake_complete` items partitioned by file-path conflicts; the `N` counter restarts at `1` in every band. Within each group, items sort by **priority first (high → medium → low)**, then by stage sub-order (actively-worked → `plan_complete` → `intake_complete` → remaining, no headings between sub-groups), then by id.
+   - **<Band> Idea** — single group holding the band's `idea` items, sorted by priority.
+   - **<Band> Other** — single group for the band's remaining items (safety net for unknown/custom stages and stale stage/status combinations; empty for all canonical stages in the default selection list).
+3. **In Review** — single group (last), whatever the priority of its members.
+
+Stage never reorders across bands: a `high@idea` item's group always precedes
+a `medium@plan_complete` item's group.
 
 ### Grouping stability
 
-The grouping is **content-deterministic** (WL-0MVVLBTTP003Y4XO): before the greedy first-fit packing runs, the input items are canonicalised by a purely content-derived key — priority (high → medium → low) → stage sub-order → id. Timestamps are never part of the key, so an item only changes group when a material input changes:
+The grouping is **content-deterministic** (WL-0MVVLBTTP003Y4XO): before the greedy first-fit packing runs, the input items are canonicalised by a purely content-derived key — priority band (critical → high → medium → low) → stage sub-order (`in-progress` → `plan_complete` → `intake_complete` → `idea` → remaining) → id. Timestamps are never part of the key, so an item only changes group when a material input changes:
 
 | Material (may move the item) | Non-material (never moves the item) |
 |---|---|

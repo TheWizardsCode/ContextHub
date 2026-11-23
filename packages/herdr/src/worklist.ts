@@ -20,7 +20,9 @@ import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
 import { AgentTracker } from './agent-tracker.js';
 import { readCodeFreezeState, readCodeFreezeStatus, writeCodeFreezeMarker, clearCodeFreezeMarker } from './code-freeze.js';
-import { runShipGuard, formatBlockedNotice } from './ship-guard.js';
+import { runShipGuard, formatBlockedNotice, formatActiveShipNotice } from './ship-guard.js';
+import { parseTabListOutput } from './dispatcher-anchor.cli-parsers.js';
+import { resolveInteractiveWorkspaceId } from './index.interactive.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   stageColor,
@@ -59,6 +61,13 @@ import {
   summariseDispatchWindowHold,
   type DispatchWindowHoldSummary,
 } from './dispatch-window-hold.js';
+import {
+  notStartedBannerText,
+  notStartedRowMarker,
+  notStartedStatusText,
+  summariseDispatchWindowStart,
+  type DispatchWindowStartSummary,
+} from './dispatch-window-start.js';
 import {
   hostBudgetStatusText,
   type HostBudgetStatus,
@@ -104,6 +113,7 @@ import {
   DRAG_THRESHOLD_CELLS,
   PRIORITY_MAP,
   SHIP_IT_COMMAND,
+  SHIP_TAB_LABEL,
   STAGES,
   STAGE_COLORS,
   STAGE_MAP,
@@ -138,6 +148,7 @@ export {
   DOUBLE_CLICK_WINDOW_MS,
   DRAG_THRESHOLD_CELLS,
   SHIP_IT_COMMAND,
+  SHIP_TAB_LABEL,
   STAGES,
   STAGE_MAP,
 } from './worklist.constants.js';
@@ -260,6 +271,9 @@ export function formatItemLine(
   maxCols: number,
   isSelected = false,
   noIcons = false,
+  // Frame instant, injectable so a frozen-clock test renders deterministically
+  // (WL-0MWMGEWH7004VUFI). Production callers omit it.
+  now: number = Date.now(),
 ): string {
   // Depth indentation for hierarchical display
   const depth = item.depth ?? 0;
@@ -304,6 +318,14 @@ export function formatItemLine(
     ? ` [${item.stage}]`
     : '';
 
+  // Not-yet-started marker (WL-0MWMGEWH7004VUFI): a row whose effective start
+  // instant (`startOn ?? createdAt`) is still in the future reads
+  // `[not started until <date>]`, so a scheduled row is distinguishable from
+  // an already-started one. Strictly read-only — it never changes the item,
+  // its `startOn` or any dispatch decision. Fail-open: an unreadable instant
+  // renders no marker.
+  const notStartedTag = notStartedRowMarker(item, now) ?? '';
+
   // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ): annotate the list row
   // with the dispatch kind and latest pane-close outcome so an operator can
   // triage without opening the detail view. Live items never carry these
@@ -312,7 +334,7 @@ export function formatItemLine(
     ? `${item.dispatchKind ? ` [${item.dispatchKind}]` : ''}${item.dispatchOutcome ? ` ${item.dispatchOutcome}` : ''}`
     : '';
 
-  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}${dispatchTag}`;
+  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}${dispatchTag}${notStartedTag}`;
 
   // Truncate to fit terminal width, accounting for ANSI codes and
   // multi-width characters (CJK, emoji, fullwidth forms). Reuses the
@@ -2313,6 +2335,26 @@ export function createListRenderer(getShowIcons?: () => boolean): (
    * (and no chrome row) when the budget/ledger is unavailable.
    */
   hostBudgetStatus?: string | null,
+  /**
+   * Header segment naming how many dispatch-window items are not yet started
+   * (`[not started: N]`, WL-0MWMGEWH7004VUFI). Display-only; null renders
+   * nothing.
+   */
+  notStartedStatus?: string | null,
+  /**
+   * Banner copy for a dispatch window where EVERY item is not yet started
+   * (WL-0MWMGEWH7004VUFI). Display-only and strictly read-only: the banner
+   * never clears/alters a `startOn` or changes a dispatch decision. `null`
+   * renders no banner (and consumes no chrome row).
+   */
+  notStartedNotice?: string | null,
+  /**
+   * Notice rendered when no valid `.worklog/` can be resolved
+   * (WL-0MW4P4GNV002V532). A non-empty string renders a persistent red error
+   * banner while `displayRows` is empty; `null`/`undefined` renders nothing.
+   * Appended last so every earlier positional caller keeps its argument order.
+   */
+  uninitialisedNotice?: string | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -2364,6 +2406,12 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     assigneeHoldNotice?: string | null,
     /** Header segment for the host-wide dispatch budget (AC4, WL-0MVXY0ZYW009NEJD). */
     hostBudgetStatus?: string | null,
+    /** Header segment for not-yet-started items (WL-0MWMGEWH7004VUFI). */
+    notStartedStatus?: string | null,
+    /** Banner copy for an all-not-yet-started dispatch window (WL-0MWMGEWH7004VUFI). */
+    notStartedNotice?: string | null,
+    /** Persistent error when the worklog root is unresolved (WL-0MW4P4GNV002V532). */
+    uninitialisedNotice?: string | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -2447,6 +2495,14 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (hostBudgetStatus) {
       header += ` ${ANSI.fg(45)}${hostBudgetStatus}${ANSI.reset}`;
     }
+    // ── Not-yet-started indicator (WL-0MWMGEWH7004VUFI) ───────────
+    // Names how many dispatch-window items are scheduled for the future.
+    // Display-only: it never clears/alters a `startOn` and never changes a
+    // dispatch decision. The all-not-started WARNING is a banner below; this
+    // segment reports the count even when the window still has started work.
+    if (notStartedStatus) {
+      header += ` ${ANSI.fg(45)}${notStartedStatus}${ANSI.reset}`;
+    }
     // ── Non-blocking sync notice (F3 — WL-0MVJV2O7H003HY9N) ─────
     // A tiny, render-only status notice ("⟳ syncing… Ns") while a background
     // `wl sync` is in flight. It NEVER blocks input: it is a pure string read
@@ -2505,6 +2561,35 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       output.push(truncateLine(bannerLine, cols));
       bannerCount++;
     }
+    // Not-yet-started banner (WL-0MWMGEWH7004VUFI): a dispatch window with
+    // ZERO already-started items because every item is scheduled for the
+    // future. Display-only WARNING — the schedule is intentional and is never
+    // altered; the operator just gets to tell "this work is scheduled" apart
+    // from "the dispatcher is broken". Consumes one chrome row so the
+    // `rows - 1` pane line-count invariant still holds (WL-0MSAAON63003N6LO).
+    if (notStartedNotice) {
+      const bannerText = `⚠ ${notStartedNotice}`;
+      const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
+    }
+    // Uninitialised-worklog banner (WL-0MW4P4GNV002V532): when no valid
+    // `.worklog/` can be resolved the caller supplies a notice and the list is
+    // genuinely empty. Render a persistent red error line (the stderr
+    // diagnostic is lost once the pane takes over the screen) so the operator
+    // is never left staring at a silent blank list. Display-only: the caller
+    // clears the notice on the next refresh once a valid root resolves. Only
+    // shown while the list is empty — a populated list makes the notice
+    // irrelevant. Newlines are collapsed so a multi-line diagnostic (the
+    // non-interactive `uninitializedReport()`) still occupies exactly one
+    // chrome row and the `rows - 1` pane invariant holds (WL-0MSAAON63003N6LO).
+    if (uninitialisedNotice && displayRows.length === 0) {
+      const singleLine = uninitialisedNotice.replace(/\s+/g, ' ').trim();
+      const bannerText = `⚠ ${singleLine}`;
+      const bannerLine = `${ANSI.bg(196)}${ANSI.fg(231)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
+    }
 
     // The caller passes the display-rows model (headings + items) — the
     // renderer renders exactly those rows and does NOT derive group
@@ -2553,6 +2638,9 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       output.push(` ${ANSI.dim}▲ more${ANSI.reset}`);
     }
     let numHeadings = 0;
+    // One frame instant for every row, so the not-started marker is consistent
+    // across the frame (WL-0MWMGEWH7004VUFI).
+    const frameNow = Date.now();
     for (let i = 0; i < visible.length; i++) {
       const actualIndex = scrollOffset + i;
       const row = visible[i];
@@ -2585,7 +2673,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       const isExpanded = expandedItems?.has(item.id) ?? false;
       const expandedItem = { ...item, _expanded: hasChildCount && isExpanded };
 
-      const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
+      const line = formatItemLine(expandedItem, cols, isSelected, noIcons, frameNow);
       if (isSelected) {
         output.push(reverseWrap(line));
       } else {
@@ -3029,6 +3117,20 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
 }
 
 /**
+ * Raw CLI outputs for the Ship Guard, plus the resolved `Ship` tab id.
+ *
+ * `shipTabId` is `null` when the tab does not exist (or cannot be read); the
+ * guard then simply cannot detect an active release — a fail-open resolution
+ * that never blocks placement (WL-0MW6FIZYI0003QEU).
+ */
+export interface ShipGuardQueryResult {
+  worklogOutput: string | null;
+  paneOutput: string | null;
+  /** The `Ship` tab's id, or null when it does not exist / cannot be read. */
+  shipTabId?: string | null;
+}
+
+/**
  * Build the production Ship Guard query seam (WL-0MUD6DDZC007ZSIW): runs
  * `wl list --json --fields id` and `herdr pane list` and returns their raw
  * stdout, or null for whichever query failed. A null output makes the guard
@@ -3041,13 +3143,23 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
  * longer risks Node's `maxBuffer` and will not re-break as the worklog grows
  * (WL-0MUEK7H39008VVUF). The `maxBuffer` is raised as a defensive backstop.
  *
+ * Ship-tab liveness (WL-0MW6FIZYI0003QEU): the query also resolves the id of
+ * the invoking workspace's `Ship` tab (when it exists) via `herdr tab list`,
+ * so the guard can reject a second Ship command while a live pane occupies
+ * that tab. Resolution is fail-open — an absent workspace, a CLI error or an
+ * unparseable list yields `shipTabId: null` and the guard simply cannot
+ * detect an active release (placement still works).
+ *
  * @param cwd - Project root (contains `.worklog/`); when provided the wl
  *   query targets that root explicitly. When omitted the module-configured
  *   worklog dir is used.
+ * @param workspaceId - The invoking workspace whose `Ship` tab is resolved.
+ *   Defaults to the workspace in the plugin environment.
  */
 export function createProductionShipGuardQuery(
   cwd?: string,
-): () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> {
+  workspaceId?: string,
+): () => Promise<ShipGuardQueryResult> {
   // IDs-only worklog query: bounded payload, resilient as the worklog grows.
   const worklogArgs = ['list', '--json', '--fields', 'id'];
   // Generous backstop; the --fields id projection keeps the real payload tiny.
@@ -3056,6 +3168,7 @@ export function createProductionShipGuardQuery(
     const exec = getExecFileAsync();
     let worklogOutput: string | null = null;
     let paneOutput: string | null = null;
+    let shipTabId: string | null = null;
     try {
       const wlArgs = cwd ? buildWlArgsForRoot(cwd, worklogArgs) : buildWlArgs(worklogArgs);
       const { stdout } = await exec('wl', wlArgs, {
@@ -3077,7 +3190,25 @@ export function createProductionShipGuardQuery(
     } catch {
       paneOutput = null;
     }
-    return { worklogOutput, paneOutput };
+    try {
+      // Resolve lazily so tests/injections that pin the workspace stay
+      // deterministic; the environment is only read when no id is supplied.
+      const ws = workspaceId ?? resolveInteractiveWorkspaceId() ?? '';
+      if (ws !== '') {
+        const herdrBin = resolveHerdrBin();
+        const { stdout } = await exec(herdrBin, ['tab', 'list', '--workspace', ws], {
+          encoding: 'utf8',
+          maxBuffer: SHIP_GUARD_MAX_BUFFER,
+        });
+        const tabs = parseTabListOutput(stdout);
+        shipTabId = tabs?.find((tab) => tab.label === SHIP_TAB_LABEL)?.tabId ?? null;
+      }
+    } catch {
+      // Fail-open: an unreadable tab list leaves shipTabId null — the guard
+      // cannot detect an active release, but it never blocks placement.
+      shipTabId = null;
+    }
+    return { worklogOutput, paneOutput, shipTabId };
   };
 }
 
@@ -3626,7 +3757,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; hostBudgetPrompt?: HostBudgetPromptHost; readHostBudgetStatus?: () => Promise<HostBudgetStatus | null>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<ShipGuardQueryResult>; hostBudgetPrompt?: HostBudgetPromptHost; readHostBudgetStatus?: () => Promise<HostBudgetStatus | null>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions; getUninitialisedNotice?: () => string | null; uninitialisedNotice?: string | null },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3648,11 +3779,18 @@ export async function runWorklistTui(
     maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
-    shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd),
+    shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd, resolveInteractiveWorkspaceId() ?? undefined),
     hostBudgetPrompt: options?.hostBudgetPrompt,
     readHostBudgetStatus: options?.readHostBudgetStatus,
     dbWatch: options?.dbWatch ?? watchDbChanges,
     dbWatchOptions: options?.dbWatchOptions,
+    // Uninitialised-worklog notice (WL-0MVTDEOOA003PLIV / WL-0MW4P52LB009J0DX):
+    // a persistent in-pane error naming the resolved path and the `wl init`
+    // fix. The getter is preferred so a `wl init` run after the pane opened
+    // clears the notice on the next refresh (the fetcher re-resolves and the
+    // closure returns null); the static value is a fallback for callers/tests.
+    getUninitialisedNotice: options?.getUninitialisedNotice,
+    uninitialisedNotice: options?.uninitialisedNotice ?? null,
   };
 
   let termSize = getTermSize();
@@ -3660,7 +3798,7 @@ export async function runWorklistTui(
   /**
    * Apply the pane-based active marker to freshly fetched items: any item
    * with a matching pane title in THIS workspace is shown as `in-progress`
-   * (marker + Group N), independent of the worklog status the demotion loop
+   * (marker + `<Band> Group N` placement), independent of the worklog status the demotion loop
    * maintains. This makes the selection list's marker reflect pane existence
    * directly (WL-0MV1BWETT005GSUJ). The production implementation is
    * injected by `index.ts`; when absent it is a no-op, so tests never spawn
@@ -3726,7 +3864,7 @@ export async function runWorklistTui(
   const refreshPaneMarkers = async (): Promise<void> => {
     await applyPaneMarkers(state.allItems());
     // The budget counter is refreshed with the pane list it depends on
-    // (the implement tier's live-pane rule), so the two can never be read at
+    // (every non-audit kind's live-pane rule), so the two can never be read at
     // materially different times on the same cadence (AC4/AC5).
     await refreshHostBudgetStatus();
     render();
@@ -3938,6 +4076,31 @@ export async function runWorklistTui(
   // the list — a filtered window cannot answer "is the WHOLE window held?"
   // (fail-safe: no warning rather than a false one).
   let assigneeHoldSummary: DispatchWindowHoldSummary | null = null;
+
+  // ── Not-started scheduling surface (WL-0MWMGEWH7004VUFI) ─────────
+  // Derived from the SAME already-fetched dispatch window on every refresh (no
+  // new `wl` spawn) and purely display-only: it never clears/alters a
+  // `startOn`, claims work or changes a dispatch decision. `null` while a
+  // filter narrows the list — a filtered window cannot answer "is the WHOLE
+  // window not yet started?" (fail-safe: no warning rather than a false one).
+  let notStartedSummary: DispatchWindowStartSummary | null = null;
+
+  /**
+   * Recompute the not-yet-started account from the window the worklist just
+   * rendered. Skipped for any filtered/dispatch-derived view, whose items are
+   * not the canonical dispatch window.
+   */
+  const applyNotStartedState = (items: WorkItem[]): void => {
+    const filtered =
+      state.activeFilter !== null ||
+      state.activePriorityFilter !== null ||
+      state.activeDispatchFilter;
+    notStartedSummary = filtered
+      ? null
+      : summariseDispatchWindowStart(items, {
+          windowSize: resolveSprintViewWindow(loadSettings().browseItemCount ?? opts.browseItemCount),
+        });
+  };
 
   /**
    * Recompute the assignee-hold account from the window the worklist just
@@ -4410,6 +4573,9 @@ export async function runWorklistTui(
         // classifier keeps the TUI in step with the coordination log's
         // `all-window-items-held` token.
         applyAssigneeHoldState(newItems);
+        // Refresh the not-yet-started account from the SAME window
+        // (WL-0MWMGEWH7004VUFI): read-only marker/banner, no mutation.
+        applyNotStartedState(newItems);
         // Blocked-by rows survive refreshes (WL-0MV8Q5X8U004KKAP): the
         // blocker cache is keyed by item ID and invalidated per item only
         // when its payload signature changes (status/stage/updatedAt — see
@@ -4564,7 +4730,7 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle, undefined, opts.onRefresh);
+          const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle, undefined, opts.onRefresh, true);
           if (result === 'noop' || result === 'blocked') {
             // Dispatch was a no-op: best-effort clear the marker WE wrote so
             // a release that never started cannot leave a stale freeze
@@ -4604,23 +4770,33 @@ export async function runWorklistTui(
    * exist.
    */
   const openShipItDialogGuarded = async (model?: string): Promise<void> => {
-    let query: { worklogOutput: string | null; paneOutput: string | null };
+    let query: ShipGuardQueryResult;
     try {
       query = await opts.shipGuardQuery();
     } catch {
       query = { worklogOutput: null, paneOutput: null };
     }
     const queryFailed = query.worklogOutput === null || query.paneOutput === null;
-    const result = runShipGuard(query.worklogOutput ?? '', query.paneOutput ?? '');
-    if (queryFailed || !result.ok || result.blockingPanes.length > 0) {
-      // Pass the guard's reason so the notice names WHICH query failed
-      // (worklog vs pane list) rather than a generic message
-      // (WL-0MUEK7H39008VVUF AC3).
-      blockedNotice = formatBlockedNotice(
-        result.blockingPanes,
-        queryFailed || !result.ok,
-        result.reason,
-      );
+    const result = runShipGuard(
+      query.worklogOutput ?? '',
+      query.paneOutput ?? '',
+      query.shipTabId,
+    );
+    const activeShip = result.activeShipPanes.length > 0;
+    if (queryFailed || !result.ok || result.blockingPanes.length > 0 || activeShip) {
+      // Rejection notices, most specific first:
+      //  - an active release in the `Ship` tab blocks a second Ship command
+      //    (WL-0MW6FIZYI0003QEU AC2);
+      //  - otherwise the existing project-pane guard notice names WHICH
+      //    query failed (worklog vs pane list) rather than a generic message
+      //    (WL-0MUEK7H39008VVUF AC3).
+      blockedNotice = activeShip
+        ? formatActiveShipNotice(result.activeShipPanes)
+        : formatBlockedNotice(
+            result.blockingPanes,
+            queryFailed || !result.ok,
+            result.reason,
+          );
       shipItDialog = null;
       render();
       return;
@@ -5667,6 +5843,18 @@ export async function runWorklistTui(
       // Host-budget counter (AC4, WL-0MVXY0ZYW009NEJD): read-only
       // `implement n/max · audit n/max`, null when the budget is unavailable.
       hostBudgetStatusText(hostBudgetStatus),
+      // Not-yet-started surface (WL-0MWMGEWH7004VUFI): display-only header
+      // count + all-not-started banner, derived from the already-fetched
+      // window. Never clears/alters a `startOn`.
+      notStartedStatusText(notStartedSummary),
+      notStartedBannerText(notStartedSummary),
+      // Uninitialised-worklog notice (WL-0MVTDEOOA003PLIV / WL-0MW4P52LB009J0DX):
+      // read through the getter on every render so the banner clears on the
+      // first refresh after a `wl init` resolves the root. Rendered only while
+      // the list is empty (the renderer enforces that guard).
+      opts.getUninitialisedNotice
+        ? opts.getUninitialisedNotice()
+        : opts.uninitialisedNotice,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

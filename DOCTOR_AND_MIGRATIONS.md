@@ -14,6 +14,7 @@ This document describes the `wl doctor` command and the migration policy for Wor
 - **Pending migrations** — the top-level `wl doctor` reports pending schema migrations and outdated git hooks (read-only) and instructs you to run `wl doctor upgrade`; the `upgrade` subcommand detects and applies them.
 - **Outdated git hooks** — the top-level `wl doctor` reports worklog-managed hooks whose committed content differs from the installed hook, alongside pending migrations.
 - **Stale deleted items** — the `prune` subcommand removes soft-deleted items older than a configurable threshold.
+- **Orphaned children** — a `parent.missing-endpoint` finding for every live item whose `parentId` no longer resolves to a live row — including a **soft-deleted** parent (R3b) — summarised by lost-parent id (see [Orphan retention and remediation](#orphan-retention-and-remediation)).
 - **Audit gaps** — the `audit-gaps` subcommand reports `completed`/`in_review` items with no audit record (read-only).
 
 ## Running `wl doctor`
@@ -152,7 +153,21 @@ Notes on GitHub-linked items:
 
 - By default `wl doctor prune` skips any deleted work item that is linked to a GitHub issue (has `githubIssueNumber`) when the local `updatedAt` is newer than the recorded `githubIssueUpdatedAt` on the work item. This prevents accidentally orphaning GitHub issues that have local changes not yet reflected on GitHub.
 
-JSON output from `--json` includes a `skippedIds` array when such items are detected during a dry-run or actual prune.
+Cascade-or-refuse (R1, WL-0MWGRK52Z0078SJJ):
+
+- By default a candidate that still has **live children** (children that are not themselves deleted) is **refused** — it is not hard-deleted, so its children keep a resolvable `parentId`. Refused ids are reported in the `refusedIds` array (dry-run and actual) and never appear in `prunedIds`.
+- `--cascade-children` is the explicit destructive opt-in: the candidate **and all of its descendants are hard-deleted with it** (deepest-first), so no child is left pointing at a parent that no longer exists. There is no default cascade.
+- After a prune that actually removes rows, any lingering local `.worklog/worklog-data.jsonl` is dropped (ephemeral JSONL pattern) so a later open of an emptied store cannot re-import it and resurrect the pruned rows.
+
+```bash
+# Preview (refused candidates are listed, not pruned)
+wl doctor prune --dry-run
+
+# Force-prune a parent together with its live children (destructive)
+wl doctor prune --days 90 --cascade-children
+```
+
+JSON output from `--json` includes `skippedIds` (GitHub-linked with newer local changes) and `refusedIds` (cascade-or-refuse guard) arrays during a dry-run or actual prune.
 
 ### Detecting foreign work items (`wl doctor foreign-items`)
 
@@ -171,6 +186,9 @@ wl doctor foreign-items --prefix SA
 # Hard-delete all foreign items (destructive; explicit opt-in required)
 wl doctor foreign-items --apply
 
+# Also hard-delete own-prefix children of a removed foreign item (destructive)
+wl doctor foreign-items --apply --cascade-children
+
 # Clean the DB and rewrite the remote worklog ref so it contains only own items
 wl doctor foreign-items --apply --push
 ```
@@ -179,9 +197,65 @@ The report includes total items scanned, the foreign count, counts grouped by pr
 
 `--apply` hard-deletes every foreign item with full cascade: the work item row, its comments, dependency edges referencing it, its `audit_results` row, and its FTS index entry. Own items are never touched. The result reports before/after totals, per-prefix removed counts, and any errors. Run `--dry-run` first to preview exactly what will be removed.
 
+Cascade-or-refuse (R1, WL-0MWGRK52Z0078SJJ):
+
+- By default a foreign item that is still referenced as the `parentId` of an **own-prefix live child** is **protected** — it is not removed, and its own-prefix child keeps a resolvable parent. Protected ids are reported in the `protectedIds` array and never appear in `removedIds`.
+- `--cascade-children` is the explicit destructive opt-in: the foreign item is removed together with its own-prefix descendants (hard-deleted), reported in `cascadedIds`, so no live own item is left pointing at a vanished foreign parent. There is no default cascade.
+- After an `--apply` that actually removes rows (and does not `--push`), any lingering local `.worklog/worklog-data.jsonl` is dropped (ephemeral JSONL pattern) so a later open of an emptied store cannot resurrect the removed rows.
+
 See [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) for the full usage guide, recommended workflow, and the pollution-source sweep findings.
 
 Adding `--push` rewrites the project's remote worklog ref (`origin refs/worklog/data`, or the configured `syncBranch`) so it contains only the project's own items, bypassing the polluted remote history entirely (a fresh orphan commit is force-pushed and the local tracking ref is updated to match). `--push` requires `--apply` — rewriting the ref without cleaning the DB would publish foreign items. After the push, a subsequent `wl sync` pulls the clean ref and cannot re-import foreign items.
+
+### Orphan retention and remediation
+
+A child **survives** its parent — it becomes an orphan — whenever its `parentId` no longer resolves to a live row. That happens through an explicit `wl delete --no-recursive`, a hard delete that bypassed descendants (`wl doctor prune`, `wl doctor foreign-items --apply` before their cascade-or-refuse guards), or a soft-deleted parent (a soft-deleted parent is as unreachable as a hard-deleted one for every rollup and report).
+
+A stranded child belongs in no rollup, is never closed by its parent's closure path, and is invisible to every parent-level report, so an operator has to decide what it is for. That decision is the **retention rule**:
+
+- **Promote** when the child's subject is **still live** — the work is still worth doing, so it is promoted to a top-level item and stays reachable.
+- **Retire** when the child is **superseded** (a newer item already covers it), when its **target is gone** (the code/feature it pointed at no longer exists), or when the abandoned parent's **feature was never delivered** and the child has no standalone value.
+
+#### Reporting orphans (grouped by lost parent)
+
+`wl doctor` emits a per-item `parent.missing-endpoint` finding (type `missing-parent`) for every live item whose `parentId` does not resolve, carrying the lost parent id in `context.parentId` and a safe `parentId: null` proposed fix. Because orphans are inherently a **group** problem — one lost parent strands N children — the report also prints an **orphan summary grouped by the lost parent id**, with the child count and the child ids:
+
+```text
+Orphan summary (children grouped by lost parent):
+  - WL-GONE: 3 child(ren) [WL-CHILD1, WL-CHILD2, WL-CHILD3]
+```
+
+`wl doctor dangling-parents --dry-run` (the default) reports the same grouping — per-child rows plus one grouped row per lost parent, with the JSON `groups` array (`{ parentId, count, childIds }`) for automation. A soft-deleted **parent** is treated as unresolvable, so its live children appear in the report (R3b); a soft-deleted **child** is already retired and is not re-reported. `wl doctor --fix` detaches the safe findings, which empties the grouped summary once the repair is applied.
+
+#### Remediation path
+
+Detaching is only the mechanical repair; the retention rule decides what the child is for.
+
+**Promotion** (keep a live child) clears `parentId` so the item becomes top-level and stays reachable:
+
+```sh
+wl update WL-CHILD --parent null                 # detach a single item
+wl doctor dangling-parents --apply               # detach every orphan
+wl doctor --fix                                  # apply the safe parentId: null fixes
+```
+
+**Retirement** (drop a stale child) uses the normal lifecycle paths:
+
+```sh
+wl close WL-CHILD -r "Superseded by WL-NEW"      # resolve/retire
+wl delete WL-CHILD -r "Target removed"           # remove it outright
+```
+
+#### Attribution and rationale
+
+Every orphaning and promotion is recorded so the history is never lost:
+
+- `wl delete --no-recursive` records a comment on **each surviving child** naming the **previous parent** and the explicit decision (plus the delete reason, when given).
+- Promotion (`parentId -> null`, via `wl update --parent null`, `wl doctor dangling-parents --apply` or `wl doctor --fix`) records a comment naming the previous parent and the rationale token:
+  - `promote-because-live` — the child's subject is still live, so it was promoted rather than retired.
+  - `retire-because-stale` — the previous parent no longer resolves to a live item, so the stale link was retired and the live child promoted.
+
+The comments are best-effort: a comment-write failure never undoes the orphaning/promotion or aborts the command. See [`wl doctor dangling-parents`](CLI.md#doctor-dangling-parents-options) and the `delete`/`update` entries in [CLI.md](CLI.md) for the exact console and JSON output.
 
 ### Renaming the project prefix (`wl doctor prefix`)
 

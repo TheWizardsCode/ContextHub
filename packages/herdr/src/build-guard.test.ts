@@ -12,6 +12,16 @@
  * This guard compiles the plugin's own tsconfig and asserts it produces no
  * diagnostics, so any future type error in `packages/herdr` fails the suite
  * instead of reaching `dev`.
+ *
+ * **Not the authoritative gate (WL-0MWKQ51G0006F3KV).** This test lives under
+ * `packages/herdr/src`, which is an opt-in profile (`--type herdr` /
+ * `--group herdr`, per WL-0MVFZVIA50062TJ8) that no gate runs automatically —
+ * so on its own it could never have caught the incident above. The single
+ * source of truth for type-checking the plugin is now the root
+ * `npm run typecheck` (`tsc --noEmit -p packages/herdr/tsconfig.json`), run as
+ * the first command of the canonical suite and by CI. This test is kept as a
+ * secondary, profile-local assertion — do not add new type-checking behaviour
+ * here; extend `npm run typecheck` instead.
  */
 
 import { describe, it, expect } from 'vitest';

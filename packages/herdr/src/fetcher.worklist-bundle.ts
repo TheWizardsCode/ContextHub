@@ -122,10 +122,20 @@ export async function fetchWorklistBundle(
   count?: number,
   timeoutMs?: number,
   dirOverride?: string,
+  /**
+   * Include not-yet-started items (`--include-not-started`, WL-0MWMGEWH7004VUFI).
+   * The WORKLIST display opts in so a scheduled item is visible read-only with
+   * its marker; the DISPATCH head never does, so a future item is never
+   * dispatched or claimed.
+   */
+  includeNotStarted = false,
 ): Promise<WorklistBundle> {
   const args = ['worklist'];
   if (count !== undefined) {
     args.push('-n', String(count));
+  }
+  if (includeNotStarted) {
+    args.push('--include-not-started');
   }
   const dirKey = dirOverride ?? worklogDirKey();
   const promise = runWl(args, true, timeoutMs, dirOverride).then((output) => {

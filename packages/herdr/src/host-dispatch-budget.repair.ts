@@ -23,13 +23,14 @@
  *
  * ## The three guarantees
  *
- *  1. **Every dispatcher label form is understood.** {@link decodeBudgetPaneLabel}
- *     strips leading decoration (emoji/status markers and surrounding
- *     whitespace) and then accepts `Downtime triggered …`,
- *     `Downtime <kind> …` and `Manually triggered …`, deriving the tier from
- *     the token after the prefix. An unreadable tier is counted against
- *     `implement` — over-counting refuses a dispatch, under-counting admits
- *     work the operator capped.
+ *  1. **Every dispatcher label form is understood.** {@link kindOf} (via
+ *     {@link decodeBudgetPaneLabel}) strips leading decoration (emoji/status
+ *     markers and surrounding whitespace) and then accepts
+ *     `Downtime triggered …`, `Downtime <kind> …` and `Manually triggered …`,
+ *     deriving the kind from the token after the prefix for EVERY budget kind
+ *     (implement, audit, plan, intake, risk-effort — WL-0MWF34932000SNTX F2).
+ *     An unreadable tier is counted against `implement` — over-counting
+ *     refuses a dispatch, under-counting admits work the operator capped.
  *  2. **A repair is all-or-nothing.** {@link planBudgetRepair} reports every
  *     live dispatcher pane it could NOT account for (no work-item id in the
  *     label), and {@link repairBudgetLedgerFromPanes} refuses to write while
@@ -45,6 +46,7 @@
  */
 
 import {
+  isHostBudgetKind,
   replaceBudget,
   type HostBudgetEntry,
   type HostBudgetKind,
@@ -62,8 +64,9 @@ export interface DecodedBudgetPaneLabel {
   form: BudgetPaneLabelForm;
   /**
    * The budgeted tier the label names, or `null` when the pane is not a
-   * budgeted dispatch at all (a plan/intake/risk-effort/prompt pane, or a
-   * non-downtime pane).
+   * capped dispatch kind at all (a scheduled/prompt pane, or a non-downtime
+   * pane). Every `HostBudgetKind` (implement, audit, plan, intake, risk-effort)
+   * is decodeable since WL-0MWF34932000SNTX F2.
    */
   kind: HostBudgetKind | null;
   /**
@@ -84,8 +87,12 @@ export interface DecodedBudgetPaneLabel {
  */
 const LEADING_DECORATION = /^[^\p{L}]+/u;
 
-/** Tier tokens the dispatcher knows are NOT budgeted. */
-const UNBUDGETED_TIER_TOKENS = new Set(['plan', 'intake', 'risk-effort', 'prompt', 'audit-skill']);
+/**
+ * Tier tokens the dispatcher knows are NOT budget kinds (`scheduled` prompts
+ * are not a work-item kind and stay outside the budget). Recognised so they are
+ * never mistaken for the conservative `implement` fallback.
+ */
+const UNBUDGETED_TIER_TOKENS = new Set(['prompt', 'audit-skill', 'scheduled']);
 
 /**
  * Decode one pane label into its budget identity (pure, total).
@@ -127,7 +134,10 @@ export function decodeBudgetPaneLabel(label: string | undefined): DecodedBudgetP
 
   const token = (rest.trim().split(/\s+/)[0] ?? '').toLowerCase();
   const itemId = toBudgetItemId(paneItemIdFromLabel(normalised));
-  if (token === 'implement' || token === 'audit') {
+  // Every `HostBudgetKind` is decodable (WL-0MWF34932000SNTX F2): the repair
+  // path and the union live count must see a plan/intake/risk-effort pane as
+  // its own kind, not as "unbudgeted" or as a conservative implement.
+  if (isHostBudgetKind(token)) {
     return { form, kind: token, kindKnown: true, itemId, normalised };
   }
   if (UNBUDGETED_TIER_TOKENS.has(token)) {
@@ -171,18 +181,38 @@ export interface BudgetRepairPlan {
 }
 
 /**
- * Build the repair plan from the machine-wide live pane list (pure).
- *
- * Only panes that decode to a BUDGETED tier (`implement`/`audit`, including the
- * conservative unknown-tier fallback) are dispatch evidence; a plan/intake/
- * prompt pane or a non-downtime pane is ignored. A budgeted pane with no
- * work-item id is `unaccounted` — an entry has no key without it, so writing
- * would silently drop a running dispatch (AC4).
+ * The budget kind a pane label names, or `null` when the pane is not a capped
+ * dispatch kind (WL-0MWF34932000SNTX F2 — the named helper the repair and the
+ * union live count share). Pure and total.
  */
-export function planBudgetRepair(
+export function kindOf(label: string | undefined): HostBudgetKind | null {
+  return decodeBudgetPaneLabel(label).kind;
+}
+
+/** One reconstructed entry plus the panes it accounts for. */
+export interface LivePaneEntries {
+  /** The entries reconstructed (one per `(kind, itemId)`). */
+  entries: HostBudgetEntry[];
+  /** Every pane id the reconstruction accounted for (incl. duplicates). */
+  accountedPaneIds: string[];
+  /** Budgeted panes that cannot become an entry (no work-item id). */
+  unaccounted: BudgetRepairUnaccountedPane[];
+}
+
+/**
+ * Reconstruct one ledger entry per capped dispatch pane (WL-0MWF34932000SNTX
+ * F2 — generalised from the implement/audit-only reconstruction).
+ *
+ * Only panes whose label decodes to a `HostBudgetKind` (via {@link kindOf}) are
+ * dispatch evidence; a scheduled/prompt pane or a non-downtime pane is ignored.
+ * A budgeted pane with no work-item id is reported as `unaccounted` — an entry
+ * has no key without it, so writing would silently drop a running dispatch
+ * (AC4). Pure: no filesystem access.
+ */
+export function entriesFromLivePanes(
   livePanes: readonly HostBudgetLivePane[],
   input: { instanceId: string; root: string; now?: number },
-): BudgetRepairPlan {
+): LivePaneEntries {
   const at = new Date(input.now ?? Date.now()).toISOString();
   const entries: HostBudgetEntry[] = [];
   const accountedPaneIds: string[] = [];
@@ -203,7 +233,7 @@ export function planBudgetRepair(
     }
     const key = `${decoded.kind}:${decoded.itemId}`;
     if (seen.has(key)) {
-      // The same (tier, item) twice: one entry is the ledger's contract. Both
+      // The same (kind, item) twice: one entry is the ledger's contract. Both
       // panes are still accounted for (nothing is dropped silently).
       accountedPaneIds.push(pane.paneId);
       continue;
@@ -221,11 +251,28 @@ export function planBudgetRepair(
     accountedPaneIds.push(pane.paneId);
   }
 
+  return { entries, accountedPaneIds, unaccounted };
+}
+
+/**
+ * Build the repair plan from the machine-wide live pane list (pure).
+ *
+ * Only panes that decode to a `HostBudgetKind` (any capped kind, including the
+ * conservative unknown-tier fallback) are dispatch evidence; a scheduled/prompt
+ * pane or a non-downtime pane is ignored. A budgeted pane with no work-item id
+ * is `unaccounted` — an entry has no key without it, so writing would silently
+ * drop a running dispatch (AC4).
+ */
+export function planBudgetRepair(
+  livePanes: readonly HostBudgetLivePane[],
+  input: { instanceId: string; root: string; now?: number },
+): BudgetRepairPlan {
+  const reconstructed = entriesFromLivePanes(livePanes, input);
   return {
-    entries,
-    accountedPaneIds,
-    unaccounted,
-    complete: unaccounted.length === 0,
+    entries: reconstructed.entries,
+    accountedPaneIds: reconstructed.accountedPaneIds,
+    unaccounted: reconstructed.unaccounted,
+    complete: reconstructed.unaccounted.length === 0,
   };
 }
 

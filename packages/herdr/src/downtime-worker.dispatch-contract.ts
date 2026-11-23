@@ -228,17 +228,18 @@ export interface DowntimeDispatchDeps {
    * WL-0MVXY0XPF006YUHA F2): the ONE machine-scoped ledger read per dispatch
    * attempt, called in `dispatchClaimedTier` immediately before the dispatch
    * marker is written so both dispatcher paths funnel through it (F3 AC1).
-   * Applies to the `implement` and `audit` kinds — plan/intake/risk-effort are
-   * never budgeted. Optional — absent means no host budget (legacy/test callers
-   * stay byte-identical).
+   * Applies to EVERY `HostBudgetKind` (implement, audit, plan, intake,
+   * risk-effort): a capped kind is enforced, an uncapped kind is admitted
+   * without a reservation (WL-0MWF34932000SNTX F2). Optional — absent means
+   * no host budget (legacy/test callers stay byte-identical).
    */
   admitHostDispatch?(
     input: DowntimeHostBudgetAdmissionInput,
   ): Promise<DowntimeHostBudgetAdmission>;
   /**
    * Record the spawned pane id on a reserved budget entry (AC3 "confirm").
-   * Countable in the ledger's liveness rules for the implement tier (the audit
-   * tier counts a fresh entry regardless, as the retired marker did).
+   * Countable in the ledger's liveness rules for every non-audit kind (the
+   * audit kind counts a fresh entry regardless, as the retired marker did).
    * Best-effort.
    */
   confirmHostDispatch?(
@@ -301,8 +302,9 @@ export interface DowntimeDispatchDeps {
 export interface DowntimeHostBudgetAdmissionInput {
   itemId: string;
   /**
-   * Dispatch kind. The `implement` and `audit` kinds are budgeted; the pipeline
-   * only calls the seam for those two.
+   * Dispatch kind. Every `HostBudgetKind` (implement, audit, plan, intake,
+   * risk-effort) is offered to the generic admission seam; whether it is
+   * CAPPED is decided by the budget config (WL-0MWF34932000SNTX F2).
    */
   kind: DowntimeDispatchKind;
   /** Worklog root the dispatch operates on. */
@@ -315,15 +317,23 @@ export interface DowntimeHostBudgetAdmissionInput {
  */
 export interface DowntimeHostBudgetAdmission {
   admitted: boolean;
+  /**
+   * `false` on an UNCAPPED kind's admission (WL-0MWF34932000SNTX F2): the kind
+   * has no configured cap, so it was admitted without a ledger reservation and
+   * the pipeline must not confirm/release an entry for it. Absent on a capped
+   * kind (and on every refusal), preserving the pre-generalisation shape.
+   */
+  capped?: boolean;
   live: number;
   max: number;
   /**
-   * Refusal token. The implement tier uses `host-budget-implement` /
-   * `host-budget-unknown`. The audit tier is proxy-derived
-   * (WL-0MWAMSK9H005BOHD) and reports the proxy's own vocabulary
-   * (`audit-budget-saturated` / `audit-budget-unknown`); only the one-release
-   * `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path still reports
-   * `host-budget-audit` / `audit-host-saturated` / `host-budget-unknown`.
+   * Refusal token. Every capped kind reports its unified
+   * `host-budget-<kind>` token (implement, audit, plan, intake, risk-effort)
+   * or `host-budget-unknown` / `host-budget-corrupt`. The audit tier is
+   * additionally proxy-derived (WL-0MWAMSK9H005BOHD) and reports the proxy's
+   * own vocabulary (`audit-budget-saturated` / `audit-budget-unknown`); only
+   * the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path reports
+   * `host-budget-audit` / `host-budget-unknown`.
    */
   reason?: string;
   /**
@@ -371,7 +381,7 @@ export interface DowntimeHostBudgetAdmission {
  * rather than deleting whichever entry happens to share the item id.
  */
 export interface DowntimeHostBudgetRelease {
-  /** Entry kind (`implement`/`audit`); omitted by the pane-close path. */
+  /** Entry kind (`HostBudgetKind`); omitted by the pane-close path. */
   kind?: DowntimeDispatchKind;
   /** The confirmed pane this release owns. */
   paneId?: string;
@@ -572,10 +582,10 @@ export interface DowntimeDispatchOutcome {
    * machine-wide Dispatcher anchor pane could not be provisioned — neutral
    * "no dispatch this cycle", never a fallback to the leader's pane) |
    * 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
-   * in flight) | 'audit-host-saturated' (WL-0MUIVE0YG000UVIA: the
-   * machine-wide active-audit marker shows an audit running on this host —
-   * dispatched by ANY project/instance — so the audit tier is deferred
-   * host-wide) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
+   * in flight) | 'host-budget-audit' (WL-0MUIVE0YG000UVIA: the
+   * machine-wide dispatch-budget ledger shows the audit tier at its cap on
+   * this host — dispatched by ANY project/instance — so the audit tier is
+   * deferred host-wide) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
    * was recorded during interim). When `reason` is 'wl-error', `error`
    * may carry the underlying wl/CLI error details (timeout, SQLITE_BUSY,
    * parse failure, stderr) for the three-strike pause log.
@@ -602,12 +612,10 @@ export interface DowntimeDispatchOutcome {
    * WL-0MVXY0XPF006YUHA F2):
    * `host-budget-implement` (the ledger reports the implement tier at or over
    * its machine-wide cap, or the tier is disabled with `maxImplement: 0`),
-   * `host-budget-audit` (the same for the audit tier at any cap other than 1,
-   * including the `maxAudit: 0` kill switch) and `host-budget-unknown` (the
+   * `host-budget-audit` (the same for the audit tier at EVERY cap, including
+   * the `maxAudit: 0` kill switch) and `host-budget-unknown` (the
    * ledger could not be read: the dispatcher fails closed and rewrites it from
-   * the live pane list). The audit tier keeps the retired marker's token
-   * `audit-host-saturated` at its `maxAudit: 1` default, so existing consumers
-   * and logs are unchanged. All of these are NEUTRAL skips — no strike, no
+   * the live pane list). All of these are NEUTRAL skips — no strike, no
    * attempt budget, no no-candidate cooldown — so the next idle tick re-checks
    * as soon as a slot frees. `budget` carries the `live`/`max` evidence.
    *
@@ -749,6 +757,25 @@ export interface DowntimeDispatchOutcome {
   hostCpuPercent?: number;
   hostCpuSource?: HostCpuSource;
   cpuGatePercent?: number;
+
+  /**
+   * Per-project fairness (WL-0MWKY141H002LULI, parent WL-0MWKE9VF800101V9
+   * AC3): the worklog root whose offer this dispatch ATTEMPTED (the entry's
+   * root on the offer path, the swept root on the registered-root sweep, the
+   * leader's own root on the own-backlog/continuation path). Recorded as
+   * `dispatchingRoot` on a successful dispatch decision only — a refusal keeps
+   * it out of the entry, so `no-dispatch` never fabricates a dispatching root.
+   * Additive and optional — every existing outcome shape is unchanged.
+   */
+  attemptedRoot?: string;
+  /**
+   * Per-project fairness selection override (WL-0MWKY141H002LULI AC3): the
+   * root the REGISTERED-ROOT SWEEP put first, whose candidate universe is the
+   * registry rather than the offer list. Offered-path outcomes omit it and the
+   * orchestrator derives the selection from its own offer snapshot. Additive
+   * and optional.
+   */
+  selectedRoot?: string | null;
 }
 
 // ── Continuable holds (WL-0MWBT76WY00298AY AC1) ────────────────────────
@@ -775,15 +802,15 @@ export const LOST_CLAIM_REASONS: ReadonlySet<string> = new Set([
 
 /**
  * Host-budget refusals: the machine-wide dispatch budget (or the proxy-owned
- * audit-budget verdict) refused this BUDGETED candidate (`implement` /
- * `audit`). Every token below is emitted by the same admission seam
- * (`dispatchClaimedTier`) with the same neutral contract — `{live, max}`
+ * audit-budget verdict) refused this CAPPED candidate (any `HostBudgetKind`,
+ * WL-0MWF34932000SNTX F2). Every token below is emitted by the same admission
+ * seam (`dispatchClaimedTier`) with the same neutral contract — `{live, max}`
  * evidence, no strike, no cooldown, no attempt budget — so all of them are
  * continuable holds:
- *  - `host-budget-implement` / `host-budget-audit` / `host-budget-unknown`
- *    (the ledger path), and
+ *  - `host-budget-<kind>` for every capped kind (implement, audit, plan,
+ *    intake, risk-effort) plus `host-budget-unknown` (the ledger path), and
  *  - `audit-budget-saturated` / `audit-budget-unknown` (the proxy-owned
- *    availability verdict) plus the one-release legacy `audit-host-saturated`.
+ *    availability verdict).
  *
  * This set is the UNION allow-list that keeps every budget refusal a
  * continuable hold; the terminal-reason precedence further splits it into
@@ -791,24 +818,25 @@ export const LOST_CLAIM_REASONS: ReadonlySet<string> = new Set([
  * tier was refused") and the implement/host rung below it
  * (WL-0MWDDHVF2004PTYX AC2).
  *
- * Prep work (`plan` / `intake` / `risk-effort`) is never budget-gated, which
- * is exactly why a refusal must not end the scan: the prep candidate ranked
- * behind the refused budgeted candidate is still dispatchable.
+ * A refusal must never end the scan: the candidates ranked behind the refused
+ * one are still dispatchable (the motivating 2/2 prep-starvation regression).
  */
 export const HOST_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
   'host-budget-implement',
   'host-budget-audit',
+  'host-budget-plan',
+  'host-budget-intake',
+  'host-budget-risk-effort',
   'host-budget-unknown',
   'audit-budget-saturated',
   'audit-budget-unknown',
-  'audit-host-saturated',
 ]);
 
 /**
  * The AUDIT tier's budget-refusal tokens — the subset of
  * {@link HOST_BUDGET_HOLD_REASONS} that names a refusal of the audit tier
- * (proxy-derived `audit-budget-*`, plus the one-release legacy
- * `host-budget-audit` / `audit-host-saturated`). A refusal quoted with one of
+ * (proxy-derived `audit-budget-*`, plus the ledger's `host-budget-audit`).
+ * A refusal quoted with one of
  * these is a statement about the AUDIT tier and therefore OUTRANKS an
  * implement-tier refusal in the terminal-reason precedence
  * (WL-0MWDDHVF2004PTYX AC2): an audit refusal with `detail: 'http-404'` is a
@@ -822,7 +850,6 @@ export const AUDIT_BUDGET_HOLD_REASONS: ReadonlySet<string> = new Set([
   'audit-budget-saturated',
   'audit-budget-unknown',
   'host-budget-audit',
-  'audit-host-saturated',
 ]);
 
 /** True when `reason` is one of the host-budget refusal tokens. */

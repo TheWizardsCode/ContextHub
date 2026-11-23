@@ -74,7 +74,18 @@ function okPanes(...specs: FakePaneSpec[]): HostBudgetLivePanesResult {
 const unknownPanes: HostBudgetLivePanesResult = { ok: false };
 
 /** Write `budget.json` into the isolated machine dir. */
-function writeBudgetConfig(dir: string, config: { maxImplement?: number; maxAudit?: number }): void {
+function writeBudgetConfig(
+  dir: string,
+  config: {
+    maxImplement?: number;
+    maxAudit?: number;
+    implement?: number;
+    audit?: number;
+    plan?: number;
+    intake?: number;
+    'risk-effort'?: number;
+  },
+): void {
   writeFileSync(join(dir, HOST_BUDGET_CONFIG_FILE), JSON.stringify(config), 'utf8');
 }
 
@@ -119,9 +130,19 @@ describe('budgetKindForAgentCommand', () => {
     expect(budgetKindForAgentCommand('/skill:audit WL-1')).toBe('audit');
   });
 
+  it('maps /skill:plan to the plan tier', () => {
+    expect(budgetKindForAgentCommand('/skill:plan WL-1')).toBe('plan');
+  });
+
+  it('maps /skill:intake to the intake tier', () => {
+    expect(budgetKindForAgentCommand('/skill:intake WL-1')).toBe('intake');
+  });
+
+  it('maps /skill:risk-effort to the risk-effort tier', () => {
+    expect(budgetKindForAgentCommand('/skill:risk-effort WL-1')).toBe('risk-effort');
+  });
+
   it('returns undefined for commands outside the budget', () => {
-    expect(budgetKindForAgentCommand('/skill:plan WL-1')).toBeUndefined();
-    expect(budgetKindForAgentCommand('/intake WL-1')).toBeUndefined();
     expect(budgetKindForAgentCommand('!!wl update WL-1')).toBeUndefined();
     expect(budgetKindForAgentCommand('')).toBeUndefined();
   });
@@ -176,7 +197,9 @@ describe('under quota (AC2)', () => {
       writeBudgetConfig(dir, { maxImplement: 0 });
       const { deps, confirm, claim } = makeDeps(dir);
 
-      const result = await prepareInteractiveAgentDispatch('/skill:plan WL-0000000000000001', deps);
+      // `/skill:refactor` is outside the five capped kinds: no quota check,
+      // no reservation, no ledger entry — but the claim still runs.
+      const result = await prepareInteractiveAgentDispatch('/skill:refactor WL-0000000000000001', deps);
 
       expect(result.proceed).toBe(true);
       expect(result.reserved).toBe(false);
@@ -196,6 +219,127 @@ describe('under quota (AC2)', () => {
     expect(confirm).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
     expect(claim).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Uncapped kinds: plan, intake, risk-effort (no default cap) ──────────
+
+describe('uncapped kinds (AC uncapped)', () => {
+  it('plan (no default cap) short-circuits: no quota check, no ledger', async () => {
+    await withMachineDir(async (dir) => {
+      // No config at all — plan has no default cap.
+      const { deps, confirm, claim, notify } = makeDeps(dir);
+
+      const result = await prepareInteractiveAgentDispatch('/skill:plan WL-0000000000000001', deps);
+
+      expect(result.proceed).toBe(true);
+      expect(result.kind).toBe('plan');
+      expect(result.reserved).toBe(false);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(readBudgetLedger(dir)).toBeNull();
+    });
+  });
+
+  it('intake (no default cap) short-circuits: no quota check, no ledger', async () => {
+    await withMachineDir(async (dir) => {
+      const { deps, confirm, claim, notify } = makeDeps(dir);
+
+      const result = await prepareInteractiveAgentDispatch('/skill:intake WL-0000000000000001', deps);
+
+      expect(result.proceed).toBe(true);
+      expect(result.kind).toBe('intake');
+      expect(result.reserved).toBe(false);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(readBudgetLedger(dir)).toBeNull();
+    });
+  });
+
+  it('risk-effort (no default cap) short-circuits: no quota check, no ledger', async () => {
+    await withMachineDir(async (dir) => {
+      const { deps, confirm, claim, notify } = makeDeps(dir);
+
+      const result = await prepareInteractiveAgentDispatch('/skill:risk-effort WL-0000000000000001', deps);
+
+      expect(result.proceed).toBe(true);
+      expect(result.kind).toBe('risk-effort');
+      expect(result.reserved).toBe(false);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(readBudgetLedger(dir)).toBeNull();
+    });
+  });
+
+  it('plan with a custom cap consults the ledger like implement', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { plan: 1 });
+      // Already at cap: 1 live pane, max 1.
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'plan', itemId: 'WL-OTHER', paneId: 'pane-1' }),
+      ]);
+      const { deps, confirm, claim } = makeDeps(dir, {
+        readLivePanes: async () => okPanes('WL-OTHER'),
+      });
+      confirm.mockResolvedValueOnce('cancel');
+
+      const result = await prepareInteractiveAgentDispatch('/skill:plan WL-0000000000000001', deps);
+
+      expect(result.proceed).toBe(false);
+      expect(confirm).toHaveBeenCalledTimes(1);
+      const request = confirm.mock.calls[0][0];
+      expect(request.kind).toBe('plan');
+      expect(request.live).toBe(1);
+      expect(request.max).toBe(1);
+      expect(claim).not.toHaveBeenCalled();
+    });
+  });
+
+  it('plan at cap + proceed ⇒ claims and records `override: { by: "user" }`', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { plan: 1 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({ kind: 'plan', itemId: 'WL-OTHER', paneId: 'pane-1' }),
+      ]);
+      const { deps, confirm, claim } = makeDeps(dir, {
+        readLivePanes: async () => okPanes('WL-OTHER'),
+      });
+      confirm.mockResolvedValueOnce('proceed');
+
+      const result = await prepareInteractiveAgentDispatch('/skill:plan WL-0000000000000001', deps);
+
+      expect(result.proceed).toBe(true);
+      expect(result.override).toEqual({ by: 'user' });
+      expect(claim).toHaveBeenCalledTimes(1);
+      const ledger = readBudgetLedger(dir);
+      const entry = ledger?.entries.find(
+        (candidate) => candidate.itemId === 'WL-0000000000000001',
+      );
+      expect(entry?.kind).toBe('plan');
+      expect(entry?.override).toEqual({ by: 'user' });
+      expect(ledger?.entries).toHaveLength(2);
+    });
+  });
+
+  it('a per-kind kill switch (`plan: 0`) prompts with 0/0 evidence', async () => {
+    await withMachineDir(async (dir) => {
+      writeBudgetConfig(dir, { plan: 0 });
+      const { deps, confirm, claim } = makeDeps(dir);
+      confirm.mockResolvedValueOnce('cancel');
+
+      const result = await prepareInteractiveAgentDispatch('/skill:plan WL-0000000000000001', deps);
+
+      expect(result.proceed).toBe(false);
+      expect(claim).not.toHaveBeenCalled();
+      expect(confirm.mock.calls[0][0]).toEqual({
+        kind: 'plan',
+        live: 0,
+        max: 0,
+        trailPath: budgetAuditTrailPath(dir),
+      });
+      expect(formatHostBudgetHeadline(confirm.mock.calls[0][0])).toContain('(0 running, max 0)');
+    });
   });
 });
 
@@ -402,8 +546,8 @@ describe('unreadable ledger (AC8)', () => {
 //
 // The interactive over-quota dialog for the audit tier must quote the same
 // pane-aware display count the worklist header shows (`reduceAuditDisplayCounts`),
-// not the admission-compatible count (`freshCount` / `reduceMarkerCounts`), so
-// the two operator-facing surfaces never disagree.
+// not the admission-compatible over-hold count (`freshCount`), so the two
+// operator-facing surfaces never disagree.
 
 describe('audit dialog pane-aware count (WL-0MW8IQNY7003JIOL)', () => {
   /** A stale heartbeat (older than the 2 h staleness window). */

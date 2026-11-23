@@ -308,13 +308,13 @@ the records changed since the last full snapshot — not unbounded history.
 | File | Change |
 |------|--------|
 | `packages/shared/src/persistent-store.ts` | `last_export_timestamps` table in `initializeSchema`; `LastExportTimestamps` type; `getLastExportTimestamps()` / `setLastExportTimestamps()` store accessors |
-| `packages/shared/src/database.ts` | `exportForSync()` accepts `{mode, since}`; dirty query filtering per record type; `getLastExportTimestamps()` / `markLastExportTimestamps()`; watermark advance after full export |
+| `packages/shared/src/database/sync.ts` | `exportForSync()` accepts `{mode, since}`; dirty query filtering per record type; `getLastExportTimestamps()` / `markLastExportTimestamps()`; watermark advance after full export (the `database.ts` façade keeps thin delegates with the same names) |
 | `src/migrations/index.ts` | `20260821-add-last-export-timestamps` migration for existing DBs |
 | `src/jsonl.ts` | header emission/parsing; a delta writer (`buildJsonlContent` with `since`) |
 | `src/sync.ts` | pull side detects header kind; `exportForSync` call sites; full-snapshot fallback decision |
 | `src/commands/sync.ts` | orchestration: decide full vs delta, cadence policy, zero-change skip |
 | `tests/` | dirty-tracking, delta export/merge, deletion propagation, convergence (interleaved full+delta), fallback tests |
-| `docs/ARCHITECTURE.md` | update "Future Considerations" §1 to reflect implemented design |
+| `docs/ARCHITECTURE.md` | update "Future Considerations" §1 to reflect implemented design; see also the Shared data layer module map below |
 
 ## 9. Concurrency & existing protections
 

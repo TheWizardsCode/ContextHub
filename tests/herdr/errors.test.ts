@@ -39,7 +39,9 @@ describe('formatWlError', () => {
     };
     const msg = formatWlError(error);
     expect(msg).toContain('not initialized');
-    expect(msg).toContain('worklog init');
+    expect(msg).toContain('wl init');
+    // Canonical CLI command, not the legacy `worklog init` spelling.
+    expect(msg).not.toContain('worklog init');
   });
 
   it('formats generic error', () => {

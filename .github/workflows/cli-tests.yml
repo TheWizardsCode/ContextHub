@@ -13,6 +13,7 @@ jobs:
     outputs:
       cli: ${{ steps.filter.outputs.cli }}
       shared: ${{ steps.filter.outputs.shared }}
+      typecheck: ${{ steps.filter.outputs.typecheck }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,14 +41,50 @@ jobs:
               - 'tests/**/*.test.ts'
               - 'test/**/*.test.ts'
               - 'scripts/wl-process-healthcheck.sh'
+            typecheck:
+              - 'src/**'
+              - 'packages/**'
+              - 'tsconfig*.json'
+              - 'package.json'
+              - 'package-lock.json'
+              - '.github/workflows/**'
 
   docs-only:
     runs-on: ubuntu-latest
     needs: changes
-    if: ${{ needs.changes.outputs.cli != 'true' && needs.changes.outputs.shared != 'true' }}
+    if: ${{ needs.changes.outputs.cli != 'true' && needs.changes.outputs.shared != 'true' && needs.changes.outputs.typecheck != 'true' }}
     steps:
       - name: No test changes detected
         run: echo "Docs-only change; skipping CLI test jobs."
+
+  typecheck:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.typecheck == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Prerequisites for the typecheck: the plugin's own dependencies
+      # (packages/herdr/node_modules) and the shared package's declarations
+      # (packages/shared/dist) — see WL-0MWKQ51G0006F3KV.
+      - name: Install herdr plugin dependencies
+        run: npm ci --prefix packages/herdr
+
+      - name: Build shared workspace package
+        run: npm run build:shared
+
+      - name: Type check root, packages/shared and packages/herdr
+        run: npm run typecheck
 
   cli-tests:
     runs-on: ubuntu-latest

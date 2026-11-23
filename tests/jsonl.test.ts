@@ -404,10 +404,20 @@ describe('JSONL Import/Export', () => {
       // Import
       const { items, comments } = importFromJsonl(testFilePath);
 
-      // Verify items
+      // Verify items. Both source records predate `startOn`, so the import
+      // back-fills it with the item's `createdAt` — back-compat is the default
+      // (WL-0MWMGEPY2004EDZ8).
       expect(items).toHaveLength(originalItems.length);
-      expect(items[0]).toEqual({ ...originalItems[0], dependencies: [] });
-      expect(items[1]).toEqual({ ...originalItems[1], dependencies: [] });
+      expect(items[0]).toEqual({
+        ...originalItems[0],
+        startOn: originalItems[0].createdAt,
+        dependencies: [],
+      });
+      expect(items[1]).toEqual({
+        ...originalItems[1],
+        startOn: originalItems[1].createdAt,
+        dependencies: [],
+      });
 
       // Verify comments
       expect(comments).toHaveLength(originalComments.length);

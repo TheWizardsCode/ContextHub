@@ -2,12 +2,16 @@
  * packages/herdr/src/host-budget-dialog.ts — Interactive over-quota
  * confirmation dialog (WL-0MVXY0Z93002HKCZ F4, parent WL-0MVXWQFGV000D2AB).
  *
- * When an operator fires `/skill:implement` or `/skill:audit` BY HAND and the
- * tier is already at (or over) the machine-wide cap, the dispatch must ask
- * first — naming the tier, the live count, the cap and the overshoot — and
- * offer cancel (the safe default) or "proceed anyway". Dispatcher-fired work
- * never prompts (its admission refuses the tick); this dialog is the
- * interactive path's counterpart.
+ * When an operator fires a `/skill:<kind>` BY HAND and the tier is already
+ * at (or over) the machine-wide cap, the dispatch must ask first — naming the
+ * tier, the live count, the cap and the overshoot — and offer cancel (the
+ * safe default) or "proceed anyway". Dispatcher-fired work never prompts (its
+ * admission refuses the tick); this dialog is the interactive path's
+ * counterpart.
+ *
+ * Any capped kind renders generically ({@link hostBudgetTierLabel} maps every
+ * `HostBudgetKind` to a human-facing label); an uncapped kind never reaches
+ * this dialog.
  *
  * Design follows `ship-it-dialog.ts` deliberately: a bottom-anchored overlay
  * composed over the already-rendered selection list (the list stays visible),
@@ -99,7 +103,13 @@ export interface HostBudgetPromptHost {
 
 /** Human-facing tier label used in the dialog and the notice copy. */
 export function hostBudgetTierLabel(kind: HostBudgetKind): string {
-  return kind === 'implement' ? 'Implement' : 'Audit';
+  switch (kind) {
+    case 'implement': return 'Implement';
+    case 'audit': return 'Audit';
+    case 'plan': return 'Plan';
+    case 'intake': return 'Intake';
+    case 'risk-effort': return 'Risk & effort';
+  }
 }
 
 /**

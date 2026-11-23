@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, Comment, DependencyEdge, AuditResult, AuditWaiver } from './types.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
+import { normalizeStartOn } from './start-on.js';
 import { assessAuditInvalidate, type AuditInvalidationVerdict } from '@worklog/shared/icons';
 
 /**
@@ -94,7 +95,11 @@ export interface LastExportTimestamps {
 // would also require changing the value `src/migrations` writes, across the
 // workspace build boundary — `initializeSchema` repairs the column additively
 // on open; see REQUIRED_COLUMNS below (WL-0MUEBQLRD00288VV).
-const SCHEMA_VERSION = 9;
+//
+// Version 10 adds `workitems.startOn` (WL-0MWMGEPY2004EDZ8) and MUST stay in
+// step with `CURRENT_SCHEMA_VERSION` in `src/migrations/index.ts`; the two are
+// asserted equal by the `startOn` migration tests.
+const SCHEMA_VERSION = 10;
 
 /**
  * Tables the current code queries without a guard. A store whose `schemaVersion`
@@ -154,6 +159,18 @@ const REQUIRED_COLUMNS: RequiredColumn[] = [
     table: 'workitems',
     column: 'auditWaiver',
     ddl: 'ALTER TABLE workitems ADD COLUMN auditWaiver TEXT',
+  },
+  // startOn (WL-0MWMGEPY2004EDZ8): the stored scheduling instant. Additive and
+  // nullable so an older database keeps working the moment it is opened; the
+  // `startOn = createdAt` back-fill is the doctor migration
+  // (`20261118-add-start-on`), which stays PENDING until it runs. The sentinel
+  // therefore records only the column add — never the back-fill — so opening
+  // the CLI can never silently retire the migration.
+  {
+    table: 'workitems',
+    column: 'startOn',
+    ddl: 'ALTER TABLE workitems ADD COLUMN startOn TEXT',
+    sentinel: 'startOn_added',
   },
 ];
 
@@ -517,6 +534,7 @@ export class SqlitePersistentStore {
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
         activityAt TEXT,
+        startOn TEXT,
         tags TEXT NOT NULL,
         assignee TEXT NOT NULL,
         stage TEXT NOT NULL,
@@ -695,6 +713,17 @@ export class SqlitePersistentStore {
         );
       }
     }
+
+    // startOn index (WL-0MWMGEPY2004EDZ8) — created AFTER the additive column
+    // repair above: on a store that predates the column, `CREATE INDEX ... ON
+    // workitems(startOn)` inside the batch above would fail with "no such
+    // column", so the index has to follow the repair that adds it. Idempotent
+    // and cheap; the doctor migration creates the same index so a store
+    // upgraded by `wl doctor upgrade` alone is complete. The default-startOn
+    // filter query uses this index instead of scanning the table.
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_workitems_startOn ON workitems(startOn)'
+    );
   }
 
   /**
@@ -833,8 +862,8 @@ export class SqlitePersistentStore {
     // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering DELETE (which would cascade and remove comments)
     const stmt = this.db.prepare(`
       INSERT INTO workitems
-      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview, auditWaiver)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, startOn, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview, auditWaiver)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -845,6 +874,7 @@ export class SqlitePersistentStore {
         createdAt = excluded.createdAt,
         updatedAt = excluded.updatedAt,
         activityAt = excluded.activityAt,
+        startOn = excluded.startOn,
         tags = excluded.tags,
         assignee = excluded.assignee,
         stage = excluded.stage,
@@ -887,6 +917,10 @@ export class SqlitePersistentStore {
     // The waiver is stored as a JSON object (machine-readable) in a single
     // nullable column; absent = null = not waived (fail-safe).
     const auditWaiverVal = item.auditWaiver ? JSON.stringify(item.auditWaiver) : null;
+    // `startOn` is always populated with the effective instant
+    // (`startOn ?? createdAt`, WL-0MWMGEPY2004EDZ8) so scheduling queries
+    // compare one non-null column and never need COALESCE over two.
+    const startOnVal = normalizeStartOn(item.startOn, item.createdAt);
     const values: any[] = [
       item.id,
       titleVal,
@@ -898,6 +932,7 @@ export class SqlitePersistentStore {
       item.createdAt,
       item.updatedAt,
       activityAtVal,
+      startOnVal,
       tagsVal,
       item.assignee ?? '',
       item.stage ?? '',
@@ -1054,6 +1089,41 @@ export class SqlitePersistentStore {
    */
   private escapeLikePattern(value: string): string {
     return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+  }
+
+  /**
+   * Ids of **live** rows whose stored `startOn` column is `NULL` or blank.
+   *
+   * The column's invariant is "always populated with the effective instant"
+   * (`startOn ?? createdAt`, WL-0MWMGEPY2004EDZ8); a row that violates it is a
+   * back-fill the `20261118-add-start-on` migration has not reached yet.
+   *
+   * A direct SQL read is deliberate: {@link rowToWorkItem} falls back to
+   * `createdAt` for a `NULL` column (back-compat), so a loaded work item can no
+   * longer reveal whether the value was stored or defaulted — `wl doctor`
+   * needs the raw column to report the mismatch at all.
+   *
+   * Soft-deleted rows are excluded (the doctor findings are for live,
+   * actionable rows; WL-0MW7S20IC001F3AP).
+   */
+  getItemIdsMissingStartOn(): string[] {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT id FROM workitems
+            WHERE (startOn IS NULL OR trim(startOn) = '')
+              AND status <> 'deleted'
+              AND trim(COALESCE(deletedBy, '')) = ''
+            ORDER BY id`,
+        )
+        .all() as any[];
+      return rows.map((row) => String(row.id));
+    } catch (_err) {
+      // A store whose `startOn` column has not been added yet cannot hold a
+      // populated value either, but the migration notice already covers that
+      // shape; never let the doctor check throw.
+      return [];
+    }
   }
 
   /**
@@ -2371,6 +2441,11 @@ export class SqlitePersistentStore {
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         activityAt: row.activityAt || row.updatedAt,
+        // A NULL `startOn` (a row written before the field existed, or one the
+        // back-fill migration has not reached) reads as `createdAt` —
+        // back-compat is the default, never "blocked"
+        // (WL-0MWMGEPY2004EDZ8).
+        startOn: normalizeStartOn(row.startOn, row.createdAt) ?? undefined,
         tags: JSON.parse(row.tags),
         assignee: row.assignee,
         stage: row.stage,
@@ -2401,6 +2476,7 @@ export class SqlitePersistentStore {
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         activityAt: row.activityAt || row.updatedAt,
+        startOn: normalizeStartOn(row.startOn, row.createdAt) ?? undefined,
         tags: [],
         assignee: row.assignee,
         stage: row.stage,

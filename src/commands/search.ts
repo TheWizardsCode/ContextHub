@@ -11,6 +11,13 @@ import type { SearchOptions } from '../cli-types.js';
 import type { FtsSearchResult } from '@worklog/shared/persistent-store';
 import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
 import { formatTitleAndId } from './helpers.js';
+import {
+  filterNotStarted,
+  markNotStarted,
+  resolveNotStartedFilterFromFlags,
+  INCLUDE_NOT_STARTED_FLAG,
+  STARTS_BEFORE_FLAG,
+} from '../not-started.js';
 import { theme } from '../theme.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import {
@@ -36,6 +43,8 @@ export default function register(ctx: PluginContext): void {
     .option('-a, --assignee <assignee>', 'Filter by assignee')
     .option('--stage <stage>', 'Filter by stage')
     .option('--deleted', 'Include deleted items in results')
+    .option(INCLUDE_NOT_STARTED_FLAG, 'Include items whose startOn is in the future (excluded by default)')
+    .option(`${STARTS_BEFORE_FLAG} <iso>`, 'Include not-yet-started items starting before this ISO-8601 instant')
     .option('--needs-producer-review [value]', 'Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)')
     .option('--issue-type <type>', 'Filter by issue type')
     .option('-f, --fields <fields>', 'Comma-separated list of fields to include in output (id always included)')
@@ -179,6 +188,12 @@ export default function register(ctx: PluginContext): void {
 
       let { results, ftsUsed, warning } = rawResults;
 
+      // Default exclusion of not-yet-started items (`startOn` in the future),
+      // opted in with `--include-not-started` / `--starts-before`
+      // (WL-0MWMGET8N009KG33). `in-progress` rows are never filtered. The
+      // filter runs on the final ranked list (after semantic fusion), so the
+      // ranking itself is untouched and only ineligible rows are dropped.
+
       // ── Semantic search enhancement ──────────────────────────────
       if (options.semantic || options.semanticOnly) {
         const worklogDir = resolveWorklogDir();
@@ -241,9 +256,27 @@ export default function register(ctx: PluginContext): void {
         }
       }
 
+      // ── Not-yet-started exclusion (WL-0MWMGET8N009KG33) ─────────
+      const notStartedFlags = resolveNotStartedFilterFromFlags(options);
+      if (!notStartedFlags.ok) {
+        output.error(notStartedFlags.message, {
+          success: false,
+          error: 'invalid-starts-before',
+          message: notStartedFlags.message,
+        });
+        process.exit(1);
+      }
+      const notStarted = notStartedFlags.filter;
+      results = results.filter(r => {
+        const item = db.get(r.itemId);
+        // A vanished item is dropped later anyway; never hide it here.
+        return item ? !notStarted.hides(item) : true;
+      });
+
       if (utils.isJsonMode()) {
         const jsonResults = results.map(r => {
           const item = db.get(r.itemId);
+          const marked = item ? notStarted.isNotStarted(item) : false;
           const base: Record<string, unknown> = requestedFields
             ? pickFields(item as NonNullable<typeof item>, requestedFields)
             : {
@@ -251,7 +284,15 @@ export default function register(ctx: PluginContext): void {
                 title: item?.title || '',
                 status: item?.status || '',
                 priority: item?.priority || '',
+                // `startOn` is part of every JSON surface a consumer can read
+                // an item from (WL-0MWMGEPY2004EDZ8); search's default
+                // projection is deliberately narrow, so the scheduling
+                // instant is carried explicitly.
+                startOn: item?.startOn,
               };
+          // The not-yet-started marker rides alongside the effective `startOn`
+          // (WL-0MWMGET8N009KG33); present only for future-dated rows.
+          if (marked) base.notStarted = true;
           // Search-specific fields are always included, even when --fields
           // projects the work-item portion (the projection applies only to
           // the work-item object fields, not to search ranking metadata).
@@ -305,9 +346,12 @@ export default function register(ctx: PluginContext): void {
       for (const result of results) {
         const item = db.get(result.itemId);
         if (!item) continue;
+        // Text marker for a shown not-yet-started item (AC): the shared title
+        // formatter appends `[not started until …]`.
+        const displayItem = markNotStarted([item], notStarted)[0];
 
         // Title line
-        console.log(formatTitleAndId(item));
+        console.log(formatTitleAndId(displayItem));
 
         // Metadata line
         const meta: string[] = [];

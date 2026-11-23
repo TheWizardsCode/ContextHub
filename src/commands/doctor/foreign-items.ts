@@ -54,9 +54,10 @@ export function registerForeignItemsCommand(doctor: Command, ctx: ForeignItemsCo
     .description('Report work items whose ID prefix does not match the project prefix')
     .option('--dry-run', 'Show foreign items without modifying anything (default)')
     .option('--apply', 'Hard-delete foreign items from the database (destructive; requires explicit opt-in)')
+    .option('--cascade-children', 'With --apply: also hard-delete own-prefix children of a removed foreign item (destructive; requires explicit opt-in)')
     .option('--push', 'After --apply, rewrite and force-push the remote worklog ref so it contains only own items (destructive)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action(async (opts: { dryRun?: boolean; apply?: boolean; push?: boolean; prefix?: string }) => {
+    .action(async (opts: { dryRun?: boolean; apply?: boolean; cascadeChildren?: boolean; push?: boolean; prefix?: string }) => {
       utils.requireInitialized();
       const db = utils.getDatabase(opts.prefix);
       const config = utils.getConfig();
@@ -84,7 +85,18 @@ export function registerForeignItemsCommand(doctor: Command, ctx: ForeignItemsCo
 
       // Destructive path: hard-delete foreign items with full cascade.
       if (opts.apply) {
-        const result = withStoreMutationLock(dataPath, () => applyForeignItemCleanup(db, report));
+        const result = withStoreMutationLock(dataPath, () => {
+          const applyResult = applyForeignItemCleanup(db, report, { cascadeChildren: opts.cascadeChildren });
+          // Ephemeral JSONL pattern: a hard-delete leaves any lingering JSONL
+          // stale. Drop it while the mutation lock is still held so a later
+          // open of an emptied store cannot re-import and resurrect the
+          // removed rows (a `--push` run needs the JSONL, so it is skipped
+          // here and cleaned after the export/push below).
+          if (!opts.push && applyResult.removedCount > 0) {
+            try { db.deleteLocalJsonl(); } catch (_) { /* best-effort */ }
+          }
+          return applyResult;
+        });
 
         // Optional remote ref rewrite: publish a clean JSONL (only own items)
         // to the project's worklog ref, bypassing the polluted remote history.
@@ -130,6 +142,18 @@ export function registerForeignItemsCommand(doctor: Command, ctx: ForeignItemsCo
           return;
         }
         console.log(`Doctor foreign-items: removed ${result.removedCount} foreign item(s) (total: ${result.totalBefore} -> ${result.totalAfter}; own: ${result.ownBefore} -> ${result.ownAfter}).`);
+        if (result.protectedIds.length > 0) {
+          console.log(`Protected (has own-prefix children; use --cascade-children to force): ${result.protectedIds.length}`);
+          for (const id of result.protectedIds) {
+            console.log(`  - ${id}`);
+          }
+        }
+        if (result.cascadedIds.length > 0) {
+          console.log(`Cascaded own-prefix children removed with their foreign parents: ${result.cascadedIds.length}`);
+          for (const id of result.cascadedIds) {
+            console.log(`  - ${id}`);
+          }
+        }
         if (result.removedIds.length > 0) {
           console.log('Removed IDs:');
           for (const id of result.removedIds) {

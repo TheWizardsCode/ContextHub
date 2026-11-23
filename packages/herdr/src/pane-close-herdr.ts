@@ -392,6 +392,16 @@ export interface HerdrReaperIo {
    * → legacy callers skip the sweep.
    */
   sweepBudgetLedger?(panes: readonly ParsedHerdrPane[]): Promise<void>;
+  /**
+   * Finished-session budget release (WL-0MWJVY6NR001E0FS): called once per
+   * pane whose Pi session is authoritatively FINISHED, INDEPENDENT of the
+   * close decision, so a deliberately-open `implement` pane (and a
+   * terminal-status `audit` pane caught by the dead-agent guard) frees its
+   * host budget slot. Identity-safe and kind-generic (see
+   * `finishedSessionReleaseIdentity`). Idempotent and best-effort (the reaper
+   * wraps it fail-open). Absent → legacy callers skip the release.
+   */
+  releaseFinishedSessionBudget?(pane: PaneStatus): Promise<void>;
   /** Clock (injectable for tests). */
   now?(): number;
 }
@@ -539,6 +549,11 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
       // Untrusted read (failed/unparseable) → never sweep.
       if (lastParsedPanes === null) return;
       await io.sweepBudgetLedger(lastParsedPanes);
+    },
+
+    async releaseFinishedSessionBudget(pane: PaneStatus): Promise<void> {
+      if (typeof io.releaseFinishedSessionBudget !== 'function') return;
+      await io.releaseFinishedSessionBudget(pane);
     },
 
     terminateProcessGroup,

@@ -5,8 +5,7 @@
  * Single responsibility: decide, for ONE idle tick, whether any work may be
  * dispatched and which candidate wins — owning the per-process dispatch
  * pipeline counter (`dispatchInFlightCount`, declared here and nowhere else),
- * the terminal no-dispatch reason composition and the host-wide
- * audit-saturation log line the coordination path shares.
+ * the terminal no-dispatch reason composition and the host-wide audit-saturation log line the coordination path shares.
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  * The Herdr list-head filter lives in `downtime-worker.dispatch-filter.ts`, the
@@ -33,6 +32,7 @@ import {
   LEAF_AUDIT_PIN_HOLD_REASON,
 } from './downtime-worker.constants.js';
 import { clampDowntimeAuditBatchMax } from './downtime-worker.clamps.js';
+import { HOST_BUDGET_AUDIT_REASON } from './downtime-log-budget.js';
 import {
   REVIEW_QUEUE_HOLD_REASON,
   auditItemEligible,
@@ -94,7 +94,7 @@ function logHostAuditSaturation(
   freeSlots: number | undefined,
   contentionQueueDepth: number | undefined,
   budget?: { live: number; max: number },
-  reason: string = 'audit-host-saturated',
+  reason: string = HOST_BUDGET_AUDIT_REASON,
   detail?: string,
 ): void {
   try {
@@ -103,11 +103,11 @@ function logHostAuditSaturation(
     // The audit tier's admission is proxy-derived (WL-0MWAMSDNW000SL0E) or, on
     // the retained legacy source, counts the machine-scoped ledger: report the
     // observed concurrent audits and cap when the caller has them, falling back
-    // to the retired marker's single-flight figures so the line shape is
-    // unchanged for callers without ledger evidence. `reason` is the token the
-    // caller actually refused with, so the line never quotes the retired
-    // marker's token for a budget stop. `detail` names the failing proxy
-    // exchange when the read failed closed (`audit-budget-unknown`).
+    // to single-flight figures so the line shape is unchanged for callers
+    // without ledger evidence. `reason` is the token the caller actually
+    // refused with (the unified `host-budget-audit` when none was supplied).
+    // `detail` names the failing proxy exchange when the read failed closed
+    // (`audit-budget-unknown`).
     const concurrent = budget !== undefined ? budget.live : 1;
     const cap = budget !== undefined ? `, maxAudit=${budget.max}` : '';
     const errorDetail = detail !== undefined ? `, detail=${detail}` : '';
@@ -442,8 +442,8 @@ export async function dispatchDowntimeWork(
     let auditHostSaturated = false;
     // The budget refusal token and its live/max evidence, when the audit
     // pre-check reported them: `audit-budget-saturated` / `audit-budget-unknown`
-    // on the proxy path, or the legacy `audit-host-saturated` / `host-budget-audit`
-    // / `host-budget-unknown` tokens on the retained host-wide source.
+    // on the proxy path, or `host-budget-audit` / `host-budget-unknown` on the
+    // retained host-wide source.
     let auditHostBudgetReason: string | undefined;
     let auditHostBudget: { live: number; max: number } | undefined;
     // Failing proxy exchange on a fail-closed audit read (audit-budget-unknown).
@@ -596,9 +596,9 @@ export async function dispatchDowntimeWork(
           // Host-wide budget refusal (WL-0MVXY0XPF006YUHA F2; formerly the
           // marker, WL-0MUIVE0YG000UVIA) vs per-worklog: distinct reason strings
           // for observability. The host-wide check reports the cap decision —
-          // `audit-host-saturated` at maxAudit 1 (the legacy token), else
-          // `host-budget-audit`/`host-budget-unknown` — while 'audit-in-flight'
-          // is a per-worklog in-flight audit. auditInFlight keeps its original
+          // `host-budget-audit` at every cap, or `host-budget-unknown` — while
+          // 'audit-in-flight' is a per-worklog in-flight audit. auditInFlight
+          // keeps its original
           // priority over auditCheckFailed (a mixed tick still reports the
           // audit skip).
           if (auditHostSaturated) {
@@ -606,12 +606,12 @@ export async function dispatchDowntimeWork(
               opts.freeSlots,
               opts.contentionQueueDepth,
               auditHostBudget,
-              auditHostBudgetReason ?? 'audit-host-saturated',
+              auditHostBudgetReason ?? HOST_BUDGET_AUDIT_REASON,
               auditHostBudgetDetail,
             );
             return finalize({
               dispatched: false,
-              reason: auditHostBudgetReason ?? 'audit-host-saturated',
+              reason: auditHostBudgetReason ?? HOST_BUDGET_AUDIT_REASON,
               ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}),
               ...(auditHostBudgetDetail !== undefined ? { detail: auditHostBudgetDetail } : {}),
             });
@@ -726,7 +726,7 @@ export async function dispatchDowntimeWork(
             // 'host-wide' on the legacy ledger source, 'per-worklog' when a
             // per-worklog dispatch marker maps to an in_progress item.
             const skipReason = auditHostSaturated
-              ? (auditHostBudgetReason ?? 'audit-host-saturated')
+              ? (auditHostBudgetReason ?? HOST_BUDGET_AUDIT_REASON)
               : 'audit-in-flight';
             if (auditHostSaturated) {
               logHostAuditSaturation(
@@ -979,7 +979,7 @@ export async function dispatchDowntimeWork(
             ? {
                 dispatched: false,
                 reason: auditHostSaturated
-                  ? (auditHostBudgetReason ?? 'audit-host-saturated')
+                  ? (auditHostBudgetReason ?? HOST_BUDGET_AUDIT_REASON)
                   : 'audit-in-flight',
                 ...(auditHostSaturated && auditHostBudget !== undefined
                   ? { budget: auditHostBudget }

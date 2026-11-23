@@ -20,7 +20,7 @@
 import { resolveSprintViewWindow } from './browse-window.js';
 import { removeOffer, type CoordinationEntry } from './coordination.js';
 import type { DowntimeLogEntry } from './downtime-log.js';
-import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
+import { orderCoordinationEntriesForDispatch } from './downtime-worker.fairness.js';
 import {
   advanceRoundRobinCursor,
   isConsumedDispatchOutcome,
@@ -119,9 +119,10 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
  * (`computeMostImportantItem`, canonical ranking via
  * fetcher → smart-selection → grouping); a legacy v1 entry advertises its
  * single `workItemId` as one offer (AC9). The leader does NOT re-rank the
- * offers (no tier priority, no round-robin cursor — those second
- * orderings are retired by WL-0MTK1ILM2009QYB2 AC1–2): ENTRIES dispatch
- * in file order, and every safety gate is a sequential FILTER at
+ * offers (no tier priority, no second item ranking — those second
+ * orderings are retired by WL-0MTK1ILM2009QYB2 AC1–2): ENTRIES dispatch in
+ * whole-set round-robin order (WL-0MWKY1839000JM5O; see below), and every
+ * safety gate is a sequential FILTER at
  * dispatch time on each OFFER (WL-0MTMPIQBE001J41P — no wall-clock
  * prune):
  *  - `fetchItem` re-fetch: the offer is validated against the item's
@@ -175,6 +176,12 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
  * An entry whose last offer dispatches is dropped exactly as before (AC9). A
  * claimed-but-failed spawn also consumes just that offer (the marker +
  * in_progress claim prevent a double dispatch).
+ *
+ * ## Run-length bound (parent AC1)
+ *
+ * The decision log (the fairness metric's SINGLE run-length source) defers a
+ * root that already dispatched twice in succession behind its peers while
+ * surplus capacity exists — ordering only, fail-open, no gate touched.
  *
  * Fail-closed at every boundary: a wl failure fetching an entry resolves
  * `wl-error` only when EVERY entry failed (a fully broken lookup — a
@@ -451,7 +458,7 @@ async function dispatchFromCoordinationGated(
   // Audit-budget hold (WL-0MWDDHVF2004PTYX): the first offer refused by the
   // proxy-derived AUDIT budget (`audit-budget-saturated` /
   // `audit-budget-unknown`, or the legacy `host-budget-audit` /
-  // `audit-host-saturated`). Mirrors `hostBudgetHold` — the offer is KEPT, the
+  // `host-budget-audit`). Mirrors `hostBudgetHold` — the offer is KEPT, the
   // hold is neutral (no strike, no cooldown, no attempt-budget charge), and
   // the tick ends on the refusal. Recorded SEPARATELY so the terminal chain
   // can rank it ABOVE an implement refusal: an audit refusal with
@@ -484,28 +491,18 @@ async function dispatchFromCoordinationGated(
     }
   }
 
-  // Entries are OFFERS — one per instance, each naming that instance's
-  // own worklog Herdr list head at its last check-in (computeMostImportantItem).
-  // The leader dispatches in ROUND-ROBIN across worklogRoots: the
-  // least-recently-DISPATCHED project root is selected first.
-  // WL-0MTMPIQBE001J41P: entries persist until dispatch-time eligibility finds
-  // them non-dispatchable; a stale offer is removed eagerly (no pane, no
-  // marker) and dispatch continues to the next offer. Selection is a PURE READ
-  // (WL-0MWFIZ8H5005FVNN) — it never advances the cursor; the dispatching root
-  // is charged only when its offer is CONSUMED below.
-  const entryRoots = entries
-    .filter(e => e.instanceId.length > 0 && entryOffers(e).length > 0)
-    .map(e => e.worklogRoot ?? e.directory);
-  const selectedRoot = selectLeastRecentlyServed(opts.coordinationDir, entryRoots, now);
-  if (selectedRoot !== null) {
-    const idx = entries.findIndex(
-      e => (e.worklogRoot ?? e.directory) === selectedRoot,
-    );
-    if (idx > 0) {
-      const [selected] = entries.splice(idx, 1);
-      entries.unshift(selected);
-    }
-  }
+  // Entries are OFFERS — one per instance, naming that instance's own worklog
+  // Herdr list head at its last check-in (computeMostImportantItem). Dispatch
+  // order is WHOLE-SET round-robin plus the parent AC1 run-length bound (see
+  // `orderCoordinationEntriesForDispatch`; fail-open decision-log source).
+  // Selection is a PURE READ (WL-0MWFIZ8H5005FVNN): the dispatching root is
+  // charged only when its offer is CONSUMED below. A stale offer is removed
+  // eagerly and dispatch continues to the next offer (WL-0MTMPIQBE001J41P).
+  const orderedEntries = await orderCoordinationEntriesForDispatch(entries, {
+    coordinationDir: opts.coordinationDir,
+    countingCwd: opts.cwd,
+    surplusCapacity: opts.freeSlots === undefined || opts.freeSlots > 1,
+  });
 
   let fetchAttempts = 0;
   let fetchFailures = 0;
@@ -533,7 +530,7 @@ async function dispatchFromCoordinationGated(
       ? batchCap
       : Math.max(0, Math.trunc(opts.auditBatchRemaining));
 
-  for (const entry of entries) {
+  for (const entry of orderedEntries) {
     if (entry.instanceId.length === 0) continue;
     const offers = entryOffers(entry);
     if (offers.length === 0) continue;
@@ -737,7 +734,7 @@ async function dispatchFromCoordinationGated(
           advanceRoundRobinCursor(opts.coordinationDir, worklogRoot, now);
         }
         return withOfferRejections(
-          outcome,
+          { ...outcome, attemptedRoot: worklogRoot },
           offerRejections.slice(rejectionsBeforeEntry),
         );
       }
@@ -772,7 +769,7 @@ async function dispatchFromCoordinationGated(
         // `host-budget-unknown` from an implement admission) records
         // `hostBudgetHold`; an AUDIT refusal (`audit-budget-saturated` /
         // `audit-budget-unknown` + `detail`, or the legacy `host-budget-audit`
-        // / `audit-host-saturated`) records `auditBudgetHold` on its own rung
+        // / `host-budget-audit`) records `auditBudgetHold` on its own rung
         // so it is NEVER masked by `host-budget-implement` (AC1/AC2) — and is
         // attributed in the per-offer rejection payload with the `audit-budget`
         // gate token (AC5).

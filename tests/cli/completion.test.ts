@@ -11,7 +11,7 @@ import { runCliProcess } from './cli-bundle.js';
 
 // Known subcommands that should appear in completion scripts
 const KNOWN_COMMANDS = [
-  'init', 'status', 'create', 'list', 'show', 'update', 'delete',
+  'init', 'status', 'create', 'list', 'show', 'update', 'delete', 'undelete',
   'export', 'import', 'next', 'worklist', 'in-progress', 'sync', 'github',
   'comment', 'close', 'recent', 'plugins', 'migrate', 'dep',
   're-sort', 'doctor', 'search', 'unlock', 'audit',
@@ -72,6 +72,22 @@ describe('wl completion bash', () => {
     // Should attempt to fetch work-item IDs dynamically
     expect(result.stdout).toContain('wl list');
     expect(result.stdout).toContain('--json');
+  });
+
+  test('offers work-item ID completion for undelete next to delete', () => {
+    const result = runCompletion('bash');
+    // The dynamic ID arm is a single case pattern listing every id-taking
+    // command (e.g. `audit|delete|dep|...|undelete|update|reviewed)`) followed
+    // by the `wl list --json` ID fetch. Require delete and undelete to be
+    // alternatives in that same arm.
+    const idArm = result.stdout
+      .split('\n')
+      .find(line =>
+        line.includes('delete|') &&
+        line.includes('undelete') &&
+        line.trim().endsWith(')'));
+    expect(idArm).toBeDefined();
+    expect(result.stdout).toContain('wl list');
   });
 
   test('creates completions for completion subcommand itself', () => {

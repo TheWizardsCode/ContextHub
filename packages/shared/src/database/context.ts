@@ -17,15 +17,19 @@
  * - `UNIQUE_*` constants and `generateUniqueId` / `generateId` /
  *   `generateCommentId`.
  * - `getPrefix` / `setPrefix` — prefix accessor helpers.
+ * - `GitTarget` — the remote/branch pair the sync module pulls and pushes.
+ * - `SyncState` — the mutable auto-sync switch and provider holder.
  *
  * **Does NOT belong here.** Anything that is specific to a single concern or
  * requires the full `WorklogDatabase` class:
  *
  * - `WorklogDatabase` itself (the façade / concern orchestrator).
  * - SQL queries, schema definitions, FTS setup.
- * - JSONL import/export, Git sync operations.
+ * - JSONL import/export, Git sync operations (see `sync.ts`,
+ *   `import-export.ts`) — only the plain `GitTarget`/`SyncState` *types* live
+ *   here, because the extracted sync module may not import the façade.
  * - Audit result management.
- * - Search / semantic search / embedders.
+ * - Search / semantic search / embedders (implementation in `search.ts`).
  * - Dirty-tracking, auto-sync, and lock management.
  *
  * Every extracted module may import this module (it is the acyclic root of the
@@ -34,8 +38,128 @@
  */
 
 import { randomBytes } from 'crypto';
-import { WorkItem, DependencyEdge, ForeignDependencyState } from '../types.js';
-import { SqlitePersistentStore } from '../persistent-store.js';
+import { WorkItem, DependencyEdge, Comment, AuditResult, ForeignDependencyState } from '../types.js';
+import {
+  SqlitePersistentStore,
+  PersistentStoreServices,
+  PersistentStoreCacheOptions,
+} from '../persistent-store.js';
+
+// ── Shared service types (moved out of the façade) ────────────────────
+
+/**
+ * JSONL import result shape.
+ *
+ * Lives here (rather than in `database.ts`) because the extracted `sync.ts`
+ * and `import-export.ts` modules name it through `WorklogDatabaseServices`;
+ * the façade re-exports it so the public surface at `@worklog/shared` is
+ * unchanged.
+ */
+export interface JsonlImportResult {
+  items: WorkItem[];
+  comments: Comment[];
+  dependencyEdges: DependencyEdge[];
+  auditResults: AuditResult[];
+  /** Sync header kind when the file starts with a sync header (incremental sync). */
+  kind?: 'full' | 'delta';
+}
+
+/**
+ * Optional CLI-specific services injected into WorklogDatabase.
+ * When not provided, features that depend on them become no-ops or throw
+ * appropriate errors. This allows the class to be used in contexts (like the
+ * TUI extension) where only core CRUD operations are needed.
+ *
+ * Lives here so the extracted modules can read `ctx.services` with full
+ * typing without importing the façade; re-exported by the façade for the
+ * `@worklog/shared` public surface.
+ */
+export interface WorklogDatabaseServices {
+  /** JSONL import/export functions (needed for JSONL sync, exports) */
+  jsonl?: {
+    importFromJsonl: (path: string) => JsonlImportResult;
+    importFromJsonlContent: (content: string) => JsonlImportResult;
+    exportToJsonlAsync: (items: WorkItem[], comments: Comment[], path: string, deps: DependencyEdge[], audits: AuditResult[], options?: any) => Promise<number>;
+    getDefaultDataPath: () => string;
+  };
+
+  /** Git sync operations */
+  sync?: {
+    mergeWorkItems: (local: WorkItem[], remote: WorkItem[]) => any;
+    mergeComments: (local: Comment[], remote: Comment[]) => any;
+    mergeAuditResults: (local: AuditResult[], remote: AuditResult[]) => any;
+    getRemoteDataFileContent: (jsonlPath: string, target: GitTarget) => Promise<string | null>;
+  };
+
+  /** File-locking utilities */
+  fileLock?: {
+    withFileLock: (lockPath: string, fn: () => Promise<any>) => Promise<any>;
+    getLockPathForJsonl: (jsonlPath: string) => string;
+  };
+
+  /** Search metrics (no-ops when omitted) */
+  searchMetrics?: {
+    increment: (key: string) => void;
+  };
+
+  /** Background task runtime */
+  runtime?: {
+    getRuntime: () => { launchTask: (name: string, fn: () => Promise<void>) => void };
+  };
+
+  /** Semantic search module */
+  search?: {
+    getDefaultEmbedder: () => any;
+    getEmbeddingStorePath: (worklogDir: string) => string;
+    EmbeddingStore: new (storePath: string) => any;
+    createSearch: (store: any, embedder: any) => any;
+    WorklogSearch: any;
+  };
+
+  /** Persistent store services (migration list, etc.) */
+  persistentStoreServices?: PersistentStoreServices;
+
+  /**
+   * Read-only resolver for foreign (cross-project) dependency targets.
+   *
+   * Injected by the CLI (`src/cross-repo/foreign-store.ts`); when omitted, an
+   * edge whose target is not in this store is treated exactly as before —
+   * local-only gating. The shared package never imports the CLI's filesystem
+   * discovery, so the dependency direction stays one-way.
+   */
+  foreign?: ForeignDependencyResolver;
+
+  /** Optional cache configuration for SqlitePersistentStore (Phase 5) */
+  cacheOptions?: PersistentStoreCacheOptions;
+}
+
+// ── Shared sync types (moved out of the façade) ──────────────────────
+
+/**
+ * Git sync target.
+ *
+ * Lives here (rather than in `database.ts`) so the extracted `sync.ts` module
+ * can name its parameter type without importing the façade; the façade
+ * re-exports it so the public surface at `@worklog/shared` is unchanged.
+ */
+export interface GitTarget {
+  remote: string;
+  branch: string;
+}
+
+/**
+ * Mutable auto-sync state shared between the façade and `sync.ts`.
+ *
+ * The façade owns the object (built once in the constructor); `sync.ts` reads
+ * and mutates its fields so `setAutoSync`/`triggerAutoSync` stay pure
+ * functions over the shared context.
+ */
+export interface SyncState {
+  /** When true, write paths fire the configured sync provider. */
+  autoSync: boolean;
+  /** The sync provider fired by `triggerAutoSync`. */
+  syncProvider?: () => Promise<void>;
+}
 
 // ── Foreign (cross-project) dependency resolution ──────────────────────
 
@@ -90,21 +214,16 @@ export interface WorklogDatabaseContext {
   store: SqlitePersistentStore;
   /** The work-item ID prefix (e.g. `'WI'`, `'WL'`). */
   prefix: string;
-  /** Optional file-locking and other services. */
-  services: {
-    fileLock?: {
-      getLockPathForJsonl?: (jsonlPath: string) => string;
-    };
-    jsonl?: {
-      getDefaultDataPath?: () => string;
-    };
-    /** Read-only foreign dependency resolver (cross-project gating). */
-    foreign?: ForeignDependencyResolver;
-    persistentStoreServices?: any;
-    cacheOptions?: any;
-  };
+  /** Optional CLI-specific services injected into `WorklogDatabase`. */
+  services: WorklogDatabaseServices;
   /** When true, suppress console/debug output. */
   silent: boolean;
+  /** Path of the ephemeral JSONL transport file used by `sync.ts`. */
+  jsonlPath: string;
+  /** Lazily created semantic-search handle (`search.ts`); null until built. */
+  _semanticSearch: any | null;
+  /** Auto-sync switch and provider, shared with `sync.ts`. */
+  syncState: SyncState;
   /** Mutable state for `generateUniqueId` — advances on every call. */
   _lastIdTime: number;
   _idSequence: number;
@@ -202,6 +321,18 @@ export interface WriteHooks {
   /** Diagnostic trace (suppressed when the database is silent). */
   debug(message: string): void;
 }
+
+/**
+ * Caller-supplied candidate exclusion predicate (WL-0MWMGET8N009KG33).
+ *
+ * A read surface may need to hide items for a reason the selection pipeline
+ * does not model — the `startOn` scheduling filter (`isNotStarted`) is the
+ * first such reason. The caller injects its decision instead: `true` means
+ * "this read must not select the item", so the *next eligible* item is chosen
+ * rather than a filtered-out one. Absent means "exclude nothing", leaving every
+ * pre-existing caller unchanged.
+ */
+export type CandidateExclusion = (item: WorkItem) => boolean;
 
 // ── Façade hooks used by the `wl next` selection modules ────────────────
 

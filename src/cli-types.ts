@@ -28,6 +28,8 @@ export interface CreateOptions {
   createdBy?: string;
   deletedBy?: string;
   deleteReason?: string;
+  /** Earliest instant the item may proceed (full ISO-8601; offset accepted, normalised to UTC). Omit for the `createdAt` default; "" keeps the default. */
+  startOn?: string;
   /** Accepts true|false|yes|no to set needsProducerReview flag for the new item */
   needsProducerReview?: string;
   /** Legacy audit flag (kept for compatibility) */
@@ -68,6 +70,10 @@ export interface ListOptions {
   icons?: boolean;
   /** Comma-separated list of fields to include in output (id always included) */
   fields?: string;
+  /** Include items whose `startOn` is in the future (default: excluded) */
+  includeNotStarted?: boolean;
+  /** Include not-yet-started items starting before this ISO-8601 instant */
+  startsBefore?: string;
 }
 
 export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; icons?: boolean; exact?: boolean }
@@ -114,6 +120,16 @@ export interface UpdateOptions {
   createdBy?: string;
   deletedBy?: string;
   deleteReason?: string;
+  /** Earliest instant the item may proceed (full ISO-8601; offset accepted, normalised to UTC); "" clears back to createdAt */
+  startOn?: string;
+  /**
+   * Audited override of the startOn claim guard (WL-0MWMGEUT10056MUI). When
+   * a claim (status in-progress or a non-empty assignee) targets an item whose
+   * explicit `startOn` is still in the future, supplying a non-blank reason
+   * lets the claim proceed and records a comment naming the actor, the reason
+   * and the overridden `startOn`.
+   */
+  forceStartOn?: string;
   /** Legacy audit flag (kept for compatibility) */
   audit?: string;
   /** Preferred audit flag for structured writes */
@@ -144,6 +160,10 @@ export interface NextOptions {
   reSortSync?: boolean;
   /** Recency policy hint for re-sort (prefer|avoid|ignore) */
   recencyPolicy?: string;
+  /** Include items whose `startOn` is in the future (default: excluded) */
+  includeNotStarted?: boolean;
+  /** Include not-yet-started items starting before this ISO-8601 instant */
+  startsBefore?: string;
 }
 export interface InProgressOptions { assignee?: string; prefix?: string }
 
@@ -193,10 +213,32 @@ export interface CommentShowOptions { prefix?: string }
 export interface CommentUpdateOptions { author?: string; comment?: string; commentFile?: string; references?: string; prefix?: string }
 export interface CommentDeleteOptions { prefix?: string }
 
-export interface RecentOptions { number?: string; children?: boolean; prefix?: string }
+export interface RecentOptions {
+  number?: string;
+  children?: boolean;
+  prefix?: string;
+  /** Include items whose `startOn` is in the future (default: excluded) */
+  includeNotStarted?: boolean;
+  /** Include not-yet-started items starting before this ISO-8601 instant */
+  startsBefore?: string;
+}
 export interface CloseOptions { reason?: string; author?: string; prefix?: string; force?: boolean }
 
 export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: boolean; reason?: string; deletedBy?: string }
+
+export interface UndeleteOptions {
+  prefix?: string;
+  recursive?: boolean;
+  sync?: boolean;
+  /** Target status for the restored item (default: derived from its stage). */
+  status?: string;
+  /** Assignee to record on restore (default: cleared). */
+  assignee?: string;
+  /** Report the plan without mutating anything. */
+  dryRun?: boolean;
+  /** Identity recorded in the audit comment (default: configured git identity). */
+  restoredBy?: string;
+}
 
 export interface ReviewedOptions { prefix?: string }
 
@@ -241,6 +283,10 @@ export interface SearchOptions {
   prefix?: string;
   /** Comma-separated list of fields to include in output (id always included) */
   fields?: string;
+  /** Include items whose `startOn` is in the future (default: excluded) */
+  includeNotStarted?: boolean;
+  /** Include not-yet-started items starting before this ISO-8601 instant */
+  startsBefore?: string;
 }
 
 export interface UnlockOptions { force?: boolean }

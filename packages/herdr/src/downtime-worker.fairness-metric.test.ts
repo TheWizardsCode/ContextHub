@@ -1,0 +1,594 @@
+/**
+ * packages/herdr/src/downtime-worker.fairness-metric.test.ts — the per-project
+ * fairness metric recorded on every dispatch decision.
+ *
+ * Parent: WL-0MWKE9VF800101V9 (dispatcher seems to unevenly distribute work).
+ * Work item: WL-0MWKY141H002LULI (record a per-project fairness metric on
+ * dispatch decisions, parent AC3).
+ *
+ * Pins the additive decision-log schema and its producers:
+ *
+ *  1. a successful dispatch records `selectedRoot`, `dispatchingRoot`,
+ *     `consecutiveRunLength` and `outcome: 'dispatched'`;
+ *  2. a `no-dispatch` decision records `selectedRoot` + `outcome: 'no-dispatch'`
+ *     and NO `dispatchingRoot`;
+ *  3. the run length is derived from the decision-log tail (restart-safe, no
+ *     new durable cursor) and increments/resets across ticks;
+ *  4. a registered-root SWEEP dispatch records the same evidence as an
+ *     offer-path dispatch;
+ *  5. an auditor can reconstruct a multi-tick per-root distribution from the
+ *     decision log alone;
+ *  6. an unreadable run-length source degrades to `1` and the dispatch still
+ *     happens (fail-open);
+ *  7. the on-disk `downtime-round-robin-by-root.json` format is unchanged.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  createDowntimeWorker,
+  createDowntimePoller,
+  dispatchFromCoordination,
+  type DowntimeHerdrItem,
+  type DowntimeItemInfo,
+  type DowntimeWorkerDeps,
+} from './downtime-worker.js';
+import {
+  appendCoordinationLogEntry,
+  readCoordinationLogEntries,
+  type CoordinationLogEntry,
+} from './downtime-log-coordination.js';
+import {
+  dispatchDecisionFairness,
+  nextConsecutiveRunLength,
+  nextRunLengthForRoot,
+  previousDispatchRun,
+} from './downtime-worker.fairness.js';
+import {
+  recordDecision,
+  type OrchestratorContext,
+} from './downtime-worker.orchestrator-dispatch.js';
+import {
+  ROUND_ROBIN_BY_ROOT_FILE_NAME,
+  type RoundRobinByRootData,
+} from './downtime-round-robin-by-root.js';
+import {
+  writeCoordinationFile,
+  type CoordinationEntry,
+} from './coordination.js';
+
+// ── Fixtures ──────────────────────────────────────────────────────────
+
+let root: string;
+let coordinationDir: string;
+let leaderCwd: string;
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'herdr-fairness-metric-'));
+  coordinationDir = join(root, 'coord');
+  leaderCwd = join(root, 'leader');
+  mkdirSync(coordinationDir, { recursive: true });
+  mkdirSync(join(leaderCwd, '.worklog'), { recursive: true });
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+function itemInfo(overrides: Partial<DowntimeItemInfo> & { id: string }): DowntimeItemInfo {
+  return {
+    id: overrides.id,
+    title: overrides.title ?? `Item ${overrides.id}`,
+    status: overrides.status ?? 'open',
+    stage: overrides.stage ?? 'idea',
+    priority: overrides.priority,
+    risk: overrides.risk,
+    effort: overrides.effort,
+    auditedAt: overrides.auditedAt,
+    updatedAt: overrides.updatedAt,
+    sortIndex: overrides.sortIndex,
+    needsProducerReview: overrides.needsProducerReview,
+    assignee: overrides.assignee,
+    deletedBy: overrides.deletedBy,
+  };
+}
+
+/** A dispatchable prep (`plan`) candidate. */
+function planItem(id: string): DowntimeItemInfo {
+  return itemInfo({ id, status: 'open', stage: 'intake_complete' });
+}
+
+/** One v1-shape offer entry pinned to a worklog root. */
+function makeEntry(instanceId: string, workItemId: string, worklogRoot: string): CoordinationEntry {
+  const at = new Date().toISOString();
+  return {
+    instanceId,
+    workItemId,
+    directory: worklogRoot,
+    worklogRoot,
+    assignedAt: at,
+    lastUpdated: at,
+  };
+}
+
+/** Seed the round-robin cursor file. */
+function seedCursor(data: RoundRobinByRootData): void {
+  writeFileSync(join(coordinationDir, ROUND_ROBIN_BY_ROOT_FILE_NAME), JSON.stringify(data), 'utf-8');
+}
+
+function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
+  return {
+    getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    getAuditCandidateScope: vi.fn().mockResolvedValue({ ok: true, scope: 'parent' }),
+    getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+    getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+    fetchItem: vi.fn().mockResolvedValue({ ok: true, info: planItem('WL-X') }),
+    claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    recordDispatch: vi.fn().mockResolvedValue(true),
+    recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
+    rollbackClaim: vi.fn().mockResolvedValue(true),
+    recordError: vi.fn().mockResolvedValue(undefined),
+    getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
+    recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
+    readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+    getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
+    getRunningDowntimePanes: vi.fn().mockResolvedValue({
+      ok: true,
+      count: 0,
+      paneIds: [],
+      records: [],
+    }),
+    ...overrides,
+  } as DowntimeWorkerDeps;
+}
+
+/** Dispatch one offer-path tick against the temp leader root. */
+function dispatchTick(deps: DowntimeWorkerDeps, entries: CoordinationEntry[]) {
+  return dispatchFromCoordination(deps, entries, {
+    model: 'plan',
+    cwd: leaderCwd,
+    coordinationDir,
+    browseItemCount: 20,
+  });
+}
+
+/**
+ * Persist a decision entry exactly as `performDispatch` does — the same
+ * fairness evidence the orchestrator composes. Used to build a multi-tick
+ * decision history without running a full worker. Returns the written entry so
+ * a test can assert the derived run length.
+ */
+async function recordOutcomeDecision(
+  outcome: Awaited<ReturnType<typeof dispatchFromCoordination>>,
+  tickSelectedRoot: string | null,
+): Promise<CoordinationLogEntry> {
+  const fairness = await dispatchDecisionFairness({
+    cwd: leaderCwd,
+    tickSelectedRoot,
+    selectedRootOverride: outcome.selectedRoot,
+    dispatchingRoot: outcome.attemptedRoot,
+    dispatched: outcome.dispatched,
+  });
+  const entry = {
+    kind: 'decision',
+    operation: outcome.dispatched ? 'dispatch' : 'no-dispatch',
+    outcome: outcome.dispatched ? 'dispatched' : 'no-dispatch',
+    instanceId: 'inst-a',
+    reason: outcome.dispatched ? 'dispatched' : outcome.reason,
+    ...fairness,
+    at: new Date().toISOString(),
+  } as CoordinationLogEntry;
+  await appendCoordinationLogEntry(leaderCwd, entry);
+  return entry;
+}
+
+// ── 1. Successful dispatch evidence ────────────────────────────────────
+
+describe('successful dispatch fairness evidence', () => {
+  it('records selectedRoot, dispatchingRoot and a run length of 1 on the first dispatch', async () => {
+    seedCursor({});
+    const deps = makeDeps();
+    const entries = [makeEntry('inst-a', 'WL-A', '/repo/a')];
+
+    const outcome = await dispatchTick(deps, entries);
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.attemptedRoot).toBe('/repo/a');
+    const entry = await recordOutcomeDecision(outcome, '/repo/a');
+    expect(entry).toMatchObject({
+      operation: 'dispatch',
+      outcome: 'dispatched',
+      selectedRoot: '/repo/a',
+      dispatchingRoot: '/repo/a',
+      consecutiveRunLength: 1,
+    });
+  });
+
+  it('increments the run for repeated dispatches to one root and resets on a root change', async () => {
+    seedCursor({});
+
+    let outcome = await dispatchTick(makeDeps(), [makeEntry('inst-a', 'WL-A', '/repo/a')]);
+    let entry = await recordOutcomeDecision(outcome, '/repo/a');
+    expect(entry.consecutiveRunLength).toBe(1);
+
+    outcome = await dispatchTick(makeDeps(), [makeEntry('inst-a', 'WL-A', '/repo/a')]);
+    entry = await recordOutcomeDecision(outcome, '/repo/a');
+    expect(entry.consecutiveRunLength).toBe(2);
+
+    outcome = await dispatchTick(makeDeps(), [makeEntry('inst-a', 'WL-A', '/repo/a')]);
+    entry = await recordOutcomeDecision(outcome, '/repo/a');
+    expect(entry.consecutiveRunLength).toBe(3);
+
+    // A dispatch to a DIFFERENT root starts a fresh run.
+    outcome = await dispatchTick(makeDeps(), [makeEntry('inst-b', 'WL-B', '/repo/b')]);
+    expect(outcome.attemptedRoot).toBe('/repo/b');
+    entry = await recordOutcomeDecision(outcome, '/repo/b');
+    expect(entry).toMatchObject({
+      selectedRoot: '/repo/b',
+      dispatchingRoot: '/repo/b',
+      consecutiveRunLength: 1,
+    });
+  });
+
+  it('lets an auditor reconstruct the per-root distribution from the decision log alone', async () => {
+    seedCursor({});
+    let outcome = await dispatchTick(makeDeps(), [makeEntry('inst-a', 'WL-A', '/repo/a')]);
+    await recordOutcomeDecision(outcome, '/repo/a');
+    outcome = await dispatchTick(makeDeps(), [makeEntry('inst-a', 'WL-A', '/repo/a')]);
+    await recordOutcomeDecision(outcome, '/repo/a');
+    outcome = await dispatchTick(makeDeps(), [makeEntry('inst-b', 'WL-B', '/repo/b')]);
+    await recordOutcomeDecision(outcome, '/repo/b');
+
+    // No dispatcher replay: read the log and tally the recorded dispatching
+    // roots. Every dispatch entry names its root and carries its outcome.
+    const log = await readCoordinationLogEntries(leaderCwd);
+    const dispatched = log.filter((entry) => entry.outcome === 'dispatched');
+    expect(dispatched).toHaveLength(3);
+    const distribution = new Map<string, number>();
+    for (const entry of dispatched) {
+      expect(typeof entry.dispatchingRoot).toBe('string');
+      distribution.set(entry.dispatchingRoot!, (distribution.get(entry.dispatchingRoot!) ?? 0) + 1);
+    }
+    expect(Object.fromEntries(distribution)).toEqual({ '/repo/a': 2, '/repo/b': 1 });
+    // The run lengths are on the entries, so a consecutive-run audit needs no
+    // second source: a, a(2), b(1).
+    expect(dispatched.map((entry) => entry.consecutiveRunLength)).toEqual([1, 2, 1]);
+  });
+});
+
+// ── 2. No-dispatch evidence ────────────────────────────────────────────
+
+describe('no-dispatch fairness evidence', () => {
+  it('records selectedRoot and the tick outcome but never a fabricated dispatchingRoot', async () => {
+    seedCursor({});
+    // The only offer is held by the producer sentinel, so nothing dispatches.
+    const deps = makeDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({
+          id: 'WL-HELD',
+          status: 'open',
+          stage: 'plan_complete',
+          risk: 'Low',
+          effort: 'S',
+          assignee: 'Map',
+        }),
+      }),
+    });
+
+    const outcome = await dispatchTick(deps, [makeEntry('inst-a', 'WL-HELD', '/repo/a')]);
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.attemptedRoot).toBeUndefined();
+
+    const entry = await recordOutcomeDecision(outcome, '/repo/a');
+    expect(entry.operation).toBe('no-dispatch');
+    expect(entry.outcome).toBe('no-dispatch');
+    expect(entry.selectedRoot).toBe('/repo/a');
+    expect(entry.dispatchingRoot).toBeUndefined();
+  });
+});
+
+// ── 3. Registered-root sweep parity ────────────────────────────────────
+
+describe('registered-root sweep fairness evidence', () => {
+  function headItem(overrides: Partial<DowntimeHerdrItem> & { id: string }): DowntimeHerdrItem {
+    return {
+      id: overrides.id,
+      title: overrides.title ?? `Head ${overrides.id}`,
+      status: overrides.status ?? 'open',
+      stage: overrides.stage ?? 'plan_complete',
+      priority: overrides.priority,
+      risk: overrides.risk ?? 'Low',
+      effort: overrides.effort ?? 'S',
+      auditedAt: overrides.auditedAt,
+      updatedAt: overrides.updatedAt,
+      sortIndex: overrides.sortIndex,
+      needsProducerReview: overrides.needsProducerReview,
+      assignee: overrides.assignee,
+      deletedBy: overrides.deletedBy,
+    };
+  }
+
+  it('records the same fairness fields as an offer-path dispatch', async () => {
+    const sweptRoot = join(root, 'registered-a');
+    mkdirSync(join(sweptRoot, '.worklog'), { recursive: true });
+    seedCursor({});
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn(async (cwd: string) =>
+        cwd === sweptRoot
+          ? { ok: true as const, items: [headItem({ id: 'WL-SWEPT' })] }
+          : { ok: true as const, items: [] },
+      ),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [], {
+      model: 'plan',
+      cwd: leaderCwd,
+      coordinationDir,
+      browseItemCount: 20,
+      registeredRoots: [sweptRoot],
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.attemptedRoot).toBe(sweptRoot);
+    expect(outcome.selectedRoot).toBe(sweptRoot);
+    const entry = await recordOutcomeDecision(outcome, sweptRoot);
+    expect(entry).toMatchObject({
+      selectedRoot: sweptRoot,
+      dispatchingRoot: sweptRoot,
+      consecutiveRunLength: 1,
+    });
+  });
+});
+
+// ── 4. Run-length source ───────────────────────────────────────────────
+
+describe('run length is derived from the decision-log tail', () => {
+  it('counts consecutive same-root dispatches and skips non-dispatch decisions', () => {
+    const entries: CoordinationLogEntry[] = [
+      { kind: 'decision', operation: 'dispatch', dispatchingRoot: '/a', consecutiveRunLength: 1 },
+      { kind: 'decision', operation: 'no-dispatch', reason: 'no-candidate' },
+      { kind: 'decision', operation: 'dispatch', dispatchingRoot: '/a', consecutiveRunLength: 2 },
+      { kind: 'decision', operation: 'dispatch', dispatchingRoot: '/b', consecutiveRunLength: 1 },
+      { kind: 'coordination', operation: 'checkin' },
+    ];
+    expect(previousDispatchRun(entries)).toEqual({ root: '/b', length: 1 });
+    expect(nextConsecutiveRunLength(entries, '/b')).toBe(2);
+    expect(nextConsecutiveRunLength(entries, '/a')).toBe(1);
+    expect(nextConsecutiveRunLength([], '/a')).toBe(1);
+  });
+
+  it('falls back to counting when an older dispatch entry has no recorded length', () => {
+    const entries: CoordinationLogEntry[] = [
+      { kind: 'decision', operation: 'dispatch', dispatchingRoot: '/a' },
+      { kind: 'decision', operation: 'dispatch', dispatchingRoot: '/a' },
+    ];
+    expect(previousDispatchRun(entries)).toEqual({ root: '/a', length: 2 });
+    expect(nextConsecutiveRunLength(entries, '/a')).toBe(3);
+  });
+
+  it('degrades to 1 when the decision log is unreadable (fail-open)', async () => {
+    // A directory where the log file should be makes the read fail.
+    mkdirSync(join(leaderCwd, '.worklog', 'downtime-coordination.log'), { recursive: true });
+    await expect(nextRunLengthForRoot(leaderCwd, '/a')).resolves.toBe(1);
+
+    seedCursor({});
+    const outcome = await dispatchTick(makeDeps(), [makeEntry('inst-a', 'WL-A', '/repo/a')]);
+    expect(outcome.dispatched).toBe(true);
+    const entry = await recordOutcomeDecision(outcome, '/repo/a');
+    expect(entry.consecutiveRunLength).toBe(1);
+  });
+});
+
+// ── 5. Unchanged on-disk cursor format ─────────────────────────────────
+
+describe('round-robin cursor format is unchanged', () => {
+  it('still writes a flat { root: ISO-8601 } map and no run-length state', async () => {
+    seedCursor({ '/repo/a': '2026-01-01T00:00:00.000Z' });
+    const outcome = await dispatchTick(makeDeps(), [makeEntry('inst-a', 'WL-A', '/repo/a')]);
+    expect(outcome.dispatched).toBe(true);
+
+    const raw = readFileSync(join(coordinationDir, ROUND_ROBIN_BY_ROOT_FILE_NAME), 'utf-8');
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(data)) {
+      expect(typeof key).toBe('string');
+      expect(typeof value).toBe('string');
+      expect(Number.isNaN(Date.parse(value as string))).toBe(false);
+    }
+    expect(Object.keys(data)).toEqual(['/repo/a']);
+    // No second durable run cursor was introduced.
+    expect(readdirSync(coordinationDir)).toEqual([ROUND_ROBIN_BY_ROOT_FILE_NAME]);
+    expect(existsSync(join(coordinationDir, 'downtime-run-length.json'))).toBe(false);
+  });
+});
+
+// ── 6. Orchestrator writer + rate limiting ─────────────────────────────
+
+describe('dispatch decision writer', () => {
+  function makeCtx(recorded: CoordinationLogEntry[]): OrchestratorContext {
+    return {
+      opts: {
+        deps: {
+          recordDecision: async (entry: CoordinationLogEntry) => {
+            recorded.push(entry);
+          },
+        },
+        config: () => ({}),
+      },
+      starvationTracker: { observe: vi.fn().mockReturnValue(null) },
+      leaderState: false,
+      lastDecisionReason: null,
+      lastDecisionAt: 0,
+      blockReason: null,
+      instanceId: 'inst-a',
+    } as unknown as OrchestratorContext;
+  }
+
+  it('writes a `dispatch`/`dispatched` entry carrying the fairness fields and is never rate-limited', async () => {
+    const recorded: CoordinationLogEntry[] = [];
+    const ctx = makeCtx(recorded);
+    const fields = {
+      freeSlots: 1,
+      totalSlots: 4,
+      ownerPresent: false,
+      runningPanes: 0,
+      contentionDepth: 0,
+      selectedRoot: '/repo/a' as string | null,
+      dispatchingRoot: '/repo/a',
+      consecutiveRunLength: 2,
+    };
+
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    try {
+      await recordDecision(ctx, leaderCwd, 'dispatched', fields, {
+        blocking: false,
+        rateLimit: false,
+        operation: 'dispatch',
+      });
+      await recordDecision(ctx, leaderCwd, 'dispatched', fields, {
+        blocking: false,
+        rateLimit: false,
+        operation: 'dispatch',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Two dispatches inside the rate-limit window are BOTH recorded.
+    expect(recorded).toHaveLength(2);
+    expect(recorded[0]).toMatchObject({
+      kind: 'decision',
+      operation: 'dispatch',
+      outcome: 'dispatched',
+      reason: 'dispatched',
+      selectedRoot: '/repo/a',
+      dispatchingRoot: '/repo/a',
+      consecutiveRunLength: 2,
+    });
+    // A dispatch is an observation: the header blocking token is untouched.
+    expect(ctx.blockReason).toBeNull();
+  });
+
+  it('still rate-limits identical refusals', async () => {
+    const recorded: CoordinationLogEntry[] = [];
+    const ctx = makeCtx(recorded);
+    const fields = {
+      freeSlots: 0,
+      totalSlots: 4,
+      ownerPresent: false,
+      runningPanes: 0,
+      contentionDepth: 0,
+      selectedRoot: null as string | null,
+    };
+
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    try {
+      await recordDecision(ctx, leaderCwd, 'no-candidate', fields);
+      await recordDecision(ctx, leaderCwd, 'no-candidate', fields);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      operation: 'no-dispatch',
+      outcome: 'no-dispatch',
+      reason: 'no-candidate',
+      selectedRoot: null,
+    });
+  });
+});
+
+// ── 7. Worker integration: the dispatch decision is written end-to-end ──
+
+describe('worker integration', () => {
+  function statusPayload(): Record<string, unknown> {
+    return {
+      llama_server_running: true,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 4,
+      total_slots: 4,
+      slots: [
+        { slot_id: 'slot-1', is_processing: false },
+        { slot_id: 'slot-2', is_processing: false },
+        { slot_id: 'slot-3', is_processing: false },
+        { slot_id: 'slot-4', is_processing: false },
+      ],
+    };
+  }
+
+  it('records the fairness fields on the coordination decision entry of a real dispatch', async () => {
+    const coordDir = join(root, 'worker-coord');
+    mkdirSync(coordDir, { recursive: true });
+    writeCoordinationFile(coordDir, {
+      version: 1,
+      entries: [makeEntry('inst-peer', 'WL-PEER', '/repo/peer')],
+    });
+
+    const recordDecisionSpy = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      recordDecision: recordDecisionSpy,
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: planItem('WL-PEER') }),
+    });
+    const fetcher = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => statusPayload(),
+    }));
+    const worker = createDowntimeWorker({
+      coordinationDir: coordDir,
+      instanceId: 'inst-a',
+      poller: createDowntimePoller('http://localhost:8000', fetcher as never, 5000),
+      deps,
+      config: () => ({
+        enabled: true,
+        thresholdMs: 60_000,
+        requiredFreeSlots: 1,
+        model: 'plan',
+        cwd: leaderCwd,
+        noCandidateCooldownMs: 3_600_000,
+      }),
+      leaseTtlSeconds: 300,
+      checkInIntervalMs: 30 * 60 * 1000,
+      leaderCheckInIntervalMs: 4 * 60 * 1000,
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    try {
+      await worker.tick();
+      vi.setSystemTime(10_000_000 + 60_001);
+      const result = await worker.tick();
+      expect(result.dispatched).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const entries = recordDecisionSpy.mock.calls.map(
+      (call) => (call as [CoordinationLogEntry])[0],
+    );
+    const dispatchEntry = entries.find((entry) => entry.operation === 'dispatch');
+    expect(dispatchEntry).toBeDefined();
+    expect(dispatchEntry).toMatchObject({
+      kind: 'decision',
+      operation: 'dispatch',
+      outcome: 'dispatched',
+      reason: 'dispatched',
+      selectedRoot: '/repo/peer',
+      dispatchingRoot: '/repo/peer',
+      consecutiveRunLength: 1,
+    });
+  });
+});

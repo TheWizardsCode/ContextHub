@@ -50,6 +50,24 @@ describe('host budget dialog copy (AC3/AC4)', () => {
     expect(headline).toContain('over by 1.');
   });
 
+  it('labels the plan tier', () => {
+    const headline = formatHostBudgetHeadline(makeRequest({ kind: 'plan', live: 1, max: 2 }));
+    expect(headline).toContain('Plan dispatch would exceed the host quota');
+    expect(headline).toContain('(1 running, max 2)');
+  });
+
+  it('labels the intake tier', () => {
+    const headline = formatHostBudgetHeadline(makeRequest({ kind: 'intake', live: 1, max: 2 }));
+    expect(headline).toContain('Intake dispatch would exceed the host quota');
+    expect(headline).toContain('(1 running, max 2)');
+  });
+
+  it('labels the risk-effort tier', () => {
+    const headline = formatHostBudgetHeadline(makeRequest({ kind: 'risk-effort', live: 1, max: 2 }));
+    expect(headline).toContain('Risk & effort dispatch would exceed the host quota');
+    expect(headline).toContain('(1 running, max 2)');
+  });
+
   // AC4: at cap ⇒ over by 1; already n over cap ⇒ over by n + 1.
   it.each([
     { live: 2, max: 2, overBy: 1, label: 'exactly at cap' },

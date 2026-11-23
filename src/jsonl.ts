@@ -9,6 +9,7 @@ import { WorkItem, Comment, DependencyEdge, WorkItemDependency, AuditResult } fr
 import { stripWorklogMarkers } from './github.js';
 import { resolveWorklogDir } from './worklog-paths.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
+import { normalizeStartOn } from '@worklog/shared/predicates';
 
 function normalizeForStableJson(value: any): any {
   if (value === null || value === undefined) return value;
@@ -389,6 +390,10 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
         if ((item as any).effort === undefined) {
           (item as any).effort = '';
         }
+        // `startOn` back-fill (WL-0MWMGEPY2004EDZ8): a legacy record written
+        // before the field existed means "not scheduled", i.e. the effective
+        // instant is the item's `createdAt` — never "blocked".
+        item.startOn = normalizeStartOn(item.startOn, item.createdAt) ?? undefined;
         if ((item as any).githubIssueNumber === undefined) {
           (item as any).githubIssueNumber = undefined;
         }
@@ -465,6 +470,10 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
         if ((item as any).effort === undefined) {
           (item as any).effort = '';
         }
+        // `startOn` back-fill (WL-0MWMGEPY2004EDZ8): a legacy record written
+        // before the field existed means "not scheduled", i.e. the effective
+        // instant is the item's `createdAt` — never "blocked".
+        item.startOn = normalizeStartOn(item.startOn, item.createdAt) ?? undefined;
         if ((item as any).githubIssueNumber === undefined) {
           (item as any).githubIssueNumber = undefined;
         }

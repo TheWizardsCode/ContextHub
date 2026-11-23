@@ -123,7 +123,8 @@ function budgetRefusal(
   return vi.fn(async (input: { kind: string }) =>
     input.kind === kind
       ? { admitted: false as const, live, max, reason, ...(detail !== undefined ? { detail } : {}) }
-      : { admitted: true as const, live: 0, max },
+      : // Every other kind is uncapped by default (WL-0MWF34932000SNTX F2).
+        { admitted: true as const, live: 0, max: 0, capped: false },
   );
 }
 
@@ -138,24 +139,26 @@ describe('continuable-hold predicate (WL-0MWBT76WY00298AY AC1)', () => {
       expect(isContinuableHoldOutcome({ reason })).toBe(true);
     }
     // The allow-list is the union of the two documented families.
-    expect(LOST_CLAIM_REASONS.size + HOST_BUDGET_HOLD_REASONS.size).toBe(8);
+    expect(LOST_CLAIM_REASONS.size + HOST_BUDGET_HOLD_REASONS.size).toBe(10);
     expect([...HOST_BUDGET_HOLD_REASONS]).toEqual([
       'host-budget-implement',
       'host-budget-audit',
+      'host-budget-plan',
+      'host-budget-intake',
+      'host-budget-risk-effort',
       'host-budget-unknown',
       'audit-budget-saturated',
       'audit-budget-unknown',
-      'audit-host-saturated',
     ]);
   });
 
   it('splits the budget holds into the AUDIT rung and the implement/host rung (WL-0MWDDHVF2004PTYX AC2)', () => {
-    // The audit rung: proxy-derived audit tokens plus the legacy audit tokens.
+    // The audit rung: proxy-derived audit tokens plus the ledger's
+    // `host-budget-audit`.
     expect([...AUDIT_BUDGET_HOLD_REASONS]).toEqual([
       'audit-budget-saturated',
       'audit-budget-unknown',
       'host-budget-audit',
-      'audit-host-saturated',
     ]);
     for (const reason of AUDIT_BUDGET_HOLD_REASONS) {
       expect(isAuditBudgetHoldReason(reason)).toBe(true);
@@ -253,8 +256,10 @@ describe('dispatchFromOwnHead — continuable host-budget hold (AC2/AC4/AC6)', (
     });
     expect(ctx.holds.budget).toBe(false);
     expect(ctx.holds.cpu).toBe(false);
-    // The prep candidate is not budget-gated: it was never refused.
-    expect(admitHostDispatch).toHaveBeenCalledTimes(1);
+    // Every kind is offered to the generic admission (WL-0MWF34932000SNTX
+    // F2): the implement head is refused, the plan behind it is admitted
+    // uncapped — never budget-gated.
+    expect(admitHostDispatch).toHaveBeenCalledTimes(2);
   });
 
   it('AC2: an audit refusal steps on to a trailing intake candidate', async () => {

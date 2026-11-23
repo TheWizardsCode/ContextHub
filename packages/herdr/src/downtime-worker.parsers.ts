@@ -491,6 +491,11 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
     risk: typeof raw.risk === 'string' ? raw.risk : undefined,
     effort: typeof raw.effort === 'string' ? raw.effort : undefined,
     assignee: typeof raw.assignee === 'string' ? raw.assignee : undefined,
+    // `startOn` scheduling gate (WL-0MWMGEWH7004VUFI): `wl show` is never
+    // filtered, so the coordination leader's per-entry classification MUST
+    // carry the temporal fields or the gate would see an already-started item.
+    startOn: typeof raw.startOn === 'string' ? raw.startOn : undefined,
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : undefined,
     auditedAt:
       typeof raw.auditedAt === 'string'
         ? raw.auditedAt

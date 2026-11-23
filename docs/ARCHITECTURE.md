@@ -182,6 +182,33 @@ wl migrate jsonl --delete
 3. If no: Check for local JSONL (legacy migration)
 4. If JSONL exists: Import to SQLite, then delete JSONL
 
+### Shared data layer module map
+
+`packages/shared/src/database.ts` is the thin façade of the decomposed shared
+data layer (WL-0MVGKGHNR0019OLT; closeout WL-0MVOBP8MC0093Y7T): the
+`WorklogDatabase` class keeps every public member (identical signature) and
+each concern lives in its own module under `packages/shared/src/database/`:
+
+| Module | Responsibility |
+|---|---|
+| `context.ts` | shared context/type module (acyclic root): `WorklogDatabaseContext`, `EdgeCache`, id/prefix helpers, `laterTimestamp`, `GitTarget`/`SyncState`/service types |
+| `work-items.ts` | item CRUD, `updateIfMatches`, no-op-change detection (`hasWorkItemChanged`) |
+| `hierarchy.ts` | children/descendants/depth queries, priority cascade, parent demotion |
+| `priority.ts` | risk/effort ordinals, effective-priority cache |
+| `next-pipeline.ts` | `wl next` selection pipeline (candidate filters, blocker surfacing) |
+| `critical-escalation.ts` | critical-escalation stage of `wl next` |
+| `sort.ts` | score computation, sort-index assignment, `reSort` |
+| `audit.ts` | audit result CRUD, waiver, freshness classification |
+| `dependencies.ts` | dependency-edge CRUD, `blocked`/`open` reconciliation |
+| `comments.ts` | comment CRUD, activity timestamps, batch import/upsert |
+| `search.ts` | FTS5 search (ID-aware) + semantic index lifecycle |
+| `sync.ts` | Git/JSONL sync (`refreshFromGit`, `exportForSync`), watermarks, dirty counts, delta metadata, auto-sync triggers |
+| `import-export.ts` | whole-store snapshots: `clear`, `getAll*`, destructive `import`, non-destructive `upsertItems` |
+
+The extracted-module graph is acyclic (no module imports the façade) and every
+module is ≤ 1,000 lines — enforced by
+`packages/shared/src/database/decomposition-guard.test.ts`.
+
 ### Sync Command Flow
 1. Export SQLite data to temporary JSONL
 2. Acquire file lock
@@ -208,7 +235,7 @@ process, so a mutation that internally triggers a sync (e.g. `wl delete`'s
 auto-sync) does not deadlock.
 
 The locked commands are: `wl update`; `wl comment add/update/delete`;
-`wl audit-set`; `wl close`; `wl delete`; `wl dep add/rm`; `wl create`;
+`wl audit-set`; `wl close`; `wl delete`; `wl undelete`; `wl dep add/rm`; `wl create`;
 `wl reviewed`; `wl interview`; `wl audit-waive/unwaive`; `wl re-sort`; the
 writing `wl doctor` subcommands; `wl github import`; `wl github push`;
 `wl import`; `wl init`; and `wl migrate`. See
@@ -252,8 +279,12 @@ state and is NOT valid — run `wl init` to repair it.
    continues to the filesystem root.
 4. **Return `undefined`** when no valid root exists. Callers decide how to
    surface the uninitialized state: the `wl` CLI falls back to
-   `<cwd>/.worklog` (it initializes on demand); the herdr plugin reports
-   the uninitialized state and shows an empty worklist.
+   `<cwd>/.worklog` (it initializes on demand); the herdr plugin renders a
+   persistent in-pane error that names the resolved path and instructs the
+   operator to run `wl init` — the selection list is never a silent blank
+   view, and the error clears on the next refresh once a `wl init` resolves
+   the root. The same message is written to stderr for non-interactive /
+   TUI-unavailable runs.
 
 ### Documented behavior change
 
@@ -562,6 +593,7 @@ modules.
 | `src/commands/doctor/stage-sync.ts` | `doctor stage-sync`: detect and (`--apply`) correct stale status/stage combinations. |
 | `src/commands/doctor/prune.ts` | `doctor prune`: hard-delete soft-deleted items older than a threshold, never orphaning linked GitHub issues. |
 | `src/commands/doctor/cache.ts` | `doctor cache`: report and (`--prune`) reclaim the bounded read-cache state directory. |
+| `src/commands/undelete.ts` | `wl undelete`: restore soft-deleted items (the sanctioned inverse of `wl delete`) — clears the tombstone, restores a status compatible with the stage, restores cascade-swept descendants, records an audit comment and syncs once. |
 | `src/commands/doctor/foreign-items.ts` | `doctor foreign-items`: report foreign-prefix items and, with `--apply`, hard-delete them (optionally rewriting the remote worklog ref). |
 | `src/commands/doctor/prefix.ts` | `doctor prefix`: preview (default) or apply a project ID-prefix rename together with its revertible rename map. |
 | `src/commands/doctor/audit-gaps.ts` | `doctor audit-gaps`: read-only report of `completed`/`in_review` items with no audit record. |
@@ -871,8 +903,8 @@ console.log(summariseSpawnRecords(process.env.WL_SPAWN_COUNT_FILE!));
 - `critical` is a hard boundary that no audit-not-ready boost can overtake.
 - Missing/`true`/stale audits receive no boost. Freshness is delegated to the single shared predicate `isAuditFresh` (`packages/shared/src/icons.ts`); the ordering tier passes no fingerprints, so the one-sided fallback time gate applies — fresh iff `auditedAt > updatedAt - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s), i.e. an audit at or after the content timestamp is fresh, and an audit older than a later content edit is stale. There is no competing `auditedAt`-vs-`updatedAt` comparison anywhere in the ordering/audit path (the shared `isAuditNotReadyFresh` predicate lives in `packages/shared/src/database/audit.ts`; WL-0MUBVH7ZR009PP80).
 - The same tier is enforced in `packages/shared/src/database/sort.ts` in `sortItemsByScore`/`computeScore` (batch audit `Map<id,AuditResult>` + tiered comparator) and in `selectBySortIndex` both when all `sortIndex` coincide (before effective-priority/age) and when they diverge (tier prefix before `sortIndex`), so `wl next --no-re-sort` and `wl next --json` preserve boosted order without requiring a prior `reSort`. The audit-map builder the tier consumes lives in `packages/shared/src/database/audit.ts`.
-- `src/commands/grouping.ts` Critical Group placement is unchanged by design.
-- **Grouping is content-deterministic (WL-0MVVLBTTP003Y4XO).** `groupItemsByFilePaths` canonicalises its input before the greedy first-fit packing, using a purely content-derived key (`compareGroupingContentKey`): priority (high → medium → low) → stage sub-order (`plan_complete` → `intake_complete` → remaining) → id. No timestamp participates, so the packing result — and therefore each item's `group`/`groupLabel` — depends only on the item set and its content. The input order fluctuates with `updatedAt` churn (comments, audit runs), which used to make the same item set pack into different groups on each refresh. Within-group ordering (`compareGroupableItems`) is now **priority first**, then the stage sub-order, then `id`; the `in_review` 6-bucket comparator is unchanged and remains priority-first. The Herdr plugin's self-contained mirror (`packages/herdr/src/grouping.ts`) applies the identical rules and must stay in sync.
+- `src/commands/grouping.ts` Critical Group placement is unchanged by design (the bands below `critical` are bucketed priority-band-first too — WL-0MWMQ6AV6007ZUNK).
+- **Grouping is content-deterministic (WL-0MVVLBTTP003Y4XO).** `groupItemsByFilePaths` canonicalises its input before the greedy first-fit packing, using a purely content-derived key (`compareGroupingContentKey`): priority band (critical → high → medium → low) → stage sub-order (`in-progress` → `plan_complete` → `intake_complete` → `idea` → remaining) → id. Sections are bucketed **priority band first** (`critical` → `high` → `medium` → `low` → `In Review`), so a `high@idea` item can never render below a `medium@plan_complete` one; stage only sub-divides inside a band as `<Band> Group N` / `<Band> Idea` / `<Band> Other`, with `In Review` a single global section pinned last (WL-0MWMQ6AV6007ZUNK). No timestamp participates, so the packing result — and therefore each item's `group`/`groupLabel` — depends only on the item set and its content. The input order fluctuates with `updatedAt` churn (comments, audit runs), which used to make the same item set pack into different groups on each refresh. Within-group ordering (`compareGroupableItems`) is now **priority first**, then the stage sub-order, then `id`; the `in_review` 6-bucket comparator is unchanged and remains priority-first. The Herdr plugin's self-contained mirror (`packages/herdr/src/grouping.ts`) applies the identical rules and must stay in sync.
 
 ## Future Considerations
 

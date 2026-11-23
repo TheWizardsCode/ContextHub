@@ -107,6 +107,26 @@ describe('parseHerdrPaneListOutput (discovery-facing record)', () => {
     });
     expect(parseHerdrPaneListOutput('not json at all')).toBeNull();
   });
+
+  it('maps the pane tab id when present (WL-0MW6FIZYI0003QEU)', () => {
+    const raw = JSON.stringify({
+      result: {
+        panes: [
+          { pane_id: 'w9:pShip', label: 'Ship', agent: 'pi', agent_status: 'working', tab_id: 'w9:tShip' },
+        ],
+      },
+    });
+    const panes = parseHerdrPaneListOutput(raw)!;
+    expect(panes[0].tabId).toBe('w9:tShip');
+  });
+
+  it('omits the tab id key when herdr did not report one', () => {
+    const raw = JSON.stringify({
+      result: { panes: [{ pane_id: 'w9:p1', label: 'P', agent: 'pi', agent_status: 'working' }] },
+    });
+    const panes = parseHerdrPaneListOutput(raw)!;
+    expect('tabId' in panes[0]).toBe(false);
+  });
 });
 
 describe('shared live/working predicates (AC3 — one liveness vocabulary)', () => {

@@ -13,7 +13,6 @@ import { fileURLToPath } from 'node:url';
 import { createDowntimeDeps } from './index.js';
 import { DISPATCHER_ASSIGNEE } from './index.claim.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE } from './downtime-log.js';
-import { readActiveAuditMarker, isHostAuditActive } from './machine-coordination.js';
 import {
   freshCount,
   HOST_BUDGET_CONFIG_FILE,
@@ -35,21 +34,12 @@ setupHostCpuPin();
 // End-to-end coverage of the real `createDowntimeDeps` wiring: the
 // machine-scoped dispatch-budget ledger (machine coordination dir, resolved via
 // HERDR_COORDINATION_DIR) must make `getActiveAudit` report a host-wide skip for
-// ANY project on the host, a non-stale legacy `active-audit` marker must be
-// counted as ONE synthetic audit entry (read-compatibility), and the legacy
-// marker must never be written or removed again.
+// ANY project on the host. On the default proxy-derived path the ledger and
+// `budget.json` never gate the audit tier.
 // ---------------------------------------------------------------------------
 
 describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
   const originalCoordinationDir = process.env.HERDR_COORDINATION_DIR;
-
-  /** Write the legacy marker verbatim, as an older herdr instance would. */
-  function writeLegacyMarker(dir: string, instanceId = 'other-instance'): void {
-    writeFileSync(
-      join(dir, 'active-audit'),
-      JSON.stringify({ instanceId, dispatchedAt: new Date().toISOString() }),
-    );
-  }
 
   /** Write `<machine dir>/budget.json` with an explicit `maxAudit`. */
   function writeMaxAudit(dir: string, maxAudit: number): void {
@@ -122,7 +112,6 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     // One vocabulary: the proxy path never emits the legacy host-budget tokens.
     const reason = (result as { reason?: string }).reason;
     expect(reason).not.toBe('host-budget-audit');
-    expect(reason).not.toBe('audit-host-saturated');
   });
 
   it('budget.json maxAudit (including 0) does not influence the proxy-path decision (AC1)', async () => {
@@ -251,12 +240,11 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     expect(wlCalls(mockExec)).toHaveLength(1);
   });
 
-  it('ignores the retired host-wide marker and per-host cap on the proxy path (AC1)', async () => {
-    // A fresh legacy marker (an older herdr instance) and a maxAudit:1 config
-    // must NOT gate the audit tier: the proxy's verdict is authoritative.
+  it('ignores the per-host cap on the proxy path (AC1)', async () => {
+    // A maxAudit:1 config must NOT gate the audit tier: the proxy's verdict is
+    // authoritative.
     const coordinationDir = makeTempDir();
     process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeLegacyMarker(coordinationDir, 'older-instance');
     writeMaxAudit(coordinationDir, 1);
 
     setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
@@ -266,25 +254,6 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     const result = await deps.getActiveAudit(makeTempDir());
 
     expect(result).toEqual({ ok: true, active: false, source: 'proxy' });
-  });
-
-  it('recordDispatch never writes the retired host-wide marker for an audit dispatch (AC2)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    await deps.recordDispatch({
-      itemId: 'WL-AUD',
-      kind: 'audit',
-      dispatchedAt: new Date().toISOString(),
-      cwd,
-    });
-
-    // The ledger (reserved in the claim pipeline) is the authority now; the
-    // legacy file is never created again.
-    expect(readActiveAuditMarker(coordinationDir)).toBeNull();
   });
 
   it('recordPaneClose releases the audit ledger reservation (AC5)', async () => {
@@ -321,35 +290,6 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     // The host-wide audit slot is given back: the ledger no longer holds the
     // reservation, whatever the lifecycle outcome.
     expect(freshCount('audit')).toMatchObject({ ok: true, count: 0 });
-  });
-
-  it('recordPaneClose never removes a legacy marker file (AC2)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeLegacyMarker(coordinationDir, 'older-instance');
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    for (const kind of ['audit', 'plan'] as const) {
-      await deps.recordPaneClose(
-        {
-          entryType: 'pane-close',
-          timestamp: new Date().toISOString(),
-          itemId: 'WL-AUD',
-          itemTitle: 'Audited item',
-          paneId: 'w1:p2',
-          kind,
-          outcome: kind === 'audit' ? 'audit-passed' : 'closed-as-plan-complete',
-          reasonCode: 'none',
-          closed: true,
-        },
-        cwd,
-      );
-    }
-
-    // Retirement: this version does not remove the file either — read-
-    // compatibility lasts until the file goes stale.
-    expect(isHostAuditActive(coordinationDir)).toBe(true);
   });
 
   it('recordPaneClose releases the host dispatch-budget reservation (F3 AC3)', async () => {
@@ -440,27 +380,6 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     expect(read.ledger.entries[0].paneId).toBe('w1:p9');
   });
 
-  it('recordDispatchFailure never removes a legacy marker file (AC2)', async () => {
-    const coordinationDir = makeTempDir();
-    process.env.HERDR_COORDINATION_DIR = coordinationDir;
-    writeLegacyMarker(coordinationDir, 'older-instance');
-    const cwd = makeTempDir();
-
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', DISPATCHER_ASSIGNEE);
-    await deps.recordDispatchFailure({
-      itemId: 'WL-AUD',
-      kind: 'audit',
-      dispatchedAt: new Date().toISOString(),
-      cwd,
-      error: 'spawn ENOENT',
-      exitCode: null,
-    });
-
-    // The ledger reservation is released by the claim pipeline's spawn-failure
-    // path (asserted in downtime-worker.dispatch.test.ts); the legacy file is
-    // left to go stale.
-    expect(isHostAuditActive(coordinationDir)).toBe(true);
-  });
 });
 
 describe('createDowntimeDeps recordDispatch', () => {

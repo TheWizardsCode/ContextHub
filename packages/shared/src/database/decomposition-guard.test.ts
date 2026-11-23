@@ -82,11 +82,12 @@ export const MAX_MODULE_LINES = 1000;
 /**
  * Files currently exempt from the size gate.
  *
- * This is a *shrink-only* allowlist: it may only ever lose entries. It starts
- * with the monolith, which is over the ceiling until the split completes; the
- * closeout child empties it in one line.
+ * This is a *shrink-only* allowlist: it may only ever lose entries. It started
+ * with the monolith, which was over the ceiling until the split completed; the
+ * closeout child (WL-0MVOBP8MC0093Y7T) emptied it in one line, so every module
+ * in the split family now meets the ceiling on its own.
  */
-export const SPLIT_ALLOWLIST: readonly string[] = ['database.ts'];
+export const SPLIT_ALLOWLIST: readonly string[] = [];
 
 /**
  * The allowlist as it stood at plan time. {@link SPLIT_ALLOWLIST} must remain a

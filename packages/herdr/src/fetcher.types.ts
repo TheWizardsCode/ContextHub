@@ -53,6 +53,13 @@ export interface WorkItem {
   issueType?: string;
   childCount?: number;
   createdAt?: string;
+  /**
+   * Earliest instant the item may proceed (ISO-8601 UTC); the effective start
+   * instant is `startOn ?? createdAt` (WL-0MWMGEWH7004VUFI). Carried so the
+   * Herdr worklist can mark not-yet-started items read-only and the dispatch
+   * gate can refuse them.
+   */
+  startOn?: string;
   updatedAt?: string;
   /** GitHub issue number (e.g., '#123'). */
   githubIssueNumber?: string;
@@ -313,4 +320,14 @@ export interface ClaimResult {
    */
   stale?: boolean;
   error?: string;
+  /**
+   * Machine-readable refusal reason when the wl CLI refused the claim for a
+   * scheduling reason rather than a lost race. Currently
+   * `start_on_not_reached` (WL-0MWMGEUT10056MUI): the item's explicit `startOn`
+   * lies in the future and no audited `--force-start-on` override was passed.
+   * The Herdr dispatch pipeline must treat this as NOT dispatchable.
+   */
+  reason?: string;
+  /** The item's effective `startOn` (canonical UTC) when the guard refused. */
+  startOn?: string;
 }

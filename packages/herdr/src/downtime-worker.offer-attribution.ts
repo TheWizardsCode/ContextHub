@@ -54,6 +54,12 @@ export type DispatchGateToken =
   | 'assignee-hold'
   /** Status/stage shape is not dispatchable at any tier. */
   | 'not-dispatchable'
+  /**
+   * The item's effective start instant (`startOn ?? createdAt`) is still in
+   * the future — a scheduling gate, refused at every tier
+   * (WL-0MWMGEWH7004VUFI).
+   */
+  | 'startOnNotReached'
   /** Completed/in_review but a fresh audit already exists. */
   | 'audit-fresh'
   /** Completed/in_review but outside the audit recency window. */
@@ -80,8 +86,8 @@ export type DispatchGateToken =
   | 'slots-unavailable'
   /**
    * The proxy-derived AUDIT budget refused the audit offer
-   * (`audit-budget-saturated` / `audit-budget-unknown`, or the legacy
-   * `host-budget-audit` / `audit-host-saturated`) — the per-offer counterpart
+   * (`audit-budget-saturated` / `audit-budget-unknown`, or the ledger's
+   * `host-budget-audit`) — the per-offer counterpart
    * of the `auditBudgetHold` terminal hold (WL-0MWDDHVF2004PTYX AC5).
    */
   | 'audit-budget'
@@ -97,6 +103,7 @@ export type ClassifyGateToken =
   | 'soft-deleted'
   | 'producer-review'
   | 'assignee-hold'
+  | 'startOnNotReached'
   | 'not-dispatchable'
   | 'audit-fresh'
   | 'audit-recency'

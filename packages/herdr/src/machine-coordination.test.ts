@@ -20,10 +20,6 @@ import {
   ensureMachineCoordinationDir,
   machineCoordinationDirExists,
   DEFAULT_MACHINE_COORDINATION_DIR,
-  DOWNTIME_HOST_AUDIT_MARKER_FILE,
-  DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS,
-  readActiveAuditMarker,
-  isHostAuditActive,
 } from './machine-coordination.js';
 
 // ── Test fixtures ──────────────────────────────────────────────────────
@@ -136,82 +132,11 @@ describe('machineCoordinationDirExists', () => {
   });
 });
 
-// ── Retired host-wide audit marker — READ-COMPATIBILITY ONLY ───────────
+// ── Retired host-wide audit marker ─────────────────────────────────────
 //
-// WL-0MVXY0XPF006YUHA F2 AC2 retires the `active-audit` marker in favour of the
-// machine-scoped dispatch-budget ledger. The writers are GONE (the marker is
-// never created or removed again); the readers remain for ONE release so a
-// non-stale marker written by an older instance is still recognised and counted
-// as one synthetic audit entry by the ledger (`legacyActiveAuditCount`).
-
-describe('host-wide active-audit marker (retired, read-compatibility only)', () => {
-  /** Write a legacy marker file verbatim, as an older instance would. */
-  function writeLegacyMarker(marker: unknown): void {
-    writeFileSync(
-      join(testDir, DOWNTIME_HOST_AUDIT_MARKER_FILE),
-      typeof marker === 'string' ? marker : JSON.stringify(marker),
-    );
-  }
-
-  it('exposes no marker writer: the file can no longer be created or removed (AC2)', async () => {
-    const mod = await import('./machine-coordination.js');
-    expect('writeActiveAuditMarker' in mod).toBe(false);
-    expect('removeActiveAuditMarker' in mod).toBe(false);
-  });
-
-  it('readActiveAuditMarker reads a marker written by an older instance', () => {
-    writeLegacyMarker({ instanceId: 'inst-a', dispatchedAt: new Date().toISOString() });
-    const marker = readActiveAuditMarker(testDir);
-    expect(marker).not.toBeNull();
-    expect(marker?.instanceId).toBe('inst-a');
-    expect(Number.isNaN(Date.parse(marker!.dispatchedAt))).toBe(false);
-  });
-
-  it('readActiveAuditMarker returns null when the marker is absent', () => {
-    expect(readActiveAuditMarker(testDir)).toBeNull();
-  });
-
-  it('readActiveAuditMarker returns null for malformed JSON (fail-safe)', () => {
-    writeLegacyMarker('not-json{');
-    expect(readActiveAuditMarker(testDir)).toBeNull();
-  });
-
-  it('readActiveAuditMarker returns null when instanceId is missing or empty (fail-safe)', () => {
-    writeLegacyMarker({ dispatchedAt: new Date().toISOString() });
-    expect(readActiveAuditMarker(testDir)).toBeNull();
-    writeLegacyMarker({ instanceId: '', dispatchedAt: new Date().toISOString() });
-    expect(readActiveAuditMarker(testDir)).toBeNull();
-  });
-
-  it('readActiveAuditMarker returns null when dispatchedAt is unparseable (fail-safe)', () => {
-    writeLegacyMarker({ instanceId: 'inst-a', dispatchedAt: 'not-a-date' });
-    expect(readActiveAuditMarker(testDir)).toBeNull();
-  });
-
-  it('isHostAuditActive is true for a fresh marker and false once the file is gone', () => {
-    writeLegacyMarker({ instanceId: 'inst-a', dispatchedAt: new Date().toISOString() });
-    expect(isHostAuditActive(testDir)).toBe(true);
-    rmSync(join(testDir, DOWNTIME_HOST_AUDIT_MARKER_FILE));
-    expect(isHostAuditActive(testDir)).toBe(false);
-  });
-
-  it('isHostAuditActive is false for a marker older than the stale window', () => {
-    // A crashed audit pane must not block the host forever: a marker older
-    // than DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS is treated as released.
-    const staleTime = new Date(
-      Date.now() - DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS - 60_000,
-    ).toISOString();
-    writeLegacyMarker({ instanceId: 'inst-a', dispatchedAt: staleTime });
-    expect(isHostAuditActive(testDir)).toBe(false);
-  });
-
-  it('isHostAuditActive is true for a marker just inside the stale window', () => {
-    // Exactly at the boundary the marker is still active (strict `<` window);
-    // one minute inside guarantees the assertion is not flaky.
-    const freshTime = new Date(
-      Date.now() - DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS + 60_000,
-    ).toISOString();
-    writeLegacyMarker({ instanceId: 'inst-a', dispatchedAt: freshTime });
-    expect(isHostAuditActive(testDir)).toBe(true);
-  });
-});
+// The retired `active-audit` marker reader surface and its synthetic ledger
+// count are deleted by WL-0MWF34IEP00221NU (host-dispatch-budget
+// generalisation, WL-0MW50EHZ6007QBPB AC5): the machine-scoped ledger is the
+// only audit-budget authority. Its read-compatibility tests were removed in
+// the tests-first slice so no test references a symbol the contract no longer
+// has.

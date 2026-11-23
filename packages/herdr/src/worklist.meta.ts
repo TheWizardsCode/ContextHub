@@ -150,6 +150,12 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
   addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
+  // `startOn` schedule (WL-0MWMGEWH7004VUFI): surfaced only when an explicit
+  // future/other instant is stored (the `createdAt` default adds no row).
+  // Read-only display — the detail view never clears or alters the schedule.
+  if (item.startOn && item.startOn !== item.createdAt) {
+    addMeta('Start On', formatTimestamp(item.startOn));
+  }
   if (item.isLogOnly && item.auditResult == null) {
     // No live audit state on a log-only row — show `—` (WL-0MUL2IY8L009S3PQ).
     addMeta('Audit', '—');

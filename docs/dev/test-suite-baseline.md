@@ -28,11 +28,13 @@ replaced by the `tests/` umbrella.
 | Dev-push | `pre-push` hook, on `refs/heads/dev` / `refs/heads/main` pushes | full | The full canonical suite (`suiteCommands`) |
 | Ship release | `dev` → `main` promotion | full | The full canonical suite, re-run on the merged tree |
 | Audit (F3) | audit skill, on a cache miss | full | The full canonical suite, read from the per-repo test cache |
+| Type check | every gate above that runs the canonical suite, plus CI | root + all `packages/*` with a tsconfig | `npm run typecheck` (`tsc --noEmit` per tsconfig) — see [The typecheck gate](#the-typecheck-gate-wl-0mwkq51g0006f3kv) |
 
 The **canonical full suite** is declared in `.pi/test-config.json`
 (`suiteCommands`):
 
 ```bash
+npm --silent run typecheck
 npm --silent test -- tests
 npm --silent test -- packages/shared
 npm --silent test -- packages/tui/extensions
@@ -298,7 +300,77 @@ The two package suites resolve `@worklog/shared` through the worktree's own
 `npm run build` must run **in the worktree** before the suite — building only
 the main checkout leaves the worktree's `packages/shared/dist` absent and every
 `@worklog/shared/<subpath>` import fails to resolve. This is a worktree-setup
-prerequisite, not a suite defect.
+prerequisite, not a suite defect. Since WL-0MW8G1X3V007CGAE the run-once
+preflight states the same precondition up front instead of leaving it to 344
+failed imports — see
+[Shared workspace build: guarded, not remembered](#shared-workspace-build-guarded-not-remembered-wl-0mw8g1x3v007cgae).
+
+### The typecheck gate (WL-0MWKQ51G0006F3KV)
+
+The canonical suite starts with a **type check**. It runs no tests: it asks
+`tsc` whether the tree is well-typed, so a merge resolution that drops a
+symbol while leaving its consumers in place fails a gate instead of shipping.
+That is not hypothetical — commit `485b764c7` did exactly that and broke the
+Worklog pane on `main` until it was restored by hand
+(WL-0MWKQ4DO2004C03A).
+
+```bash
+npm run typecheck   # expands to typecheck:root && typecheck:shared && typecheck:herdr
+```
+
+| Sub-script | Project | tsconfig |
+|---|---|---|
+| `typecheck:root` | repo root (`src/**`) | `tsconfig.json` |
+| `typecheck:shared` | `packages/shared` | `packages/shared/tsconfig.json` |
+| `typecheck:herdr` | `packages/herdr` | `packages/herdr/tsconfig.json` |
+
+**Scope rule.** Every `packages/*` directory that carries a tsconfig is
+type-checked. `packages/tui` has none — that tree runs only under `tsx` — so it
+is deliberately out of scope; authoring a tsconfig for it is a separate change
+(see `tests/unit/typecheck-gate.test.ts`, which fails when a new
+`packages/*/tsconfig.json` is added without wiring).
+
+**How it is enforced.** `npm run typecheck` is the first entry in
+`suiteCommands`, so it rides the full canonical suite and is therefore already
+executed by `implement.py finish` (full-scope changes), the dev-push hook, audit
+F3 and the ship release gate — with **no change to the pre-push hook template**
+(see [pre-push-hook.md](./pre-push-hook.md)). `groups.herdr` is untouched.
+
+Three further layers back it up:
+
+- **`noEmitOnError: true`** in the root, `packages/shared` and `packages/herdr`
+  tsconfigs, so a build from a tree with type errors leaves `dist/` untouched
+  instead of emitting loadable-but-broken JS (the failure mode that made the
+  pane crash rather than refuse to start).
+- **`npm run build` is authoritative.** The root `build` compiles
+  `packages/herdr` too (`build:herdr` → the package's `build:only`, after
+  `build:shared`), and the ship pipeline already invokes `npm run build` via
+  `scripts/generate-version.cjs` — so release promotion refuses a tree that
+  does not type-check.
+- **CI.** `install-and-smoke-test.yml` type-checks **before** it builds (PRs and
+  pushes to `main`, no path filter — the backstop), and `cli-tests.yml` has a
+  path-filtered `typecheck` job covering `src/**`, `packages/**`,
+  `tsconfig*.json` and `package.json` for fast PR feedback. Both jobs install
+  the plugin's dependencies and build `packages/shared` first: the typecheck
+  resolves `@worklog/shared` from `packages/shared/dist` and `marked` from
+  `packages/herdr/node_modules`, and neither exists in a fresh checkout. Do the
+  same locally after a clean clone — `npm install` (its `install` lifecycle
+  script runs `scripts/install-herdr.sh`, which installs the plugin's
+  dependencies) followed by one `npm run build`, before running the suite.
+
+**Relationship to the opt-in herdr *test* profile.** Type-checking is a
+separate gate from the herdr test suite: the producer decision on
+WL-0MVFZVIA50062TJ8 keeps `packages/herdr/src` **tests** out of the canonical
+suite, and this section does not re-litigate it. `npm run typecheck` is the
+**single source of truth** for herdr type-checking;
+`packages/herdr/src/build-guard.test.ts` (WL-0MUFSQMH90086I7W) stays in place
+as a secondary, profile-local assertion that only runs under `--type herdr` /
+`--group herdr`.
+
+**Cost.** ~15 s on this host (three serial `tsc --noEmit` runs; measured
+2026-11-17: root ~5 s, `packages/shared` ~3.5 s, `packages/herdr` ~5.5 s). It
+is a plain command in `suiteCommands`, not a vitest file, so it runs outside
+the measured ratchet project group.
 
 ## Test file count (baseline)
 
@@ -739,6 +811,60 @@ commit that registered the `worklist` command — the source was correct.
   checkout's suite for the tests that legitimately exercise the built
   artefact, and the guard keeps a forgotten rebuild from silently producing
   false failures.
+
+##### Shared workspace build: guarded, not remembered (WL-0MW8G1X3V007CGAE)
+
+The same standing rule now covers the **workspace** build. `tests/**` resolve
+`@worklog/shared` through the package `exports` map into
+`packages/shared/dist/` (gitignored), so a checkout whose shared build
+predates a `packages/shared/src` change exercised the OLD shared code and
+reported failures for work already correct and merged — repeatedly, because
+`npm test` never rebuilt it.
+
+That is no longer silent: `vitest.config.ts` registers a **once-per-run**
+`globalSetup` (`tests/global-setup.ts`, verdict in
+`tests/shared-dist-guard.ts`) that, before any test file is collected, compares
+the mtime of the **resolved** `dist/worklog-paths.js` with the newest build
+input under the **resolved** `packages/shared/src`, and aborts with one message
+naming that directory, the two mtimes and `cd <repo root> && npm run build:shared`.
+
+- **Resolve, don't guess.** The check follows `node_modules/@worklog/shared`
+  (symlinks included) and derives the repository root from the resolved
+  package, so it judges — and names — the build the run actually loads. With
+  the worktree link farm shipped (`SA-0MVMZBJGT00718ZO`, see
+  [worktree-isolation.md](./worktree-isolation.md#the-link-farm-shipped))
+  that is the worktree's own package; before it, a worktree run named the main
+  checkout's build, which is exactly the case a worktree-local comparison would
+  have got backwards.
+- **One check per run, never per test file.** `setupFiles` runs per test file
+  (344 of them); this lives in `globalSetup`, so the `src` walk happens once.
+- **Never rebuild, never write.** The preflight only `stat`s — an in-run build
+  would mutate the checkout the live-repo guard reports, and would make a green
+  suite evidence of a build nobody asked for. `implement.py finish` already runs
+  `npm run build` (shared first) before its tests, so gated runs are unaffected.
+- **Fail-open.** An unresolvable package with no discoverable repository root,
+  a package outside a `packages/` workspace, an unreadable directory, and a
+  missing/unreadable `src` all proceed silently; only a genuinely stale or
+  absent artefact fires.
+- **mtime is a heuristic.** A branch switch or a restored file can make `src`
+  look newer than `dist` without a content change (one wasted
+  `npm run build:shared`), and a copied `dist` can carry an older mtime with
+  newer content. Content hashing is deliberately out of scope.
+- **After rebuilding, `--force` once.** `run_tests.py` caches a verdict per git
+  state and a rebuild does not change git state, so the first post-rebuild run
+  can replay the aborted verdict from cache; `--force` (or `--no-cache`) records
+  the fresh one. That is the runner's cache key (WL-0MWRZZ98Y007RKZ4), not this
+  guard.
+
+Recovery detail — including a wiped `packages/shared` tree and
+`scripts/repair-shared-package.sh` — is in
+[wl-shared-dist-diagnostic.md](./wl-shared-dist-diagnostic.md); the
+full-suite contract that depends on this precondition is in
+[pre-push-hook.md](./pre-push-hook.md#shared-build-precondition-for-full-suite-evidence-wl-0mw8g1x3v007cgae).
+Coverage: `tests/unit/shared-dist-freshness.test.ts` (stale, fresh, missing,
+no-repo-root, worktree resolution; temp-dir fixtures with controlled mtimes) and
+`tests/unit/shared-dist-global-setup.test.ts` (the run-once wiring and the
+abort message).
 
 ### Results — canonical suite (`.pi/test-config.json`)
 

@@ -576,7 +576,7 @@ describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
     expect(outcome.candidate?.id).toBe('WL-IMP');
   });
 
-  it('host-wide saturation with an empty remaining backlog reports audit-host-saturated (never no-candidate)', async () => {
+  it('host-wide saturation with an empty remaining backlog reports host-budget-audit (never no-candidate)', async () => {
     // A host-wide skip is NOT a genuine empty backlog: it must never enter
     // the no-candidate cooldown — polling continues and the next idle tick
     // re-checks while the remote audit is still running.
@@ -589,7 +589,7 @@ describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.dispatched).toBe(false);
-    expect(outcome.reason).toBe('audit-host-saturated');
+    expect(outcome.reason).toBe('host-budget-audit');
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     expect(deps.recordDispatch).not.toHaveBeenCalled();
@@ -597,7 +597,7 @@ describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
 
   it('distinguishes host-wide from per-worklog saturation: a per-worklog active audit still reports audit-in-flight', async () => {
     // The reason string must not regress the existing per-worklog semantics:
-    // only `source: 'host-wide'` produces 'audit-host-saturated'.
+    // only `source: 'host-wide'` produces 'host-budget-audit'.
     const deps = makeDeps({
       getActiveAudit: vi.fn().mockResolvedValue(perWorklogActive),
       getNextImplementCandidate: vi.fn().mockResolvedValue(null),
@@ -610,7 +610,7 @@ describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
     expect(outcome.reason).toBe('audit-in-flight');
   });
 
-  it('logs audit-host-saturated with the concurrent-audit count and slot state (AC3)', async () => {
+  it('logs host-budget-audit with the concurrent-audit count and slot state (AC3)', async () => {
     // Contention must be visible: the skip line names the condition and
     // carries the concurrent-audit count (1 — host-wide single-flight) plus
     // the live free-slot / contention queue state so an operator can tell
@@ -633,7 +633,7 @@ describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
       expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
       // Observable contract: stderrSpy observable output stream — sole channel for the skipped/saturated reason log (producer Q1-A/plan-A)
       expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Downtime audit tier skipped: audit-host-saturated'),
+        expect.stringContaining('Downtime audit tier skipped: host-budget-audit'),
       );
       // Observable contract: stderrSpy observable output stream — sole channel for the skipped/saturated reason log (producer Q1-A/plan-A)
       expect(stderrSpy).toHaveBeenCalledWith(
@@ -700,7 +700,6 @@ describe('dispatch proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
       expect(outcome.dispatched).toBe(false);
       // One vocabulary (parent AC2): the proxy's own refusal token.
       expect(outcome.reason).toBe('audit-budget-saturated');
-      expect(outcome.reason).not.toBe('audit-host-saturated');
       expect(outcome.reason).not.toBe('host-budget-audit');
       expect(outcome.budget).toEqual({ live: 1, max: 1 });
       expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
@@ -1583,7 +1582,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
       auditBatchRemaining: 2,
     });
     expect(blocked.dispatched).toBe(false);
-    expect(blocked.reason).toBe('audit-host-saturated');
+    expect(blocked.reason).toBe('host-budget-audit');
 
     (getActiveAudit as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, active: false });
     const released = await dispatchDowntimeWork(deps, {

@@ -79,10 +79,9 @@ export async function rollbackClaimForFailure(
  *
  * Called on every abort path of the claim pipeline — admission refusal (the
  * claim is rolled back), marker-write failure and spawn failure — so a
- * reservation can never outlive a dispatch that never produced an agent. The
- * release is idempotent and best-effort: a missing entry, an unwired seam or a
- * throwing stub is a non-event (a stale entry is still reaped by the ledger's
- * own staleness rule, so this can never wedge the host).
+ * reservation can never outlive a dispatch that never produced an agent.
+ * Idempotent and best-effort: a missing entry, an unwired seam or a throwing
+ * stub is a non-event (the staleness rule is the backstop).
  */
 async function releaseHostBudgetForFailure(
   deps: DowntimeDispatchDeps,
@@ -91,13 +90,13 @@ async function releaseHostBudgetForFailure(
   cwd: string,
   reason: string,
   attemptId: string | undefined,
-  // Proxy audit lease (WL-0MWFJH3NW006F5GN AC3): true on abort paths AFTER
-  // an audit admission held one — the shared GPU goes back with the slot.
+  // Proxy audit lease (WL-0MWFJH3NW006F5GN AC3): true once an audit admission
+  // held one — the shared GPU goes back with the slot.
   leaseHeld: boolean = false,
+  // WL-0MWF34932000SNTX F2: an uncapped kind never reserved (parent AC2).
+  capped: boolean = true,
 ): Promise<void> {
-  // The ledger records only implement/audit entries; plan/intake/scheduled
-  // dispatches never reserve, so there is nothing to release.
-  if (kind !== 'implement' && kind !== 'audit') return;
+  if (!capped) return;
   if (typeof deps.releaseHostDispatch === 'function') {
     try {
       // Identity, not just the item id (WL-0MWFJD5T4003OM91): the release can
@@ -156,6 +155,8 @@ async function abortForAnchorUnavailable(
   leaseHeld: boolean,
   detail: string | undefined,
   projectWorkspaceMismatch?: ProjectWorkspaceMismatch,
+  // WL-0MWF34932000SNTX F2: whether this attempt held a reservation.
+  capped: boolean = true,
 ): Promise<DowntimeDispatchOutcome> {
   const releasedReservation: DowntimeReservationEvidence | undefined =
     reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
@@ -167,6 +168,7 @@ async function abortForAnchorUnavailable(
     'anchor-unavailable',
     attemptId,
     leaseHeld,
+    capped,
   );
   const rollbackOk = await rollbackClaimForFailure(deps, itemId, claimExpected, cwd);
   return {
@@ -383,30 +385,28 @@ export async function dispatchClaimedTier(
   // ── Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3,
   //    audit tier WL-0MVXY0XPF006YUHA F2) ────────────────────────────────
   //
-  // ONE ledger read per dispatch attempt, placed in the claim→marker→spawn
-  // pipeline IMMEDIATELY BEFORE the dispatch marker is written. Both dispatcher
-  // paths (`dispatchDowntimeWork` and `dispatchFromCoordination`) reach this
-  // point through `dispatchClaimedTier`, so neither can bypass the machine-wide
-  // cap (F3 AC1). Both budgeted tiers are admitted here: `implement` and
-  // `audit` (F2 AC1/AC5) — plan/intake/risk-effort never reserve.
-  //
-  // The reservation is taken AFTER the CAS claim succeeded and BEFORE
-  // `recordDispatch` (AC3), and the claim is rolled back on refusal so the item
-  // is never left stranded `in_progress` (AC2). A refusal is a NEUTRAL skip
-  // (AC5): no marker, no spawn, no strike, no attempt budget and no
-  // no-candidate cooldown — the next idle tick re-checks. `live`/`max` ride on
-  // the outcome as evidence for the observability slice (F5).
+  // ONE ledger read per dispatch attempt, placed IMMEDIATELY BEFORE the
+  // dispatch marker is written. Both dispatcher paths
+  // (`dispatchDowntimeWork` and `dispatchFromCoordination`) reach this point
+  // through `dispatchClaimedTier`, so neither can bypass the machine-wide cap
+  // (F3 AC1). EVERY kind is offered to the generic admission
+  // (WL-0MWF34932000SNTX F2): a capped kind is enforced, an uncapped kind is
+  // admitted without a reservation. The reservation is taken AFTER the CAS
+  // claim and BEFORE `recordDispatch` (AC3), the claim is rolled back on
+  // refusal (AC2) and the refusal is a NEUTRAL skip (AC5).
   let budgetEvidence: { live: number; max: number } | undefined;
   // The attempt token of THIS dispatch's reservation (WL-0MWFJD5T4003OM91):
-  // every later abort path releases with it, so it can only remove the entry
-  // this attempt created.
+  // every later abort path releases with it, never another attempt's entry.
   let budgetAttemptId: string | undefined;
+  // Whether this kind RESERVED a slot (WL-0MWF34932000SNTX F2): an uncapped
+  // kind is admitted without one, so confirm and abort release are skipped.
+  // Defaults to the historical budgeted kinds with no admission seam wired.
+  let budgetCapped = kind === 'implement' || kind === 'audit';
   // Audit lease (WL-0MWFJH3NW006F5GN AC3): true once admission ADMITS an
-  // AUDIT with a held proxy lease; every terminal path after that point must
-  // give the shared GPU back (spawn/marker/anchor abort below, pane close in
-  // the caller), so the release helper receives it on each abort.
+  // AUDIT with a held proxy lease; every terminal path then gives the shared
+  // GPU back through the release helper.
   let leaseHeld = false;
-  if ((kind === 'implement' || kind === 'audit') && typeof deps.admitHostDispatch === 'function') {
+  if (typeof deps.admitHostDispatch === 'function') {
     let admission: Awaited<ReturnType<NonNullable<DowntimeDispatchDeps['admitHostDispatch']>>> | null =
       null;
     try {
@@ -425,6 +425,7 @@ export async function dispatchClaimedTier(
     }
     budgetEvidence = { live: admission.live, max: admission.max };
     budgetAttemptId = admission.attemptId;
+    budgetCapped = admission.capped !== false;
     if (!admission.admitted) {
       // Round trip: a granted local-capacity ticket can no longer reach a pane
       // (single-use — recorded released/expired, never reused or leaked), the
@@ -440,6 +441,8 @@ export async function dispatchClaimedTier(
         opts.cwd,
         'admission-refused',
         admission.attemptId,
+        false,
+        budgetCapped,
       );
       const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
       return {
@@ -470,19 +473,12 @@ export async function dispatchClaimedTier(
   }
 
   // ── Placement: project workspace + item-ID tab, then the fallbacks ──────
-  // Resolved HERE — after the CAS claim, the local-capacity reservation gate
-  // and the host-budget admission, and immediately before the marker write
-  // (WL-0MW5JE0SZ0057K30): provisioning the item-ID tab any earlier left an
-  // orphaned placeholder pane whenever one of those gates refused the tick (an
-  // empty pane in a fresh item tab with no command ever run). Precedence and
-  // fail-closed rules live in `resolveDispatchPlacement`; the F3 contract is
-  // unchanged (admission still happens once, after the claim and before the
-  // marker/spawn).
-  //
-  // A provisioning failure now happens on an already-claimed item, so it rolls
-  // the claim back (and releases the host-budget entry/ticket) through
-  // `abortForAnchorUnavailable` — the same invariants as every other pre-spawn
-  // abort, so no orphaned `in_progress` item is left behind.
+  // Resolved HERE, after the last admission gate and immediately before the
+  // marker write (WL-0MW5JE0SZ0057K30): provisioning the item-ID tab earlier
+  // left an orphaned placeholder pane whenever a gate refused the tick. A
+  // provisioning failure happens on an already-claimed item, so it rolls the
+  // claim back (and releases the host-budget entry/ticket) through
+  // `abortForAnchorUnavailable`, so no orphaned `in_progress` item is left.
   const placement = await resolveDispatchPlacement(deps, {
     cwd: opts.cwd,
     itemId: candidate.id,
@@ -490,7 +486,7 @@ export async function dispatchClaimedTier(
   if (!placement.ok) {
     return abortForAnchorUnavailable(
       deps, kind, candidate.id, expected, opts.cwd, reservation, budgetAttemptId,
-      leaseHeld, placement.detail, placement.projectWorkspaceMismatch,
+      leaseHeld, placement.detail, placement.projectWorkspaceMismatch, budgetCapped,
     );
   }
   const anchorId = placement.anchorId;
@@ -569,6 +565,7 @@ export async function dispatchClaimedTier(
       'marker-write-failed',
       budgetAttemptId,
       leaseHeld,
+      budgetCapped,
     );
     // Marker-write recovery (WL-0MT32F908002YFFA AC1): the CAS claim
     // succeeded but the marker write failed — the item is stranded in
@@ -647,6 +644,7 @@ export async function dispatchClaimedTier(
       'spawn-failed',
       budgetAttemptId,
       leaseHeld,
+      budgetCapped,
     );
     // Placeholder root-pane cleanup (WL-0MW5JE0SZ0057K30, defence in depth):
     // the item tab was provisioned but the split failed, so the blank root
@@ -728,15 +726,10 @@ export async function dispatchClaimedTier(
   }
 
   // Root-pane cleanup (WL-0MU2EOHK900425VU): a project-workspace item tab is
-  // provisioned with herdr's initial root pane (an empty bash pane) that is
-  // only used as the split anchor for the FIRST dispatch. Once the dispatch
-  // pane has spawned, close that root pane so the tab shows only the
-  // productive pane. Only ever close a ROOT pane: an anchor pane already
-  // carrying a downtime dispatch label is a live agent session and must stay
-  // open. Best-effort — cleanup must never block or fail the dispatch
-  // outcome. Shared with the pre-spawn abort paths (marker-write failure,
-  // spawn failure) by `closePlaceholderRootPaneBestEffort`
-  // (WL-0MW5JE0SZ0057K30).
+  // provisioned with herdr's initial root pane that is only used as the split
+  // anchor for the FIRST dispatch. Close that root pane once the dispatch pane
+  // has spawned, but never one already carrying a downtime label (a live
+  // agent). Best-effort; shared with the pre-spawn abort paths.
   await closePlaceholderRootPaneBestEffort(deps, {
     cwd: opts.cwd,
     anchorId,
@@ -744,12 +737,9 @@ export async function dispatchClaimedTier(
   });
 
   // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6 AC6.2/AC6.3): best-effort
-  // resolve the spawned pane's id and append a second log entry that copies
-  // the marker fields (`itemId`/`kind`/`stage`/`dispatchedAt`) so the marker
-  // readers see the SAME marker state. Fail-open: ANY failure (missing dep,
-  // thrown resolver, unresolved pane) never blocks or un-marks the dispatch —
-  // an unresolved pane is recorded as `paneId: null` rather than omitted or
-  // guessed.
+  // resolve the spawned pane's id and append a second entry copying the marker
+  // fields. Fail-open: any failure never blocks the dispatch; an unresolved
+  // pane is recorded as `paneId: null`.
   await recordDispatchEnrichmentBestEffort(deps, {
     itemId: candidate.id,
     kind,
@@ -757,6 +747,9 @@ export async function dispatchClaimedTier(
     cwd: opts.cwd,
     title: candidate.title,
     stage: expected.stage,
+    // WL-0MWF34932000SNTX F2: an uncapped kind reserved nothing, so it must
+    // not be confirmed into the ledger.
+    budgetCapped,
     ...(opts.selectionPath !== undefined ? { selectionPath: opts.selectionPath } : {}),
     ...(opts.selectionReason !== undefined ? { selectionReason: opts.selectionReason } : {}),
     // Copy the locality evidence onto the enrichment entry too
@@ -787,6 +780,8 @@ export async function recordDispatchEnrichmentBestEffort(
     cwd: string;
     title?: string;
     stage?: string;
+    /** Whether this dispatch reserved a ledger slot (`false` ⇒ never record). */
+    budgetCapped?: boolean;
     selectionPath?: string;
     selectionReason?: string;
     /** Resolved locality preference + reason copied from the success marker. */
@@ -815,7 +810,11 @@ export async function recordDispatchEnrichmentBestEffort(
   // enrichment entry. Best-effort — an unresolved pane id (null) or a failing
   // seam never affects the dispatch, and the pane-close release remains the
   // backstop so no entry leaks permanently.
-  if (paneId !== null && typeof deps.confirmHostDispatch === 'function') {
+  if (
+    paneId !== null &&
+    base.budgetCapped !== false &&
+    typeof deps.confirmHostDispatch === 'function'
+  ) {
     try {
       await deps.confirmHostDispatch(base.itemId, base.kind, paneId, base.cwd);
     } catch {

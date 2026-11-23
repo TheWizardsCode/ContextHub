@@ -52,6 +52,7 @@ Worklog uses a **dual-storage model** to combine the benefits of persistent data
   "priority": "medium",
   "parentId": null,
   "createdAt": "2024-01-01T00:00:00.000Z",
+  "startOn": "2024-01-01T00:00:00.000Z",
   "updatedAt": "2024-01-01T00:00:00.000Z",
   "activityAt": "2024-01-01T00:00:00.000Z",
   "tags": ["feature", "backend"],
@@ -70,6 +71,7 @@ Worklog uses a **dual-storage model** to combine the benefits of persistent data
 - **priority**: `low`, `medium`, `high`, or `critical`
 - **parentId**: ID of parent work item (null for root items)
 - **createdAt**: ISO timestamp of creation
+- **startOn**: Earliest instant at which the item may be worked on, as an ISO-8601 UTC timestamp (WL-0MWMGEPY2004EDZ8). It is always stored **populated with the effective instant**, `startOn ?? createdAt`, so an item with no explicit schedule carries its `createdAt` and behaves exactly as it did before the field existed — the default is "already started", never "blocked". A write normalises a parseable value to canonical `...Z` form (an explicit offset such as `+01:00` is accepted and read identically), an explicit blank clears back to `createdAt`, and a legacy JSONL/Git record without the field imports as `createdAt`. Every CLI JSON surface and the REST API return it; see [`docs/migrations/start_on.md`](docs/migrations/start_on.md) for the storage invariant and sync behaviour
 - **updatedAt**: ISO timestamp of the last *content* change. Comment writes do not move this field (audit freshness is computed against it), and audit persistence sets it to `auditedAt`
 - **activityAt** (optional): ISO timestamp of last activity, including comment create/update/delete. Always `>= updatedAt`. Recency/ordering surfaces (`wl recent`, score recency) read this field and fall back to `updatedAt` when absent (WL-0MUBVH6JM0093KVM)
 - **tags**: Array of string tags

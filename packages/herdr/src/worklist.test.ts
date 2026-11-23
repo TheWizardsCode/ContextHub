@@ -3039,6 +3039,174 @@ describe('createListRenderer — code freeze banner', () => {
   });
 });
 
+// ── Uninitialised worklog banner (WL-0MW4P4GNV002V532) ────────────────
+// When no valid `.worklog/` can be resolved the TUI must not render a silent
+// blank list: the caller supplies a notice and the renderer shows a persistent
+// red error line naming the resolved path and the `wl init` fix. The banner is
+// shown only while the list is genuinely empty and the notice is present, and
+// it never breaks the `rows - 1` pane invariant (WL-0MSAAON63003N6LO).
+
+describe('createListRenderer — uninitialised worklog banner (WL-0MW4P4GNV002V532)', () => {
+  const renderer = createListRenderer();
+  const NOTICE =
+    "Worklog not initialised in '/tmp/no-worklog-here' — run 'wl init' to create it";
+
+  /**
+   * Render list mode with only the uninitialised-notice seam set. The notice
+   * is the LAST parameter (appended so every earlier positional caller keeps
+   * its argument order).
+   */
+  function renderNotice(
+    notice: string | null | undefined,
+    rows: DisplayRow[] = [],
+    term: { rows: number; cols: number } = { rows: 24, cols: 200 },
+  ): string {
+    return renderer(
+      rows,                   // displayRows
+      0,                      // selectedIndex
+      0,                      // scrollOffset
+      term,                   // termSize
+      null,                   // activeFilter
+      'list',                 // mode
+      null,                   // detailItem
+      undefined,              // totalCount
+      undefined,              // chordState
+      undefined,              // detailScrollOffset
+      undefined,              // autoRefresh
+      undefined,              // expandedItems
+      undefined,              // chordHelpHints
+      undefined,              // navStackDepth
+      undefined,              // panePaused
+      undefined,              // codeFreezeActive
+      undefined,              // metaScrollOffset
+      undefined,              // metaLastCommand
+      undefined,              // readFile
+      undefined,              // downtimeStatus
+      undefined,              // detailToCIndex
+      undefined,              // detailToCFocus
+      undefined,              // detailRenderedIndex
+      undefined,              // showHelpText
+      undefined,              // codeFreezeAmbiguous
+      undefined,              // hoverTooltip
+      undefined,              // sprintComplete
+      undefined,              // sprintCompletedCount
+      undefined,              // browseItemCount
+      undefined,              // sprintAuditsOutstanding
+      undefined,              // metaBlockedBy
+      undefined,              // detailBlockedBy
+      undefined,              // syncNotice
+      undefined,              // assigneeHoldStatus
+      undefined,              // assigneeHoldNotice
+      undefined,              // hostBudgetStatus
+      undefined,              // notStartedStatus
+      undefined,              // notStartedNotice
+      notice,                 // uninitialisedNotice
+    );
+  }
+
+  it('renders a persistent red banner naming the path and the wl init fix (AC1)', () => {
+    const output = renderNotice(NOTICE);
+    expect(output).toContain(NOTICE);
+    expect(output).toContain('/tmp/no-worklog-here');
+    expect(output).toContain('wl init');
+    // Red background (256-colour 196) with white text (231) for visibility.
+    expect(output).toContain(ANSI.bg(196));
+    expect(output).toContain(ANSI.fg(231));
+  });
+
+  it('re-renders the banner every frame while the state holds (AC1)', () => {
+    // Two consecutive frames with the same unresolved state must both carry
+    // the error line — it is persistent, not a one-shot toast.
+    expect(renderNotice(NOTICE)).toContain("run 'wl init'");
+    expect(renderNotice(NOTICE)).toContain("run 'wl init'");
+  });
+
+  it('covers a missing .worklog/ root (AC2)', () => {
+    // No `.worklog/` exists: the caller supplies the unresolved-path notice.
+    const notice = "Worklog not initialised in '/tmp/missing-worklog' — run 'wl init' to create it";
+    const output = renderNotice(notice);
+    expect(output).toContain('/tmp/missing-worklog');
+    expect(output).toContain('wl init');
+  });
+
+  it('covers an existing but invalid/partial .worklog/ (AC2)', () => {
+    // A `.worklog/` containing only `worklog.db` has no `config.yaml` /
+    // `initialized` marker, so `resolveWorklogRoot()` treats it as unresolved
+    // and the exact same notice is surfaced.
+    const notice = "Worklog not initialised in '/tmp/partial-worklog' — run 'wl init' to create it";
+    const output = renderNotice(notice);
+    expect(output).toContain('/tmp/partial-worklog');
+    expect(output).toContain('wl init');
+  });
+
+  it('drops the banner once a valid root resolves and the notice is cleared (AC1/AC2)', () => {
+    const output = renderNotice(null);
+    expect(output).not.toContain('not initialised');
+    expect(output).not.toContain('wl init');
+  });
+
+  it('renders no banner when uninitialisedNotice is undefined (AC3)', () => {
+    const output = renderNotice(undefined);
+    expect(output).not.toContain('not initialised');
+  });
+
+  it('renders no banner when the list has items (AC4)', () => {
+    const output = renderNotice(NOTICE, [makeItem('A')]);
+    expect(output).not.toContain('Worklog not initialised');
+    expect(output).toContain('Item A');
+  });
+
+  it('keeps the rows - 1 line-count invariant with the banner (AC5)', () => {
+    const output = renderNotice(NOTICE, [], TERM_80x24);
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+
+  it('truncates a wide notice to a single chrome row in an 80-column pane (AC5)', () => {
+    const longNotice = `Worklog not initialised in '/tmp/${'x'.repeat(200)}' — run 'wl init' to create it`;
+    const output = renderNotice(longNotice, [], TERM_80x24);
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+    // The banner still leads with the diagnosis after the path is truncated.
+    expect(output).toContain('Worklog not initialised');
+    const bannerLine = output
+      .split('\n')
+      .find((line) => line.includes('Worklog not initialised'));
+    expect(bannerLine?.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(TERM_80x24.cols);
+  });
+
+  it('collapses a multi-line notice into exactly one chrome row (AC5)', () => {
+    // `uninitializedReport()` in non-interactive mode emits two lines; the
+    // renderer must flatten them so the banner consumes one chrome row.
+    const multiline =
+      "Worklog not initialised in '/tmp/two-line' — run 'wl init' to create it.\n" +
+      'Second diagnostic line';
+    const output = renderNotice(multiline, [], { rows: 24, cols: 200 });
+    const bannerLine = output
+      .split('\n')
+      .find((line) => line.includes('Worklog not initialised'));
+    expect(bannerLine).toBeDefined();
+    expect(bannerLine).toContain('Second diagnostic line');
+    expect(output.split('\n').length).toBeLessThanOrEqual(TERM_80x24.rows - 1);
+  });
+
+  it('renders the production uninitializedReport() copy naming the path and wl init (AC4a)', async () => {
+    // Wire the actual production message (not a hand-rolled fixture) into the
+    // renderer so the real wording is validated end-to-end: unresolved root
+    // → banner present with the path and `wl init`; resolved → no banner.
+    const { uninitializedReport } = await import('./index.settings.js');
+    const notice = uninitializedReport('/tmp/herdr-uninit');
+    expect(notice).toContain("Run 'wl init'");
+    expect(notice).not.toContain('worklog init');
+
+    const unresolved = renderNotice(notice);
+    expect(unresolved).toContain('/tmp/herdr-uninit');
+    expect(unresolved).toContain('wl init');
+    expect(unresolved).not.toContain('worklog init');
+
+    const resolved = renderNotice(null);
+    expect(resolved).not.toContain('No valid .worklog/');
+  });
+});
+
 // ── Chord-mode footer gating (WL-0MSGJDSMJ004128E) ─────────────────────
 // The chord-in-progress footer (`chord: <keys> _ <hints>`) must be gated by
 // `showHelpText` like the normal shortcut hint line, so `showHelpText: false`

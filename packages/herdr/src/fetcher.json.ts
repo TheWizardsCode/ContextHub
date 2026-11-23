@@ -86,6 +86,7 @@ export function normalizeItem(raw: any): WorkItem {
     githubIssueNumber: raw?.githubIssueNumber ? String(raw.githubIssueNumber) : undefined,
     childCount: raw?.childCount !== undefined ? Number(raw.childCount) : undefined,
     createdAt: raw?.createdAt ? String(raw.createdAt) : undefined,
+    startOn: raw?.startOn ? String(raw.startOn) : undefined,
     updatedAt: raw?.updatedAt ? String(raw.updatedAt) : undefined,
     group: raw?.group !== undefined ? Number(raw.group) : undefined,
     groupLabel: raw?.groupLabel ? String(raw.groupLabel) : undefined,

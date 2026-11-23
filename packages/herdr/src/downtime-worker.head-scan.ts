@@ -39,11 +39,15 @@
  * leaf-audit pin), and `hostBudget` is LAST (before `no-candidate`).
  */
 
-import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
+import { orderRootsLeastRecentlyServed } from './downtime-round-robin-by-root.js';
 import {
   advanceRoundRobinCursor,
   isConsumedDispatchOutcome,
 } from './downtime-worker.selection.js';
+import {
+  deferRunLengthCeilingRoot,
+  readPreviousDispatchRun,
+} from './downtime-worker.fairness.js';
 import { readOwnHeadWindow } from './downtime-worker.coordination-batch.js';
 import {
   isAuditBudgetHoldOutcome,
@@ -114,7 +118,7 @@ export interface HeadScanHolds {
    *
    * The proxy-owned rung of the budget hold: `audit-budget-saturated` /
    * `audit-budget-unknown` (or the legacy `host-budget-audit` /
-   * `audit-host-saturated`), recorded SEPARATELY from the implement hold so
+   * `host-budget-audit`), recorded SEPARATELY from the implement hold so
    * the caller's terminal chain can rank an audit refusal ABOVE an
    * implement refusal — a refuse with `detail: 'http-404'` is a broken proxy
    * contract, not an ambient implement-cap statement (AC2). `detail` names
@@ -360,6 +364,9 @@ export async function dispatchFromOwnHead(
         selectionReason: ctx.selectionReason,
       },
     );
+    // Per-project fairness (WL-0MWKY141H002LULI AC3): the caller records this
+    // attempted root as `dispatchingRoot` only when the outcome dispatched.
+    outcome.attemptedRoot = ctx.root;
     if (outcome.dispatched) return outcome;
     // A non-continuable outcome (wl-error, spawn-failed, marker-write-failed,
     // anchor-unavailable, …) is returned unchanged so the caller's strike/skip
@@ -418,13 +425,18 @@ export async function dispatchFromOwnHead(
  *     sweep is a bounded WINDOW over roots, never a second ranking.
  *  2. **Round-robin fairness (AC4).** The starting root is the
  *     least-recently-DISPATCHED registered root, chosen with the SAME (pure,
- *     read-only) `selectLeastRecentlyServed` cursor the offer path uses —
- *     selection never charges (WL-0MWFIZ8H5005FVNN). A root is charged ONLY
+ *     read-only) cursor the offer path uses — selection never charges
+ *     (WL-0MWFIZ8H5005FVNN). The sweep follows the SAME whole-set candidate
+ *     order (unknown roots first, ties alphabetical) and applies the SAME
+ *     run-length bound as the leader (WL-0MWKY1839000JM5O): a root that already
+ *     dispatched twice in succession with the decision log as evidence is
+ *     deferred behind its peers while surplus capacity exists, so the two
+ *     paths cannot drift. A root is charged ONLY
  *     when the sweep CONSUMES one of its items (`dispatched` /
  *     `spawn-failed` / `marker-write-failed`, via the shared
  *     `isConsumedDispatchOutcome` predicate) — a visit that dispatches
- *     nothing charges no root. The sweep then visits the remaining roots in
- *     registry order and runs BEFORE the leader's own out-of-view backlog,
+ *     nothing charges no root. The sweep then visits the remaining roots and
+ *     runs BEFORE the leader's own out-of-view backlog,
  *     so a busy leader root cannot starve the registry.
  *  3. **No gate bypass (AC2).** Every candidate passes the FULL sequential
  *     filter chain against ITS OWN root's state (freeze marker, review queue,
@@ -453,11 +465,23 @@ export async function dispatchFromRegisteredRoots(
   const roots = normaliseRegisteredRoots(opts.registeredRoots);
   // AC6: an empty or unresolvable registry leaves today's behaviour unchanged.
   if (roots.length === 0) return null;
-  // AC4: the least-recently-served root starts the sweep (the cursor advances
-  // for it here, exactly as the offer path does); the rest follow in registry
-  // order. A root found with nothing dispatchable is skipped, not charged.
-  const first = selectLeastRecentlyServed(opts.coordinationDir, [...roots], now);
-  const ordered = first === null ? roots : [first, ...roots.filter(root => root !== first)];
+  // AC4: the least-recently-DISPATCHED root starts the sweep (selection is a
+  // pure read — it charges nothing; only a consumed item charges its root
+  // below, WL-0MWFIZ8H5005FVNN). The whole candidate set follows the same
+  // ordering, and the parent AC1 run-length bound (the leader's SAME
+  // decision-log source) defers a root that already dispatched twice in
+  // succession behind its peers while surplus capacity exists — so the sweep
+  // and the offer path cannot drift (WL-0MWKY1839000JM5O). Fail-open: an
+  // absent/corrupt log means no deferral, exactly today's ordering.
+  const selection = orderRootsLeastRecentlyServed(opts.coordinationDir, roots);
+  const first = selection[0] ?? null;
+  const previousRun =
+    selection.length > 1 ? await readPreviousDispatchRun(opts.cwd) : null;
+  const ordered = deferRunLengthCeilingRoot(
+    selection,
+    previousRun,
+    base.auditSlotBudget === undefined || base.auditSlotBudget > 1,
+  );
   for (const root of ordered) {
     // AC5: a missing/unreadable root resolves `null` (the reader already
     // catches thrown reads and `{ok:false}`) — a skip, never a strike.
@@ -499,6 +523,11 @@ export async function dispatchFromRegisteredRoots(
       // an I/O error — never blocks a dispatch.
       if (isConsumedDispatchOutcome(outcome)) {
         advanceRoundRobinCursor(opts.coordinationDir, root, now);
+        // Per-project fairness accounting (WL-0MWKY141H002LULI AC3): the
+        // sweep's OWN selection rides the outcome so the orchestrator records
+        // `selectedRoot` for the registry candidate universe (the offer-list
+        // selection is a different universe and would misattribute a sweep).
+        return { ...outcome, selectedRoot: first };
       }
       return outcome;
     }

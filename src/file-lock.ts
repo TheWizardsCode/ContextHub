@@ -8,6 +8,13 @@
  * The lock file contains the holder's PID, hostname, and acquisition
  * timestamp so that stale locks left behind by crashed processes can
  * be detected and cleaned up automatically.
+ *
+ * Stale-lock semantics (see :func:`acquireFileLock`): a same-host lock whose
+ * holder PID is alive is authoritative and is never age-expired — a slow but
+ * live holder keeps its lock for the whole operation. Age-expiry applies only
+ * where PID liveness cannot be trusted: foreign-host locks. Dead same-host
+ * PIDs, corrupted/unparseable locks and parsed-but-missing-field locks are
+ * reclaimed exactly as before.
  */
 
 import * as fs from 'fs';
@@ -25,7 +32,7 @@ export interface FileLockOptions {
   timeout?: number;
   /** If true, stale locks from dead processes are automatically removed (default true). */
   staleLockCleanup?: boolean;
-  /** Maximum age of a lock file in milliseconds before it is treated as stale regardless of PID status (default 300 000 = 5 minutes). */
+  /** Maximum age of a lock file in milliseconds before it is treated as stale **when the holder's PID cannot be trusted** (a foreign-host lock). Default 300 000 = 5 minutes. A same-host lock whose holder PID is alive is authoritative and is never age-expired, regardless of age. */
   maxLockAge?: number;
   /** Maximum delay in milliseconds between retry attempts after exponential growth (default 2 000). */
   maxRetryDelay?: number;
@@ -328,19 +335,30 @@ export function acquireFileLock(lockPath: string, options?: FileLockOptions): vo
             }
           }
 
-          // Age-based expiry: if the lock is older than maxLockAge,
-          // treat it as stale regardless of PID status.  This handles
-          // PID recycling and environments where PID checks are unreliable.
+          // Age-based expiry: only for locks whose holder liveness cannot be
+          // trusted — i.e. locks from a DIFFERENT host. A same-host lock whose
+          // PID is alive is authoritative for as long as that process lives: a
+          // long-running operation (e.g. a slow `wl sync` doing fetch → merge →
+          // write → push over a slow network or a large store) must never have
+          // its lock stolen mid-flight, otherwise two writers proceed
+          // concurrently and the sync writes back its pre-operation snapshot
+          // over whatever the stealer committed — the lost-update class
+          // WL-0MUV2U9QF002S9J1 closed for short operations but that persisted
+          // for long ones while age-expiry ignored PID liveness. Dead same-host
+          // PIDs were already reclaimed by the branch above, so age-expiry is
+          // now only a foreign-host fallback (where a PID cannot be checked).
           // Guard against clock skew: only expire if age is positive.
-          const lockAge = Date.now() - new Date(existing.acquiredAt).getTime();
-          if (lockAge > 0 && lockAge > maxLockAge) {
-            debugLog(`Stale lock detected: age-expired (${lockAge}ms > ${maxLockAge}ms), removing ${lockPath}`);
-            try {
-              fs.unlinkSync(lockPath);
-              continue;
-            } catch {
-              // Another process may have removed it; retry
-              continue;
+          if (!sameHost) {
+            const lockAge = Date.now() - new Date(existing.acquiredAt).getTime();
+            if (lockAge > 0 && lockAge > maxLockAge) {
+              debugLog(`Stale lock detected: age-expired foreign-host lock (${lockAge}ms > ${maxLockAge}ms), removing ${lockPath}`);
+              try {
+                fs.unlinkSync(lockPath);
+                continue;
+              } catch {
+                // Another process may have removed it; retry
+                continue;
+              }
             }
           }
         } else if (fs.existsSync(lockPath)) {

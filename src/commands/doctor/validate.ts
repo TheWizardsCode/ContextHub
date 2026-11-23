@@ -25,10 +25,15 @@ import { loadStatusStageRules } from '../../status-stage-rules.js';
 import { validateStatusStageItems } from '../../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../../doctor/dependency-check.js';
 import { resolveForeignItem, prefixOfWorkItemId } from '../../cross-repo/foreign-store.js';
-import { validateParentReferences } from '../../doctor/parent-check.js';
+import { validateParentReferences, groupOrphanFindings } from '../../doctor/parent-check.js';
 import { validatePodcastScripts } from '../../doctor/podcast-scripts-check.js';
 import { probeAuditFingerprintSkewFinding } from '../../doctor/audit-fingerprint-skew-check.js';
+import {
+  summariseMissingStartOn,
+  validateStartOnInstants,
+} from '../../doctor/start-on-check.js';
 import { withStoreMutationLock } from '../../mutation-lock.js';
+import { recordDetachAttribution } from '../../orphan-attribution.js';
 import {
   normalizePriority,
   isValidPriority,
@@ -144,6 +149,13 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
       // allowed to change the exit status. `null` means ok/skip or no skew.
       const auditFingerprintSkew = probeAuditFingerprintSkewFinding();
 
+      // `startOn` storage checks (WL-0MWMGEPY2004EDZ8): `missing` is a global
+      // finding built from the RAW column (a loaded item always reports the
+      // `createdAt` fallback, so it cannot reveal a `NULL` row), `invalid` is
+      // per item because it is one row's data problem. Both are warning-only
+      // and read-only.
+      const startOnMissing = summariseMissingStartOn(db.getItemIdsMissingStartOn());
+
       let findings: any[] = [
         // Dependency-graph findings come first: an unresolved foreign edge is
         // the item's primary dependency signal and must not be buried behind
@@ -166,6 +178,8 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
         ...priorityFindings,
         ...validatePodcastScripts(items),
         ...(auditFingerprintSkew ? [auditFingerprintSkew] : []),
+        ...validateStartOnInstants(items),
+        ...(startOnMissing ? [startOnMissing] : []),
       ];
 
       // If --fix was provided, attempt to apply safe fixes and prompt per non-safe finding
@@ -266,6 +280,11 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
               if (Object.prototype.hasOwnProperty.call(f.proposedFix, 'parentId')) {
                 update.parentId = (f.proposedFix as any).parentId;
               }
+              // A safe `parentId: null` fix detaches the item — remember the
+              // previous parent and, once the write lands, record the
+              // promotion attribution (R2, WL-0MWGRKYG0006N2A8).
+              const previousParentId =
+                update.parentId === null && item.parentId ? item.parentId : null;
               if (Object.keys(update).length > 0) {
                 try {
                   db.update(itemId, update);
@@ -273,6 +292,14 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
                   // if update fails, keep finding in remaining list so it appears in report
                   remainingFindings.push(f);
                   continue;
+                }
+                if (previousParentId) {
+                  recordDetachAttribution(
+                    db,
+                    itemId,
+                    previousParentId,
+                    'wl doctor --fix',
+                  );
                 }
                 // applied successfully; don't add to remainingFindings
                 continue;
@@ -416,6 +443,21 @@ export function registerValidateCommand(doctor: Command, ctx: ValidateCommandCon
           if (finding.proposedFix) {
             console.log(`    Suggested: ${JSON.stringify(finding.proposedFix)}`);
           }
+        }
+      }
+
+      // Grouped orphan summary (R3/R3b, WL-0MWGRKLLG0035PLG): the per-item
+      // findings above stay for actionability, but orphans are inherently a
+      // group problem — a single lost parent strands N children — so summarise
+      // them by lost-parent id. `--fix` detaches safe findings above, leaving
+      // this summary empty once the repair has been applied.
+      const orphanGroups = groupOrphanFindings(findings);
+      if (orphanGroups.length > 0) {
+        console.log('\nOrphan summary (children grouped by lost parent):');
+        for (const group of orphanGroups) {
+          console.log(
+            `  - ${group.parentId}: ${group.count} child(ren) [${group.childIds.join(', ')}]`,
+          );
         }
       }
 

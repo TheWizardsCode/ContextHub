@@ -31,6 +31,7 @@
 
 import { NextWorkItemResult, WorkItem } from '../types.js';
 import { EdgeCache, SelectionHooks } from './context.js';
+import type { CandidateExclusion } from './context.js';
 import { matchesRiskEffort } from './priority.js';
 // Shared soft-delete predicate (WL-0MW7S20IC001F3AP): this stage runs on the
 // FULL item set and bypasses filterCandidates, so it must apply the same
@@ -65,6 +66,12 @@ export function handleCriticalEscalation(
     includeInProgress?: boolean;
     edgeCache?: EdgeCache;
     sortOrderCache?: WorkItem[];
+    /**
+     * Hide items the caller's read surface must not select
+     * (WL-0MWMGET8N009KG33). Applied to the blocker pairs gathered from the
+     * store — `allItems` is already filtered by the caller.
+     */
+    excludeItem?: CandidateExclusion;
   } = {}
 ): NextWorkItemResult | null {
   const {
@@ -76,6 +83,7 @@ export function handleCriticalEscalation(
     debugPrefix = '[critical]',
     includeInProgress = false,
     edgeCache,
+    excludeItem,
   } = options;
 
   // Find all critical items from the full set, excluding only
@@ -189,7 +197,10 @@ export function handleCriticalEscalation(
     // Apply assignee/search filters to the blockers only
     const filteredBlockingPairs = blockingPairs.filter(pair =>
       hooks.applyFilters([pair.blocking], assignee, searchTerm).length > 0
-    ).filter(pair => matchesRiskEffort(pair.blocking, risk, effort));
+    ).filter(pair => matchesRiskEffort(pair.blocking, risk, effort))
+      // A blocker the caller's read must hide (e.g. not yet started) is not a
+      // surfacable result (WL-0MWMGET8N009KG33).
+      .filter(pair => !excludeItem || !excludeItem(pair.blocking));
     hooks.debug(`${debugPrefix} blocking candidates=${blockingPairs.length} after filters=${filteredBlockingPairs.length}`);
 
     // Strict root-only (WL-0MS964SIA0057ABR): never surface child blockers.

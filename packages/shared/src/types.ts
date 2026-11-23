@@ -63,6 +63,18 @@ export interface WorkItem {
   createdAt: string;
   updatedAt: string;
   /**
+   * Earliest instant at which this item may proceed — ISO-8601 UTC
+   * (WL-0MWMGEPY2004EDZ8, parent WL-0MWM0FDZK007BAD0).
+   *
+   * Always populated on write with the effective instant (`startOn ??
+   * createdAt`, normalised to `...Z`) so scheduling queries compare a single
+   * non-null column. Rows that predate the field (legacy SQLite rows, legacy
+   * JSONL/Git records) read as `createdAt`: back-compat is the default, never
+   * "blocked". Optional in the type only because a caller may construct an
+   * item without it; the store back-fills it.
+   */
+  startOn?: string;
+  /**
    * Last-activity timestamp — moves for any write that touches the item,
    * including comment create/update/delete.
    *
@@ -120,6 +132,9 @@ export interface CreateWorkItemInput {
   assignee?: string;
   stage?: string;
 
+  /** Earliest instant this item may proceed (ISO-8601); defaults to `createdAt`. */
+  startOn?: string;
+
   issueType?: string;
   createdBy?: string;
   deletedBy?: string;
@@ -152,6 +167,12 @@ export interface UpdateWorkItemInput {
 
   risk?: WorkItemRiskLevel | '';
   effort?: WorkItemEffortLevel | '';
+  /**
+   * Earliest instant this item may proceed (ISO-8601). An omitted field keeps
+   * the stored value; an explicit empty string clears it back to `createdAt`
+   * (WL-0MWMGEPY2004EDZ8).
+   */
+  startOn?: string;
   /** When present, sets the needsProducerReview flag */
   needsProducerReview?: boolean;
   /**

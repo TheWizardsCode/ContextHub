@@ -328,7 +328,12 @@ const seededDirs: string[] = [];
  * the in-process SQLite fast path (not a `wl show` spawn) performs the parent
  * lookup.
  */
-function seedSubstitutionDb(): { worklogDir: string; rootId: string; childId: string } {
+function seedSubstitutionDb(
+  options: {
+    rootPriority?: 'critical' | 'high' | 'medium' | 'low';
+    rootStage?: string;
+  } = {},
+): { worklogDir: string; rootId: string; childId: string } {
   const rootDir = mkdtempSync(join(tmpdir(), 'herdr-substitution-'));
   seededDirs.push(rootDir);
   const worklogDir = join(rootDir, '.worklog');
@@ -340,7 +345,11 @@ function seedSubstitutionDb(): { worklogDir: string; rootId: string; childId: st
     true,
     false,
   );
-  const root = db.create({ title: 'Substitution root', priority: 'medium', stage: 'idea' });
+  const root = db.create({
+    title: 'Substitution root',
+    priority: options.rootPriority ?? 'medium',
+    stage: options.rootStage ?? 'idea',
+  });
   const child = db.create({
     title: 'Substitution critical child',
     priority: 'critical',
@@ -586,8 +595,9 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     expect(root?.priority).toBe('medium');
     expect(root?.status).toBe('open');
     expect(root?.stage).toBe('idea');
-    // Sorted by its own group, not promoted into a Critical group (Q3: no badge).
-    expect(root?.groupLabel).toBe('Idea');
+    // Sorted by its own band-prefixed group, not promoted into a Critical group
+    // (Q3: no badge).
+    expect(root?.groupLabel).toBe('Medium Idea');
     expect(root?.groupLabel?.startsWith('Critical')).toBe(false);
     // No marker/indicator field is attached to the substituted row.
     for (const marker of [
@@ -601,6 +611,65 @@ describe('fetchNextItems: critical-child parent substitution (WL-0MVN4WESM007T4X
     ]) {
       expect((root as Record<string, unknown> | undefined)?.[marker]).toBeUndefined();
     }
+  });
+
+  it('bundle path: groups a substituted root by ITS OWN band and keeps band order through the selection tail (WL-0MWMRG9GQ000P52S AC4/AC5)', async () => {
+    // Band-first numbering must survive the selection tail
+    // (`mergeMandatoryAndSelect` → `regroupWorkItems`): the substituted root is
+    // NOT promoted into the Critical section — it is stamped with the group of
+    // its own priority band, and the band order (High → Medium) is preserved.
+    // The tail derives no section numbers of its own (it delegates to the
+    // band-first regroup), so this spec pins that contract and would catch a
+    // stage-bucket assumption creeping back in.
+    const seeded = seedSubstitutionDb({ rootPriority: 'high', rootStage: 'plan_complete' });
+    setWorklogDir(seeded.worklogDir);
+    const criticalChild = item(seeded.childId, {
+      priority: 'critical',
+      stage: 'idea',
+      parentId: seeded.rootId,
+    });
+    const mediumPlan = item('N-MED-PLAN', { priority: 'medium', stage: 'plan_complete' });
+    const calls = mockWl((args) => {
+      const command = commandOf(args);
+      if (command === 'worklist') {
+        const payload = substitutionWorklistPayload(requestedBrowseCount(args), {
+          criticalChildren: [criticalChild],
+        });
+        const subsets = payload.subsets as { browse: unknown[] };
+        // The substituted root is NOT in the browse feed (it is resolved
+        // in-process); a medium-band row gives the band ordering a
+        // lower-priority reference to sort against.
+        subsets.browse = [entry(mediumPlan, 'browse')];
+        return payload;
+      }
+      return legacyRespond(args);
+    });
+
+    const items = await fetchNextItems(20);
+    const root = items.find((i) => i.id === seeded.rootId);
+    const mediumRow = items.find((i) => i.id === 'N-MED-PLAN');
+
+    // Exactly once — the critical child is never a top-level row.
+    expect(items.filter((i) => i.id === seeded.rootId)).toHaveLength(1);
+    expect(ids(items)).not.toContain(seeded.childId);
+
+    // Grouped by its OWN band (High), not Critical, and ahead of the Medium band.
+    expect(root?.priority).toBe('high');
+    expect(root?.groupLabel?.startsWith('High')).toBe(true);
+    expect(root?.groupLabel?.startsWith('Critical')).toBe(false);
+    expect(mediumRow?.groupLabel?.startsWith('Medium')).toBe(true);
+    expect(root!.group!).toBeLessThan(mediumRow!.group!);
+    expect(items.findIndex((i) => i.id === seeded.rootId)).toBeLessThan(
+      items.findIndex((i) => i.id === 'N-MED-PLAN'),
+    );
+
+    // Expand-affordance contract survives substitution.
+    expect(root?.childCount).toBe(1);
+    // No marker/badge is attached by the substitution.
+    expect((root as Record<string, unknown> | undefined)?.['substituted']).toBeUndefined();
+
+    // Still the single consolidated in-process read.
+    expect(calls).toHaveLength(1);
   });
 
   it('bundle path: promotes the TOP-MOST ancestor for a nested critical child', async () => {

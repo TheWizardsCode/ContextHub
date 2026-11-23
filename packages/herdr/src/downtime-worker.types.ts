@@ -14,6 +14,10 @@
  */
 
 import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
+// The `startOn` scheduling fields (`startOn ?? createdAt`) are the shared
+// predicate's own structural shape, so the list-head and per-item shapes adopt
+// it directly rather than restating the fields (WL-0MWMGEWH7004VUFI).
+import type { StartOnFields } from '@worklog/shared/predicates';
 import type { EmptyOfferAttribution } from './downtime-worker.offer-attribution.js';
 // Canonical homes (WL-0MWHWH6XL0025YX2): the discovery-facing pane record
 // and the raw `agent_session` shape live in `pane-discovery.ts` (one
@@ -455,7 +459,7 @@ export interface DowntimePoller {
 }
 export type DowntimeStage = 'intake_complete' | 'idea' | 'audit' | 'implement';
 /** Ordered Herdr list head item (canonical ranking: fetcher → smart-selection → grouping). */
-export interface DowntimeHerdrItem {
+export interface DowntimeHerdrItem extends StartOnFields {
   id: string;
   title: string;
   stage?: string;
@@ -624,7 +628,7 @@ export type DowntimeNextResult =
  * from the completed/in_review list query). Carries the fields the
  * coordinator needs to classify an item into its dispatch tier.
  */
-export interface DowntimeItemInfo {
+export interface DowntimeItemInfo extends StartOnFields {
   id: string;
   title?: string;
   /** Worklog status (`open` | `completed` | `in_progress` | …). */
@@ -773,9 +777,10 @@ export type DowntimeClaimResult =
  * the proxy path the token is the proxy's own vocabulary —
  * `audit-budget-saturated` (verdict `available:false`) or
  * `audit-budget-unknown` (absent/unreachable/unparsable read, fail-closed) —
- * never the legacy `host-budget-audit` / `audit-host-saturated` tokens. On the
- * retained host-wide source the legacy tokens are unchanged (`host-budget-corrupt`
- * = the ledger exists but is untrustworthy; no read repairs it). `detail`
+ * never a `host-budget-*` token. On the retained host-wide source the tokens
+ * are `host-budget-audit` / `host-budget-unknown` / `host-budget-corrupt`
+ * (`host-budget-corrupt` = the ledger exists but is untrustworthy; no read
+ * repairs it). `detail`
  * records the failing exchange on a fail-closed proxy read for the decision
  * log. Absent on a per-worklog skip.
  */
@@ -785,7 +790,6 @@ export type DowntimeActiveAuditResult =
       active: boolean;
       source?: 'host-wide' | 'per-worklog' | 'proxy';
       reason?:
-        | 'audit-host-saturated'
         | 'host-budget-audit'
         | 'host-budget-unknown'
         | 'host-budget-corrupt'

@@ -1,5 +1,6 @@
 {
   "suiteCommands": [
+    "npm --silent run typecheck",
     "npm --silent test -- tests",
     "npm --silent test -- packages/shared",
     "npm --silent test -- packages/tui/extensions"

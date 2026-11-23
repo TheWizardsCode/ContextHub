@@ -8,7 +8,7 @@
  * Valid field names:
  *   id, title, description, status, stage, priority, issueType,
  *   assignee, tags, createdAt, updatedAt, parentId,
- *   needsProducerReview, sortIndex
+ *   needsProducerReview, sortIndex, startOn
  *
  * Usage:
  *   const compact = pickFields(fullItem, ['id', 'title', 'status']);
@@ -41,6 +41,9 @@ export const VALID_FIELDS = [
   'parentId',
   'needsProducerReview',
   'sortIndex',
+  // `startOn` is a first-class stored field (WL-0MWMGEPY2004EDZ8): generic
+  // `--fields` reads/writes must see it like every other scalar field.
+  'startOn',
 ] as const;
 
 /**

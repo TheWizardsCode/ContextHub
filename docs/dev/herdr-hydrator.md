@@ -143,7 +143,8 @@ display overlay:
 
 - `markItemsActiveByPane(items, activeIds)` recursively stamps
   `status = 'in-progress'` on every item whose ID is in the active pane set,
-  so the row renders the in-progress icon and the item is placed in Group N.
+  so the row renders the in-progress icon and the item is placed in its band's
+  `<Band> Group N` section.
   It is **idempotent**: each item's pre-marker status is captured on first
   sight (a non-enumerable `Symbol` property) and restored on every later
   pass, so a **closed** pane clears the marker back to the true worklog

@@ -6,14 +6,17 @@
  * THIS HEADER COMMENT IS THE CONTRACT OF RECORD.
  * ─────────────────────────────────────────────────────────────────────────
  *
- * One machine-scoped record of every in-flight `implement` and `audit`
- * dispatch, plus a configurable per-tier cap, so a host budget is
- * authoritative across every herdr instance and project on the machine.
+ * One machine-scoped record of every in-flight budgeted dispatch (any
+ * {@link HostBudgetKind}, i.e. every `DowntimeSkillKind` member), plus a
+ * configurable per-kind cap, so a host budget is authoritative across every
+ * herdr instance and project on the machine.
  *
- * Enforcement lives elsewhere: the dispatcher's admission read and both tiers'
- * wiring are in `host-dispatch-budget.admission.ts` (implement tier F3, audit
- * tier F2 — which also replaces the retired host-wide `active-audit` marker),
- * consumable per-tier caps come from `readBudgetConfig`, and the interactive
+ * Enforcement lives elsewhere: the dispatcher's admission read (one generic
+ * path for every capped kind) and the per-kind wiring are in
+ * `host-dispatch-budget.admission.ts` (implement tier F3, audit tier F2 — which
+ * also replaces the retired host-wide `active-audit` marker — generalised to
+ * every `DowntimeSkillKind` by WL-0MWF34932000SNTX F2),
+ * consumable per-kind caps come from `readBudgetConfig`, and the interactive
  * over-quota dialog / observability surfaces are F4/F5.
  *
  * ## Audit admission authority (WL-0MW95GBEG005ERHS)
@@ -37,15 +40,19 @@
  *    `host-dispatch-budget.audit.ts` from inside the ledger lock. Bounded by
  *    the coordination-log retention policy; fail-open, so it can never block
  *    a dispatch or change a decision (WL-0MWFJDGXQ001OXP8).
- *  - `budget.json` — the per-tier caps (read-only here; the operator writes it):
- *    `{ "maxImplement": 2, "maxAudit": 1 }`. `maxImplement` governs the
- *    implement tier; `maxAudit` is the legacy/observability figure only (see
- *    the audit-admission-authority note above).
+ *  - `budget.json` — the per-kind caps (read-only here; the operator writes it)
+ *    as a map over kinds, e.g. `{ "implement": 2, "audit": 1, "plan": 3 }`.
+ *    A kind ABSENT from the file is uncapped (no default cap is invented).
+ *    The legacy `maxImplement` / `maxAudit` keys are still read, so existing
+ *    operator files keep their meaning. The legacy `maxAudit` figure is the
+ *    observability-only audit cap (see the audit-admission-authority note
+ *    above).
  *
  * ## Ledger shape (version 1)
  *
  *     { "version": 1,
- *       "entries": [ { "kind": "implement" | "audit",
+ *       "entries": [ { "kind": "implement" | "audit" | "plan" | "intake"
+ *                            | "risk-effort",
  *                      "itemId": "WL-…",
  *                      "instanceId": "…",
  *                      "paneId": "…"?,          // absent until a pane exists
@@ -116,14 +123,12 @@
  *    heartbeat age (pane-derived freshness — see the liveness table).
  *  - `freshCount(kind)` — the AUDIT tier's **legacy/observability** read:
  *    counts every entry of that kind whose heartbeat is fresh, with no
- *    live-pane requirement, and reaps every stale entry. This is the semantics
- *    of the retired host-wide `active-audit` marker (WL-0MVXY0XPF006YUHA F2):
- *    an audit slot is held from the dispatch until a release point fires (pane
- *    close, dispatch failure, claim rollback) and is released by staleness
- *    after the 2 h window — the pane list is not a release point for the audit
- *    tier. It also counts a non-stale legacy `active-audit` marker file as ONE
- *    synthetic audit entry (retirement read-compatibility) and never writes or
- *    removes that file. Since WL-0MW95GBEG005ERHS the audit tier's ADMISSION
+ *    live-pane requirement, and reaps every stale entry. This is the audit
+ *    tier's over-hold rule (WL-0MVXY0XPF006YUHA F2): an audit slot is held from
+ *    the dispatch until a release point fires (pane close, dispatch failure,
+ *    claim rollback) and is released by staleness after the 2 h window — the
+ *    pane list is not a release point for the audit tier. Since
+ *    WL-0MW95GBEG005ERHS the audit tier's ADMISSION
  *    authority is the proxy's audit-availability read; this count is used for
  *    the observability surfaces, the divergence evidence and the one-release
  *    `HERDR_AUDIT_LOCAL_BUDGET=1` legacy path — never to refuse an audit on the
@@ -156,7 +161,7 @@
  * dispatch is still in flight, and `heartbeatAt` is only written at
  * `reserve`/`confirmHostDispatch` (no refresh path), so a >2 h implement must
  * not silently drop out of the counter or the cap. The AUDIT tier keeps the
- * freshness rule (staleness is its release; see {@link reduceMarkerCounts}).
+ * freshness rule (staleness is its release; see {@link reduceFreshCounts}).
  *
  * A CONFIRMED entry (non-empty `paneId`) whose pane is absent from a trusted
  * live list is additionally swept by {@link sweepClosedPanes} regardless of
@@ -168,20 +173,23 @@
  * The window where a freshly reserved entry has no pane yet is why the
  * admission path must pass the `paneId` at reserve time whenever one exists;
  * reaping is bounded by the 2 h stale convention
- * (`DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS`).
+ * ({@link HOST_BUDGET_STALE_WINDOW_MS}).
  *
  * ## Configuration
  *
- * Resolution order: `budget.json` → defaults (`maxImplement: 2`,
- * `maxAudit: 1`, the pre-proxy single-flight figure kept for the one-release
- * legacy path and for local observability) →
- * `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` env override → clamp to
- * `0..HOST_BUDGET_MAX`. `0` disables that tier host-wide (a per-tier kill
- * switch) on the paths that read these caps (the implement tier always; the
- * audit tier only under the one-release legacy flag — the proxy owns the
- * default audit cap). A malformed `budget.json` falls back to the defaults and
- * records a warning instead of throwing; an unresolvable coordination dir
- * yields defaults + env and never throws.
+ * Resolution order: `budget.json` (a map over kinds; an absent kind is
+ * uncapped) → defaults (`implement: 2`, `audit: 1`; every other kind absent,
+ * hence uncapped) → `HERDR_HOST_MAX_<KIND>` env override → clamp to
+ * `0..HOST_BUDGET_MAX`. {@link HOST_BUDGET_ENV_KEYS} is the single source of
+ * the env override vocabulary (one key per kind, `implement` and `audit`
+ * included); there is no separate fixed two-key path. `0` disables that kind
+ * host-wide (a per-kind kill switch)
+ * on the paths that read these caps (the implement tier always; the audit
+ * tier only under the one-release legacy flag — the proxy owns the default
+ * audit cap). A malformed `budget.json` never throws: an invalid value for a
+ * defaulted kind keeps that default with a warning, any other invalid value is
+ * left uncapped. An unresolvable coordination dir yields defaults + env and
+ * never throws.
  *
  * ## Layering
  *
@@ -202,10 +210,8 @@ import {
   type BudgetAuditOp,
 } from './host-dispatch-budget.audit.js';
 import {
-  DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS,
   ensureMachineCoordinationDir,
   getMachineCoordinationDir,
-  readActiveAuditMarker,
 } from './machine-coordination.js';
 
 // ── Contract constants ─────────────────────────────────────────────────
@@ -219,11 +225,32 @@ export const DISPATCH_BUDGET_VERSION = 1;
 /** Budget configuration file name inside the machine coordination dir. */
 export const HOST_BUDGET_CONFIG_FILE = 'budget.json';
 
-/** Env override keys, per tier. */
+/** Every dispatch kind the host budget can cap. */
+export const HOST_BUDGET_KINDS = [
+  'implement',
+  'audit',
+  'plan',
+  'intake',
+  'risk-effort',
+] as const satisfies readonly HostBudgetKind[];
+
+/** Env override key for each kind (`HERDR_HOST_MAX_<KIND>`). */
 export const HOST_BUDGET_ENV_KEYS = {
   implement: 'HERDR_HOST_MAX_IMPLEMENT',
   audit: 'HERDR_HOST_MAX_AUDIT',
-} as const;
+  plan: 'HERDR_HOST_MAX_PLAN',
+  intake: 'HERDR_HOST_MAX_INTAKE',
+  'risk-effort': 'HERDR_HOST_MAX_RISK_EFFORT',
+} as const satisfies Record<HostBudgetKind, string>;
+
+/**
+ * Legacy `budget.json` keys still honoured for operator-file compatibility
+ * (kind-named keys win when both are present).
+ */
+export const LEGACY_HOST_BUDGET_CONFIG_KEYS = {
+  implement: 'maxImplement',
+  audit: 'maxAudit',
+} as const satisfies Partial<Record<HostBudgetKind, string>>;
 
 /** Ceiling for a configured cap — guards typos/overflow, never a policy. */
 export const HOST_BUDGET_MAX = 32;
@@ -245,24 +272,39 @@ export const HOST_BUDGET_MAX = 32;
  */
 export const HERDR_AUDIT_LOCAL_BUDGET_ENV = 'HERDR_AUDIT_LOCAL_BUDGET';
 
-/** Today's behaviour preserved: two implements, one audit. */
-export const DEFAULT_HOST_BUDGET_CONFIG: Readonly<HostBudgetConfig> = Object.freeze({
-  maxImplement: 2,
-  maxAudit: 1,
-});
+/**
+ * Default kind map: two implements, one audit. Every other kind is absent
+ * from the map and therefore uncapped — no default cap is invented for a kind
+ * the operator has not configured.
+ */
+export const DEFAULT_HOST_BUDGET_CONFIG = Object.freeze({
+  implement: 2,
+  audit: 1,
+}) satisfies HostBudgetConfig;
 
 /**
- * Staleness window for heartbeat-based reaping: the existing 2 h convention
- * used by the host-wide active-audit marker
- * (`DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS`), kept as one number so the two
- * liveness mechanisms cannot drift.
+ * The default cap for `kind`, or `undefined` when that kind is uncapped by
+ * default (every kind except `implement` / `audit`).
  */
-export const HOST_BUDGET_STALE_WINDOW_MS = DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS;
+export function defaultHostBudgetCap(kind: HostBudgetKind): number | undefined {
+  return kind === 'implement'
+    ? DEFAULT_HOST_BUDGET_CONFIG.implement
+    : kind === 'audit'
+      ? DEFAULT_HOST_BUDGET_CONFIG.audit
+      : undefined;
+}
+
+/**
+ * Staleness window for heartbeat-based reaping: the long-standing 2 h
+ * convention the retired host-wide `active-audit` marker used (a crashed
+ * audit pane may leave its entry behind; staleness is its release).
+ */
+export const HOST_BUDGET_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-/** Dispatch tiers the budget covers (v1: implement + audit only). */
-export type HostBudgetKind = 'implement' | 'audit';
+/** Dispatch kinds the budget covers (every `DowntimeSkillKind` member). */
+export type HostBudgetKind = 'implement' | 'audit' | 'plan' | 'intake' | 'risk-effort';
 
 /** One in-flight dispatch, exactly the on-disk shape. */
 export interface HostBudgetEntry {
@@ -295,11 +337,12 @@ export interface HostBudgetLedger {
   entries: HostBudgetEntry[];
 }
 
-/** Per-tier caps. */
-export interface HostBudgetConfig {
-  maxImplement: number;
-  maxAudit: number;
-}
+/**
+ * Per-kind caps. A kind ABSENT from the map is uncapped: admission admits it
+ * on budget grounds without reserving a ledger entry and no cap is invented
+ * for it.
+ */
+export type HostBudgetConfig = Partial<Record<HostBudgetKind, number>>;
 
 /** A resolved configuration plus any non-fatal warnings. */
 export interface HostBudgetConfigResult {
@@ -449,11 +492,8 @@ export type ReleaseResult =
 /** Result of {@link replaceBudget} (`count` = entries written). */
 export type ReplaceBudgetResult = { ok: true; count: number } | HostBudgetFailure;
 
-/** Live counts per tier. */
-export interface HostBudgetCounts {
-  implement: number;
-  audit: number;
-}
+/** Live counts per kind. Every kind is present, defaulting to 0. */
+export type HostBudgetCounts = Record<HostBudgetKind, number>;
 
 /** Result of {@link reap}. */
 export type ReapResult =
@@ -487,49 +527,86 @@ export function clampHostBudget(value: unknown, fallback: number): number {
   return Math.min(Math.round(value), HOST_BUDGET_MAX);
 }
 
+/** Type guard for a {@link HostBudgetKind} (`unknown` input from JSON/env). */
+export function isHostBudgetKind(value: unknown): value is HostBudgetKind {
+  return (
+    typeof value === 'string' &&
+    (HOST_BUDGET_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/** A zero count for every kind — the starting point for every reduction. */
+export function emptyHostBudgetCounts(): HostBudgetCounts {
+  return {
+    implement: 0,
+    audit: 0,
+    plan: 0,
+    intake: 0,
+    'risk-effort': 0,
+  };
+}
+
 /**
- * Parse a raw `budget.json` document (already JSON-parsed) into a config.
+ * Parse a raw `budget.json` document (already JSON-parsed) into a kind map.
  *
  * Absent (`undefined`/`null`) means "no file": the defaults, no warning.
- * A non-object, an invalid per-tier value (wrong type, non-finite, negative)
- * keeps the default for that tier and records a warning — a malformed file
- * must never throw, and never half-apply a nonsense cap. Unknown extra keys
- * are ignored (additive format evolution).
+ * For a document that IS present, only the kinds it names are configured — a
+ * kind absent from the file is uncapped (no default cap is invented). A
+ * kind-named key wins over its legacy `max*` alias. An invalid value records
+ * a warning and keeps the default for a defaulted kind (`implement`/`audit`),
+ * or leaves any other kind uncapped: a malformed file must never throw, and
+ * never half-apply a nonsense cap. Unknown extra keys are ignored (additive
+ * format evolution).
  */
 export function parseBudgetConfig(raw: unknown): HostBudgetConfigResult {
-  const defaults: HostBudgetConfig = { ...DEFAULT_HOST_BUDGET_CONFIG };
-  if (raw === undefined || raw === null) return { config: defaults, warnings: [] };
+  if (raw === undefined || raw === null) {
+    return { config: { ...DEFAULT_HOST_BUDGET_CONFIG }, warnings: [] };
+  }
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return {
-      config: defaults,
+      config: { ...DEFAULT_HOST_BUDGET_CONFIG },
       warnings: ['budget.json is not a JSON object; falling back to defaults'],
     };
   }
   const doc = raw as Record<string, unknown>;
   const warnings: string[] = [];
-  const tier = (key: keyof HostBudgetConfig): number => {
+  const config: HostBudgetConfig = {};
+  for (const kind of HOST_BUDGET_KINDS) {
+    const legacyKey = (LEGACY_HOST_BUDGET_CONFIG_KEYS as Partial<
+      Record<HostBudgetKind, string>
+    >)[kind];
+    // Kind-named key wins over the legacy alias when both are present.
+    const key =
+      doc[kind] !== undefined
+        ? kind
+        : legacyKey !== undefined && doc[legacyKey] !== undefined
+          ? legacyKey
+          : undefined;
+    if (key === undefined) continue;
     const value = doc[key];
-    if (value === undefined) return defaults[key];
+    const fallback = defaultHostBudgetCap(kind);
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
       warnings.push(
-        `budget.json ${key} is not a non-negative number; using ${defaults[key]}`,
+        `budget.json ${key} is not a non-negative number; ` +
+          (fallback === undefined ? 'leaving the kind uncapped' : `using ${fallback}`),
       );
-      return defaults[key];
+      if (fallback !== undefined) config[kind] = fallback;
+      continue;
     }
-    return clampHostBudget(value, defaults[key]);
-  };
-  return {
-    config: { maxImplement: tier('maxImplement'), maxAudit: tier('maxAudit') },
-    warnings,
-  };
+    config[kind] = clampHostBudget(value, fallback ?? 0);
+  }
+  return { config, warnings };
 }
 
 /**
- * Apply `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` over a config.
+ * Apply `HERDR_HOST_MAX_<KIND>` over a config.
  *
- * Unset and empty values are "no override". A non-numeric or negative value
- * is ignored with a warning (keeping the file/default value). A valid value
- * is clamped to `[0, HOST_BUDGET_MAX]`, so `0` is the documented kill switch.
+ * One env key per kind (`HERDR_HOST_MAX_IMPLEMENT`, `HERDR_HOST_MAX_AUDIT`,
+ * `HERDR_HOST_MAX_PLAN`, `HERDR_HOST_MAX_INTAKE`,
+ * `HERDR_HOST_MAX_RISK_EFFORT`). Unset and empty values are "no override". A
+ * non-numeric or negative value is ignored with a warning (keeping the
+ * file/default figure). A valid value is clamped to `[0, HOST_BUDGET_MAX]`, so
+ * `0` is the documented per-kind kill switch.
  */
 export function applyBudgetEnvOverrides(
   config: HostBudgetConfig,
@@ -537,23 +614,23 @@ export function applyBudgetEnvOverrides(
 ): HostBudgetConfigResult {
   const next: HostBudgetConfig = { ...config };
   const warnings: string[] = [];
-  const override = (
-    key: keyof HostBudgetConfig,
-    envKey: string,
-  ): void => {
+  for (const kind of HOST_BUDGET_KINDS) {
+    const envKey = HOST_BUDGET_ENV_KEYS[kind];
     const raw = env[envKey];
-    if (raw === undefined) return;
+    if (raw === undefined) continue;
     const trimmed = raw.trim();
-    if (trimmed.length === 0) return;
+    if (trimmed.length === 0) continue;
     const parsed = Number(trimmed);
     if (!Number.isFinite(parsed) || parsed < 0) {
-      warnings.push(`${envKey}="${raw}" is not a non-negative number; keeping ${next[key]}`);
-      return;
+      const kept = next[kind];
+      warnings.push(
+        `${envKey}="${raw}" is not a non-negative number; ` +
+          (kept === undefined ? 'leaving the kind uncapped' : `keeping ${kept}`),
+      );
+      continue;
     }
-    next[key] = clampHostBudget(parsed, next[key]);
-  };
-  override('maxImplement', HOST_BUDGET_ENV_KEYS.implement);
-  override('maxAudit', HOST_BUDGET_ENV_KEYS.audit);
+    next[kind] = clampHostBudget(parsed, next[kind] ?? defaultHostBudgetCap(kind) ?? 0);
+  }
   return { config: next, warnings };
 }
 
@@ -606,9 +683,9 @@ export function isLegacyAuditBudgetEnabled(
 /**
  * True when an entry's heartbeat is at or beyond `staleWindowMs` old.
  *
- * The comparison matches `isHostAuditActive` (an age of exactly the window is
- * stale). An unparseable/missing heartbeat is stale: a corrupt timestamp can
- * never pin an entry forever. A future heartbeat (clock skew) is fresh.
+ * An age of exactly the window is stale. An unparseable/missing heartbeat is
+ * stale: a corrupt timestamp can never pin an entry forever. A future
+ * heartbeat (clock skew) is fresh.
  */
 export function isEntryStale(
   entry: Pick<HostBudgetEntry, 'heartbeatAt'>,
@@ -632,27 +709,29 @@ export function livePaneIdSet(
 }
 
 /**
- * True when a confirmed entry with a live pane counts for the implement tier
- * (WL-0MW9VQ08W000SN63 pane-derived freshness — the ONE counting rule).
+ * True when a confirmed entry with a live pane counts for a NON-AUDIT kind
+ * (WL-0MW9VQ08W000SN63 pane-derived freshness — the ONE counting rule;
+ * generalised to every capped kind by WL-0MWF34932000SNTX F2).
  *
- * The implement tier treats a confirmed entry (non-empty `paneId`) whose pane
- * is in the trusted live list as fresh REGARDLESS of heartbeat age: the pane
- * is conclusive evidence the dispatch is still in flight, and `heartbeatAt`
- * is only written at `reserve`/`confirmHostDispatch` (there is no refresh
- * path), so a >2 h implement would otherwise silently drop out of the counter
- * and the cap while its pane is demonstrably alive. The audit tier keeps the
- * freshness rule (staleness is its release; see {@link reduceMarkerCounts}).
+ * Every kind except `audit` treats a confirmed entry (non-empty `paneId`)
+ * whose pane is in the trusted live list as fresh REGARDLESS of heartbeat age:
+ * the pane is conclusive evidence the dispatch is still in flight, and
+ * `heartbeatAt` is only written at `reserve`/`confirmHostDispatch` (there is no
+ * refresh path), so a >2 h dispatch would otherwise silently drop out of the
+ * counter and the cap while its pane is demonstrably alive. The audit tier is
+ * the ONLY over-hold: it keeps the freshness rule (staleness is its release;
+ * see {@link reduceFreshCounts}). That asymmetry is deliberate (parent AC4).
  */
-export function isImplementPaneFresh(
+export function isPaneDerivedFresh(
   entry: { kind: HostBudgetKind },
   hasLivePane: boolean,
   stale: boolean,
 ): boolean {
-  return hasLivePane && (entry.kind === 'implement' || !stale);
+  return hasLivePane && (entry.kind !== 'audit' || !stale);
 }
 
 /**
- * Reduce a ledger against a live pane list: per-tier live counts, surviving
+ * Reduce a ledger against a live pane list: per-kind live counts, surviving
  * entries and entries to reap (see the liveness table in the header).
  *
  * `livePaneIds` of `undefined` means pane liveness is UNKNOWN (a failed or
@@ -672,7 +751,7 @@ export function reduceLedgerCounts(
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
-  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const counts = emptyHostBudgetCounts();
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
@@ -693,38 +772,38 @@ export function reduceLedgerCounts(
       continue;
     }
     retained.push(entry);
-    // Pane-derived freshness (WL-0MW9VQ08W000SN63): for the IMPLEMENT tier a
-    // confirmed entry whose pane is in the trusted live list is counted
-    // REGARDLESS of heartbeat age — a live pane is conclusive evidence the
-    // dispatch is still in flight, and `heartbeatAt` is only written at
-    // reserve/confirm (no refresh path), so a >2 h implement must not silently
-    // drop out of the cap. The AUDIT tier keeps the freshness rule here (its
-    // authoritative counts live in reduceMarkerCounts / reduceAuditDisplayCounts).
-    if (isImplementPaneFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
+    // Pane-derived freshness (WL-0MW9VQ08W000SN63, generalised by
+    // WL-0MWF34932000SNTX F2): for EVERY kind except `audit` a confirmed entry
+    // whose pane is in the trusted live list is counted REGARDLESS of heartbeat
+    // age — a live pane is conclusive evidence the dispatch is still in flight,
+    // and `heartbeatAt` is only written at reserve/confirm (no refresh path),
+    // so a >2 h dispatch must not silently drop out of the cap. The AUDIT tier
+    // keeps the freshness rule here (its authoritative counts live in
+    // reduceFreshCounts / reduceAuditDisplayCounts) and is the only over-hold.
+    if (isPaneDerivedFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }
 
 /**
- * Reduce a ledger with the RETIRED host-wide audit marker's semantics.
+ * Reduce a ledger with the audit tier's freshness rule: count every fresh
+ * entry, ignoring pane liveness.
  *
- * The marker held a host-wide audit slot from dispatch until a release point
- * fired (audit pane close, dispatch/spawn failure, claim rollback) and was
- * ignored once older than the 2 h stale window — the live pane list was never
- * consulted. Reusing that rule for the audit tier is what makes `maxAudit: 1`
- * indistinguishable from the marker (WL-0MVXY0XPF006YUHA F2 AC1): a fresh
- * entry counts even in the reserve→spawn window, and staleness is the only
- * time-based release.
+ * The audit tier holds a host-wide slot from dispatch until a release point
+ * fires (audit pane close, dispatch/spawn failure, claim rollback) and is
+ * ignored once older than the 2 h stale window — the live pane list is not
+ * consulted (WL-0MVXY0XPF006YUHA F2 AC1): a fresh entry counts even in the
+ * reserve→spawn window, and staleness is the only time-based release.
  *
  * Pure — the sibling of {@link reduceLedgerCounts}, which keeps the
  * pane-liveness rule for the implement tier.
  */
-export function reduceMarkerCounts(
+export function reduceFreshCounts(
   entries: readonly HostBudgetEntry[],
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
-  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const counts = emptyHostBudgetCounts();
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
@@ -743,8 +822,8 @@ export function reduceMarkerCounts(
  * (WL-0MW8D4UQH002TWJV).
  *
  * The audit tier's LEGACY (pre-proxy) admission rule was deliberately
- * marker-compatible: it counted every fresh entry and ignored pane liveness
- * ({@link reduceMarkerCounts}), so a slot was held from dispatch until an
+ * freshness-only: it counted every fresh entry and ignored pane liveness
+ * ({@link reduceFreshCounts}), so a slot was held from dispatch until an
  * explicit release point or the 2 h staleness window. That remains the rule
  * only under the one-release `HERDR_AUDIT_LOCAL_BUDGET=1` path; the DEFAULT
  * (proxy-derived) audit admission does not read this count at all. For the
@@ -756,7 +835,7 @@ export function reduceMarkerCounts(
  *  - no `paneId` (reserve→spawn window, no pane evidence yet) → counted;
  *  - `paneId` present in the trusted live-pane set → counted;
  *  - `paneId` present but absent from the trusted live-pane set → NOT counted.
- * Stale entries are excluded exactly as {@link reduceMarkerCounts} excludes
+ * Stale entries are excluded exactly as {@link reduceFreshCounts} excludes
  * them. The `implement` count is always 0 here — callers pair this reduction
  * with {@link reduceLedgerCounts} for that tier.
  *
@@ -771,7 +850,7 @@ export function reduceAuditDisplayCounts(
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
-  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const counts = emptyHostBudgetCounts();
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
@@ -809,7 +888,7 @@ export function reduceAuditDisplayCounts(
  * {@link reduceLedgerCounts}), so the dead-pane sweep cannot drop a
  * long-running implement off the ledger.
  *
- * Pure — the sibling of {@link reduceLedgerCounts} / {@link reduceMarkerCounts}.
+ * Pure — the sibling of {@link reduceLedgerCounts} / {@link reduceFreshCounts}.
  * `livePaneIds` MUST come from a trusted pane read; a failed read must not be
  * passed as an empty set or every confirmed entry would be reaped.
  */
@@ -819,7 +898,7 @@ export function reduceClosedPaneSweep(
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
 ): HostBudgetReduction {
-  const counts: HostBudgetCounts = { implement: 0, audit: 0 };
+  const counts = emptyHostBudgetCounts();
   const retained: HostBudgetEntry[] = [];
   const reaped: HostBudgetEntry[] = [];
   for (const entry of entries) {
@@ -827,16 +906,16 @@ export function reduceClosedPaneSweep(
       typeof entry.paneId === 'string' && entry.paneId.length > 0;
     const hasLivePane = confirmed && livePaneIds.has(entry.paneId as string);
     const stale = isEntryStale(entry, now, staleWindowMs);
-    // Pane-derived freshness for the implement tier (WL-0MW9VQ08W000SN63):
-    // a stale-but-live implement entry is retained, never reaped on staleness.
-    const staleForImplement =
-      stale && (entry.kind !== 'implement' || !hasLivePane);
-    if (staleForImplement || (confirmed && !hasLivePane)) {
+    // Pane-derived freshness for every non-audit kind (WL-0MW9VQ08W000SN63,
+    // generalised by WL-0MWF34932000SNTX F2): a stale-but-live entry is
+    // retained, never reaped on staleness. Audit keeps the 2 h release.
+    const staleDespiteLivePane = stale && (entry.kind === 'audit' || !hasLivePane);
+    if (staleDespiteLivePane || (confirmed && !hasLivePane)) {
       reaped.push(entry);
       continue;
     }
     retained.push(entry);
-    if (isImplementPaneFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
+    if (isPaneDerivedFresh(entry, hasLivePane, stale)) counts[entry.kind] += 1;
   }
   return { counts, retained, reaped };
 }
@@ -886,7 +965,7 @@ function ioError(): HostBudgetFailure {
 function normalizeLedgerEntry(raw: unknown): HostBudgetEntry | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
-  if (o.kind !== 'implement' && o.kind !== 'audit') return null;
+  if (!isHostBudgetKind(o.kind)) return null;
   if (typeof o.itemId !== 'string' || o.itemId.length === 0) return null;
   if (typeof o.instanceId !== 'string' || o.instanceId.length === 0) return null;
   if (typeof o.root !== 'string') return null;
@@ -1141,7 +1220,7 @@ export function reserve(
   if (
     input.itemId.length === 0 ||
     input.instanceId.length === 0 ||
-    (input.kind !== 'implement' && input.kind !== 'audit')
+    !isHostBudgetKind(input.kind)
   ) {
     return { ok: false, unknown: false, reason: 'invalid-input' };
   }
@@ -1492,69 +1571,41 @@ export function liveCount(
 }
 
 /**
- * Count the non-stale legacy `active-audit` marker file as ONE synthetic audit
- * entry (WL-0MVXY0XPF006YUHA F2 AC2 — retirement read-compatibility).
- *
- * A marker written by an older instance (one still running the marker-based
- * single-flight) must keep blocking this instance, otherwise a mixed-version
- * host could double-dispatch audits. The file is read only: this module never
- * creates or removes it. A missing, unreadable or malformed marker counts 0
- * (the reader is fail-safe), and a marker at/older than the stale window counts
- * 0 — the same release rule the marker itself had.
- */
-export function legacyActiveAuditCount(
-  dir: string | null,
-  now: number = Date.now(),
-  staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
-): number {
-  if (dir === null) return 0;
-  const marker = readActiveAuditMarker(dir);
-  if (marker === null) return 0;
-  return isEntryStale({ heartbeatAt: marker.dispatchedAt }, now, staleWindowMs) ? 0 : 1;
-}
-
-/**
  * The audit tier's pane-aware DISPLAY count, shared by the worklist header and
  * the interactive over-quota dialog (WL-0MW8IQNY7003JIOL).
  *
  * Both operator-facing surfaces must quote the same number: a confirmed audit
  * entry whose pane has closed is a dead audit and must not render as in flight,
  * even though the admission rule keeps counting it until an explicit release or
- * the staleness window ({@link reduceMarkerCounts}). This helper is the ONE
+ * the staleness window ({@link reduceFreshCounts}). This helper is the ONE
  * place that rule is spelled out, so the header and the dialog cannot drift.
  *
  * `livePaneIds` MUST come from a trusted machine-wide pane read. When it is
- * `undefined` (no trusted list available) the marker-compatible freshness rule
- * is used instead of excluding every confirmed entry — the same fallback
- * `readHostBudgetStatus` applies, rather than inventing a zero.
- *
- * Includes the non-stale legacy `active-audit` marker as one synthetic audit
- * entry ({@link legacyActiveAuditCount}), exactly like the header. Read-only:
- * unlike `freshCount`, it never reaps or rewrites the ledger (a TUI render and
- * the interactive gate must never mutate machine state).
+ * `undefined` (no trusted list available) the freshness rule is used instead
+ * of excluding every confirmed entry — the same fallback `readHostBudgetStatus`
+ * applies, rather than inventing a zero. Read-only: unlike `freshCount`, it
+ * never reaps or rewrites the ledger (a TUI render and the interactive gate
+ * must never mutate machine state).
  */
 export function auditDisplayCount(
   entries: readonly HostBudgetEntry[],
   livePaneIds: ReadonlySet<string> | undefined,
   now: number,
   staleWindowMs: number = HOST_BUDGET_STALE_WINDOW_MS,
-  dir: string | null = null,
 ): number {
   const reduction =
     livePaneIds === undefined
-      ? reduceMarkerCounts(entries, now, staleWindowMs)
+      ? reduceFreshCounts(entries, now, staleWindowMs)
       : reduceAuditDisplayCounts(entries, livePaneIds, now, staleWindowMs);
-  return reduction.counts.audit + legacyActiveAuditCount(dir, now, staleWindowMs);
+  return reduction.counts.audit;
 }
 
 /**
  * Count a tier's FRESH entries without requiring a live pane, and reap every
- * stale entry (see {@link reduceMarkerCounts} for the semantics and why the
+ * stale entry (see {@link reduceFreshCounts} for the semantics and why the
  * audit tier uses them).
  *
- * For the audit tier the result additionally includes a non-stale legacy
- * `active-audit` marker as one synthetic entry ({@link legacyActiveAuditCount}),
- * so `count` and `counts.audit` are exactly what the one-release LEGACY path
+ * `count` and `counts.audit` are exactly what the one-release LEGACY path
  * compares with `maxAudit` (and what the divergence log uses as local
  * evidence). The DEFAULT proxy-derived audit admission does not compare this
  * count with `maxAudit` at all. The reap write is best-effort, like
@@ -1571,11 +1622,11 @@ export function freshCount(
   const windowMs = staleWindowOf(opts);
   const read = readBudgetAt(dir);
   if (!read.ok) return read;
-  const reduction = reduceMarkerCounts(read.ledger.entries, now, windowMs);
+  const reduction = reduceFreshCounts(read.ledger.entries, now, windowMs);
   let counts = reduction.counts;
   if (reduction.reaped.length > 0) {
     const reaped = withLedgerLock(dir, (ledger) => {
-      const again = reduceMarkerCounts(ledger.entries, now, windowMs);
+      const again = reduceFreshCounts(ledger.entries, now, windowMs);
       if (
         again.reaped.length > 0 &&
         !writeBudgetAt(dir, { version: DISPATCH_BUDGET_VERSION, entries: again.retained })
@@ -1586,13 +1637,11 @@ export function freshCount(
     });
     if (reaped !== null && reaped.ok) counts = reaped.counts;
   }
-  const legacy = kind === 'audit' ? legacyActiveAuditCount(dir, now, windowMs) : 0;
-  if (legacy > 0) counts = { ...counts, audit: counts.audit + legacy };
   return { ok: true, kind, count: counts[kind], counts };
 }
 
 /**
- * Resolve the effective per-tier caps from `budget.json` + env overrides.
+ * Resolve the effective per-kind caps from `budget.json` + env overrides.
  *
  * Never throws. A missing file is silent (defaults); malformed/unreadable
  * content records a warning and uses defaults; an unresolvable coordination
