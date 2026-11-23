@@ -537,6 +537,200 @@ mismatches recorded as open questions):
   **Deliberate fail-closed mismatch, recorded as an open question** (does this
   item still need producer attention?).
 
+### Root cause: the 2026-11-22/23 empty prep bucket (WL-0MWTBJCIV006BEGE)
+
+Child 5 of WL-0MWTAD1KM0081UUD states the AC3 root cause from the AC1
+measurement (*Recorded prep-supply window*) and the AC2 provenance audit
+(*Recorded producer-review provenance audit*). It corrects the intake evidence
+where re-derivation disagrees, and labels every claim historical or current.
+
+**Verdict: the bucket was empty at the OFFER layer, not the SUPPLY layer.**
+Prep supply existed on every root at the snapshot instant — **397** prep-stage
+items existed at `2026-11-23T10:15:00Z` and **123** of them were offerable by
+re-derivation — yet **no prep item was the head offer on any of the 964
+check-ins the surviving logs cover in that window** (0 of 22 distinct head
+offers). On the two
+roots that logged a gate classification on every tick, **100 % of the scanned
+candidate window was gated on every tick** (ContextHub 4,165/4,165 candidate
+slots; games_curator 768/768). The one bucket that could drain that gated queue
+— audit — was itself refused by the machine-wide audit budget on **588 of 873**
+refusal decisions. Producer review is a real but **minority** contributor:
+**18 of 416** prep items carried the flag (4.3 %), and 17 of those 18 carry an
+unanswered producer question.
+
+#### Evidence commands (read-only)
+
+```bash
+# Refusal / no-dispatch decisions (per root, rolling 500-line logs)
+python3 - <<'EOF'
+import json,glob,collections
+start,end='2026-11-22T18:00:00','2026-11-23T10:00:00'
+c=collections.Counter()
+for p in glob.glob('/home/rgardler/projects/*/.worklog/downtime-coordination.log*'):
+    for line in open(p,errors='replace'):
+        e=json.loads(line) if line.startswith('{') else None
+        if not e or not (start<=e.get('at','')<=end): continue
+        if e.get('kind')!='decision' or e.get('operation')!='no-dispatch': continue
+        if e.get('reason')!='idle-age-qualified': c[e['reason']]+=1
+print(sum(c.values()), c.most_common())
+EOF
+
+# Check-in head offers + gate classifications per root (same window)
+python3 - <<'EOF'
+import json,glob,collections
+start,end='2026-11-22T18:00:00','2026-11-23T10:15:00'
+b=collections.defaultdict(lambda: collections.Counter())
+for p in glob.glob('/home/rgardler/projects/*/.worklog/downtime-coordination.log*'):
+    root=p.split('/')[4]
+    for line in open(p,errors='replace'):
+        e=json.loads(line) if line.startswith('{') else None
+        if not e or e.get('operation')!='checkin': continue
+        if not (start<=e.get('at','')<=end): continue
+        x=b[root]
+        x['checkins']+=1
+        x['head' if e.get('workItemId') else 'empty']+=1
+        for k,v in (e.get('gateCounts') or {}).items(): x['gate:'+k]+=v
+        x['window']=e.get('windowSize') or x['window']
+for r,c in sorted(b.items()): print(r, dict(c))
+EOF
+
+# A cited source cannot answer refusal questions (see corrected evidence 1)
+grep -c 'audit-budget-saturated' ~/.herdr/downtime/dispatch-budget.log*   # 0
+
+# Prep-supply read (schema v1; live item state, 10:15Z clock)
+npx tsx packages/herdr/src/prep-supply-report-cli.ts \
+  --root /home/rgardler/projects/ContextHub --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents --root /home/rgardler/projects/Tableau-Card-Engine \
+  --root /home/rgardler/projects/tce-the-rising --root /home/rgardler/projects/games_curator \
+  --now 2026-11-23T10:15:00Z --json
+```
+
+#### Corrected evidence (was → now, because)
+
+| # | Intake claim | Corrected evidence | Why |
+|---|---|---|---|
+| 1 | "`dispatch-budget.log` refusal counts: 873 refusals / 588 (67 %) `audit-budget-saturated`" | The totals stand, but the **source is wrong**: they come from `<root>/.worklog/downtime-coordination.log*` entries with `kind=decision, operation=no-dispatch`. `~/.herdr/downtime/dispatch-budget.log*` holds **1,029 reserve/confirm/sweep entries and no refusal record at all** (`grep -c audit-budget-saturated` = 0). | The budget log records ledger operations; the refusal verdict is recorded by the coordinator. |
+| 2 | The 873 figure is reproducible from the logs | **It is not reproducible now**: re-running the intake command at `2026-11-23T22:36Z` returns **0** for its own window. The per-root coordination logs are rolling 500-line caps (4 files); the window's decision entries have rotated out (Tableau-Card-Engine rotates ~500 lines per 2 h). The number is the **recorded reading at 2026-11-23T10:12Z** (intake session log, tool call `call_314d4ffdeefe4c7488f70060`). | No durable refusal log exists. Durable refusal evidence is a gap (open question 2). |
+| 3 | "Prep supply at 10:15Z: 3/4/1/0/0/0 items, 0 admissible on every root" | **397 prep items existed at 10:15Z** (`createdAt <= 10:15Z` filter) and **123 were offerable**: ContextHub 27/10, AI_Hell 78/13, SorraAgents 238/83, Tableau-Card-Engine 11/1, tce-the-rising 42/15, games_curator 1/1. | The snapshot was a *windowed* reading of the dispatch window, not the root's prep set (child 3's correction); the intake under-counted by ~10× on the large roots. |
+| 4 | "The prep backlog is almost entirely producer-review flagged" | **18 of 416** prep items (4.3 %) were flagged. Dependency holds dominate the backlog (256, 61.5 %), then startOn 17, dispatch-marker 2, producer-review 18, offerable 123. Producer review **is** material in the *scanned window*: 22.7 % of ContextHub's and 75 % of games_curator's gated candidate slots. | The intake conflated the prep backlog with the bounded scan window; both readings are true of different populations. |
+| 5 | "The leader therefore offered almost exclusively implement/audit candidates" | It offered **only** implement/audit heads: 0 of 22 distinct head offers were prep-stage; games_curator offered no head at all (192/192 empty), and Tableau-Card-Engine's window entries have rotated out (retention now starts `2026-11-23T12:01Z`). | "Almost exclusively" understates a 100 % observation on the roots whose logs survive. |
+
+#### Per-root supply vs gating (window `2026-11-22T18:00Z`–`2026-11-23T10:15Z`)
+
+Held-by-gate columns are the AC1 prep-supply buckets (live item state at the
+10:15Z clock, per child 3's `--now` caveat), not a state replay.
+
+| Root | Check-ins | Head offers | Empty offers (logged reason) | Distinct heads | Prep heads | Prep existed at 10:15Z | Offerable | producer-review | dependency | startOn | marker | Gate-classified ticks |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ContextHub | 194 | 109 | 85 (81 `review-queue-hold`, 4 `all-window-items-gated`) | 6 | 0 | 27 | 10 | 3 | 19 | 3 | 1 | 85/85, window 49, **100 % gated** |
+| AI_Hell | 191 | 191 | 0 | 5 | 0 | 78 | 13 | 5 | 64 | 1 | 0 | none logged |
+| SorraAgents | 195 | 195 | 0 | 7 | 0 | 238 | 83 | 9 | 147 | 1 | 1 | none logged |
+| Tableau-Card-Engine | — | — | — | — | — | 11 | 1 | 0 | 0 | 11 | 0 | window not covered (log retention starts `12:01Z`) |
+| tce-the-rising | 192 | 192 | 0 | 4 | 0 | 42 | 15 | 1 | 26 | 1 | 0 | none logged |
+| games_curator | 192 | 0 | 192 (`all-window-items-gated`) | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 0 | 192/192, window 4, **100 % gated** |
+| **total** | **964** | **687** | **277** | **22** | **0** | **397** | **123** | **18** | **256** | **17** | **2** | — |
+
+Reconciliation: head offers 687 + empty offers 277 = 964 check-ins **on the five
+roots whose logs cover the window**; Tableau-Card-Engine's window entries have
+rotated out and are therefore not claimed either way. Held
+18 + 256 + 17 + 2 + offerable 123 = 416 = the prep total (single bucket per
+item, no silent drops).
+
+Gate-classification reconciliation (`gateCounts × windowSize` = candidate
+slots, every slot accounted for):
+
+| Root | Slots | review-queue-hold | audit-fresh | producer-review | code-freeze | dispatched-marker | other |
+|---|---|---|---|---|---|---|---|
+| ContextHub (85 × 49) | 4,165 | 1,782 (42.8 %) | 1,259 (30.2 %) | 944 (22.7 %) | 88 (2.1 %) | 86 (2.1 %) | 6 (0.1 %) |
+| games_curator (192 × 4) | 768 | 0 | 192 (25 %) | 576 (75 %) | 0 | 0 | 0 |
+
+Only 34 of the 964 check-ins carried `filledBeyondWindow` (AI_Hell 3,
+ContextHub 4, tce-the-rising 27; games_curator 0), so the per-bucket widening
+(WL-0MWFJ8R1P005G1H1) did not reach the prep items outside these windows.
+
+#### The offer layer in detail
+
+The 22 distinct head offers — every one a `plan_complete` (implement) or
+`in_review`/`completed`/`done` (audit) candidate — are the log's evidence that
+the head of each entry was never prep. ContextHub's 81 `review-queue-hold`
+empties and games_curator's 192 `all-window-items-gated` empties are the
+"prep bucket empty" the run reported: the *offer* was empty, not the *backlog*.
+Tableau-Card-Engine's window is not covered by the surviving logs, so the claim
+is scoped to the five roots whose entries survive.
+
+#### The decision layer (refusal reasons)
+
+| Window | `no-dispatch` decisions | Refusals (excl. `idle-age-qualified`) | `audit-budget-saturated` | Share | Both LLM slots free |
+|---|---|---|---|---|---|
+| Recorded intake window `2026-11-22T18:00Z`–`2026-11-23T10:00Z` (primary logs rotated since) | not recorded | 873 | 588 | 67 % | 738 (84.5 %) |
+| Surviving window `2026-11-23T12:01Z`–`22:30Z` (re-runnable today) | 1,428 | 1,013 | 280 | 27.6 % | 637 (62.9 %) |
+
+Recorded intake distribution (873): `audit-budget-saturated` 588 (67 %),
+`idle-age-pending` 100, `capacity-saturated` 47, `prefill-cap` 45,
+`slots-unavailable` 45, `cpu-saturated` 21, `reservation-refused` 12,
+`prefill-eta` 7, `audit-tier-budget-skipped` 7, `host-budget-implement` 1.
+`freeSlots` at refusal: `{2: 738, 1: 87, 0: 48}`.
+
+#### Root-cause statement (named causes, with counts)
+
+1. **No prep supply — refuted.** 397 prep items existed at the window instant,
+   123 offerable, on all six roots (games_curator 1, Tableau-Card-Engine 11).
+2. **Bounded, fully-gated offer window.** The leader scans a bounded ranked
+   window (`browseItemCount`: 49 on ContextHub, 4 on games_curator). On the
+   roots that logged a classification, **100 % of those slots were gated on
+   every tick** (4,165/4,165; 768/768). Prep items beyond or behind the window
+   were invisible to the offer; widening did not fire (34/964 check-ins).
+3. **The gate that dominated was review-queue/audit-fresh, not producer
+   review.** ContextHub: `review-queue-hold` 42.8 % + `audit-fresh` 30.2 % +
+   `producer-review` 22.7 %. games_curator: `producer-review` 75 % +
+   `audit-fresh` 25 %. It was a completed/in_review-queue hold, not a prep hold.
+4. **The drain bucket was budget-capped.** `audit` was the bucket that could
+   have drained that queue, and the machine-wide audit lease refused it:
+   588/873 (67 %) of refusal decisions were `audit-budget-saturated`, 85 % of
+   them with both LLM slots free. Per-offer attribution over the surviving
+   decisions agrees: `audit-budget` is the largest `offerRejections` gate
+   (1,473).
+5. **Producer-review is real but minority.** 18/416 prep items flagged
+   (4.3 %); 17 have an unanswered producer question (`needs-producer-input`),
+   the single clearable row is independently held by six unmet dependencies,
+   so clearing the flag could not dispatch it. Prep was **held by gates** in
+   this narrow sense (18 items), but that cannot explain an empty bucket while
+   123 prep items were offerable.
+
+#### Time dependence (historical window vs current state)
+
+- **Historical, cannot be replayed.** The 873 distribution and the per-root
+  check-in offers were read from rolling logs at `2026-11-23T10:12Z`; the
+  window's decision entries have since rotated out (evidence 2). `--now`
+  freezes time-derived gates only — `wl` has no item-state history, so status,
+  dependency, assignee and `needsProducerReview` are always live.
+- **Current state is materially different.** At `2026-11-23T22:32Z` the same
+  prep-supply read gives **413** prep items, **128 offerable**, 16
+  producer-review-held. The recorded `--now 10:15Z` read (child 3) was 416 /
+  123 / 18; the delta is explained: two ContextHub `ruff DTZ007` items were
+  cleared externally at `22:00:04Z`/`22:00:05Z` (producer-review → offerable),
+  and one Tableau-Card-Engine `startOn` matured. SorraAgents alone holds 238
+  prep items at the window clock (93 `open`, 145 `blocked`) versus the `1` in
+  the intake snapshot.
+- **What the finding does and does not support.** It supports "the prep offer
+  starved while prep supply existed" for this window. It does not support
+  "the prep backlog is almost entirely producer-review flagged" (evidence 4)
+  nor a claim that producer review was the dominant gate.
+
+#### Open questions
+
+1. **Head vs offers is not provable from the log.** A check-in logs only
+   `workItemId`, which mirrors `offers[0]` under the v2 protocol; the per-entry
+   `offers` payload is not persisted. No prep nominee is *excluded* by this
+   evidence — only proven absent from the head. The v2 per-bucket nominees
+   were live before the window (WL-0MWDDHQON0015T3P completed
+   `2026-11-17T10:06Z`). Persisting `offers` on the check-in line would close
+   this.
+2. **No durable refusal log.** The AC's named source cannot answer refusal
+   questions and the coordinator logs rotate within hours, so an overnight
+   root-cause read cannot be re-derived after the fact. A durable (or longer
+   retention) refusal log is needed before the next overnight post-mortem.
+
 ### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
 
 The leader keeps ONE entry per instance and iterates the offers **inside** it:
