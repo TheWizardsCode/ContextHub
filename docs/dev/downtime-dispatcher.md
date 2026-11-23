@@ -401,6 +401,142 @@ therefore "live item state, 10:15Z clock". That is why the re-derivation uses
 an exact replay of 10:15Z state; a true historical replay would need a
 versioned item store.
 
+### Producer-review provenance (WL-0MWTBJAV7002ZZQI, child of WL-0MWTAD1KM0081UUD)
+
+`needsProducerReview === true` is the dispatcher's only persistent hold, and
+nothing records where it came from: the intake/plan/interview question loop, an
+audit rejection, attempt-budget exhaustion, a release escalation and a
+hand-written `wl reviewed` all write the same boolean. A stale flag is therefore
+indistinguishable from a live producer question, which is what starved the prep
+fallback in the 2026-11-22/23 run. This rule makes the flag auditable per item:
+**which evidence set it, how old that evidence is, whether a question is still
+unanswered, and therefore whether it can be cleared now.**
+
+`packages/herdr/src/downtime-worker.producer-review-provenance.ts` implements
+the rule (`classifyProducerReviewProvenance`);
+`downtime-worker.producer-review-provenance.test.ts` pins it, including this
+table. The source names are the exported `PRODUCER_REVIEW_SOURCES` constant and
+are asserted against this table — drift in either fails the suite.
+
+**The rule.** A flag source is claimed only from durable evidence; the
+**newest** such evidence wins, and ties break by authority order (audit >
+attempt budget > question > escalation > manual). The flag age is measured from
+**that evidence's own timestamp** — never from the item's `updatedAt`, which
+bulk worklog operations move without touching the flag.
+
+| # | source | evidence fields it keys on | fail-closed behaviour |
+|---|---|---|---|
+| 1 | `audit-reject` | stored audit record `readyToClose === false` (`wl audit-show`), timestamped by `generatedAt` then `auditedAt`; `auditResult` is the item-level mirror | a **passing** audit (`readyToClose === true`) is never a flag source; a reject with no timestamp is `ambiguous` |
+| 2 | `attempt-budget-exhaustion` | dispatch markers at the item's CURRENT stage: non-enrichment, non-`spawn-failed` entries for the item, counted per kind (`isAttemptBudgetExhausted` / `countAttempts`), aged from the marker that exhausted the cap (`attempts >= downtimeMaxAttempts`, default 3) | markers rotated out of the rolling log, or fewer than the cap, claim nothing; the source is never inferred from the flag alone |
+| 3 | `question-loop` | newest question comment: author + body markers (`question:`, `OPEN QUESTIONS`, `Questions for producer`, `Producer decision required`, `awaiting producer`, `remains open for the producer`, `please confirm/approve/answer/reject`), or the description's `OPEN QUESTION` appendix when no question comment survives | a description-only question carries no timestamp ⇒ `flagAgeMs: null`; it is open unless a later comment records an answer (`Answer:` / `producer answer:` / `answered by`) |
+| 4 | `ship-escalation` | newest comment that both mentions an escalation and the producer (the ship skill's child-to-ancestor escalation), aged from its `createdAt` | an escalation for another item, or an untimeable comment, claims nothing |
+| 5 | `manual` | an explicit `wl reviewed <id> true` / `needs-producer-review: true` comment, aged from its `createdAt`; with no such comment the flag has no recorded cause | no evidence at all ⇒ `source: manual`, `flagAgeMs: null`, grouped `needs-producer-input` (clearing is not provably safe) unless an independent hold proves no dispatch can follow |
+
+**Ambiguity is never silently resolved.** `ambiguous` is returned when the only
+flag-causing evidence has no timestamp, when the newest evidence postdates the
+evaluation instant (it cannot have set the flag in a replay), or when a passing
+audit is the only audit on record. An ambiguous or evidence-less row is grouped
+`needs-producer-input` — the audit never overrides history to make a row
+clearable.
+
+**Groups (parent AC2).** Rows are grouped `can-clear-now` (no unanswered
+question AND the provenance is provable) and `needs-producer-input` (an
+unanswered question is recorded, or the provenance cannot be proved). A
+recorded, **later** answer to the question closes it and makes the stale flag
+clearable. The one fail-closed exception: when an independent dispatcher hold
+(`dependency`, `assignee-hold`, `startOn`, `attempt-budget`, `cooldown`) already
+blocks the item, clearing the flag cannot cause a dispatch, so an
+ambiguously-sourced row may be listed `can-clear-now` **with the hold named** —
+the hold is reported, never relaxed.
+
+**Read-only.** The classifier is pure: plain data in, a verdict out — no `wl`
+call, no subprocess, no file write, no input mutation, and it never clears a
+flag, reassigns an item or changes a dispatch decision. Clearing flags and
+batching producer interviews are separate follow-ups; the audit only records
+what the evidence proves.
+
+### Recorded producer-review provenance audit (2026-11-23 22:15Z, WL-0MWTBJAV7002ZZQI)
+
+Child 4 of WL-0MWTAD1KM0081UUD applies the rule above to every prep item that
+carried `needsProducerReview=true` in the 2026-11-23 audit window, on each
+active root. Rows are read-only findings: **no flag was cleared and no item was
+reassigned** by this audit.
+
+**Evidence read (read-only).** Per root:
+
+```bash
+wl --worklog-dir <root>/.worklog list --json --needs-producer-review --include-not-started
+wl --worklog-dir <root>/.worklog comment list <id> --json
+wl --worklog-dir <root>/.worklog audit-show <id> --json
+wl --worklog-dir <root>/.worklog dep list <id> --json
+```
+
+plus the root's rolling `<root>/.worklog/downtime-dispatches.log` and the
+durable `Auto-dispatched by the herdr downtime worker …` comments (the
+attempt-budget evidence survives log rotation only in the comments). `--now`
+was frozen at `2026-11-23T22:15:00Z`. Classification and grouping are produced
+by `classifyProducerReviewProvenance` + `assembleProducerReviewProvenance` over
+that evidence — the same rule this section documents.
+
+| root | id | flag source | deciding evidence | flag age | open question | group |
+|---|---|---|---|---|---|---|
+| ContextHub | WL-0MWAJ3RPX000HQIG | `question-loop` | `comment:WL-C0MWHP2X210072E21` | 8d 11h | yes | needs-producer-input |
+| ContextHub | WL-0MWQYC2ZQ002NGZP | `question-loop` | `comment:WL-C0MWQZ1GPM007357K` | 1d 23h | yes | needs-producer-input |
+| ContextHub | WL-0MWQYC3MZ0013YLS | `question-loop` | `comment:WL-C0MWQZKYJ8008OAE9` | 1d 23h | yes | needs-producer-input |
+| AI_Hell | AH-0MWEUSVJ1007EXJY | `question-loop` | `comment:AH-C0MWGX0EL7000ZLLB` | 9d 0h | yes | needs-producer-input |
+| AI_Hell | AH-0MWFDQ9EY004NO4X | `question-loop` | `comment:AH-C0MWI5L6HD004KW3P` | 8d 4h | yes | needs-producer-input |
+| AI_Hell | AH-0MWL7OWPF003E4TP | `question-loop` | `comment:AH-C0MWLANMGN004OL0L` | 5d 23h | yes | needs-producer-input |
+| AI_Hell | AH-0MWL7P1AO003LKXT | `question-loop` | `comment:AH-C0MWLBFLER000V8GL` | 5d 22h | yes | needs-producer-input |
+| AI_Hell | AH-0MWLLPA1Q0006U2P | `manual` | none (dependency-held) | unknown | no | can-clear-now |
+| SorraAgents | SA-0MSN9UXKJ002JK42 | `question-loop` | `comment:SA-C0MWMTG2ZX001R5A9` | 4d 21h | yes | needs-producer-input |
+| SorraAgents | SA-0MU9VU8GB009P523 | `question-loop` | `comment:SA-C0MUJNHTF4007Q22T` | 57d 12h | yes | needs-producer-input |
+| SorraAgents | SA-0MVNPSBEJ006Z59T | `question-loop` | `comment:SA-C0MWG935ZP003GX87` | 9d 11h | yes | needs-producer-input |
+| SorraAgents | SA-0MVQKMGGN0091NAR | `question-loop` | `comment:SA-C0MWG8SP9K000Q2EW` | 9d 12h | yes | needs-producer-input |
+| SorraAgents | SA-0MVSCS0M80007X23 | `manual` | none (no question/audit/budget evidence survives) | unknown | no | needs-producer-input |
+| SorraAgents | SA-0MVXVC9FM003ZJKJ | `question-loop` | `comment:SA-C0MWINOVMJ0081RHI` | 7d 19h | yes | needs-producer-input |
+| SorraAgents | SA-0MW5KKEHL005BR0L | `question-loop` | `comment:SA-C0MWL5PUW4007DAYU` | 6d 1h | yes | needs-producer-input |
+| SorraAgents | SA-0MWAXZHOU000UBG1 | `question-loop` | `comment:SA-C0MWJ3PXQC008QPZY` | 7d 12h | yes | needs-producer-input |
+| SorraAgents | SA-0MWROFAG800719G4 | `question-loop` | `comment:SA-C0MWROFKMI003FIDJ` | 1d 12h | yes | needs-producer-input |
+| tce-the-rising | RISE-0MWMS0TAN008G2SY | `question-loop` | `comment:RISE-C0MWMSPLPT002T2L6` | 4d 22h | yes | needs-producer-input |
+
+**Group counts** (18 flagged prep items; Tableau-Card-Engine and games_curator
+had none): ContextHub 0 clear / 3 need input, AI_Hell 1 / 4, SorraAgents 0 / 9,
+tce-the-rising 0 / 1 — **1 can clear now, 17 need producer input**. The single
+clearable row is the dependency-held item; every other row has an unanswered
+producer question on record.
+
+**Snapshot caveat.** The two ContextHub `ruff DTZ007` items
+(WL-0MWQYC2ZQ002NGZP, WL-0MWQYC3MZ0013YLS) were flagged when the audit
+started (21:53Z read) and were cleared externally at `2026-11-23T22:00:04Z` /
+`22:00:05Z` **without a comment and by no action of this audit**; they are
+recorded above because they were in scope at the snapshot instant. Conversely
+`SA-0MVSCS0M8` has no surviving evidence for its flag and is therefore
+`needs-producer-input` (fail-closed) — a question for the producer, not a
+silent clear.
+
+**Sanity check against documented history** (parent AC: at least three items,
+mismatches recorded as open questions):
+
+- `AH-0MWEUSVJ1007EXJY` — intake dispatched 2026-11-14T21:19Z, Q1–Q3 posted
+  `21:25Z` and marked `OPEN QUESTION` in the brief → rule says `question-loop`,
+  needs producer input. **Matches.**
+- `WL-0MWAJ3RPX000HQIG` — the intake agent recorded its own recommendation
+  ("Intake decision recorded … Option (c)") and then asked "please confirm or
+  reject option (c)". The recommendation is NOT an answer (pinned by a test) →
+  `question-loop`, needs producer input. **Matches.**
+- `AH-0MWFDQ9EY004NO4X` — intake auto-completed, then the producer-delegated
+  re-ruling states "this ruling remains open for the producer and is not
+  closed" → `question-loop`, needs producer input. **Matches.**
+- `AH-0MWLLPA1Q0006U2P` — implementation aborted 2026-11-23T05:01Z with a new
+  blocker item; no question is recorded and six unmet dependencies hold it →
+  `manual`/unknown age, `can-clear-now` via the independent-hold exception.
+  **Matches** the history (flagging it cannot dispatch it).
+- `SA-0MVSCS0M80007X23` — a plan was recorded on 2026-11-17 with no question,
+  no audit and no attempt-budget evidence. The rule cannot prove why it is
+  flagged, so it is grouped `needs-producer-input` rather than cleared.
+  **Deliberate fail-closed mismatch, recorded as an open question** (does this
+  item still need producer attention?).
+
 ### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
 
 The leader keeps ONE entry per instance and iterates the offers **inside** it:
