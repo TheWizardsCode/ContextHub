@@ -34,6 +34,7 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.selection.ts` | Per-tier candidate selection, rotation, critical-first, dependency frontier | `selectNextCandidate`, `selectAuditCandidate`, `selectWithRotation`, `resolveDependencyFrontier` |
 | `downtime-worker.pane.ts` | Pane identity, in-flight resolution, spawn invocation, pane-lifecycle monitor | `buildDowntimePaneArgs`, `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` |
 | `downtime-worker.gates.ts` | Every "may the worker dispatch X?" decision (holds, depth, attempt budget, classification) | `classifyItemForDispatch`, `evaluateCriticalFirstGuard`, `readReviewQueueGate`, `isAttemptBudgetExhausted` |
+| `downtime-worker.prep-supply.ts` | The READ-ONLY per-root prep-supply bucket classification (measurement vocabulary only — no I/O, no dispatch decision) | `PREP_SUPPLY_BUCKETS`, `classifyPrepSupplyItem`, `classifyPrepSupplyWindow` |
 | `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
 | `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
 | `downtime-worker.dispatch-cpu-gate.ts` | Host-CPU dispatch gate (host-utilisation seam) | `CPU_SATURATED_REASON` |
@@ -183,6 +184,52 @@ Contract:
 The check-in writes the nominees as the v2 `offers` array (canonical bucket
 order `implement` → `audit` → `prep`) with `workItemId` mirroring the first
 offer, so a v1-era leader keeps reading exactly one offer.
+
+### Prep-supply buckets (WL-0MWTBJ5N1005BNXZ, child of WL-0MWTAD1KM0081UUD)
+
+Why the dispatcher's plan/intake fallback can be empty is measured, not
+sampled. `packages/herdr/src/downtime-worker.prep-supply.ts` classifies one
+root's prep-stage items into exactly ONE bucket each — the **primary cause**,
+first match wins — so a past window (a frozen `now`, the root's rolling
+dispatch log and its items) can be replayed deterministically and diffed.
+
+**Scope.** Prep supply is `idea` and `intake_complete` only. These items are
+never prep supply and appear in no bucket:
+
+| exclusion | predicate |
+|---|---|
+| `soft-deleted` | non-empty `deletedBy` |
+| `terminal-status` | status `completed` or `deleted` |
+| `not-prep-stage` | any other stage (`plan_complete` is an implement candidate) |
+
+**Buckets, in primary-cause precedence order** (bucket names are the
+exported `PREP_SUPPLY_BUCKETS` constant, and this table is asserted against it
+by `downtime-worker.prep-supply.test.ts` — drift fails the suite; one source
+of truth in two places):
+
+| # | bucket | the item was refused because | predicate reused |
+|---|---|---|---|
+| 1 | `producer-review` | `needsProducerReview` is set (the only persistent hold) | `classifyItemForDispatchDetail` → `producer-review` |
+| 2 | `dispatch-marker` | a fresh `plan`/`intake` success marker exists at the item's CURRENT stage | `dispatchedItemMarkers` + `markerStillExcludes` (`stage-guard`) |
+| 3 | `assignee-hold` | a non-empty assignee holds it (the producer sentinel included; the dispatcher's own claim is not a hold) | `classifyItemForDispatchDetail` → `assignee-hold` |
+| 4 | `dependency` | a dependency edge points at a non-terminal blocker (an unresolvable blocker counts as unmet) | `wl` dependency edges |
+| 5 | `startOn` | the effective start instant (`startOn ?? createdAt`) is still in the future | `classifyItemForDispatchDetail` → `startOnNotReached` |
+| 6 | `other-gated` | the classifier refuses for a reason with no dedicated bucket (e.g. an `in-progress` claim at a prep stage) | any other classifier gate |
+| 7 | `attempt-budget` | the per-item, per-kind attempt cap is exhausted at the current stage | `isAttemptBudgetExhausted` |
+| 8 | `cooldown` | a non-terminal pane close is still inside the cooldown | `isNonTerminalCooldownActive` |
+| 9 | `offerable` | nothing above applies — this is real prep supply | — |
+
+**Precedence is a reporting label, never a gate.** The report orders the
+predicates (`producer-review` → `dispatch-marker` → holds → worker-side gates →
+`offerable`) so a fixture with several simultaneous causes still reports one
+primary cause. The dispatcher's own filter chain (classify → marker → attempt
+budget → cooldown) is untouched and no predicate is restated here — every
+bucket quotes the module that owns it.
+
+**Read-only.** The classifier takes plain data only: no `wl` call, no
+subprocess, no file write, and it never mutates its input. A regression test
+asserts the classified dispatch decisions are identical with and without the
+module loaded, so the measurement can never licence a behaviour change.
 
 ### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
 
