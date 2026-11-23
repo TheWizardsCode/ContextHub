@@ -35,6 +35,35 @@ import type { ClaimResult } from './fetcher.types.js';
 const CLAIM_TIMEOUT_MS = 3000;
 
 /**
+ * Detect the wl CLI's `start_on_not_reached` claim-guard refusal
+ * (WL-0MWMGEUT10056MUI) in a failed claim's error message.
+ *
+ * The CLI writes a JSON refusal object to stderr —
+ * `{"success":false,"error":"start_on_not_reached","startOn":"…", …}` —
+ * which surfaces here as the error message. Matches only a refusal that names
+ * the token (so a plain `stale` race is never misclassified) and extracts the
+ * effective `startOn` so the caller can report it. Returns `null` when the
+ * message is not a start-on refusal at all.
+ */
+function parseStartOnNotReached(message: string): { startOn?: string } | null {
+  if (!message.includes('start_on_not_reached')) return null;
+  // The refusal object has no nested braces, so a brace-bounded match is safe
+  // even when stderr carries other log lines around it.
+  const match = message.match(/\{[^{}]*"start_on_not_reached"[^{}]*\}/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[0]) as { error?: unknown; startOn?: unknown };
+      if (parsed && parsed.error === 'start_on_not_reached') {
+        return { startOn: typeof parsed.startOn === 'string' ? parsed.startOn : undefined };
+      }
+    } catch {
+      // Token present but JSON unreadable — still a start-on refusal.
+    }
+  }
+  return {};
+}
+
+/**
  * Claim a work item before dispatching an agent command. For every tier
  * except audit the claim sets its status to `in_progress` with the given
  * assignee, matching the claim pattern documented in AGENTS.md. For the
@@ -125,6 +154,22 @@ export async function claimWorkItem(
     return { success: true };
   } catch (err: any) {
     const message = err.message ?? String(err);
+    // startOn claim-guard refusal (WL-0MWMGEUT10056MUI): the wl CLI refuses a
+    // claim whose item has an explicit startOn still in the future. Surface the
+    // machine-readable reason so the dispatcher can treat it as "not
+    // dispatchable" (defence in depth behind the read filter) rather than a
+    // generic wl error. The Herdr claim never passes an override — an operator
+    // must start early deliberately via `wl update --force-start-on`.
+    const startOnRefusal = parseStartOnNotReached(message);
+    if (startOnRefusal) {
+      return {
+        success: false,
+        stale: false,
+        error: message,
+        reason: 'start_on_not_reached',
+        ...(startOnRefusal.startOn ? { startOn: startOnRefusal.startOn } : {}),
+      };
+    }
     // Lost CAS race: the wl CLI exits non-zero with `{"success":false,
     // "error":"stale", ...}` on stderr (runWl surfaces stderr first).
     const stale =

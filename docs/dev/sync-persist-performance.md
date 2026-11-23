@@ -171,9 +171,10 @@ work.
 
 ## Where the fix is
 
-- `packages/shared/src/database.ts` — `import()`, `importComments()`,
-  `upsertItems()`, `upsertComments()`: differential persist, per-record-type
-  transactions, FTS upkeep only for changed ids.
+- `packages/shared/src/database/import-export.ts` — `import()`, `upsertItems()`: differential persist, per-record-type
+  transactions, FTS upkeep only for changed ids (`importComments()` /
+  `upsertComments()` live in `packages/shared/src/database/comments.ts`; the
+  `database.ts` façade members are thin delegates).
 - `packages/shared/src/persistent-store.ts` — `deleteFtsEntry` (targeted
   FTS-row removal for the sync path), unchanged `clearWorkItems()` /
   `clearComments()` for the remaining destructive callers (`importData()`,

@@ -12,7 +12,7 @@ search reliable in practice:
 
 ## How search works
 
-- `WorklogDatabase.search()` (in `packages/shared/src/database.ts`) merges
+- `WorklogDatabase.search()` (implementation in `packages/shared/src/database/search.ts`, exposed through the `database.ts` façade's thin delegate) merges
   ID-aware matches with FTS5 results (`SqlitePersistentStore.searchFts()`)
   and dedupes them.
 - When FTS5 is unavailable, it falls back to application-level `searchFallback()`.
@@ -76,4 +76,4 @@ New behavior in `searchFts` → `WorklogDatabase.search()` → `wl search`:
 - `tests/cli/search-fts-freshness.test.ts` — end-to-end `wl search` coverage
   (fresh index for created/imported items; auto-quote warning in human and JSON
   output; no warning for quoted phrases or genuine empty results).
-- `tests/fts-search.test.ts`, `tests/database.test.ts` — regression suites.
+- `tests/fts-search.test.ts`, `tests/database.test.ts` (and its split files) — regression suites.

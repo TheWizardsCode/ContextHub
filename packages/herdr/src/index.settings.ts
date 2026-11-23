@@ -54,6 +54,23 @@ export function configureWorklogTarget(startDir?: string): string | undefined {
   if (startDir) {
     process.stderr.write(`[worklog-plugin] resolving worklog root from HERDR_RESOLVED_CWD: ${startDir}\n`);
   }
+  return refreshWorklogTarget(startDir);
+}
+
+/**
+ * Quietly re-resolve the worklog root and reconfigure the fetcher.
+ *
+ * Same shared resolver as {@link configureWorklogTarget}, but without the
+ * startup stderr diagnostic. `main()`'s fetcher calls this on refresh while
+ * the root is unresolved so a `wl init` run after the pane opened is picked up
+ * and the in-pane uninitialised notice clears without a plugin restart
+ * (WL-0MVTDEOOA003PLIV / WL-0MW4P52LB009J0DX AC1). Presentation-only: no
+ * change to resolution semantics.
+ *
+ * Returns the resolved project root, or undefined when no valid `.worklog/` is
+ * found.
+ */
+export function refreshWorklogTarget(startDir?: string): string | undefined {
   const wlRoot = resolveWorklogRoot(startDir);
   if (wlRoot) {
     setWorklogDir(join(wlRoot, '.worklog'));
@@ -67,10 +84,10 @@ export function configureWorklogTarget(startDir?: string): string | undefined {
  * uninitialized reporting without launching the full TUI.
  */
 export function uninitializedReport(startDir: string): string {
-  return [
-    `[worklog-plugin] No valid .worklog/ directory found in or above '${startDir}'`,
-    `[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.`,
-  ].join('\n') + '\n';
+  return (
+    `[worklog-plugin] No valid .worklog/ directory found in or above '${startDir}'. ` +
+    `Run 'wl init' in that directory to create a valid worklog.\n`
+  );
 }
 
 export { settings };

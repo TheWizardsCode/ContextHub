@@ -40,6 +40,7 @@ import {
   WorklogDatabaseContext,
   buildEdgeCache,
 } from './context.js';
+import type { CandidateExclusion } from './context.js';
 import {
   getForeignDependencyViews,
   hasActiveBlockers,
@@ -305,20 +306,22 @@ export function findNextWorkItemFromItems(
   includeInProgress: boolean = false,
   edgeCache?: EdgeCache,
   risk?: string,
-  effort?: string
+  effort?: string, excludeItem?: CandidateExclusion
 ): NextWorkItemResult {
   hooks.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0} risk=${risk || ''} effort=${effort || ''}`);
 
+  const selectableItems = excludeItem ? items.filter(item => !excludeItem(item)) : items;
+
   // Build the sort-order cache once from the pre-loaded items array.
   // This avoids an extra full-table scan of all work items from the database.
-  const sortOrderCache = ctx.store.orderItemsByHierarchySortIndexSkipCompleted(items);
+  const sortOrderCache = ctx.store.orderItemsByHierarchySortIndexSkipCompleted(selectableItems);
 
   // Shared effective-priority cache: avoids redundant dependency lookups
   // across all selectBySortIndex calls within this invocation.
   const effectivePriorityCache = new Map<string, { value: number; reason: string; inheritedFrom?: string }>();
 
   // ── Stage 1: Filter pipeline ──
-  const { candidates: filteredItems, criticalPool } = filterCandidates(ctx, hooks, items, {
+  const { candidates: filteredItems, criticalPool } = filterCandidates(ctx, hooks, selectableItems, {
     assignee,
     searchTerm,
     stage,
@@ -338,7 +341,7 @@ export function findNextWorkItemFromItems(
   // Skip critical escalation when stage filter is specified - user is
   // explicitly filtering by stage and doesn't want escalation to override it.
   if (!stage) {
-    const criticalResult = handleCriticalEscalation(hooks, items, {
+    const criticalResult = handleCriticalEscalation(hooks, selectableItems, {
       assignee,
       searchTerm,
       excluded,
@@ -348,6 +351,7 @@ export function findNextWorkItemFromItems(
       debugPrefix: `${debugPrefix} [critical]`,
       edgeCache,
       sortOrderCache,
+      excludeItem,
     });
     if (criticalResult) {
       return withForeignDependencies(ctx, criticalResult, edgeCache);
@@ -380,7 +384,7 @@ export function findNextWorkItemFromItems(
   if (!stage) {
     const nonCriticalBlocked = criticalPool.filter(
       item => item.status === 'blocked' && item.priority !== 'critical'
-    ).filter(item => !hooks.isInProgressSubtree(item, items));
+    ).filter(item => !hooks.isInProgressSubtree(item, selectableItems));
     hooks.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
 
     if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
@@ -426,7 +430,7 @@ export function findNextWorkItemFromItems(
         // Apply assignee/search filters to blockers
         let filteredBlockers = blockingPairs.filter(pair =>
           applyFilters(ctx, [pair.blocking], assignee, searchTerm).length > 0
-        ).filter(pair => matchesRiskEffort(pair.blocking, risk, effort));
+        ).filter(pair => matchesRiskEffort(pair.blocking, risk, effort) && (!excludeItem || !excludeItem(pair.blocking)));
   
         // Strict root-only (WL-0MS964SIA0057ABR): child blockers are never
         // surfaced by wl next.
@@ -444,7 +448,7 @@ export function findNextWorkItemFromItems(
             continue;
           }
           // Child blocker: resolve to parent when selectable, else hidden.
-          const resolved = resolveBlockerToRoot(ctx, hooks, pair.blocking, items, assignee, searchTerm, excluded);
+          const resolved = resolveBlockerToRoot(ctx, hooks, pair.blocking, selectableItems, assignee, searchTerm, excluded);
           if (resolved) {
             // Parent is selectable — it competes in Stage 5 (existing
             // hierarchy awareness, WL-0MQF95NCC0024H61).
@@ -462,7 +466,7 @@ export function findNextWorkItemFromItems(
         // blocked item itself and the existing isInProgressSubtree() filter
         // in Stage 5 (open item selection).
         filteredBlockers = filteredBlockers.filter(pair =>
-          !hooks.isInProgressSubtree(pair.blocking, items)
+          !hooks.isInProgressSubtree(pair.blocking, selectableItems)
         );
   
         hooks.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
@@ -498,7 +502,7 @@ export function findNextWorkItemFromItems(
   // Children of in-progress parents are excluded — the entire in-progress
   // subtree should be skipped from wl next recommendations.
   const rootCandidates = filteredItems.filter(item => !item.parentId)
-    .filter(item => !hooks.isInProgressSubtree(item, items));
+    .filter(item => !hooks.isInProgressSubtree(item, selectableItems));
   hooks.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
 
   if (rootCandidates.length === 0) {
@@ -506,7 +510,7 @@ export function findNextWorkItemFromItems(
     // descend into children, and do not promote orphans.
     // Still exclude items in an in-progress subtree even in the fallback path
     // so that the entire in-progress subtree is skipped.
-    const fallbackItems = filteredItems.filter(item => !item.parentId && !hooks.isInProgressSubtree(item, items));
+    const fallbackItems = filteredItems.filter(item => !item.parentId && !hooks.isInProgressSubtree(item, selectableItems));
     if (fallbackItems.length === 0) {
       // Clear reason when blockers were hidden children (WL-0MS964SIA0057ABR):
       // the child is hidden entirely and its parent is not selectable.
@@ -518,16 +522,16 @@ export function findNextWorkItemFromItems(
       }
       return { workItem: null, reason: 'No work items available' };
     }
-    const selected = hooks.selectBySortIndex(fallbackItems, effectivePriorityCache, sortOrderCache, edgeCache, items);
+    const selected = hooks.selectBySortIndex(fallbackItems, effectivePriorityCache, sortOrderCache, edgeCache, selectableItems);
     hooks.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
-    const effectiveInfo = selected ? computeEffectivePriority(ctx, hooks, selected, effectivePriorityCache, edgeCache, items) : null;
+    const effectiveInfo = selected ? computeEffectivePriority(ctx, hooks, selected, effectivePriorityCache, edgeCache, selectableItems) : null;
     return withForeignDependencies(ctx, {
       workItem: selected,
       reason: `Next open item by sort_index${selected ? ` (${effectiveInfo?.inheritedFrom ? effectiveInfo.reason : `priority ${selected.priority}`})` : ''}`
     }, edgeCache);
   }
 
-  const selectedRoot = hooks.selectBySortIndex(rootCandidates, effectivePriorityCache, sortOrderCache, edgeCache, items);
+  const selectedRoot = hooks.selectBySortIndex(rootCandidates, effectivePriorityCache, sortOrderCache, edgeCache, selectableItems);
   hooks.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
 
   if (!selectedRoot) {
@@ -536,7 +540,7 @@ export function findNextWorkItemFromItems(
 
   // Return the selected root directly — do NOT descend into children.
   // The parent represents the unit of work; children are tracked within it.
-  const rootEffectiveInfo = computeEffectivePriority(ctx, hooks, selectedRoot, effectivePriorityCache, edgeCache, items);
+  const rootEffectiveInfo = computeEffectivePriority(ctx, hooks, selectedRoot, effectivePriorityCache, edgeCache, selectableItems);
   return withForeignDependencies(ctx, {
     workItem: selectedRoot,
     reason: `Next open item by sort_index${rootEffectiveInfo ? ` (${rootEffectiveInfo.inheritedFrom ? rootEffectiveInfo.reason : `priority ${selectedRoot.priority}`})` : ''}`
@@ -558,11 +562,11 @@ export function findNextWorkItem(
   stage?: string,
   includeInProgress: boolean = false,
   risk?: string,
-  effort?: string
+  effort?: string, excludeItem?: CandidateExclusion
 ): NextWorkItemResult {
   const items = ctx.store.getAllWorkItems();
   const edgeCache = buildEdgeCache(ctx, items);
-  return findNextWorkItemFromItems(ctx, hooks, items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress, edgeCache, risk, effort);
+  return findNextWorkItemFromItems(ctx, hooks, items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress, edgeCache, risk, effort, excludeItem);
 }
 
 /**
@@ -579,7 +583,7 @@ export function findNextWorkItems(
   stage?: string,
   includeInProgress: boolean = false,
   risk?: string,
-  effort?: string
+  effort?: string, excludeItem?: CandidateExclusion
 ): NextWorkItemResult[] {
   const results: NextWorkItemResult[] = [];
   const excluded = new Set<string>();
@@ -603,7 +607,8 @@ export function findNextWorkItems(
       includeInProgress,
       edgeCache,
       risk,
-      effort
+      effort,
+      excludeItem
     );
 
     results.push(result);

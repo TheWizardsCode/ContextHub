@@ -22,14 +22,24 @@
 
 import {
   findBlockingPanes,
+  isPaneAgentLive,
   parseHerdrPaneListOutput,
   type BlockingPane,
+  type HerdrPaneRecord,
 } from './pane-discovery.js';
 // The blocking-pane record type is canonical in `pane-discovery.ts`; kept
 // importable from here so ship-guard consumers/tests keep one import.
 export type { BlockingPane } from './pane-discovery.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────
+
+/** One live pane occupying the dedicated `Ship` tab. */
+export interface ActiveShipPane {
+  /** The pane's unique identifier. */
+  paneId: string;
+  /** The pane's label (may be undefined). */
+  label?: string;
+}
 
 /** The result of a guard check. */
 export interface ShipGuardResult {
@@ -39,6 +49,12 @@ export interface ShipGuardResult {
   reason?: string;
   /** The set of panes that block ship mode (empty when clear). */
   blockingPanes: BlockingPane[];
+  /**
+   * Live panes inside the dedicated `Ship` tab — a release already running
+   * (WL-0MW6FIZYI0003QEU). Empty when the tab id is unknown or the tab hosts
+   * no live agent pane.
+   */
+  activeShipPanes: ActiveShipPane[];
 }
 
 // ── Pure helpers (injectable seams) ──────────────────────────────────────
@@ -181,6 +197,60 @@ export function formatBlockedNotice(
 // ── Public API ────────────────────────────────────────────────────────────
 
 /**
+ * Find live panes inside the dedicated `Ship` tab (WL-0MW6FIZYI0003QEU).
+ *
+ * A second Ship command must be rejected while the first release is still
+ * active. "Active" is interpreted as *a live pi pane in the `Ship` tab*: the
+ * release pane spawned by the first confirmation. Only a positively known
+ * `shipTabId` is examined (an unknown/absent id yields no match, keeping
+ * placement fail-open); a pane with no agent or a terminal agent status is
+ * not live and does not block.
+ *
+ * @param records   Parsed pane records (from `parseHerdrPaneListOutput`).
+ * @param shipTabId The `Ship` tab's id, or `null`/`undefined` when unknown.
+ * @returns The live panes occupying the `Ship` tab (empty when none).
+ */
+export function findActiveShipPanes(
+  records: readonly HerdrPaneRecord[],
+  shipTabId: string | null | undefined,
+): ActiveShipPane[] {
+  if (typeof shipTabId !== 'string' || shipTabId === '') return [];
+  const active: ActiveShipPane[] = [];
+  for (const rec of records) {
+    if (rec.tabId !== shipTabId) continue;
+    if (!isPaneAgentLive(rec)) continue;
+    active.push({ paneId: rec.paneId, ...(rec.label !== undefined ? { label: rec.label } : {}) });
+  }
+  return active;
+}
+
+/**
+ * Format a human-readable notice for an active Ship-tab release.
+ *
+ * Reuses the existing blocked-notice surface (`formatBlockedShipDialog` adds
+ * the "SHIP MODE BLOCKED" heading): a second Ship command is rejected —
+ * never opening the confirmation dialog or spawning a second pi pane — while
+ * the running release occupies the `Ship` tab (WL-0MW6FIZYI0003QEU).
+ *
+ * @param activeShipPanes - Array of `ActiveShipPane` from `findActiveShipPanes`.
+ * @returns Formatted notice text.
+ */
+export function formatActiveShipNotice(activeShipPanes: ActiveShipPane[]): string {
+  const lines: string[] = [];
+  lines.push('⚠ Ship mode is blocked — a dev→main release is already running.');
+  lines.push('');
+  lines.push('Active release pane' + (activeShipPanes.length === 1 ? ':' : 's:'));
+  for (const pane of activeShipPanes) {
+    lines.push(pane.label ? `  • ${pane.label} (${pane.paneId})` : `  • ${pane.paneId}`);
+  }
+  lines.push('');
+  lines.push(
+    'Wait for the running release to finish (or close the Ship pane) and retry.',
+  );
+  return lines.join('\n');
+}
+
+/**
  * Run the full ship guard: collect project IDs, list blocking panes, and
  * return the result.
  *
@@ -190,11 +260,14 @@ export function formatBlockedNotice(
  *
  * @param wlListOutput - Raw stdout from `wl list --json`.
  * @param paneListOutput - Raw stdout from `herdr pane list`.
+ * @param shipTabId - The `Ship` tab's id, or `null`/`undefined` when unknown
+ *   (fail-open: an unknown id simply yields no active Ship panes).
  * @returns The guard result with blocking panes or a failure reason.
  */
 export function runShipGuard(
   wlListOutput: string,
   paneListOutput: string,
+  shipTabId?: string | null,
 ): ShipGuardResult {
   const projectIds = parseWorklogWorkItemIds(wlListOutput);
   if (projectIds === null) {
@@ -202,6 +275,7 @@ export function runShipGuard(
       ok: false,
       reason: 'worklog list unavailable — cannot verify pane state',
       blockingPanes: [],
+      activeShipPanes: [],
     };
   }
 
@@ -212,11 +286,13 @@ export function runShipGuard(
       ok: false,
       reason: 'pane list unavailable — cannot verify pane state',
       blockingPanes: [],
+      activeShipPanes: [],
     };
   }
 
   return {
     ok: true,
     blockingPanes: findBlockingPanes(records, projectIds),
+    activeShipPanes: findActiveShipPanes(records, shipTabId),
   };
 }

@@ -262,12 +262,13 @@ describe('podcast item stage grouping', () => {
     const allLabels = labels.join(' ');
     expect(allLabels).not.toMatch(/sourced|drafted|written|produced/);
 
-    // Idea → 'Idea', plan_complete → 'Group N', in_review → 'In Review'.
-    expect(groups.get('ep-idea')?.groupLabel).toBe('Idea');
-    expect(groups.get('ep-drafted')?.groupLabel).toMatch(/^Group \d+$/);
+    // Idea → 'Medium Idea', plan_complete → 'Medium Group N', in_review →
+    // 'In Review'.
+    expect(groups.get('ep-idea')?.groupLabel).toBe('Medium Idea');
+    expect(groups.get('ep-drafted')?.groupLabel).toMatch(/^Medium Group \d+$/);
     expect(groups.get('ep-written')?.groupLabel).toBe('In Review');
-    // done is not one of the known buckets → 'Other'.
-    expect(groups.get('ep-produced')?.groupLabel).toBe('Other');
+    // done is not one of the known buckets → 'Medium Other'.
+    expect(groups.get('ep-produced')?.groupLabel).toBe('Medium Other');
   });
 
   it('regroupWorkItems keeps podcast stage groups stable after reorder', () => {
@@ -283,8 +284,8 @@ describe('podcast item stage grouping', () => {
     const byId = new Map(regrouped.map(i => [i.id, i]));
     // In Review must come last.
     expect(byId.get('ep-written')?.groupLabel).toBe('In Review');
-    expect(byId.get('ep-idea')?.groupLabel).toBe('Idea');
-    expect(byId.get('ep-drafted')?.groupLabel).toMatch(/^Group \d+$/);
+    expect(byId.get('ep-idea')?.groupLabel).toBe('Medium Idea');
+    expect(byId.get('ep-drafted')?.groupLabel).toMatch(/^Medium Group \d+$/);
   });
 });
 

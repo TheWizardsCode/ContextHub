@@ -20,8 +20,7 @@
  * the outcomes `isContinuableHoldOutcome` allow-lists — lost claims
  * (`claim-failed` / `claim-rolled-back`) and neutral host-budget refusals
  * (`host-budget-implement` / `host-budget-audit` / `host-budget-unknown` /
- * `audit-budget-saturated` / `audit-budget-unknown` /
- * `audit-host-saturated`). A budget refusal is recorded on
+ * `audit-budget-saturated` / `audit-budget-unknown`). A budget refusal is recorded on
  * `flags.hostBudgetReason` / `flags.hostBudget` (reason + `{live, max}`
  * evidence) plus `flags.hostBudgetDetail` (the failing proxy exchange on a
  * fail-closed audit read, WL-0MWDDHVF2004PTYX AC3) and the scan steps to the
@@ -262,6 +261,10 @@ export async function dispatchFromHerdrList(
       // info so a held item is excluded by `classifyItemForDispatch` here too.
       assignee: item.assignee,
       needsProducerReview: item.needsProducerReview,
+      // `startOn` scheduling gate (WL-0MWMGEWH7004VUFI): a future item is
+      // filtered out of the list-head candidate set at every tier.
+      startOn: item.startOn,
+      createdAt: item.createdAt,
     };
     const k = classifyItemForDispatch(info, now);
     if (k === null) continue;
@@ -276,9 +279,9 @@ export async function dispatchFromHerdrList(
       // host-wide ledger, WL-0MVXY0XPF006YUHA F2): the source tells the
       // proxy/host-wide budget refusal from the per-worklog marker check, and
       // `reason`/`budget` carry the cap decision (`audit-budget-saturated` /
-      // `audit-budget-unknown` on the proxy path; the legacy `audit-host-saturated` /
-      // `host-budget-audit` / `host-budget-unknown` tokens for any host-wide
-      // source) plus its live/max evidence, so the terminal reason is reported
+      // `audit-budget-unknown` on the proxy path; `host-budget-audit` /
+      // `host-budget-unknown` for any host-wide source) plus its live/max
+      // evidence, so the terminal reason is reported
       // rather than inferred here. `detail` records the failing proxy exchange.
       if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide' || active.source === 'proxy') { flags.auditHostSaturated = true; if (typeof active.reason === 'string') { flags.hostBudgetReason = active.reason; } if (active.budget !== undefined) { flags.hostBudget = active.budget; } if (typeof active.detail === 'string') { flags.hostBudgetDetail = active.detail; } } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }

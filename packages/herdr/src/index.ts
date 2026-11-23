@@ -50,7 +50,7 @@ import {
 import { applyActivePaneMarkers, createProductionHydratorDeps } from './hydrator.js';
 import { resolveHerdrBin } from './herdr-bin.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
-import { runWorklistTui, getTermSize } from './worklist.js';
+import { runWorklistTui, getTermSize, SHIP_IT_COMMAND } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import {
@@ -75,7 +75,16 @@ import {
   type AuditBudgetLogEvent,
   type HostBudgetLivePanesResult,
 } from './host-dispatch-budget.admission.js';
-import { isLegacyAuditBudgetEnabled, sweepClosedPanes } from './host-dispatch-budget.js';
+import {
+  isHostBudgetKind,
+  isLegacyAuditBudgetEnabled,
+  readBudgetConfig,
+  sweepClosedPanes,
+} from './host-dispatch-budget.js';
+// The budget's LIVE-pane projection (WL-0MWJVY6NR001E0FS): trims terminal-status
+// agents from the FULL pane-record set so a finished session whose pane stays
+// open stops counting against its tier.
+import { liveBudgetPanesFromRecords } from './host-dispatch-budget.live-panes.js';
 import {
   auditLeaseSessionId,
   createAuditLeaseClient,
@@ -106,6 +115,7 @@ import {
 } from './pane-close-herdr.js';
 import { observeDispatchedPaneOutcome } from './downtime-worker.route-outcome.js';
 import { runScheduledPaneClose } from './pane-close-scheduler.js';
+import { finishedSessionReleaseIdentity } from './pane-close-reaper.js';
 import {
   createDowntimeWorker,
   createDowntimePoller,
@@ -308,6 +318,7 @@ import {
   closeInteractiveTabRootPane,
   defaultInteractiveClosePane,
   defaultInteractiveLiveTrackedPanesResolver,
+  interactiveTabLabel,
   resolveInteractiveItemAnchor,
   resolveInteractiveItemAnchorAfterAdmission,
   resolveInteractiveWorkspaceId,
@@ -316,6 +327,7 @@ import {
 export {
   closeInteractiveTabRootPane,
   defaultInteractiveLiveTrackedPanesResolver,
+  interactiveTabLabel,
   resolveInteractiveItemAnchor,
   resolveInteractiveItemAnchorAfterAdmission,
   resolveInteractiveWorkspaceId,
@@ -372,6 +384,7 @@ export { setHostCpuSamplerForTests } from './index.host-cpu.js';
 
 import {
   configureWorklogTarget,
+  refreshWorklogTarget,
   settings,
   uninitializedReport,
 } from './index.settings.js';
@@ -403,12 +416,14 @@ async function hostBudgetLivePanes(
     const running = await readRunningPanes(cwd);
     if (!running.ok) return { ok: false };
     if (Array.isArray(running.records)) {
+      // Count only LIVE panes (WL-0MWJVY6NR001E0FS): a finished session whose
+      // pane stays open (implement is never auto-closed) is not in-flight WORK
+      // and must not hold a dispatch-budget slot. `records` is the FULL pane set
+      // (other consumers need every label suffix); the budget projection trims
+      // terminal-status agents so the header and admission stop counting them.
       return {
         ok: true,
-        panes: running.records.map((record) => ({
-          paneId: record.paneId,
-          ...(typeof record.label === 'string' ? { title: record.label } : {}),
-        })),
+        panes: liveBudgetPanesFromRecords(running.records),
       };
     }
     if (Array.isArray(running.paneIds)) {
@@ -1185,11 +1200,10 @@ export function createDowntimeDeps(
         return false;
       }
       // 3. Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
-      // AC2): the machine-scoped dispatch-budget ledger is the audit-tier
-      // authority now, reserved in the claim→marker→spawn choke point. This
-      // version never writes nor removes the legacy `active-audit` file; a
-      // non-stale file written by an older instance is still counted as one
-      // synthetic audit entry on read (mixed-version safety).
+      // AC2) and its marker surface is DELETED (WL-0MWF34IEP00221NU AC5): the
+      // machine-scoped dispatch-budget ledger is the audit-tier authority,
+      // reserved in the claim→marker→spawn choke point. Nothing reads, writes
+      // or removes a legacy `active-audit` file any more.
       return true;
     },
     async recordError(event: DowntimeErrorEvent): Promise<void> {
@@ -1221,10 +1235,9 @@ export function createDowntimeDeps(
         // fail-closed: audit logging must never crash the worker
       }
       // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
-      // AC2): a failed audit spawn releases the machine-scoped LEDGER entry in
-      // the claim pipeline's spawn-failure path
-      // (`releaseHostBudgetForFailure`), so this version neither writes nor
-      // removes the legacy `active-audit` file.
+      // AC2) and its marker surface is DELETED (WL-0MWF34IEP00221NU AC5): a
+      // failed audit spawn releases the machine-scoped LEDGER entry in the
+      // claim pipeline's spawn-failure path (`releaseHostBudgetForFailure`).
     },
     async recordDispatchEnrichment(event: DowntimeDispatchEnrichmentEvent): Promise<void> {
       // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6): append a second
@@ -1309,8 +1322,8 @@ export function createDowntimeDeps(
     // throws.
     async recordPaneClose(entry, cwd: string): Promise<void> {
       // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
-      // AC2): the audit slot is released by the dispatch-budget ledger release
-      // below. The legacy `active-audit` file is never removed by this version.
+      // AC2) and its marker surface is DELETED (WL-0MWF34IEP00221NU AC5): the
+      // audit slot is released by the dispatch-budget ledger release below.
       //
       // Host-wide dispatch budget (WL-0MVXY0YG7009JMHI F3 AC3): a closed pane
       // gives its OWN machine-wide slot back. Since WL-0MWFJD5T4003OM91 the
@@ -1483,6 +1496,25 @@ export function createDowntimeDeps(
             actor: `herdr:${process.pid}`,
           });
         },
+        // Finished-session budget release (WL-0MWJVY6NR001E0FS): a pane whose
+        // Pi session is FINISHED gives its tier slot back even when the close
+        // policy leaves the pane OPEN (an `implement` pane is never
+        // auto-closed; a terminal-status `audit` pane is caught by the
+        // dead-agent guard). The release identity omits `kind`, so the
+        // ledger entry's OWN kind keys it — a future capped skill kind is
+        // covered with no change here — and the finished PANE id is the
+        // ownership proof, so a sibling dispatch for the same item keeps its
+        // entry (WL-0MWFJD5T4003OM91). Best-effort: the reaper wraps it
+        // fail-open; the close-path release, dead-pane sweep and 2 h stale
+        // reap remain as backstops.
+        releaseFinishedSessionBudget: async (pane) => {
+          if (pane.itemId !== '') {
+            releaseHostBudgetDispatch(finishedSessionReleaseIdentity(pane), {
+              reason: 'session-finished',
+              actor: `herdr:${process.pid}`,
+            });
+          }
+        },
       });
       const result = await runScheduledPaneClose(
         deps,
@@ -1538,6 +1570,15 @@ export function createDowntimeDeps(
       this: DowntimeWorkerDeps,
       input,
     ) {
+      // WL-0MWF34932000SNTX F2: an uncapped kind (or a non-budget kind)
+      // admits WITHOUT a reservation and without reading the live pane list —
+      // no ledger bookkeeping, no budget refusal token (parent AC2).
+      if (!isHostBudgetKind(input.kind)) {
+        return { admitted: true, live: 0, max: 0, capped: false };
+      }
+      if (readBudgetConfig().config[input.kind] === undefined) {
+        return { admitted: true, live: 0, max: 0, capped: false };
+      }
       const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
       const audit = input.kind === 'audit';
       // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN):
@@ -1570,7 +1611,7 @@ export function createDowntimeDeps(
       }
       return admitHostBudgetDispatch(
         {
-          kind: audit ? 'audit' : 'implement',
+          kind: input.kind,
           itemId: input.itemId,
           instanceId: `herdr:${process.pid}`,
           root: input.cwd,
@@ -1592,7 +1633,7 @@ export function createDowntimeDeps(
       );
     },
     async confirmHostDispatch(itemId, kind, paneId, cwd): Promise<void> {
-      if (kind !== 'implement' && kind !== 'audit') return;
+      if (!isHostBudgetKind(kind)) return;
       try {
         confirmHostBudgetDispatch({
           kind,
@@ -1611,7 +1652,7 @@ export function createDowntimeDeps(
       releaseHostBudgetDispatch(
         {
           itemId,
-          ...(release?.kind === 'implement' || release?.kind === 'audit'
+          ...(release?.kind !== undefined && isHostBudgetKind(release.kind)
             ? { kind: release.kind }
             : {}),
           ...(release?.paneId !== undefined ? { paneId: release.paneId } : {}),
@@ -1743,11 +1784,20 @@ export async function main(): Promise<void> {
   const resolvedCwd = process.env.HERDR_RESOLVED_CWD;
   process.stderr.write(`[worklog-plugin] HERDR_RESOLVED_CWD='${resolvedCwd ?? '(not set)'}'\n`);
 
-  const wlRoot = configureWorklogTarget(resolvedCwd ?? process.cwd());
+  const startDir = resolvedCwd ?? process.cwd();
+  let wlRoot = configureWorklogTarget(startDir);
+  // Persistent in-pane uninitialised notice (WL-0MVTDEOOA003PLIV /
+  // WL-0MW4P52LB009J0DX): when no valid `.worklog/` resolves, the selection
+  // list renders this as a persistent error line naming the path and the
+  // `wl init` fix, so the pane is never a silent blank list. It is emitted to
+  // stderr as well for non-interactive / TUI-unavailable runs (same wording).
+  // Kept mutable so the fetcher can clear it once a `wl init` resolves the
+  // root on a subsequent refresh, without a plugin restart (AC1).
+  let uninitialisedNotice: string | null = wlRoot ? null : uninitializedReport(startDir);
   if (wlRoot) {
     process.stderr.write(`[worklog-plugin] wlRoot resolved: ${wlRoot}\n`);
-  } else {
-    process.stderr.write(uninitializedReport(resolvedCwd ?? process.cwd()));
+  } else if (uninitialisedNotice) {
+    process.stderr.write(uninitialisedNotice);
   }
 
   // Load shortcut config: bundled defaults merged with a project-local
@@ -1809,12 +1859,26 @@ export async function main(): Promise<void> {
     // the plugin's own CWD (which would show an unrelated project's items).
     // Return an empty list so the TUI shows the uninitialized/empty state.
     if (!wlRoot) {
-      return [];
+      // Re-resolve on refresh so a `wl init` run after the pane opened is
+      // picked up without a plugin restart (WL-0MVTDEOOA003PLIV /
+      // WL-0MW4P52LB009J0DX AC1). Presentation-only: same shared resolver, no
+      // semantics change.
+      wlRoot = refreshWorklogTarget(startDir);
+      if (!wlRoot) {
+        return [];
+      }
+      // A valid root now exists — clear the in-pane uninitialised notice so
+      // the renderer drops the error banner on this refresh.
+      uninitialisedNotice = null;
     }
     try {
       const currentSettings = loadSettings();
       const count = clampBrowseItemCount(currentSettings.browseItemCount ?? defaultSettings.browseItemCount);
-      const items = await fetchNextItems(count);
+      // The WORKLIST is a read-only VIEW: it opts in to not-yet-started items
+      // so a scheduled item is visible with its `[not started until <date>]`
+      // marker (WL-0MWMGEWH7004VUFI). The DISPATCH head below deliberately
+      // does NOT opt in, so a future item is never dispatched or claimed.
+      const items = await fetchNextItems(count, undefined, { includeNotStarted: true });
       // The pane-existence marker (in-progress status + green-circle icon)
       // is applied by the worklist's `applyPaneMarkers` seam on the initial
       // load and every refresh (WL-0MV1BWETT005GSUJ); no separate
@@ -1992,6 +2056,10 @@ export async function main(): Promise<void> {
       cwd: targetCwd,
       showHelpText: runSettings.showHelpText,
       showIcons: runSettings.showIcons,
+      // Uninitialised-worklog notice (WL-0MVTDEOOA003PLIV /
+      // WL-0MW4P52LB009J0DX): read through a getter so the banner clears on
+      // the first refresh after a `wl init` resolves the root.
+      getUninitialisedNotice: () => uninitialisedNotice,
       downtimeWorker,
       downtimePollIntervalMs: runSettings.downtimePollIntervalMs,
       // Per-instance downtime toggle (`d` shortcut, parent WL-0MSZ4NSOE007AQEF):
@@ -2072,6 +2140,18 @@ export async function main(): Promise<void> {
         // no ID, no workspace, or any resolution/creation failure yields
         // `undefined`, so the scripts keep today's current-pane split (AC5).
         const interactiveItemId = shouldOpenPane ? extractWorkItemId(command) : undefined;
+        // Ship It dispatch placement (WL-0MW6FIZYI0003QEU): `/skill:ship
+        // release` is a GLOBAL command carrying no work-item ID, so the
+        // item-ID anchor lookup would return null and split the CURRENT
+        // pane/tab. Substituting the `Ship` tab label on this path only
+        // places the release pane in its dedicated tab (created on first
+        // use, reused thereafter) through the SAME `getItemTabAnchor`
+        // machinery — no parallel tab-provisioning path. Fail-open: an
+        // unresolvable tab still falls back to the current-pane split.
+        const shipDispatch = shouldOpenPane && command.trim() === SHIP_IT_COMMAND;
+        const interactiveAnchorLabel = shouldOpenPane
+          ? interactiveTabLabel(interactiveItemId, shipDispatch)
+          : undefined;
         // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF, AC7): populated only
         // when the item tab is PROVISIONED. A reused tab leaves this null, so a
         // reused live anchor is never considered for cleanup. Combined with the
@@ -2090,11 +2170,11 @@ export async function main(): Promise<void> {
         const interactiveWorkspaceId = resolveInteractiveWorkspaceId(process.env) ?? '';
         const resolveInteractiveAnchorForShellRoute =
           async (): Promise<ItemTabAnchor | null> =>
-            interactiveItemId !== undefined
+            interactiveAnchorLabel !== undefined
               ? resolveInteractiveItemAnchor(
                   targetCwd,
                   interactiveWorkspaceId,
-                  interactiveItemId,
+                  interactiveAnchorLabel,
                   undefined,
                   onCreateItemTabAnchor,
                   'left-of-extensions',
@@ -2204,7 +2284,7 @@ export async function main(): Promise<void> {
             budgetPreparation.proceed,
             targetCwd,
             interactiveWorkspaceId,
-            interactiveItemId,
+            interactiveAnchorLabel,
             undefined,
             onCreateItemTabAnchor,
             'left-of-extensions',
@@ -2215,7 +2295,16 @@ export async function main(): Promise<void> {
           // succeeds, then record the work-item ↔ pane association
           // fire-and-forget. Commands without an ID are not tracked (AC6).
           const itemId = extractWorkItemId(command);
-          const paneIdFile = itemId
+          // Pane-ID capture (WL-0MSBQUJQX005RAT9) also drives the fail-safe
+          // placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF): capture
+          // whenever the dispatch carries an item ID OR this dispatch
+          // provisioned a FRESH tab. The ship dispatch has no item ID but
+          // creates the `Ship` tab on first use, so its placeholder root pane
+          // must be closed too (WL-0MW6FIZYI0003QEU). The closure keeps the
+          // create-vs-reuse read out of TypeScript's stale `null` narrowing.
+          const needsPaneIdCapture = (): boolean =>
+            itemId !== undefined || createdItemTabAnchor !== null;
+          const paneIdFile = needsPaneIdCapture()
             ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}.json`)
             : undefined;
           // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): build the pane
@@ -2223,6 +2312,11 @@ export async function main(): Promise<void> {
           // title/id, then pass it via --pane-name so the pi pane is
           // identifiable among other panes.
           const paneName = buildManuallyTriggeredPaneTitle(command, paneTitle, itemId);
+          // Focus (WL-0MT70LC6B009TL3Q): the Ship It release is normally
+          // dispatched with `focus: true` (the operator wants to watch the
+          // release run). Force it here as well so any ship dispatch that
+          // reaches this path is focused (WL-0MW6FIZYI0003QEU AC3).
+          const effectiveFocus = shipDispatch ? true : focus;
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           // The `model` from the shortcut entry (if any) is forwarded as
@@ -2235,7 +2329,7 @@ export async function main(): Promise<void> {
               model,
               paneIdFile,
               paneName,
-              focus,
+              effectiveFocus,
               interactiveAnchor?.paneId,
               requestPriority,
             ),
@@ -2254,21 +2348,30 @@ export async function main(): Promise<void> {
             },
           );
           child.unref(); // Allow the parent to exit independently
-          if (itemId && paneIdFile) {
+          if (paneIdFile) {
             // Fire-and-forget: polling must never block the TUI loop. A
             // missing file (split failed) is a no-op — no entry recorded.
             // Once the pane id is captured (proving the split succeeded) the
             // freshly-created item tab's placeholder root pane is closed
             // (fail-safe; WL-0MUYI3K8H007MPKF, AC7).
-            void capturePaneIdFromFile(itemId, paneIdFile, (wid, pid) =>
-              agentTracker.recordAgentForWorkItem(wid, pid, command),
-            ).then((capturedPaneId) => {
+            //
+            // Only item-carrying dispatches record a work-item ↔ pane
+            // association; the ship dispatch's capture exists solely for the
+            // root-pane cleanup (WL-0MW6FIZYI0003QEU).
+            void capturePaneIdFromFile(itemId ?? '', paneIdFile, (wid, pid) => {
+              if (itemId === undefined) return;
+              return agentTracker.recordAgentForWorkItem(wid, pid, command);
+            }).then((capturedPaneId) => {
               if (capturedPaneId !== undefined) {
                 // Confirm the reservation with the live pane id so the
                 // implement tier counts this user-fired dispatch (its
                 // liveness rule needs a pane in the machine-wide pane list).
                 // Best-effort: a failing seam never affects the dispatch.
-                if (budgetPreparation.reserved && budgetPreparation.kind !== undefined) {
+                if (
+                  itemId !== undefined &&
+                  budgetPreparation.reserved &&
+                  budgetPreparation.kind !== undefined
+                ) {
                   try {
                     confirmHostBudgetDispatch({
                       kind: budgetPreparation.kind,

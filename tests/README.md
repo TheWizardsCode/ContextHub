@@ -23,14 +23,28 @@ node ./scripts/test-timings.cjs
 > **Canonical gate vs. bare vitest.** `npm test` runs the whole vitest suite
 > (every `tests/` and `packages/` test file). The *canonical* full suite that
 > the implement/test gates and the ship release use is declared in
-> `.pi/test-config.json` (`suiteCommands`) and is currently
-> `npm --silent test -- tests` — all 277 `tests/` files, since
-> WL-0MVG4FF9200346NR widened it from `tests/cli` + `tests/unit` (160 files).
-> `packages/herdr` stays a separate, opt-in profile (producer decision
-> WL-0MVFZVIA50062TJ8); `packages/tui` and `packages/shared` are not gated yet
-> (WL-0MVODOJWB004G03J). See
+> `.pi/test-config.json` (`suiteCommands`): a leading
+> `npm --silent run typecheck`, then `npm --silent test -- tests`,
+> `npm --silent test -- packages/shared` and
+> `npm --silent test -- packages/tui/extensions`. The `tests` umbrella executes
+> every `tests/` file since WL-0MVG4FF9200346NR widened it from `tests/cli` +
+> `tests/unit`; `packages/shared` and `packages/tui/extensions` were added by
+> WL-0MVODOJWB004G03J. `packages/herdr` **tests** stay a separate, opt-in
+> profile (producer decision WL-0MVFZVIA50062TJ8), while `packages/herdr`
+> **types** are gated by the typecheck (WL-0MWKQ51G0006F3KV). See
 > [docs/dev/test-suite-baseline.md](../docs/dev/test-suite-baseline.md#test-gates)
 > for the gate reference, coverage table and measured runtimes.
+
+> **Shared-build precondition.** Tests import `@worklog/shared` from
+> `packages/shared/dist` — gitignored build output — so a run whose build
+> predates `packages/shared/src` would exercise stale shared code and report
+> phantom failures. A once-per-run `globalSetup` (`tests/global-setup.ts`,
+> wired in `vitest.config.ts`) aborts before any test file with one message
+> naming the resolved `packages/shared` directory, the artefact and source
+> mtimes, and the remedy: `npm run build:shared` from that repository root. It
+> never rebuilds for you. Fail-open: a checkout it cannot judge runs normally.
+> See
+> [docs/dev/pre-push-hook.md](../docs/dev/pre-push-hook.md#shared-build-precondition-for-full-suite-evidence-wl-0mw8g1x3v007cgae).
 
 ## Per-test timings
 
@@ -66,7 +80,8 @@ Tests live under the top-level `tests/` directory:
 
 ### Core unit tests (`tests/`)
 
-- **`database.test.ts`** — WorklogDatabase CRUD, queries, comments, parent-child relationships
+- **`database.test.ts`, `database-dependencies-import.test.ts`, `database-transactional-import-next.test.ts`, `database-next-pipeline.test.ts`, `database-sort-audit-sync.test.ts`** — WorklogDatabase CRUD, queries, comments, parent-child relationships, dependency edges, import/upsert, `wl next` selection, sorting, caching, JSONL bootstrap/export and audit ordering (mechanically split from the original `database.test.ts`; WL-0MVOBP8MC0093Y7T)
+- **`next-regression.test.ts`, `next-regression-escalation.test.ts`, `next-regression-stage-filters.test.ts`** — `wl next` regression scenarios (mechanically split from the original `next-regression.test.ts`; WL-0MVOBP8MC0093Y7T)
 - **`jsonl.test.ts`** — JSONL import/export, backward compatibility, round-trip integrity
 - **`sync.test.ts`** — Work item merging, field-level conflict resolution, tag/comment merging
 - **`sync-worktree.test.ts`** — Git worktree sync scenarios

@@ -11,6 +11,13 @@ import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
 // visible and immutable.
 import { isSoftDeleted } from '@worklog/shared/predicates';
 import { createListEnricher } from '../list-enrichment.js';
+import {
+  filterNotStarted,
+  markNotStarted,
+  resolveNotStartedFilterFromFlags,
+  INCLUDE_NOT_STARTED_FLAG,
+  STARTS_BEFORE_FLAG,
+} from '../not-started.js';
 import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, createHierarchyOrderComparator } from './helpers.js';
 import { compareInReviewItems } from './grouping.js';
 
@@ -31,6 +38,8 @@ export default function register(ctx: PluginContext): void {
     .option('--tags <tags>', 'Filter by tags (comma-separated)')
     .option('-a, --assignee <assignee>', 'Filter by assignee')
     .option('--stage <stage>', 'Filter by stage')
+    .option(INCLUDE_NOT_STARTED_FLAG, 'Include items whose startOn is in the future (excluded by default)')
+    .option(`${STARTS_BEFORE_FLAG} <iso>`, 'Include not-yet-started items starting before this ISO-8601 instant')
     .option('--needs-producer-review [value]', 'Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)')
     .option('-f, --fields <fields>', 'Comma-separated list of fields to include in output (id always included)')
     .option('--prefix <prefix>', 'Override the default prefix')
@@ -114,6 +123,21 @@ export default function register(ctx: PluginContext): void {
       
       let items = db.list(query);
 
+      // Default exclusion of not-yet-started items (`startOn` in the future),
+      // with `--include-not-started` / `--starts-before` as the opt-in
+      // (WL-0MWMGET8N009KG33). `in-progress` rows are never filtered.
+      const notStartedFlags = resolveNotStartedFilterFromFlags(options);
+      if (!notStartedFlags.ok) {
+        output.error(notStartedFlags.message, {
+          success: false,
+          error: 'invalid-starts-before',
+          message: notStartedFlags.message,
+        });
+        process.exit(1);
+      }
+      const notStarted = notStartedFlags.filter;
+      items = filterNotStarted(items, notStarted);
+
       // Apply --number/-n limit when provided (only for human or JSON output)
       const numRequested = options.number ? parseInt(options.number as any, 10) : NaN;
       const limit = Number.isNaN(numRequested) || numRequested < 1 ? undefined : numRequested;
@@ -193,6 +217,10 @@ export default function register(ctx: PluginContext): void {
             })
         : items.slice().sort(hierarchyComparator);
       const limited = limit ? sortedAll.slice(0, limit) : sortedAll;
+      // Mark the items this read shows: JSON carries `notStarted: true`, and
+      // the shared title formatter appends the trailing
+      // `[not started until …]` marker to text output (AC).
+      const markedLimited = markNotStarted(limited, notStarted);
 
       if (utils.isJsonMode()) {
         // Enrich each work item with the audit verdict, the canonical content
@@ -200,7 +228,7 @@ export default function register(ctx: PluginContext): void {
         // query for the whole list). Consumers (e.g. the Pi TUI extension, the
         // Herdr worklist) rely on this shape for the audit icon (✅/❌/❓) and
         // the audit-freshness gate without an extra round-trip per item.
-        const enrichedItems = enricher.enrich(limited);
+        const enrichedItems = enricher.enrich(markedLimited);
         // Apply --fields projection when requested (id always included).
         // The projected items drop enrichment fields (auditResult, auditedAt,
         // fingerprint, currentFingerprint, childCount) unless explicitly
@@ -216,7 +244,7 @@ export default function register(ctx: PluginContext): void {
           return;
         }
 
-        const displayItems = limited;
+        const displayItems = markedLimited;
         console.log(`Found ${displayItems.length} work item(s):\n`);
         const format = resolveFormat(program);
         if (requestedFields && format.toLowerCase() !== 'raw' && format.toLowerCase() !== 'concise') {

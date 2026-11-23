@@ -29,6 +29,7 @@ import listCommand from '../../src/commands/list.js';
 import showCommand from '../../src/commands/show.js';
 import updateCommand from '../../src/commands/update.js';
 import deleteCommand from '../../src/commands/delete.js';
+import undeleteCommand from '../../src/commands/undelete.js';
 import exportCommand from '../../src/commands/export.js';
 import importCommand from '../../src/commands/import.js';
 import nextCommand from '../../src/commands/next.js';
@@ -60,6 +61,7 @@ const builtInCommands = [
   showCommand,
   updateCommand,
   deleteCommand,
+  undeleteCommand,
   exportCommand,
   importCommand,
   nextCommand,

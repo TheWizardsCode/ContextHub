@@ -398,7 +398,9 @@ export async function performSync(
   // The merge above works from the local snapshot taken at the *start* of the
   // sync (before the fetch). A claim that landed during the read→write window
   // (the window the mutation lock is supposed to close — it can still open
-  // when a long sync's lock is treated as age-expired) is not in that
+  // for a **foreign-host** long sync, whose lock is age-expired because its
+  // PID cannot be trusted; a same-host live holder is now authoritative and
+  // never age-expired — SA-0MVL7YG2S009L6PU) is not in that
   // snapshot, so the merged set can carry the pre-claim row. Persisting it
   // would revert the claim, and `import()`/`upsertItems()` would then re-stamp
   // the losing row as the newest row, making the revert permanent.

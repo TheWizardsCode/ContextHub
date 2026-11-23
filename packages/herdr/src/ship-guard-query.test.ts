@@ -177,3 +177,89 @@ describe('createProductionShipGuardQuery (WL-0MUEK7H39008VVUF)', () => {
     expect(calls[0]).toContain('--fields');
   });
 });
+
+// ── Ship-tab id resolution (WL-0MW6FIZYI0003QEU AC2) ──────────────────────
+
+describe('createProductionShipGuardQuery — Ship tab resolution (WL-0MW6FIZYI0003QEU)', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+  });
+
+  afterEach(() => {
+    resetExecFileAsync();
+  });
+
+  it('resolves the id of the tab labelled exactly Ship in the given workspace', async () => {
+    const calls: { bin: string; args: string[] }[] = [];
+    const mock = vi.fn(async (bin: string, args: string[]) => {
+      calls.push({ bin, args });
+      if (bin === 'wl') return { stdout: idsPayload(1), stderr: '' };
+      if (args[0] === 'tab') {
+        return {
+          stdout: JSON.stringify({
+            result: {
+              tabs: [
+                { tab_id: 'w9:tWorklog', label: 'Worklog', workspace_id: 'w9' },
+                { tab_id: 'w9:tShip', label: 'Ship', workspace_id: 'w9' },
+              ],
+            },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: panePayload([]), stderr: '' };
+    });
+    setExecFileAsync(mock as any);
+
+    const query = await createProductionShipGuardQuery(undefined, 'w9')();
+
+    expect(query.shipTabId).toBe('w9:tShip');
+    const tabCall = calls.find((c) => c.bin !== 'wl' && c.args[0] === 'tab');
+    expect(tabCall?.args).toEqual(['tab', 'list', '--workspace', 'w9']);
+  });
+
+  it('returns shipTabId null when no Ship tab exists', async () => {
+    const mock = vi.fn(async (bin: string, args: string[]) => {
+      if (bin === 'wl') return { stdout: idsPayload(1), stderr: '' };
+      if (args[0] === 'tab') {
+        return {
+          stdout: JSON.stringify({ result: { tabs: [{ tab_id: 'w9:tWorklog', label: 'Worklog' }] } }),
+          stderr: '',
+        };
+      }
+      return { stdout: panePayload([]), stderr: '' };
+    });
+    setExecFileAsync(mock as any);
+
+    const query = await createProductionShipGuardQuery(undefined, 'w9')();
+    expect(query.shipTabId).toBeNull();
+  });
+
+  it('fails open (shipTabId null) when the tab list query fails, keeping the other outputs', async () => {
+    const mock = vi.fn(async (bin: string, args: string[]) => {
+      if (bin === 'wl') return { stdout: idsPayload(1), stderr: '' };
+      if (args[0] === 'tab') throw new Error('herdr tab list boom');
+      return { stdout: panePayload([]), stderr: '' };
+    });
+    setExecFileAsync(mock as any);
+
+    const query = await createProductionShipGuardQuery(undefined, 'w9')();
+    expect(query.shipTabId).toBeNull();
+    expect(query.worklogOutput).not.toBeNull();
+    expect(query.paneOutput).not.toBeNull();
+  });
+
+  it('does not query tabs when no workspace is known', async () => {
+    const calls: string[][] = [];
+    const mock = vi.fn(async (bin: string, args: string[]) => {
+      if (bin !== 'wl') calls.push(args);
+      if (bin === 'wl') return { stdout: idsPayload(1), stderr: '' };
+      return { stdout: panePayload([]), stderr: '' };
+    });
+    setExecFileAsync(mock as any);
+
+    const query = await createProductionShipGuardQuery(undefined, '')();
+    expect(query.shipTabId).toBeNull();
+    expect(calls.some((args) => args[0] === 'tab')).toBe(false);
+  });
+});

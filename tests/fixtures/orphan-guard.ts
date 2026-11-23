@@ -117,6 +117,30 @@ export function seedHardMissingParentWithLiveChildren(dir: string): void {
 }
 
 /**
+ * Seed both orphan-reporting scenarios into ONE store — a hard-missing parent
+ * (children reference an id that is never created) and a soft-deleted parent
+ * with a live child — so grouped reporting is exercised across both shapes
+ * together (R3/R3b, WL-0MWGRKLLG0035PLG).
+ *
+ * `seedWorkItems` writes the ephemeral JSONL wholesale, so calling the two
+ * single-scenario helpers in sequence would replace the first seed; compose
+ * the items into a single call instead.
+ */
+export function seedGroupedOrphanReportingScenarios(dir: string): void {
+  const { parentId, children } = HARD_MISSING_PARENT;
+  const soft = SOFT_DELETED_PARENT;
+  seedWorkItems(dir, [
+    ...children.map((id, index) => ({
+      id,
+      title: `Live child ${index + 1} of hard-deleted parent`,
+      parentId,
+    })),
+    { id: soft.parent, title: 'Soft-deleted parent', status: 'deleted' },
+    { id: soft.child, title: 'Live child of soft-deleted parent', parentId: soft.parent },
+  ]);
+}
+
+/**
  * Seed a foreign-prefix parent (`WL-101`) with an own-prefix child, a second
  * plain foreign item with no dependents, and a plain own item. This is the
  * R1 shape for `wl doctor foreign-items --apply`.

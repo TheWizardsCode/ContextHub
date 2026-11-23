@@ -41,11 +41,16 @@ import {
 } from './downtime-worker.constants.js';
 import { dispatchFromCoordination } from './downtime-worker.coordination-leader.js';
 import { computeMostImportantItem } from './downtime-worker.coordination.js';
+import {
+  dispatchDecisionFairness,
+  selectedRootForTick,
+} from './downtime-worker.fairness.js';
 import { hasPeerOffer, readCoordinationFile, upsertLeader } from './coordination.js';
 import { countFreeUnownedSlots, evaluatePrefillPacing } from './downtime-worker.idle.js';
 import { dispatchDowntimeWork } from './downtime-worker.dispatch.js';
 import {
   pauseAfterPersistentErrors,
+  refusalDecisionFields,
   writeCapacityStarvationSignal,
 } from './downtime-worker.orchestrator-signals.js';
 import type { LeafAuditAdmission } from './downtime-worker.gates.js';
@@ -227,8 +232,17 @@ export async function recordDecision(
      * open-vocabulary reason is not). Defaults to `reason`.
      */
     starvationReason?: string;
+    /**
+     * `false` disables the identical-reason rate limit (successful dispatches
+     * are fairness evidence and must never be dropped). Defaults to `true`;
+     * `operation` sets the entry's operation/outcome (`dispatch` vs the default
+     * `no-dispatch`).
+     */
+    rateLimit?: boolean;
+    operation?: 'dispatch' | 'no-dispatch';
   } = {},
 ): Promise<void> {
+  const operation = options.operation ?? 'no-dispatch';
   if (options.blocking !== false) ctx.blockReason = decisionHeaderToken(reason);
   const now = Date.now();
   // ── Continuous capacity-starvation signal (WL-0MVKNC2N50025HXE AC3) ──
@@ -267,6 +281,7 @@ export async function recordDecision(
     }
   }
   if (
+    options.rateLimit !== false &&
     ctx.lastDecisionReason === reason &&
     now - ctx.lastDecisionAt < DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS
   ) {
@@ -296,7 +311,8 @@ export async function recordDecision(
   }
   const entry: CoordinationLogEntry = {
     kind: 'decision',
-    operation: 'no-dispatch',
+    operation,
+    outcome: operation === 'dispatch' ? 'dispatched' : 'no-dispatch',
     instanceId: ctx.instanceId,
     reason,
     ...fields,
@@ -585,6 +601,17 @@ export async function performDispatch(
     ctx.opts.coordinationDir && typeof ctx.opts.deps.fetchItem === 'function'
       ? readCoordinationFile(ctx.opts.coordinationDir)?.entries ?? []
       : [];
+  // Per-project fairness (AC3): the same pure selection over the same snapshot.
+  const tickSelectedRoot = ctx.opts.coordinationDir !== undefined
+    ? selectedRootForTick(ctx.opts.coordinationDir, coordinationEntries)
+    : null;
+  const dispatchBaseFields: DecisionEntryFields = {
+    freeSlots: admission.freeSlots,
+    totalSlots: evaluation.status.total_slots,
+    ownerPresent: admission.ownerPresent,
+    runningPanes: admission.runningPanes,
+    contentionDepth: admission.contentionQueueDepth,
+  };
   try {
     const outcome =
       ctx.opts.coordinationDir && typeof ctx.opts.deps.fetchItem === 'function'
@@ -686,75 +713,50 @@ export async function performDispatch(
       // reservation race can never be confused with herdr's own
       // `prefill-gate`/`prefill-cap` pacing.
       const reservationRefused = outcome.reservation?.admit === false;
+      // A refusal consumed nothing: selected root only (legacy direct mode is unchanged).
+      const fairness =
+        ctx.opts.coordinationDir !== undefined ? { selectedRoot: tickSelectedRoot } : {};
+      const baseFields: DecisionEntryFields = {
+        ...dispatchBaseFields,
+        ...admission.capacity,
+        // AC5: a held/blocked continuation reuses the EXISTING token and gains
+        // the active batch metadata as an additive field.
+        ...batchMetadata(ctx, outcome.auditBatch),
+      };
       void recordDecision(
         ctx,
         cfg.cwd,
         reservationRefused ? 'reservation-refused' : outcome.reason,
-        {
-          freeSlots: admission.freeSlots,
-          totalSlots: evaluation.status.total_slots,
-          ownerPresent: admission.ownerPresent,
-          runningPanes: admission.runningPanes,
-          contentionDepth: admission.contentionQueueDepth,
-          ...admission.capacity,
-          // AC5: a held/blocked continuation reuses the EXISTING token
-          // unchanged (`audit-in-flight` / `audit-host-saturated` /
-          // `code-freeze` / `review-queue-hold` / `no-candidate` / ...) and
-          // gains the active batch metadata as an additive field.
-          ...batchMetadata(ctx, outcome.auditBatch),
-          // The proxy's own refusal reason (open vocabulary), preserved
-          // for diagnosis alongside the grouped entry reason.
-          ...(reservationRefused ? { reservationReason: outcome.reason } : {}),
-          ...(outcome.offerRejections !== undefined ? { offerRejections: outcome.offerRejections } : {}),
-          // Host-budget evidence (WL-0MVXY0ZYW009NEJD F5 AC1): the SAME
-          // `{ live, max }` figure the refusal quotes on the stderr skip line
-          // and the worklist counter shows, copied straight from the dispatch
-          // outcome — one set of numbers for every surface. Absent on every
-          // non-budget outcome, so existing entry shapes are unchanged.
-          ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
-          // Failing exchange on a fail-closed audit-budget refusal
-          // (`audit-budget-unknown`): the decision entry names the broken
-          // proxy contract (`http-404` / `timeout` / `network` / `bad-body` /
-          // `seam-absent`) without reading code (WL-0MWDDHVF2004PTYX AC3).
-          // Absent on every other outcome, so existing entry shapes are
-          // unchanged.
-          ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
-          // Primary-path near-miss diagnostic (WL-0MWHCV3PR002WSQM AC4): the
-          // recorded `HERDR_RESOLVED_CWD` mismatch rides the decision entry
-          // (expected vs actual root, pane/workspace ids) when placement
-          // failed closed after a near-miss — a fallback failure never hides
-          // the primary-path diagnosis. Absent on every other outcome.
-          ...(outcome.projectWorkspaceMismatch !== undefined
-            ? { projectWorkspaceMismatch: outcome.projectWorkspaceMismatch }
-            : {}),
-          // Audit-lease cooldown (WL-0MWFJH3NW006F5GN AC2): the proxy's
-          // bounded `retry_after_s` on a 429 audit-lease refusal — the
-          // deferral advice an operator reads to know when the tier re-checks.
-          // Absent on every other outcome.
-          ...(outcome.retryAfterS !== undefined ? { retryAfterS: outcome.retryAfterS } : {}),
-          // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
-          // slice C2): a refusal carries its reason as the decision reason
-          // (distinct header token) plus `admit: false`, `retryAfterS` and
-          // `projectedWaitS`; a granted ticket that could not be forwarded
-          // carries `reservationTicket` + `reservationReleased`. Absent on
-          // fail-open dispatches and pre-reservation outcomes.
-          ...outcome.reservation,
-          // Host-CPU gate evidence (WL-0MVK0UO3Q002TXW6 AC4): present on a
-          // `cpu-saturated` refusal so the measured utilisation, its
-          // source and the configured threshold are recoverable from the
-          // decision log. Absent on every other outcome.
-          ...(outcome.hostCpuPercent !== undefined
-            ? {
-                hostCpuPercent: outcome.hostCpuPercent,
-                hostCpuSource: outcome.hostCpuSource,
-                cpuGatePercent: outcome.cpuGatePercent,
-              }
-            : {}),
-        },
+        refusalDecisionFields(outcome, baseFields, fairness, reservationRefused),
         // The grouped token must not change the starvation signal: the
         // tracker keeps judging the PROXY's own reason, exactly as it did
         // when that reason was the entry reason (slice C3).
         reservationRefused ? { starvationReason: outcome.reason } : {},
+      );
+    }
+    if (outcome.dispatched) {
+      // Per-project fairness (WL-0MWKY141H002LULI AC3): a successful dispatch
+      // is a decision too — selected root, dispatching root, tick outcome and
+      // run length. An OBSERVATION (`blocking: false`), never rate-limited.
+      const fairness =
+        ctx.opts.coordinationDir !== undefined
+          ? await dispatchDecisionFairness({
+              cwd: cfg.cwd,
+              tickSelectedRoot,
+              selectedRootOverride: outcome.selectedRoot,
+              dispatchingRoot: outcome.attemptedRoot,
+              dispatched: true,
+            })
+          : {};
+      void recordDecision(
+        ctx,
+        cfg.cwd,
+        'dispatched',
+        {
+          ...dispatchBaseFields,
+          ...fairness,
+        },
+        { blocking: false, rateLimit: false, operation: 'dispatch' },
       );
     }
     // Any non-`dispatched` outcome ends the audit batch (parent

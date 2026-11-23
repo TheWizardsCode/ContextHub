@@ -104,8 +104,19 @@ describe('decodeBudgetPaneLabel', () => {
     expect(decoded).toMatchObject({ kind: 'implement', kindKnown: false, itemId: 'WL-X' });
   });
 
+  it('decodes every capped kind (implement, audit, plan, intake, risk-effort)', () => {
+    for (const kind of ['implement', 'audit', 'plan', 'intake', 'risk-effort'] as const) {
+      expect(decodeBudgetPaneLabel(`Downtime triggered ${kind} Work - WL-K`)).toMatchObject({
+        form: 'downtime',
+        kind,
+        kindKnown: true,
+        itemId: 'WL-K',
+      });
+    }
+  });
+
   it('does not mistake an unbudgeted tier or a non-dispatcher pane for dispatch evidence', () => {
-    expect(decodeBudgetPaneLabel('Downtime triggered plan Plan it - WL-P').kind).toBeNull();
+    expect(decodeBudgetPaneLabel('Downtime triggered scheduled Cron - WL-S').kind).toBeNull();
     expect(decodeBudgetPaneLabel('Manually triggered prompt write tests').kind).toBeNull();
     expect(decodeBudgetPaneLabel('rgardler@host: ~/projects/x').kind).toBeNull();
     expect(decodeBudgetPaneLabel(undefined).kind).toBeNull();
@@ -127,6 +138,7 @@ describe('planBudgetRepair', () => {
         { paneId: 'w50:p5N', title: 'Downtime triggered audit Audit it - WL-3' },
         // Not a budgeted dispatch: ignored, never "unaccounted".
         { paneId: 'w50:p1', title: 'rgardler@host: ~/projects/x' },
+        // Every capped kind is reconstructed (WL-0MWF34932000SNTX F2).
         { paneId: 'w50:p2', title: 'Downtime triggered plan Plan it - WL-4' },
       ]),
       INSTANCE,
@@ -138,8 +150,9 @@ describe('planBudgetRepair', () => {
       'audit:WL-3',
       'implement:WL-1',
       'implement:WL-2',
+      'plan:WL-4',
     ]);
-    expect(plan.accountedPaneIds.sort()).toEqual(['w50:p5B', 'w50:p5N', 'w50:p65']);
+    expect(plan.accountedPaneIds.sort()).toEqual(['w50:p2', 'w50:p5B', 'w50:p5N', 'w50:p65']);
   });
 
   it('refuses (incomplete) when a live dispatcher pane carries no work-item id (AC4)', () => {

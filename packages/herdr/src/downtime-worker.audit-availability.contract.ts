@@ -58,15 +58,27 @@ export const AUDIT_BUDGET_SATURATED_REASON = 'audit-budget-saturated';
 export const AUDIT_BUDGET_UNKNOWN_REASON = 'audit-budget-unknown';
 
 /**
+ * The proxy's canonical token for an audit-lease REGISTRY failure
+ * (WL-0MWFJH3NW006F5GN): the lease protocol answers `503` with this reason
+ * when its own registry read/write fails — a proxy-side fault, NOT a
+ * saturated budget and NOT an unknown-budget read. Distinct from
+ * {@link AUDIT_BUDGET_UNKNOWN_REASON} (the local fail-closed token) so a
+ * decision log can tell "the proxy said its registry is broken" from "herdr
+ * could not reach the proxy at all"; both refuse the audit tier, but the
+ * operator action differs (proxy health check vs network/proxy availability).
+ */
+export const AUDIT_BUDGET_UNAVAILABLE_REASON = 'audit-budget-unavailable';
+
+/**
  * One live audit lease on the proxy. `expiresAt` is the only substantive
  * field: a lease with no usable expiry cannot be reasoned about, so a
  * malformed entry makes the whole payload unusable (fail-closed).
  *
  * The shipped proxy serves `leases: []` while the budget is idle. The expiry
  * is pinned as epoch MILLISECONDS; a proxy that serves epoch seconds (or an
- * ISO-8601 string) is handled by the string form below. Lease acquisition and
- * expiry semantics are deferred to WL-0MWFJH3NW006F5GN, so this reader only
- * reports what the availability observation serves.
+ * ISO-8601 string) is handled by the string form below. Acquisition and
+ * expiry semantics now live in the audit-lease client (WL-0MWFJH3NW006F5GN);
+ * this reader still reports what the availability observation serves.
  */
 export interface AuditAvailabilityLease {
   /** Proxy lease identity when served (open vocabulary; never branched on). */

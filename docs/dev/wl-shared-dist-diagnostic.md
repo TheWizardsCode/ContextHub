@@ -134,6 +134,22 @@ bash scripts/check-main-checkout.sh --work-item WL-<id>   # also wl-comment the 
 
 See `docs/dev/worktree-isolation.md` for the guard context.
 
+## Related guard: the test run (WL-0MW8G1X3V007CGAE)
+
+The `wl` preflight above covers a **missing** build, for the CLI only. Test
+runs hit the same gitignored output from a different entry point, and a build
+that merely **predates** a `packages/shared/src` change is just as misleading
+there: the suite exercises old shared code and reports failures for work that is
+already correct. A once-per-run vitest `globalSetup`
+(`tests/global-setup.ts` → `tests/shared-dist-guard.ts`) therefore judges the
+**resolved** `dist/worklog-paths.js` against the newest source mtime and aborts
+before any test file, printing the resolved `packages/shared` directory, both
+mtimes and the same one-command remedy (`npm run build:shared`). It never
+rebuilds and fails open when it cannot judge. The contract is in
+[pre-push-hook.md](./pre-push-hook.md#shared-build-precondition-for-full-suite-evidence-wl-0mw8g1x3v007cgae)
+and the standing rule in
+[test-suite-baseline.md](./test-suite-baseline.md#shared-workspace-build-guarded-not-remembered-wl-0mw8g1x3v007cgae).
+
 ## Tests
 
 `tests/cli/missing-shared-dist.test.ts`:

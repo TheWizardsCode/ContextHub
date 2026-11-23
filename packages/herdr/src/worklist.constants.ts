@@ -21,6 +21,15 @@
  */
 export const SHIP_IT_COMMAND = '/skill:ship release';
 
+/**
+ * The dedicated tab label that hosts the interactive dev→main release pane
+ * (WL-0MW6FIZYI0003QEU). The label is the tab's key: the tab is created on
+ * first use and reused thereafter, and a live pane inside it means a release
+ * is still active (a second Ship command is rejected). Placement, focus and
+ * the second-command rejection apply to the interactive `S` shortcut path.
+ */
+export const SHIP_TAB_LABEL = 'Ship';
+
 // The canonical `wl` CLI stage vocabulary (WL-0MUY1CRBQ007L7AK). Mirrors the
 // stages accepted by `wl update`/`wl next` validation (`done` is the
 // post-release terminal stage). Do NOT reintroduce `in_progress`/`completed`:

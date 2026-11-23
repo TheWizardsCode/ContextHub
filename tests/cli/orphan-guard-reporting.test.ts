@@ -4,13 +4,13 @@
  *
  * Serves WL-0MWGRJCXO006A9ZV (fixture slice of WL-0MWFMKWZA005ZT4T) and pins
  * the AC3 / R3 / R3b contract implemented by the sibling slice
- * WL-0MWGRKLLG0035PLG. The defective-behaviour specs are **RED-pinned with
- * `it.fails(...)`** by this test-first child: their assertions fail on
- * current main (proved in the raw red run — no finding for a soft-deleted
- * parent's child, `groups` undefined) while the suite stays green for the
- * finish and dev-push gates. WL-0MWGRKLLG0035PLG must flip `it.fails(` →
- * `it(` on those specs as the reporting lands; the shipped-shape pin below
- * stays plain `it` (repo convention, cf. tests/cli/doctor-prefix.test.ts).
+ * WL-0MWGRKLLG0035PLG. The specs below were **RED-pinned with
+ * `it.fails(...)`** by the test-first child (their assertions failed on
+ * current main — no finding for a soft-deleted parent's child, `groups`
+ * undefined) while the suite stayed green for the finish and dev-push gates.
+ * WL-0MWGRKLLG0035PLG flipped `it.fails(` → `it(` on both specs as the
+ * reporting landed (repo convention, cf. tests/cli/doctor-prefix.test.ts);
+ * the shipped-shape pin below stayed plain `it` throughout.
  *
  * ## Contract pinned here
  *
@@ -45,6 +45,7 @@ import {
 import {
   seedHardMissingParentWithLiveChildren,
   seedSoftDeletedParentWithLiveChildren,
+  seedGroupedOrphanReportingScenarios,
   HARD_MISSING_PARENT,
   SOFT_DELETED_PARENT,
 } from '../fixtures/orphan-guard.js';
@@ -64,7 +65,7 @@ describe('orphan-guard: grouped orphan reporting (R3/R3b)', () => {
 
   // ── Root wl doctor (validate) ───────────────────────────────────────────
 
-  it.fails('wl doctor reports children of a soft-deleted parent (R3b)', async () => {
+  it('wl doctor reports children of a soft-deleted parent (R3b)', async () => {
     const { parent, child } = SOFT_DELETED_PARENT;
     seedSoftDeletedParentWithLiveChildren(tempState.tempDir);
 
@@ -103,12 +104,11 @@ describe('orphan-guard: grouped orphan reporting (R3/R3b)', () => {
 
   // ── wl doctor dangling-parents --dry-run ───────────────────────────────
 
-  it.fails('dangling-parents --dry-run groups children per lost parent, hard-missing and soft-deleted alike (R3/R3b)', async () => {
+  it('dangling-parents --dry-run groups children per lost parent, hard-missing and soft-deleted alike (R3/R3b)', async () => {
     const { parentId, children } = HARD_MISSING_PARENT;
     const softParent = SOFT_DELETED_PARENT;
     // One store holding both shapes so the grouping is exercised together.
-    seedHardMissingParentWithLiveChildren(tempState.tempDir);
-    seedSoftDeletedParentWithLiveChildren(tempState.tempDir);
+    seedGroupedOrphanReportingScenarios(tempState.tempDir);
 
     const { stdout } = await execAsync(
       `tsx ${cliPath} --json doctor dangling-parents --dry-run`,

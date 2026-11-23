@@ -33,6 +33,10 @@ import {
 setupHostCpuPin();
 
 type InteractiveAnchorHelpers = {
+  interactiveTabLabel?: (
+    extractedItemId: string | undefined,
+    isShipDispatch: boolean,
+  ) => string | undefined;
   resolveInteractiveWorkspaceId?: (
     env?: Record<string, string | undefined>,
   ) => string | null;
@@ -802,5 +806,135 @@ describe('Interactive operator dispatch — work-item priority survives the whol
       requestPriority,
     );
     expect(paneDispatchPriority(args)).toBe('high');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ship It tab placement (WL-0MW6FIZYI0003QEU)
+//
+// `/skill:ship release` carries no work-item ID, so the item-ID anchor path
+// would return null and split the current pane/tab. The Ship dispatch
+// substitutes the literal `Ship` label on that path only, reusing the same
+// create-or-reuse tab machinery and left-of-extensions placement.
+// ---------------------------------------------------------------------------
+
+describe('interactiveTabLabel — Ship label substitution (WL-0MW6FIZYI0003QEU AC1)', () => {
+  it('substitutes the literal Ship label when a Ship dispatch carries no item id', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.interactiveTabLabel!(undefined, true)).toBe('Ship');
+  });
+
+  it('leaves a normal item-ID dispatch unchanged', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.interactiveTabLabel!('WL-ABC', false)).toBe('WL-ABC');
+  });
+
+  it('returns undefined for a non-ship dispatch with no item id (current-pane split)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.interactiveTabLabel!(undefined, false)).toBeUndefined();
+  });
+
+  it('an extracted item id always wins over the Ship fallback', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.interactiveTabLabel!('WL-ABC', true)).toBe('WL-ABC');
+  });
+
+  it('treats an empty item id as absent', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.interactiveTabLabel!('', true)).toBe('Ship');
+  });
+});
+
+describe('Ship tab anchor provisioning (WL-0MW6FIZYI0003QEU AC1/AC4)', () => {
+  let coordDir: string;
+  let savedCoord: string | undefined;
+
+  beforeEach(() => {
+    coordDir = mkdtempSync(join(tmpdir(), 'ship-tab-anchor-'));
+    savedCoord = process.env.HERDR_COORDINATION_DIR;
+    process.env.HERDR_COORDINATION_DIR = coordDir;
+  });
+
+  afterEach(() => {
+    if (savedCoord === undefined) delete process.env.HERDR_COORDINATION_DIR;
+    else process.env.HERDR_COORDINATION_DIR = savedCoord;
+    try { rmSync(coordDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('creates a tab labelled exactly Ship and returns its anchor pane', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeInteractiveAnchorDeps({ createTab });
+
+    const got = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'Ship', deps);
+    expect(got).toEqual({ tabId: 'w9:tShip', paneId: 'w9:tShip:p1' });
+    expect(createTab).toHaveBeenCalledWith('w9', 'Ship');
+  });
+
+  it('places a freshly created Ship tab left of the extensions tab', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const moveTab = vi.fn(async () => true);
+    const deps = makeInteractiveAnchorDeps({
+      moveTab,
+      listTabs: async () => [
+        { tabId: 'w9:tWorklog', label: 'Worklog' },
+        { tabId: 'w9:tDrop', label: 'Downtime' },
+      ],
+      listMachinePanes: async () => [
+        { paneId: 'w9:pB', workspaceId: 'w9', tabId: 'w9:tWorklog', label: 'Work Items', focused: false },
+      ],
+    });
+
+    const got = await helpers.resolveInteractiveItemAnchor!(
+      '/repo', 'w9', 'Ship', deps, undefined, 'left-of-extensions',
+    );
+    expect(got).toEqual({ tabId: 'w9:tShip', paneId: 'w9:tShip:p1' });
+    expect(moveTab).toHaveBeenCalledWith('w9', 'w9:tShip', 0);
+  });
+
+  it('forwards the Ship tab anchor pane id and focus to send-to-pi.sh args (AC6)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps();
+    const label = helpers.interactiveTabLabel!(undefined, true)!;
+    const anchor = await helpers.resolveInteractiveItemAnchor!(
+      '/repo', 'w9', label, deps, undefined, 'left-of-extensions',
+    );
+    expect(anchor).not.toBeNull();
+
+    const args = buildSendToPiArgs(
+      '/skill:ship release',
+      '/repo',
+      undefined,
+      undefined,
+      'Manually triggered ship',
+      true,
+      anchor!.paneId,
+    );
+    const anchorIdx = args.indexOf('--anchor');
+    expect(anchorIdx).toBeGreaterThanOrEqual(0);
+    expect(args[anchorIdx + 1]).toBe(anchor!.paneId);
+    expect(args).toContain('--focus');
+  });
+
+  it('reuses an existing Ship tab without creating or moving it', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const createTab = vi.fn();
+    const moveTab = vi.fn(async () => true);
+    const deps = makeInteractiveAnchorDeps({
+      createTab,
+      moveTab,
+      listTabs: async () => [{ tabId: 'w9:tShip', label: 'Ship' }],
+      listPanes: async () => [{ paneId: 'w9:tShip:p1', tabId: 'w9:tShip' }],
+    });
+
+    const got = await helpers.resolveInteractiveItemAnchor!(
+      '/repo', 'w9', 'Ship', deps, undefined, 'left-of-extensions',
+    );
+    expect(got).toEqual({ tabId: 'w9:tShip', paneId: 'w9:tShip:p1' });
+    expect(createTab).not.toHaveBeenCalled();
+    expect(moveTab).not.toHaveBeenCalled();
   });
 });

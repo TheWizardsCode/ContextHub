@@ -20,11 +20,9 @@
  *  - AC4: `maxImplement: 0` disables the tier host-wide (refused `0/0`).
  *  - Parent AC11: an unresolvable coordination dir degrades to no ledger.
  *
- *  - F2 AC1/AC3: the audit matrix — `maxAudit` 0/1/2, `maxAudit: 1` keeping the
- *    retired marker's single-flight token, `maxAudit: 2` admitting two and
- *    refusing the third with `host-budget-audit`.
- *  - F2 AC2: a non-stale legacy `active-audit` marker counts as ONE synthetic
- *    audit entry; a stale one is ignored and the file is never removed.
+ *  - F2 AC1/AC3: the audit matrix — `maxAudit` 0/1/2, `maxAudit: 1` enforcing
+ *    single-flight, `maxAudit: 2` admitting two and refusing the third, all
+ *    with the unified `host-budget-audit` token.
  *  - F2 AC5: every release point (pane close / dispatch failure / claim
  *    rollback — all `releaseHostDispatch`) frees the audit slot, and a stale
  *    entry is reaped by the 2 h rule.
@@ -48,7 +46,6 @@ import {
   decideAuditAvailability,
   decideAuditLeaseAdmission,
   HOST_BUDGET_AUDIT_REFUSAL,
-  HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
   HOST_BUDGET_CORRUPT_REFUSAL,
   HOST_BUDGET_IMPLEMENT_REFUSAL,
   HOST_BUDGET_UNKNOWN_REFUSAL,
@@ -67,8 +64,6 @@ import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js'
 import { AUDIT_BUDGET_DIVERGENCE_REASON, AUDIT_BUDGET_LEGACY_REASON } from './downtime-log-budget.js';
 import { HOST_BUDGET_CONFIG_FILE, isLegacyAuditBudgetEnabled } from './host-dispatch-budget.js';
 import {
-  DOWNTIME_HOST_AUDIT_MARKER_FILE,
-  readActiveAuditMarker,
 } from './machine-coordination.js';
 import {
   budgetLedgerPath,
@@ -317,16 +312,8 @@ function auditAdmit(
   );
 }
 
-/** Write the legacy `active-audit` marker file verbatim. */
-function writeLegacyMarker(dir: string, dispatchedAt: string): void {
-  writeFileSync(
-    join(dir, DOWNTIME_HOST_AUDIT_MARKER_FILE),
-    JSON.stringify({ instanceId: 'older-instance', dispatchedAt }),
-  );
-}
-
 describe('host dispatch budget — audit tier (F2)', () => {
-  it('AC1: maxAudit=1 reproduces the single-flight exactly — second audit refused with the legacy token', () =>
+  it('AC1: maxAudit=1 enforces single-flight exactly — second audit refused with host-budget-audit', () =>
     withMachineDir((dir) => {
       writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
       const panes = makeLivePaneList([auditPane('pane-1', 'WL-A')]);
@@ -335,13 +322,13 @@ describe('host dispatch budget — audit tier (F2)', () => {
       // audit tier counts a fresh reservation immediately (marker semantics).
       expect(auditAdmit('WL-A', panes)).toMatchObject({ admitted: true, live: 0, max: 1 });
 
-      // The second audit is refused at the cap, with the retired marker's reason
-      // token (existing consumers keep working) and the observed evidence.
+      // The second audit is refused at the cap with the unified token (F2
+      // removed the maxAudit: 1 special-case) and the observed evidence.
       expect(auditAdmit('WL-B', panes)).toEqual({
         admitted: false,
         live: 1,
         max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
       });
       // A refusal never reserves.
       expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-A']);
@@ -389,45 +376,6 @@ describe('host dispatch budget — audit tier (F2)', () => {
       });
       // A disabled tier never reserves (the ledger is not even created).
       expect(readBudgetLedger(dir)).toBeNull();
-    }));
-
-  it('AC2: a non-stale legacy marker counts as ONE synthetic audit entry', () =>
-    withMachineDir((dir) => {
-      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
-      writeLegacyMarker(dir, new Date().toISOString());
-
-      // A mixed-version host: an older instance still runs the marker-based
-      // single-flight, so this instance must not dispatch a second audit.
-      expect(readAuditBudgetState({ livePanes: [] })).toEqual({
-        atCap: true,
-        live: 1,
-        max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
-      });
-      expect(auditAdmit('WL-NEW', [])).toMatchObject({
-        admitted: false,
-        live: 1,
-        max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
-      });
-      // Counting a legacy marker never writes a ledger entry for it.
-      expect(readBudgetLedger(dir)).toBeNull();
-    }));
-
-  it('AC2: a stale legacy marker is ignored and the file is left in place', () =>
-    withMachineDir((dir) => {
-      writeBudgetConfig(dir, { maxImplement: 2, maxAudit: 1 });
-      writeLegacyMarker(
-        dir,
-        new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-      );
-
-      expect(readAuditBudgetState({ livePanes: [] })).toMatchObject({ atCap: false, live: 0 });
-      expect(auditAdmit('WL-NEW', [])).toMatchObject({ admitted: true, live: 0, max: 1 });
-      expect(readBudgetLedger(dir)?.entries.map((entry) => entry.itemId)).toEqual(['WL-NEW']);
-      // Retirement: the stale file is neither counted nor deleted (an operator
-      // or the older instance owns it).
-      expect(readActiveAuditMarker(dir)).not.toBeNull();
     }));
 
   it('AC5: every release point (pane close, dispatch failure, claim rollback) frees the slot by identity', () =>
@@ -500,7 +448,7 @@ describe('host dispatch budget — audit tier (F2)', () => {
       expect(readBudgetLedger(dir)).toBeNull();
 
       // The explicit repair is the recovery: the running audit pane becomes an
-      // entry and the pre-check reports the real single-flight token.
+      // entry and the pre-check reports the unified single-flight token.
       const repaired = repairBudgetLedgerFromPanes(livePanes, {
         instanceId: 'operator',
         root: '/repo/test',
@@ -510,7 +458,7 @@ describe('host dispatch budget — audit tier (F2)', () => {
         atCap: true,
         live: 1,
         max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
       });
     }));
 });
@@ -717,7 +665,7 @@ describe('host dispatch budget — proxy-derived audit admission (WL-0MWAMSK9H00
           { livePanes: [], env: LEGACY_AUDIT_ENV, auditAvailability: availability, onAuditBudgetEvent: sink },
         );
 
-      // Local at cap: the LEGACY token and the local figures decide, even
+      // Local at cap: the unified local token and the local figures decide,
       // though the proxy would admit (the proxy is not consulted).
       writeBudgetLedger(dir, [
         makeBudgetEntry({ kind: 'audit', itemId: 'WL-RUN', heartbeatAt: new Date().toISOString() }),
@@ -726,7 +674,7 @@ describe('host dispatch budget — proxy-derived audit admission (WL-0MWAMSK9H00
         admitted: false,
         live: 1,
         max: 1,
-        reason: HOST_BUDGET_AUDIT_SATURATED_REFUSAL,
+        reason: HOST_BUDGET_AUDIT_REFUSAL,
       });
       // The legacy path is marked in the decision log; no divergence entry.
       expect(events).toEqual([

@@ -121,10 +121,35 @@ describe('configureWorklogTarget', () => {
     expect(resolved).toBe(root);
   });
 
-  it('reports the uninitialized state with actionable stderr messages', async () => {
+  it('reports the uninitialized state with canonical wl init wording', async () => {
     const { uninitializedReport } = await import('./index.js');
     const report = uninitializedReport('/tmp/nonexistent-project');
     expect(report).toContain("No valid .worklog/ directory found in or above '/tmp/nonexistent-project'");
-    expect(report).toContain('Showing empty worklist. Navigate to a project with \'worklog init\' to see items.');
+    expect(report).toContain("Run 'wl init' in that directory to create a valid worklog.");
+    // The canonical CLI command, not the legacy `worklog init` spelling (AC3).
+    expect(report).not.toContain('worklog init');
+    // No longer claims a silent empty list is shown.
+    expect(report).not.toContain('Showing empty worklist');
+  });
+
+  it('treats an existing but partial .worklog/ (only worklog.db) as uninitialised', async () => {
+    const { configureWorklogTarget } = await import('./index.js');
+    const root = makeTempDir();
+    mkdirSync(join(root, '.worklog'));
+    // A `.worklog/` with only `worklog.db` and no `config.yaml`/`initialized`
+    // marker is a partial/legacy state — resolveWorklogRoot() rejects it, so
+    // the plugin surfaces the uninitialised notice (AC2).
+    writeFileSync(join(root, '.worklog', 'worklog.db'), '');
+    resetWorklogDir();
+
+    const resolved = configureWorklogTarget(root);
+    expect(resolved).toBeUndefined();
+  });
+
+  it('formatWlError uses canonical wl init wording', async () => {
+    const { formatWlError } = await import('./fetcher.js');
+    const message = formatWlError({ success: false, initialized: false });
+    expect(message).toBe('Worklog not initialized. Run "wl init" first.');
+    expect(message).not.toContain('worklog init');
   });
 });

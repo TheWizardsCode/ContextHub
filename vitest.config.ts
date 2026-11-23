@@ -67,6 +67,16 @@ export default defineConfig({
     // "Hook timed out" — a load-induced flake with nothing wrong with the
     // code under test (WL-0MVF9JJUH0077OB8 AC6).
     hookTimeout: 60000,
+    // Run-once preflight: refuse a run whose resolved @worklog/shared build is
+    // older than the newest shared source file (or missing entirely), naming
+    // the directory, the mtimes and `npm run build:shared`
+    // (WL-0MWHD4GU3003ZE7Q, parent WL-0MW8G1X3V007CGAE). It belongs here, not
+    // in `setupFiles` below: `globalSetup` runs once per invocation in the main
+    // process, before any test file is collected, so the abort is one message
+    // instead of 344 stale imports, and the `packages/shared/src` walk is not
+    // repeated per test file. It never rebuilds — the suite must not mutate the
+    // checkout — and it fails open when it cannot judge (no repository root).
+    globalSetup: ['./tests/global-setup.ts'],
     // Run setup to inject mock git into PATH for spawn-based calls
     setupFiles: ['./tests/setup-tests.ts'],
     // Parallelism — maxWorkers: 6 (WL-0MVHVZTYA003TNN0).

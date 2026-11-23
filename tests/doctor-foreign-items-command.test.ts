@@ -99,6 +99,7 @@ describe('registerForeignItemsCommand', () => {
     expect(foreignItems!.options.map((o) => o.flags)).toEqual([
       '--dry-run',
       '--apply',
+      '--cascade-children',
       '--push',
       '--prefix <prefix>',
     ]);

@@ -1857,3 +1857,120 @@ describe('host-wide dispatch budget — audit tier (F2)', () => {
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
   });
 });
+
+// ── Host-wide dispatch budget — generalised kinds (T1 contract) ────────
+//
+// Tests-first slice for WL-0MW50EHZ6007QBPB (parent AC1/AC8): the DIRECT
+// dispatcher path (`dispatchDowntimeWork`) must consult admission for plan /
+// intake / risk-effort exactly as it does for implement/audit, and honour a
+// unified `host-budget-<kind>` refusal (no spawn, no marker, claim rolled
+// back). Committed RED as vitest `it.fails(...)` (the repo's documented TDD
+// pattern); F2 (WL-0MWF34932000SNTX) flipped them to plain `it`s once the
+// generic admission landed.
+describe('host-wide dispatch budget — generalised kinds (T1 contract; F2 green)', () => {
+  it('consults admission for a plan dispatch and honours host-budget-plan', async () => {
+    const admitHostDispatch = vi.fn().mockResolvedValue({
+      admitted: false,
+      live: 1,
+      max: 1,
+      reason: 'host-budget-plan',
+    });
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-PLAN', title: 'Plan me', stage: 'intake_complete', status: 'open' },
+      }),
+      admitHostDispatch,
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(admitHostDispatch).toHaveBeenCalledWith({
+      itemId: 'WL-PLAN',
+      kind: 'plan',
+      cwd: '/repo',
+    });
+    expect(outcome).toMatchObject({
+      dispatched: false,
+      reason: 'host-budget-plan',
+      budget: { live: 1, max: 1 },
+    });
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('consults admission for an intake dispatch and honours host-budget-intake', async () => {
+    const admitHostDispatch = vi.fn().mockResolvedValue({
+      admitted: false,
+      live: 1,
+      max: 1,
+      reason: 'host-budget-intake',
+    });
+    const deps = makeDeps({
+      // Tier 2 (intake_complete → plan) must answer empty so the idea tier
+      // (`intake`) is the one that dispatches.
+      getNextItem: vi.fn(async (stage: string) =>
+        stage === 'idea'
+          ? {
+              ok: true as const,
+              candidate: { id: 'WL-INTAKE', title: 'Intake me', stage: 'idea', status: 'open' },
+            }
+          : { ok: true as const, candidate: null },
+      ),
+      admitHostDispatch,
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(admitHostDispatch).toHaveBeenCalledWith({
+      itemId: 'WL-INTAKE',
+      kind: 'intake',
+      cwd: '/repo',
+    });
+    expect(outcome).toMatchObject({
+      dispatched: false,
+      reason: 'host-budget-intake',
+      budget: { live: 1, max: 1 },
+    });
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('consults admission for a risk-effort dispatch and honours host-budget-risk-effort', async () => {
+    // A plan_complete item missing risk/effort classifies as `risk-effort` on
+    // the Herdr-head scan (the production ranking path).
+    const riskItem = {
+      id: 'WL-RISK',
+      title: 'Risk me',
+      status: 'open',
+      stage: 'plan_complete',
+      sortIndex: 0,
+    } as DowntimeHerdrItem;
+    const admitHostDispatch = vi.fn().mockResolvedValue({
+      admitted: false,
+      live: 1,
+      max: 1,
+      reason: 'host-budget-risk-effort',
+    });
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [riskItem] }),
+      admitHostDispatch,
+      releaseHostDispatch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(admitHostDispatch).toHaveBeenCalledWith({
+      itemId: 'WL-RISK',
+      kind: 'risk-effort',
+      cwd: '/repo',
+    });
+    expect(outcome).toMatchObject({
+      dispatched: false,
+      reason: 'host-budget-risk-effort',
+      budget: { live: 1, max: 1 },
+    });
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});

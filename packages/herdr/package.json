@@ -8,7 +8,8 @@
     "worklog-pane-close": "dist/pane-close-cli.js"
   },
   "scripts": {
-    "build": "npm run build:shared && tsc && cp src/shortcuts.json dist/shortcuts.json && chmod +x dist/pane-close-cli.js",
+    "build": "npm run build:shared && npm run build:only",
+    "build:only": "tsc && cp src/shortcuts.json dist/shortcuts.json && chmod +x dist/pane-close-cli.js",
     "build:shared": "tsc -p ../../packages/shared/tsconfig.json",
     "postinstall": "node ./scripts/link-shared.mjs",
     "dev": "tsx src/index.ts"

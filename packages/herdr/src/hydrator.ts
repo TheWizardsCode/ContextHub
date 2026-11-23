@@ -73,7 +73,7 @@
  * Selection-list marker (WL-0MV1BWETT005GSUJ): the same pane set drives the
  * selection list's in-progress marker via `markItemsActiveByPane` /
  * `applyActivePaneMarkers` — an item with a matching pane title is rendered
- * `in-progress` (marker + Group N) even when its worklog status is still
+ * `in-progress` (marker + `<Band> Group N` placement) even when its worklog status is still
  * `open`, so the marker reflects pane existence rather than only the status
  * the demotion loop maintains. The marker ALSO stamps the row's green-circle
  * icon (`agentState='working'`) for pane-matched items and clears it for
@@ -627,7 +627,7 @@ type PaneMarkedActivePaneItem = ActivePaneItem & {
 
 /**
  * Mark every item that has a matching workspace pane as `in-progress` so
- * the selection list's in-progress marker (and Group N placement) reflects
+ * the selection list's in-progress marker (and `<Band> Group N` placement) reflects
  * pane-title existence, not only the worklog status the demotion loop
  * maintains (WL-0MV1BWETT005GSUJ). Recurses into children.
  *

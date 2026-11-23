@@ -1487,6 +1487,9 @@ describe('scripted decision-log scenario — dispatch / budget-skip / stale slot
         leafAuditScope: 'leaf',
         leafAuditImmediate: false,
       },
+      // A successful dispatch is now a decision too (WL-0MWKY141H002LULI):
+      // the fairness metric records the slot evidence for the dispatch.
+      { reason: 'dispatched', freeSlots: 1, totalSlots: 3 },
     ]);
 
     // (b) a parent audit is skipped (fail-closed) with the budget-skip token.
@@ -1532,7 +1535,7 @@ describe('scripted decision-log scenario — dispatch / budget-skip / stale slot
     const delayed = await runLeafAuditDecisionLogScenario({ decisionLogDelayMs: 150 });
 
     expect(delayed.map((capture) => capture.decisions.map((entry) => entry.reason))).toEqual([
-      ['leaf-audit-admission'],
+      ['leaf-audit-admission', 'dispatched'],
       ['audit-tier-budget-skipped'],
       ['slots-unavailable'],
     ]);

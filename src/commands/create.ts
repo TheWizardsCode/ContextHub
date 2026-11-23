@@ -11,6 +11,7 @@ import { promises as fs } from 'fs';
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
+import { parseStartOnOption, START_ON_FLAG, START_ON_TIMEZONE_EXAMPLE, START_ON_UTC_EXAMPLE } from '../validators/start-on.js';
 import { isAutomationAuthoredChild } from '../automation.js';
 import { recordDemotionAuditTrail } from '../demotion-audit.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
@@ -68,6 +69,7 @@ export default function register(ctx: PluginContext): void {
     .option('--created-by <createdBy>', 'Created by (interoperability field)')
     .option('--deleted-by <deletedBy>', 'Deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'Delete reason (interoperability field)')
+    .option('--start-on <ISO-8601>', `Earliest instant the item may be worked on (WL-0MWM0FDZK007BAD0): a full ISO-8601 timestamp with an explicit timezone, e.g. ${START_ON_UTC_EXAMPLE} or ${START_ON_TIMEZONE_EXAMPLE}; an offset is accepted and normalised to UTC. Default: the item's createdAt. Pass "" to keep the createdAt default.`)
     .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
@@ -80,7 +82,7 @@ export default function register(ctx: PluginContext): void {
     .option('--dedup-window <duration>', 'Dedup match window: recent non-terminal same-title items created within this window are reused instead of creating a twin (e.g. 30s, 5m, 1h; default 5m)')
     .action(async (...rawArgs: any[]) =>
       withStoreMutationLock(ctx.dataPath, async () => {
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','prefix','noReSort','reSortSync','allowDuplicate','dedupWindow']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','startOn','needsProducerReview','audit','auditText','auditFile','prefix','noReSort','reSortSync','allowDuplicate','dedupWindow']);
       let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -136,6 +138,27 @@ export default function register(ctx: PluginContext): void {
           process.exit(1);
         }
         options.priority = np;
+      }
+
+      // `--start-on` (WL-0MWMGEREG002L2YA): a full ISO-8601 instant, offset
+      // accepted and normalised to UTC, defaulting to `createdAt`. Validated
+      // before any write so an unusable value never creates an item; the clear
+      // form (`""`) simply leaves the default in place.
+      let startOnValue: string | undefined;
+      if (normalized.provided.has('startOn')) {
+        const parsedStartOn = parseStartOnOption(String(options.startOn ?? ''));
+        if (!parsedStartOn.ok) {
+          output.error(parsedStartOn.message, {
+            success: false,
+            error: 'invalid-start-on',
+            message: parsedStartOn.message,
+            flag: START_ON_FLAG,
+            value: parsedStartOn.value,
+            reason: parsedStartOn.reason,
+          });
+          process.exit(1);
+        }
+        startOnValue = parsedStartOn.clear ? undefined : parsedStartOn.value;
       }
 
       let auditTextInput = options.auditText ?? options.audit;
@@ -249,6 +272,7 @@ export default function register(ctx: PluginContext): void {
         createdBy: options.createdBy || '',
         deletedBy: options.deletedBy || '',
         deleteReason: options.deleteReason || '',
+        startOn: startOnValue,
         needsProducerReview: (options.needsProducerReview !== undefined) ?
           (['true','yes','1'].includes(String(options.needsProducerReview).toLowerCase())) :
           false,

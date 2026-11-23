@@ -18,10 +18,15 @@
  * - The charge (`advanceRoot`) is a read-modify-write guarded by the same
  *   coordination-lock mechanism (`tryAcquireCoordLock`) used for the
  *   coordination file — concurrent leaders do not corrupt the cursor.
- * - Selection (`selectLeastRecentlyServed`) is a **pure read**: it takes no
- *   coordination lock and writes nothing. Only a *consumed offer* charges the
- *   cursor, via `advanceRoot`; a root that is selected but dispatches nothing
- *   is never charged (WL-0MWFIZ8H5005FVNN).
+ * - Selection (`selectLeastRecentlyServed`, `orderRootsLeastRecentlyServed`)
+ *   is a **pure read**: it takes no coordination lock and writes nothing. Only
+ *   a *consumed offer* charges the cursor, via `advanceRoot`; a root that is
+ *   selected but dispatches nothing is never charged (WL-0MWFIZ8H5005FVNN).
+ * - The ORDERED candidate list (WL-0MWKY1839000JM5O) is the whole-set form of
+ *   selection: least-recently-served first, unknown roots first, ties
+ *   alphabetical. The leader orders its entire entry list from it, so a
+ *   selected-but-fully-held root no longer leaves fall-through in raw
+ *   coordination-file order.
  *
  * Fail-open by contract: a missing or unreadable cursor file degrades to
  * "no history" — entries are ordered in the original file order, which is the
@@ -131,12 +136,8 @@ export { tryAcquireCoordLock };
 /**
  * Get the next entry to dispatch, ordered by least-recently-served first.
  *
- * Among the provided roots:
- *  1. **Unknown / new roots** (not in the cursor) sort first — they are
- *     never penalised for not having dispatch history.
- *  2. Among known roots, the one with the **oldest** last-served timestamp
- *     is selected first (global cross-project round-robin).
- *  3. Ties among known roots are broken by alphabetical root name (deterministic).
+ * Equivalent to the first element of {@link orderRootsLeastRecentlyServed}; with
+ * no roots it returns `null`.
  *
  * **Pure read:** selection takes no coordination lock, writes no cursor file
  * and never blocks on a concurrent writer. It therefore cannot charge the
@@ -145,9 +146,8 @@ export { tryAcquireCoordLock };
  * (WL-0MWFIZ8H5005FVNN).
  *
  * **Fail-open:** a missing/corrupt cursor yields "no history" (all roots
- * unknown → alphabetical order, i.e. the first-in-array root for an already
- * alphabetical input); an empty root set returns `null`. Selection never
- * throws.
+ * unknown → alphabetical order); an empty root set returns `null`. Selection
+ * never throws.
  *
  * @param coordinationDir — The coordination directory.
  * @param roots — The candidate `worklogRoot` values.
@@ -160,30 +160,67 @@ export function selectLeastRecentlyServed(
   roots: string[],
   _now: number = Date.now(),
 ): string | null {
-  if (roots.length === 0) return null;
-
-  // Read-only: no coordination lock, no write.
-  const data = loadRoundRobinCursor(coordinationDir);
-  return selectLeastRecentlyServedFromCursor(data, roots);
+  return orderRootsLeastRecentlyServed(coordinationDir, roots)[0] ?? null;
 }
 
 /**
- * Internal: pure selection over already-loaded cursor state.
+ * Order the WHOLE candidate set, least-recently-served first.
  *
- * 1. Partition roots into known (in cursor) and unknown (new).
- * 2. Unknown roots sort first — pick the first unknown.
- * 3. Among known roots, pick the one with the oldest timestamp.
- * 4. Return the selected root — nothing is written.
+ * This is the whole-set form of selection (WL-0MWKY1839000JM5O): the leader
+ * orders its entire entry list from it instead of rotating only the tick's
+ * first choice, so a selected-but-fully-held root cannot leave the fall-through
+ * in raw coordination-file order. Pure and total — exactly the ordering rule
+ * `selectLeastRecentlyServed` already implemented for its first element:
+ *
+ *  1. **Unknown / new roots** (not in the cursor) sort first — they are
+ *     never penalised for not having dispatch history; ties alphabetical.
+ *  2. Then known roots, **oldest** last-served timestamp first (global
+ *     cross-project round-robin); ties alphabetical.
+ *
+ * Duplicate inputs are collapsed (a root is one rotation slot however many
+ * instances advertise it).
+ *
+ * **Pure read:** takes no coordination lock, writes no cursor file and never
+ * blocks on a concurrent writer, so it can never charge the cursor. Only a
+ * consumed offer advances the cursor, via `advanceRoot` (WL-0MWFIZ8H5005FVNN).
+ *
+ * **Fail-open:** a missing/corrupt cursor yields "no history" (all roots
+ * unknown → alphabetical order); an empty root set returns `[]`. Never throws.
+ *
+ * @param coordinationDir — The coordination directory.
+ * @param roots — The candidate `worklogRoot` values (deduplicated).
+ * @returns The ordered candidate roots — never mutates the input.
  */
-function selectLeastRecentlyServedFromCursor(
+export function orderRootsLeastRecentlyServed(
+  coordinationDir: string,
+  roots: readonly string[],
+): string[] {
+  if (roots.length === 0) return [];
+
+  // Read-only: no coordination lock, no write.
+  const data = loadRoundRobinCursor(coordinationDir);
+  return orderRootsFromCursor(data, roots);
+}
+
+/**
+ * Internal: pure whole-set ordering over already-loaded cursor state.
+ *
+ * 1. Collapse duplicates (first occurrence wins).
+ * 2. Partition into unknown (new) and known roots.
+ * 3. Unknown roots sort first, alphabetically for determinism.
+ * 4. Known roots follow, oldest timestamp first, ties alphabetical.
+ */
+function orderRootsFromCursor(
   data: RoundRobinByRootData,
-  roots: string[],
-): string {
-  // Partition into unknown (new) and known.
+  roots: readonly string[],
+): string[] {
   const unknownRoots: string[] = [];
   const knownRoots: { root: string; timestamp: string }[] = [];
+  const seen = new Set<string>();
 
   for (const root of roots) {
+    if (root.length === 0 || seen.has(root)) continue;
+    seen.add(root);
     if (root in data) {
       knownRoots.push({ root, timestamp: data[root] });
     } else {
@@ -191,25 +228,15 @@ function selectLeastRecentlyServedFromCursor(
     }
   }
 
-  let selected: string;
+  // Unknown roots sort first (never penalised); alphabetical for determinism.
+  unknownRoots.sort();
+  knownRoots.sort((a, b) => {
+    const timeDiff = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+    if (timeDiff !== 0) return timeDiff;
+    return a.root < b.root ? -1 : a.root > b.root ? 1 : 0;
+  });
 
-  // Unknown roots sort first (never penalised).
-  if (unknownRoots.length > 0) {
-    // Pick the first unknown root (alphabetical for determinism).
-    unknownRoots.sort();
-    selected = unknownRoots[0];
-  } else {
-    // Among known roots, pick the one with the oldest timestamp.
-    // Ties broken by alphabetical root name.
-    knownRoots.sort((a, b) => {
-      const timeDiff = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-      if (timeDiff !== 0) return timeDiff;
-      return a.root < b.root ? -1 : a.root > b.root ? 1 : 0;
-    });
-    selected = knownRoots[0].root;
-  }
-
-  return selected;
+  return [...unknownRoots, ...knownRoots.map((entry) => entry.root)];
 }
 
 /**

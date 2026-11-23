@@ -9,22 +9,25 @@
  * enforced, but until F5 its numbers were only visible as a per-tick refusal
  * reason: the worklist had no way to say "this host is running 1 of 2
  * implements and 0 of 1 audits". This module supplies the two remaining
- * observability surfaces of parent AC10 — the worklist `implement n/max ·
- * audit n/max` counter (AC4) and the `Downtime … tier skipped: <reason>`
- * stderr line with the live count and the cap (AC3) — and the pure pairing
- * helper (`summariseHostBudget`) they share.
+ * observability surfaces of parent AC10 — the worklist counter, one
+ * `<kind> n/max` segment per CONFIGURED (capped) kind (AC4 for implement/audit,
+ * generalised to every kind by WL-0MWF351XL002WVL2 F5) and the
+ * `Downtime … tier skipped: <reason>` stderr line with the live count and the
+ * cap (AC3) — and the pure pairing helper (`summariseHostBudget`) they share.
+ * A kind the operator has not capped is unlimited: it is never counted and
+ * never gains a segment, so an uncapped kind cannot appear on any surface.
  *
  * ## One reader, read-only (AC5)
  *
  * `readHostBudgetStatus` is the ONLY counting entry point for the display
  * surfaces, and it does not count anything itself: it pairs the counts of the
  * SAME pure reductions the dispatcher's admission compares with the caps
- * (`reduceLedgerCounts` for the implement tier's pane-derived live-pane rule
- * — WL-0MW9VQ08W000SN63: a confirmed implement with a live pane counts
+ * (`reduceLedgerCounts` for the non-audit live-pane rule
+ * — WL-0MW9VQ08W000SN63: a confirmed dispatch with a live pane counts
  * regardless of heartbeat age —,
  * `reduceAuditDisplayCounts` for the audit tier's pane-aware DISPLAY rule, or
- * the marker-compatible `reduceMarkerCounts` when no live pane list is
- * supplied, plus `legacyActiveAuditCount`). There is therefore no second
+ * the freshness-only `reduceFreshCounts` when no live pane list is
+ * supplied). There is therefore no second
  * counting or ranking path: the decision log's `budget` evidence, the header
  * token, the stderr line and the worklist counter are all quoting the ledger
  * through one set of rules.
@@ -58,14 +61,17 @@
 import * as fs from 'node:fs';
 
 import {
+  HOST_BUDGET_KINDS,
   HOST_BUDGET_STALE_WINDOW_MS,
   auditDisplayCount,
   budgetLedgerPath,
+  emptyHostBudgetCounts,
   livePaneIdSet,
   readBudget,
   readBudgetConfig,
   type HostBudgetConfig,
   type HostBudgetCounts,
+  type HostBudgetKind,
   type HostBudgetLivePane,
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
@@ -80,27 +86,34 @@ import {
   type HostBudgetDecisionReason,
   type HostBudgetEvidence,
 } from './downtime-log.js';
+import {
+  HOST_BUDGET_INTAKE_REASON,
+  HOST_BUDGET_PLAN_REASON,
+  HOST_BUDGET_RISK_EFFORT_REASON,
+} from './downtime-log-budget.js';
 
 /** One tier's observed in-flight count and configured cap. */
 export type HostBudgetTierStatus = HostBudgetEvidence;
 
-/** Both budgeted tiers, as every observability surface quotes them. */
-export interface HostBudgetStatus {
-  implement: HostBudgetTierStatus;
-  audit: HostBudgetTierStatus;
-}
+/**
+ * One entry per CONFIGURED (capped) kind, as every observability surface
+ * quotes it. A kind absent from the budget config is unlimited, so it has no
+ * live/max pair to show and is simply not present here — an uncapped kind can
+ * never produce a counter segment.
+ */
+export type HostBudgetStatus = Partial<Record<HostBudgetKind, HostBudgetTierStatus>>;
 
 /** Options for {@link readHostBudgetStatus} (ledger seams + the live pane list). */
 export interface HostBudgetStatusOptions extends HostBudgetOptions {
   /**
    * The machine-wide live pane list, when the pane read SUCCEEDED — an
-   * authoritative list is consulted for the implement tier's live-pane rule and
-   * for the audit tier's pane-aware display rule. `undefined` means pane
+   * authoritative list is consulted for every non-audit kind's live-pane rule
+   * and for the audit kind's pane-aware display rule. `undefined` means pane
    * liveness is UNKNOWN (a failed/unparseable read, WL-0MW9VQX5T001GCUP) and
-   * both figures fall back to the freshness rule (fresh entries count, no pane
+   * every figure falls back to the freshness rule (fresh entries count, no pane
    * requirement) — an unknown read must not report a false zero. An empty
-   * AUTHORITATIVE list (`[]`) still reads as zero in-flight for both tiers
-   * (empty ≠ unknown). The read is non-mutating in every case.
+   * AUTHORITATIVE list (`[]`) still reads as zero in-flight for every counted
+   * kind (empty ≠ unknown). The read is non-mutating in every case.
    */
   livePanes?: readonly HostBudgetLivePane[];
 }
@@ -118,31 +131,49 @@ export function summariseHostBudget(
 ): HostBudgetStatus | null {
   if (counts === null || counts === undefined) return null;
   if (config === null || config === undefined) return null;
-  return {
-    implement: { live: counts.implement, max: config.maxImplement },
-    audit: { live: counts.audit, max: config.maxAudit },
-  };
+  // Only configured kinds get a live/max pair: an absent cap means unlimited,
+  // and an unlimited kind is never counted against anything (AC "absent =
+  // unlimited") nor listed on any surface.
+  const status: HostBudgetStatus = {};
+  for (const kind of HOST_BUDGET_KINDS) {
+    const max = config[kind];
+    if (max === undefined) continue;
+    status[kind] = { live: counts[kind] ?? 0, max };
+  }
+  return status;
 }
 
 /**
- * Header segment for the worklist (AC4): `[budget: implement 1/2 · audit 0/1]`.
+ * Header segment for the worklist (AC4): one `kind n/max` segment per
+ * configured kind, in the canonical {@link HOST_BUDGET_KINDS} order —
+ * `[budget: implement 1/2 · audit 0/1]`, extended as
+ * `[budget: implement 1/2 · audit 0/1 · plan 0/3]` when more kinds are capped.
  *
- * `null` when the budget is unavailable, so no segment (and no extra chrome
- * row) is added. Display-only: it is a string, never a gate.
+ * `null` when the budget is unavailable or no kind is capped, so no segment
+ * (and no extra chrome row) is added. Display-only: it is a string, never a
+ * gate.
  */
 export function hostBudgetStatusText(
   status: HostBudgetStatus | null | undefined,
 ): string | null {
   if (status === null || status === undefined) return null;
-  const implement = `${status.implement.live}/${status.implement.max}`;
-  const audit = `${status.audit.live}/${status.audit.max}`;
-  return `[budget: implement ${implement} · audit ${audit}]`;
+  const segments: string[] = [];
+  for (const kind of HOST_BUDGET_KINDS) {
+    const tier = status[kind];
+    if (tier === undefined) continue;
+    segments.push(`${kind} ${tier.live}/${tier.max}`);
+  }
+  if (segments.length === 0) return null;
+  return `[budget: ${segments.join(' · ')}]`;
 }
 
 /** The tier word used in the stderr skip line for each budget token. */
 const TIER_LABEL_BY_REASON: Readonly<Record<HostBudgetDecisionReason, string>> = {
   [HOST_BUDGET_IMPLEMENT_REASON]: 'implement',
   [HOST_BUDGET_AUDIT_REASON]: 'audit',
+  [HOST_BUDGET_PLAN_REASON]: 'plan',
+  [HOST_BUDGET_INTAKE_REASON]: 'intake',
+  [HOST_BUDGET_RISK_EFFORT_REASON]: 'risk-effort',
   // `host-budget-unknown` can come from either tier (the ledger could not be
   // trusted), so the line names the budget itself rather than guessing a tier.
   [HOST_BUDGET_UNKNOWN_REASON]: 'budget',
@@ -208,34 +239,39 @@ export function readHostBudgetStatus(
 
   const now = opts.now ?? Date.now();
   const windowMs = opts.staleWindowMs ?? HOST_BUDGET_STALE_WINDOW_MS;
-  // `undefined` live panes = pane liveness UNKNOWN (WL-0MW9VQX5T001GCUP): the
-  // implement figure drops the pane requirement and falls back to the
-  // freshness rule (fresh entries count) instead of folding unknown into an
-  // empty set and reporting zero implements. An authoritative empty list still
-  // reads as zero.
-  // The ONE in-flight rule (WL-0MWFJDD8R005F5BV): the ledger's own count
-  // PLUS live dispatcher panes no entry accounts for, so the header and the
-  // admission decision always quote the same figure. Non-mutating: a render
+  // Per-kind counting, one rule each, over the CONFIGURED kinds only:
+  //
+  //  - every non-audit kind uses the ONE in-flight rule (WL-0MWFJDD8R005F5BV):
+  //    the ledger's own live count PLUS live dispatcher panes no entry
+  //    accounts for, so the header and the admission decision always quote the
+  //    same figure. `undefined` live panes = pane liveness UNKNOWN
+  //    (WL-0MW9VQX5T001GCUP): the figure drops the pane requirement and falls
+  //    back to the freshness rule (fresh entries count) instead of folding
+  //    unknown into an empty set and reporting zero. An authoritative empty
+  //    list still reads as zero.
+  //  - `audit` keeps the pane-aware DISPLAY rule (WL-0MW8D4UQH002TWJV), shared
+  //    with the interactive over-quota dialog so the two surfaces cannot
+  //    disagree (WL-0MW8IQNY7003JIOL). A confirmed entry whose pane is gone is
+  //    a dead audit and must not render as in flight; `undefined` live panes
+  //    fall back to freshness rather than inventing a zero.
+  //
+  // Uncapped kinds are skipped entirely: no count, no segment, and a render
   // never reaps or rewrites the ledger.
-  const implement = countLiveWork(read.ledger.entries, opts.livePanes, 'implement', now, windowMs);
-  // Pane-aware audit DISPLAY rule (WL-0MW8D4UQH002TWJV), shared with the
-  // interactive over-quota dialog so the two surfaces cannot disagree
-  // (WL-0MW8IQNY7003JIOL). A confirmed entry whose pane is gone is a dead
-  // audit and must not render as in flight. `undefined` live panes (UNKNOWN,
-  // WL-0MW9VQX5T001GCUP) cannot distinguish "gone" from "unknown", so both
-  // tiers fall back to the freshness rule rather than inventing a zero. The
-  // legacy `active-audit` marker is included as one synthetic entry, exactly
-  // as before.
-  const audit = auditDisplayCount(
-    read.ledger.entries,
-    opts.livePanes === undefined ? undefined : livePaneIdSet(opts.livePanes),
-    now,
-    windowMs,
-    dir,
-  );
-  const { config } = readBudgetConfig(ledgerOptions);
-  return summariseHostBudget(
-    { implement: implement.live, audit },
-    config,
-  );
+  const config = readBudgetConfig(ledgerOptions).config;
+  const livePaneIds =
+    opts.livePanes === undefined ? undefined : livePaneIdSet(opts.livePanes);
+  const counts = emptyHostBudgetCounts();
+  for (const kind of HOST_BUDGET_KINDS) {
+    const max = config[kind];
+    if (max === undefined) continue;
+    // A disabled kind (`0`) admits nothing, so its live figure is 0 — the same
+    // documented `0/0` evidence the interactive over-quota gate quotes
+    // (`readTierCount`), so the two surfaces cannot disagree.
+    if (max === 0) continue;
+    counts[kind] =
+      kind === 'audit'
+        ? auditDisplayCount(read.ledger.entries, livePaneIds, now, windowMs)
+        : countLiveWork(read.ledger.entries, opts.livePanes, kind, now, windowMs).live;
+  }
+  return summariseHostBudget(counts, config);
 }

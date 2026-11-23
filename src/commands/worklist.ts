@@ -52,6 +52,16 @@ import { resolveWorklogDir } from '../worklog-paths.js';
 import { createHierarchyOrderComparator } from './helpers.js';
 import { createListEnricher } from '../list-enrichment.js';
 import { selectBrowseFeed, type BrowseFeedEntry } from '../worklist-selection.js';
+// The same not-yet-started filter every other search surface uses
+// (WL-0MWMGET8N009KG33): applied to all four mandatory subsets *and* the
+// browse feed, so the consolidated read cannot diverge from `wl list`/`wl next`.
+import {
+  filterNotStarted,
+  markNotStarted,
+  resolveNotStartedFilterFromFlags,
+  INCLUDE_NOT_STARTED_FLAG,
+  STARTS_BEFORE_FLAG,
+} from '../not-started.js';
 // Shared soft-delete predicate (WL-0MW7S20IC001F3AP): the mandatory list
 // subsets are release-gate feeds and must agree with `wl list` / `wl update`.
 import { isSoftDeleted } from '@worklog/shared/predicates';
@@ -133,10 +143,25 @@ export default function register(ctx: PluginContext): void {
         'deterministic and cacheable.',
     )
     .option('-n, --number <n>', `Number of browse-feed items to return (default: ${WORKLIST_DEFAULT_BROWSE_COUNT})`, String(WORKLIST_DEFAULT_BROWSE_COUNT))
+    .option(INCLUDE_NOT_STARTED_FLAG, 'Include items whose startOn is in the future (excluded by default)')
+    .option(`${STARTS_BEFORE_FLAG} <iso>`, 'Include not-yet-started items starting before this ISO-8601 instant')
     .option('--prefix <prefix>', 'Override the default prefix')
     .action((options: any) => {
       utils.requireInitialized();
       const count = parseBrowseCount(options?.number);
+
+      // One resolved filter for the whole payload: every subset compares
+      // against the same instant (AC: clock-injectable, frozen-clock friendly).
+      const notStartedFlags = resolveNotStartedFilterFromFlags(options);
+      if (!notStartedFlags.ok) {
+        output.error(notStartedFlags.message, {
+          success: false,
+          error: 'invalid-starts-before',
+          message: notStartedFlags.message,
+        });
+        process.exit(1);
+      }
+      const notStarted = notStartedFlags.filter;
 
       // ONE handle for every subset below: this is the whole point of the
       // command (one process, one DB open, one cache entry).
@@ -159,10 +184,17 @@ export default function register(ctx: PluginContext): void {
       // all four subsets.
       const enricher = createListEnricher(db);
 
-      const critical = enricher.enrich(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.critical))));
-      const reviewQueue = enricher.enrich(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.reviewQueue))));
-      const inProgressRoots = enricher.enrich(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.inProgressRoots))));
-      const blockedRoots = enricher.enrich(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.blockedRoots))));
+      // Exclude not-yet-started rows from **every** subset (the `in-progress`
+      // exemption lives in the shared predicate), then mark the rows that are
+      // shown so consumers can render the same trailing marker as `wl list`
+      // (WL-0MWMGET8N009KG33).
+      const visible = (items: WorkItem[]): WorkItem[] =>
+        markNotStarted(filterNotStarted(items, notStarted), notStarted);
+
+      const critical = enricher.enrich(visible(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.critical)))));
+      const reviewQueue = enricher.enrich(visible(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.reviewQueue)))));
+      const inProgressRoots = enricher.enrich(visible(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.inProgressRoots)))));
+      const blockedRoots = enricher.enrich(visible(order(liveOnly(db.list(WORKLIST_LIST_SUBSET_QUERIES.blockedRoots)))));
 
       // The browse feed is the *same* selection `wl next -n <count>
       // --include-in-progress --include-blocked --no-re-sort` performs, minus
@@ -171,6 +203,9 @@ export default function register(ctx: PluginContext): void {
         count,
         includeBlocked: true,
         includeInProgress: true,
+        includeNotStarted: notStarted.optedIn,
+        startsBefore: notStarted.startsBeforeMs,
+        now: notStarted.now,
       });
 
       const payload: WorklistPayload = {

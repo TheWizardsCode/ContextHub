@@ -239,6 +239,7 @@ Options:
 - `--created-by <createdBy>` — Interoperability: created by (optional).
 - `--deleted-by <deletedBy>` — Interoperability: deleted by (optional).
 - `--delete-reason <deleteReason>` — Interoperability: delete reason (optional).
+- `--start-on <ISO-8601>` — Earliest instant at which the item may be worked on (optional; default: the item's `createdAt`). A **full** ISO-8601 timestamp with an explicit timezone is required, e.g. `2026-11-19T10:25:00Z` or `2026-11-19T11:25:00+01:00`; an offset is accepted and normalised to UTC `Z` form before storage. A bare date (`2026-11-19`) or a time with no timezone is rejected because its instant would be ambiguous. Pass `--start-on ""` to keep the `createdAt` default. See *Scheduling with `startOn`* below.
 - `--needs-producer-review <true|false>` — Set needsProducerReview flag (true|false|yes|no) (optional).
 - `--audit-text <text>` — Set structured audit text when creating an item. The audit result is stored in the `audit_results` table (the sole source of truth for audit state). Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
 - `--audit-file <file>` — Read audit text from a file (recommended for large or shell-sensitive content).
@@ -293,7 +294,9 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--start-on <ISO-8601>` (set the earliest start instant — same validation as `create`; `--start-on ""` clears it back to the item's `createdAt`), `--force-start-on <reason>` (audited override of the `startOn` claim guard; see *Claiming a not-yet-started item* below), `--needs-producer-review <true|false>` (set needsProducerReview flag).
+
+> **`--start-on` validation is global (WL-0MWMGEREG002L2YA):** the value is parsed once, before any id is written, so an invalid value fails the whole command with a non-zero exit and leaves **every** id in a batch update untouched. The rejection is a JSON object with `error: "invalid-start-on"` and a `message` that names the flag, the received value and an accepted example.
 
 > **Soft-delete guard (SA-0MUJBLZC60085DI9):** a soft-deleted item (non-empty `deletedBy`) cannot be updated — `wl update` rejects it per-id with error `deleted-item` and a message naming the item, and exits non-zero. This prevents a stale status/stage update from resurrecting a deleted item for the dispatcher to re-select. An explicit change to the delete-attribution fields themselves (`--deleted-by` / `--delete-reason`) is still permitted.
 
@@ -301,7 +304,14 @@ Update fields on one or more existing work items. Accepts multiple IDs. Options 
 
 > **Reparenting demotion:** when `--parent <id>` attaches an item to a `completed`/`in_review` parent, the parent is demoted to `open`/`plan_complete` so a finished parent never silently gains uncompleted work. Automation-authored telemetry children (tagged `test-failure`, titled `[test-failure]…`, or created by a known bot identity) are exempt and do not rewind the parent (WL-0MTWU4XUD0001ALR). A demotion records an audit-trail comment on the parent naming the attached child, the actor, and the transition (WL-0MTWU4Y82001B3UH).
 
-> **Detach:** pass `--parent null` (case-insensitive; also accepted: `none`, `nil`, `-`, or `""`) to detach an item, setting its `parentId` to `null`. Use `wl doctor dangling-parents` to detect and optionally fix orphaned parent references (e.g. the legacy `WL-NULL` artifact).
+> **Detach:** pass `--parent null` (case-insensitive; also accepted: `none`, `nil`, `-`, or `""`) to detach an item, setting its `parentId` to `null` — this *promotes* the item to top-level. Use `wl doctor dangling-parents` to detect and optionally fix orphaned parent references (e.g. the legacy `WL-NULL` artifact).
+
+> **Detach attribution (R2):** a `--parent null` detach records a comment on the item naming the **previous parent** and the decision rationale, so the promoted item's lineage is never silently lost:
+>
+> - `promote-because-live` — the child's subject is still live, so it was promoted to a top-level item rather than retired.
+> - `retire-because-stale` — the previous parent no longer resolves to a live item (hard-deleted, soft-deleted or an unresolvable sentinel), so the stale link was retired and the live child promoted.
+>
+> The same attribution comment is written by `wl doctor dangling-parents --apply` and `wl doctor --fix`. See [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#orphan-retention-and-remediation) for the retention rule and remediation path.
 
 Automatic re-sort:
 
@@ -353,6 +363,130 @@ Conditional updates (compare-and-swap guards):
 
 - `--if-assignee ""` is a meaningful expected value: it matches an item that is currently **unassigned** (empty assignee). It is distinguishable from omitting the flag (which applies no assignee guard), so an empty-string guard is a valid exclusive-claim token.
 - The guarded status values are normalized (e.g. `in_progress` matches a stored `in-progress`). `--if-assignee` matches the stored assignee exactly.
+
+### Scheduling with `startOn`
+
+Every work item carries a `startOn` instant — the earliest date/time at which it may
+be worked on (WL-0MWM0FDZK007BAD0). It defaults to the item's `createdAt`, so
+existing items behave exactly as before: a defaulted item is always "started".
+
+```sh
+# Schedule an item for a specific instant (offset accepted, stored as UTC)
+wl create -t "Re-measure cache hit rate" --start-on 2026-11-19T11:25:00+01:00
+wl update WL-ABC123 --start-on 2026-11-19T10:25:00Z
+
+# Clear the schedule back to the item's createdAt
+wl update WL-ABC123 --start-on ""
+```
+
+Validation rules:
+
+- The value must be a **full** ISO-8601 timestamp with an explicit timezone —
+  `Z` or an offset such as `+01:00` — e.g. `2026-11-19T10:25:00Z`. An offset is
+  accepted and normalised to UTC `Z` form before storage, so the same instant
+  always reads back identically.
+- A **bare date** (`2026-11-19`) is rejected: it is not a date/time, and the
+  midnight it would imply is ambiguous across timezones. A time with **no**
+  timezone designator is rejected for the same reason, and an unparseable value
+  is rejected outright.
+- A rejected value fails with a non-zero exit and a message naming the flag, the
+  received value and an accepted example (JSON: `error: "invalid-start-on"` plus
+  `message`, `flag`, `value` and `reason` fields). Nothing is written.
+- `--start-on ""` on `wl update` clears the value back to the item's
+  `createdAt`; on `wl create` it keeps the `createdAt` default.
+
+`wl show <id>` is **never** filtered by `startOn`: an item is always retrievable
+by id, and a scheduled item shows its `Starts` instant in human output (the JSON
+surface always carries `startOn`).
+
+#### Not-yet-started items are hidden by default (WL-0MWMGET8N009KG33)
+
+An item is **not yet started** when its effective start instant
+(`startOn`, or `createdAt` when unset, normalised to UTC) is still in the
+future. Every search surface hides such items by default:
+
+| Surface | Default behaviour |
+|---|---|
+| `wl list`, `wl search`, `wl recent` | not-yet-started rows excluded |
+| `wl next` | not-yet-started candidates (and blockers) are not selectable — the **next eligible started item** is chosen instead |
+| `wl worklist` | the exclusion applies to **every** subset (critical, review queue, in-progress roots, blocked roots and the browse feed) |
+| `wl in_progress` | never filtered: an `in-progress` item has already started, even when its `startOn` lies ahead (it is shown **marked**) |
+| `wl show <id>` | never filtered |
+
+The `next`/`worklist` browse feed resolves the filter once inside the shared
+selection (`src/worklist-selection.ts`), so `wl next`, `wl worklist` and the
+Herdr fetchers cannot disagree about which items exist for a read.
+
+Opt in with either flag (accepted by `list`, `search`, `next`, `recent` and
+`worklist`):
+
+- `--include-not-started` — show every not-yet-started item.
+- `--starts-before <ISO-8601>` — also an opt-in, and bounds the window to items
+  starting **strictly before** the given instant (same validation as
+  `--start-on`: a full timestamp with an explicit timezone). Combined with
+  `--include-not-started` the window is "not started **and** starting before
+  `<ISO>`".
+
+Opted-in rows are marked on every surface, in both output modes:
+
+- **Text** carries a trailing marker in the same bracketed style as the
+  worklist's `[held: N by Map]`:
+  `[not started until 2026-11-19T10:25:00.000Z]` (the effective `startOn`,
+  UTC `Z` form).
+- **JSON** carries `notStarted: true` alongside the effective `startOn` (the
+  field is absent on started rows, so existing payloads are unchanged).
+
+```sh
+wl list --include-not-started                       # every scheduled item
+wl list --starts-before 2026-12-01T00:00:00Z        # only those starting before December
+wl next --include-not-started --json                # work on scheduled items too
+```
+
+#### Claiming a not-yet-started item is refused (WL-0MWMGEUT10056MUI)
+
+The read filter is defence in depth; the **claim path** enforces the schedule
+too. Setting an item to `in_progress` — or writing any non-empty `assignee`
+(the Herdr audit tier's status-neutral claim) — on an item whose **explicit**
+`startOn` is still in the future is **refused** before any write, with a
+non-zero exit and a machine-readable reason:
+
+```sh
+wl update WL-ABC123 --status in-progress --assignee implement
+# { "success": false, "error": "start_on_not_reached",
+#   "reason": "start_on_not_reached", "startOn": "2099-11-19T10:25:00.000Z",
+#   "msUntilStart": 3600000,
+#   "message": "Work item WL-ABC123 cannot be claimed: its startOn (...) has
+#               not been reached yet — 1 hour to go. To start early, pass
+#               --force-start-on \"<reason>\" …" }
+```
+
+- The refusal names the item's effective `startOn` and how long until it is
+  reached (`msUntilStart` is the same figure in milliseconds).
+- The guard covers **every claim path** that shells into `wl update`, including
+  the `StatusLifecycle` claim helper and the Herdr claim. The Herdr claim
+  surfaces `reason: "start_on_not_reached"` on its `ClaimResult` so a
+  dispatcher can treat the item as not dispatchable rather than a generic
+  error.
+- It is an **additional** sequential refusal: it never replaces the `assignee`
+  hold, dependency readiness or `needsProducerReview`. An item can be
+  dependency-ready, unheld and still not-yet-started.
+- The guard **never fires for a `createdAt`-defaulted item** (its `startOn`
+  equals its `createdAt`), nor for any item whose effective instant is at or
+  before now. The boundary is inclusive: `startOn == now` is started.
+
+To start early deliberately, pass the audited override — the claim proceeds
+and a comment records the **actor**, the **reason** and the overridden
+`startOn`:
+
+```sh
+wl update WL-ABC123 --status in-progress --assignee implement \
+  --force-start-on "measurement window must not slip"
+```
+
+The comment is visible in `wl show <id>` and survives export/import like any
+other comment. The override is only recorded when it actually bypasses a
+not-yet-reached instant, so passing the flag on an already-started item is a
+no-op.
 
 ### `reviewed` <id> [value]
 
@@ -516,7 +650,7 @@ Every id is processed independently. A failure for one id (for example, not foun
 Options:
 
 - `--prefix <prefix>` — Operate on a specific prefix (optional; applies uniformly to every id in the batch).
-- `--no-recursive` — Delete only the specified items, leaving children orphaned (applies to every id).
+- `--no-recursive` — Delete only the specified items, leaving children orphaned (applies to every id). This is the explicit orphaning opt-in — the default is recursive.
 - `--no-sync` — Skip the automatic post-delete sync for the whole batch.
 
 JSON mode returns a per-id `results` array plus an overall `success`/`deleted`/`failed` summary. When exactly one id is supplied, the legacy single-id fields (`deletedId`, `deletedWorkItem`, `recursive`) are preserved for backward compatibility. Duplicate ids, and ids already removed as a descendant earlier in the same batch, are reported as `skipped` (`already deleted`) rather than failing the command.
@@ -529,6 +663,62 @@ wl delete WL-ABC123 --no-recursive        # delete only the parent, leaving chil
 wl delete WL-ABC123 WL-DEF456 --no-sync   # delete a batch without syncing
 wl --json delete WL-ABC123                # single-id machine-readable confirmation
 ```
+
+#### Orphan guard and attribution (`--no-recursive`, R2)
+
+`wl delete` is recursive by default, so deleting a parent removes its descendants and no child is left pointing at a vanished parent. `--no-recursive` is the **explicit orphaning opt-in**: only the named items are deleted and their children survive as top-level items.
+
+When orphaning is applied, `wl delete --no-recursive` records a comment on **each surviving child** naming the **previous parent** and the explicit decision (plus the delete `--reason`, when given), so the survivorship is traceable back to the deleted parent through `wl show` and the TUI. Children that are already soft-deleted are skipped — they are not live orphans.
+
+After an explicit orphaning, apply the retention rule to each survivor (see [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#orphan-retention-and-remediation)): **promote** it when its subject is still live (`wl update <id> --parent null`, or `wl doctor dangling-parents --apply`), and **retire** it when it is superseded, its target is gone, or the abandoned parent's feature was never delivered (`wl close <id>` or `wl delete <id>`).
+
+### `undelete` [options] <ids...>
+
+Restore one or more soft-deleted work items — the sanctioned inverse of `wl delete`. `wl update` deliberately refuses every field mutation on a soft-deleted item (only the delete-attribution fields can be changed), so an accidental or over-broad delete used to be unrecoverable from the CLI; `wl undelete` clears the tombstone and brings the item back with its history, children and dependency edges intact.
+
+What a restore does:
+
+- Clears `deletedBy` and `deleteReason`.
+- Restores a **live status**: `--status` wins when given; otherwise the status is derived from the item's stage (`in_review`/`done` → `completed`, `in_progress` → `in-progress`, otherwise `open`), validated against the project's `statusStageCompatibility`. The stage itself is preserved whenever a live status can carry it, and only cleared (reported in the audit comment) when it cannot.
+- Clears `assignee` (a stale claim is a scheduling hold) unless `--assignee` is given.
+- Restores **cascade-deleted descendants** by default: a descendant whose `deleteReason` starts with `cascade from <id>` was swept with the parent and comes back with it. A descendant retired in its own right keeps its tombstone and is reported as skipped. `wl delete` no longer re-attributes an already-retired descendant, which is what makes this distinction reliable.
+- Records an **audit comment** on the item naming the restoring identity, the previous `status`, `deletedBy` and `deleteReason`, so the delete/restore history survives log rotation.
+- Runs the automatic post-batch sync exactly once (`--no-sync` opts out), the same contract `wl delete` uses, so the restore propagates to peers instead of being undone by the next pull. Sync/merge treats a restore as the newer write: an older attributed tombstone no longer re-tombstones a restored item, while a later delete still wins.
+
+Options:
+
+- `--prefix <prefix>` — Operate on a specific prefix (applies to every id in the batch).
+- `--status <status>` — Status to restore to. `deleted` is refused.
+- `--assignee <assignee>` — Record an assignee on restore (default: cleared).
+- `--no-recursive` — Restore only the named items, leaving cascade-deleted children deleted.
+- `--dry-run` — Report exactly what would be restored; mutate nothing and skip the sync.
+- `--no-sync` — Skip the automatic post-restore sync for the whole batch.
+- `--restored-by <identity>` — Identity recorded in the audit comment (default: the configured git identity).
+
+Every id is processed independently, mirroring `wl delete`: an id that is not soft-deleted is a `skipped` (`already live`) result, an unknown id is a failure, and the command exits non-zero only when an id failed. JSON mode returns a per-id `results` array plus an overall `success`/`restored`/`failed` summary (plus `restoredDescendantsCount`, `restoredDescendants` and `skippedDescendants` when the subtree mattered).
+
+Examples:
+
+```sh
+wl undelete WL-ABC123                               # back to a live status, stage kept
+wl undelete WL-ABC123 --status blocked --assignee agent-x
+wl undelete WL-ABC123 --no-recursive                # only the parent comes back
+wl undelete WL-ABC123 --dry-run                     # report the plan, mutate nothing
+wl --json undelete WL-ABC123 WL-DEF456              # batch, machine-readable
+```
+
+Recovering a mistaken delete — copy-paste runbook:
+
+```sh
+wl show WL-ABC123 --json                     # 1. inspect the tombstone (deletedBy/deleteReason)
+wl undelete WL-ABC123 --dry-run              # 2. preview the restore set (parent + swept children)
+wl undelete WL-ABC123                        # 3. restore it, audit comment + one sync included
+wl show WL-ABC123 --children --json          # 4. confirm children and dependency edges survived
+```
+
+Step 4 is the check that matters for a parent item: the restore brings back the
+children that were swept with it, but a child deleted in its own right stays
+deleted (reported as `skipped`) and must be restored deliberately.
 
 ### `comment` (subcommands)
 
@@ -799,6 +989,10 @@ Options:
 
 - `-n, --number <n>` — browse-feed window size (default `20`). Bounds **only**
   the `browse` subset; the four mandatory subsets are always complete.
+- `--include-not-started` — show not-yet-started items in every subset
+  (excluded by default; `in-progress` rows are always kept and marked).
+- `--starts-before <ISO-8601>` — opt in and bound the window to items starting
+  before this instant.
 - `--prefix <prefix>` — override the default work-item prefix.
 
 Payload (stable — the Herdr fetcher caches it verbatim and parses it directly,
@@ -913,8 +1107,10 @@ Options:
 `--stage <stage>` — Filter by stage: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` (optional).
 `--search <term>` (optional)
 `-n, --number <n>` — Number of items to return (optional; default: `1`).
-`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by priority, stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Items with priority `critical` are partitioned into `Critical Group N` file-path conflict groups at the top. Non-critical `in_progress`/`plan_complete`/`intake_complete` items are partitioned into `Group N` file-path conflict groups; items with unknown/custom stages are grouped together in a single "Other" group. See "Parallel-safe grouping" below.
+`-g, --groups <n>` — Number of parallel-safe groups to identify (optional; default: `3`). Only meaningful when `-n > 1`. Groups items by **priority band first**, then stage and file-path conflicts extracted from their descriptions, placing items that affect different files in the same group and conflicting items in separate groups. Sections render band-first (`critical` → `high` → `medium` → `low` → `In Review`), so a `high` item never appears below a `medium` item whatever its stage. Items with priority `critical` are partitioned into `Critical Group N` file-path conflict groups at the top; each other band is split into `<Band> Group N`, `<Band> Idea` and `<Band> Other` sections. See "Parallel-safe grouping" below.
 `--include-blocked` — Include dependency-blocked items (excluded by default).
+`--include-not-started` — Include not-yet-started items (`startOn` in the future), which are excluded by default (see *Scheduling with `startOn`*).
+`--starts-before <ISO-8601>` — Include not-yet-started items starting before this instant (opts in and bounds the window).
 `--no-re-sort` — Skip automatic re-sort before selection, preserving current `sort_index` order (optional).
 `--re-sort-sync` — Force a synchronous (blocking) re-sort when automatic re-sort is triggered. By default automatic re-sorts are run asynchronously to avoid blocking interactive commands.
 `--recency-policy <policy>` — Recency handling for the re-sort step: `prefer`, `avoid`, or `ignore` (optional; default: `ignore`).
@@ -947,30 +1143,33 @@ When requesting multiple items (`-n <count>`), the output wraps results in:
 
 When `-n > 1`, `wl next` automatically groups items into parallel-safe groups based on priority, stage, and file-path conflicts extracted from each item's description. The `--groups/-g` option controls the number of file-path-based groups (default: `3`).
 
-The grouping algorithm uses a greedy first-fit strategy:
+Sections are bucketed by **priority band first**: `critical` → `high` → `medium` → `low` → `In Review`. Stage only sub-divides inside a band, so a high-priority idea always renders above a medium-priority planned item (the old stage-first inversion is gone).
+
+The grouping algorithm uses a greedy first-fit strategy within each band:
 
 1. Extract file paths from each item's description using a `**Key Files:**` section convention (see [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) for the full specification).
-2. **Canonicalise the input order** before packing, using a purely content-derived key: priority (high → medium → low) → stage sub-order (`plan_complete` → `intake_complete` → remaining) → id. Timestamps (`updatedAt`) are never part of the key, so packing is order-independent (WL-0MVVLBTTP003Y4XO).
+2. **Canonicalise the input order** before packing, using a purely content-derived key: priority (high → medium → low) → stage sub-order (actively-worked → `plan_complete` → `intake_complete` → `idea` → remaining) → id. Timestamps (`updatedAt`) are never part of the key, so packing is order-independent (WL-0MVVLBTTP003Y4XO).
 3. **Critical priority items** are partitioned first into `Critical Group N` file-path conflict groups at the very top.
-4. Non-critical items with stage `in_progress`, `plan_complete`, or `intake_complete` are partitioned into `Group N` file-path conflict groups.
-5. `idea` items are placed together in a single "Idea" group.
-6. Items with unknown/custom stages (and not critical) are placed together in a single "Other" group (no file-overlap splitting). This is a safety net for unknown/custom stages; it is empty for all canonical stages in the default selection list.
-7. `in_review` items are placed in a single "In Review" group, last.
+4. For each of the `high`, `medium` and `low` bands, the band's actively-worked (`status: in-progress`), `plan_complete` and `intake_complete` items are partitioned into `<Band> Group N` file-path conflict groups, with the label counter restarting at `1` in each band.
+5. The band's `idea` items are placed together in a single `<Band> Idea` group.
+6. The band's items with unknown/custom stages (e.g. `done`) are placed together in a single `<Band> Other` group (no file-overlap splitting). This is a safety net; it is empty for all canonical stages in the default selection list.
+7. `in_review` items are placed in a single "In Review" group, last, whatever their priority.
 
 The group display order is:
 1. **Critical Group N** — critical items partitioned by file-path conflicts (items sharing a file path land in different groups; items with unknown paths get singleton groups).
-2. **Group N** — in_progress + plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, items sort by **priority first (high → medium → low)**, then by the stage sub-order (`in_progress` → `plan_complete` → `intake_complete` → remaining, with no headings between the sub-groups), then by id. The same within-group ordering applies inside each Critical Group N.
-3. **Idea** — single group, sorted by priority.
-4. **Other** — single group for items with unknown/custom stages.
-5. **In Review** — single group (last).
+2. **High / Medium / Low bands**, each contributing in turn:
+   - **<Band> Group N** — actively-worked + plan_complete + intake_complete items partitioned by file-path conflicts. Within each group, items sort by **priority first (high → medium → low)**, then by the stage sub-order (actively-worked → `plan_complete` → `intake_complete` → remaining, with no headings between the sub-groups), then by id. The same within-group ordering applies inside each Critical Group N.
+   - **<Band> Idea** — single group, sorted by priority.
+   - **<Band> Other** — single group for items with unknown/custom stages.
+3. **In Review** — single group (last), pinning every `in_review` item regardless of priority.
 
 **Stability.** Grouping is a content-deterministic function of the item set: the same items with the same key files, priority and stage/status always land in the same groups, regardless of the order the database happened to return them in. An item only changes group when a material input changes — its `**Key Files:**` section, its priority, its stage/status, or the item set itself (an item added or removed). Comment or audit churn (`updatedAt`) never moves an item, and within a group priorities never interleave (every high item ranks ahead of every medium item, which ranks ahead of every low item).
 
 In JSON output (`--json` with `-n > 1`), each result entry includes a `group` field (integer, 1-indexed) indicating the group assignment.
 
-In human-readable output, group headings (e.g., `── Critical Group 1 ──`, `── Group 1 ──`, `── Idea ──`, `── Other ──`, `── In Review ──`) are displayed between groups.
+In human-readable output, group headings (e.g., `── Critical Group 1 ──`, `── High Group 1 ──`, `── Medium Idea ──`, `── Low Other ──`, `── In Review ──`) are displayed between groups.
 
-The Herdr plugin's Worklog selection list renders group separator lines between items in different groups, helping you quickly identify items you can work on in parallel.
+The Herdr plugin's Worklog selection list renders the same band-first sections. The two implementations are maintained as deliberate hand-synchronised copies (`src/commands/grouping.ts` and `packages/herdr/src/grouping.ts`), and `tests/grouping-parity.test.ts` keeps them in step by asserting identical group assignments for a shared fixture.
 
 To specify a custom number of groups:
 
@@ -1003,6 +1202,11 @@ Options:
 `-a, --assignee <assignee>` — Filter by assignee (optional).
 `--prefix <prefix>` — Override the default prefix (optional).
 
+An in-progress item is **never** filtered by `startOn` — a started item has
+already started, even if its scheduled instant is still in the future. Such a
+row is shown with the `[not started until …]` marker (and `notStarted: true` in
+JSON) so the reason it is not yet dispatchable is visible.
+
 Examples:
 
 ```sh
@@ -1018,6 +1222,8 @@ Options:
 
 `-n, --number <n>` — Number of recent items to show (optional).
 `-c, --children` — Also show children (optional).
+`--include-not-started` — Include items whose `startOn` is in the future (excluded by default; the filter is applied before the window is sliced).
+`--starts-before <ISO-8601>` — Include not-yet-started items starting before this instant.
 `--prefix <prefix>` — Override the default prefix (optional).
 
 Examples:
@@ -1044,6 +1250,8 @@ Options:
 `--stage <stage>` (optional)
 `--deleted` (optional) — Include items with `deleted` status in the output (hidden by default).
 `--needs-producer-review [value]` (optional; defaults to `true` when omitted; accepts true|false|yes|no)
+`--include-not-started` (optional) — Include items whose `startOn` is in the future (excluded by default).
+`--starts-before <ISO-8601>` (optional) — Include not-yet-started items starting before this instant
 `--prefix <prefix>` (optional)
 `--no-icons` (optional) — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
 `--json` (optional)
@@ -1110,6 +1318,8 @@ Options:
 `--deleted` (optional) — Include deleted items in results
 `--needs-producer-review [value]` (optional) — Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)
 `--issue-type <type>` (optional) — Filter by issue type
+`--include-not-started` (optional) — Include matches whose `startOn` is in the future (excluded by default; the ranked list is filtered after semantic fusion)
+`--starts-before <ISO-8601>` (optional) — Include not-yet-started matches starting before this instant
 `-l, --limit <n>` (optional) — Maximum number of results (default: 20)
 `--rebuild-index` (optional) — Rebuild the FTS index from scratch before searching
 `--semantic` (optional) — Enable hybrid lexical+semantic search. Blends FTS BM25
@@ -1490,9 +1700,10 @@ Options:
 Subcommands:
 
 - `upgrade [options]` — Preview or apply pending database schema migrations. Options: `--dry-run` (preview without applying), `--confirm` (apply non-interactively).
-- `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
+- `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned), `--cascade-children` (destructive opt-in: also hard-delete the live children of a pruned parent; without it a candidate that still has live children is **refused**, reported in `refusedIds`).
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
-- `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
+- `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--cascade-children` (with `--apply`: also hard-delete own-prefix children of a removed foreign item; without it a foreign item still referenced by an own-prefix live child is **protected**, reported in `protectedIds`), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
+- `dangling-parents [options]` — Detect items whose `parentId` references a non-existent (hard-deleted, soft-deleted or bogus sentinel) work item and optionally promote them to top-level. Options: `--dry-run` (report only — the default), `--apply` (detach each orphan by setting `parentId` to `null` and record an attribution comment). See [`doctor dangling-parents`](#doctor-dangling-parents-options).
 - `prefix [options]` — Preview (default, read-only) or apply a rename of the project's ID prefix, rewriting every ID-bearing record in the SQLite store plus the `prefix:` entry in `.worklog/config.yaml` and writing a revertible rename map. Options: `--to <prefix>` (target prefix; ASCII letters and digits only), `--apply` (request the rename and prompt for an explicit `y`; fails closed without a TTY), `--confirm` (apply without prompting; required for non-interactive runs), `--prefix <prefix>` (override the source prefix). See [`doctor prefix`](#doctor-prefix-options).
 - `audit-gaps [options]` — Read-only report of every `completed`/`in_review` item with **no audit record**, showing root vs `child of <parent-id>`, age (from `activityAt`/`updatedAt`), and coverage/waiver status (`uncovered` / `covered` / `waived`). Omits items with a fresh audit; a child covered by a fresh-audited direct parent is reported as `covered`, not flagged. Options: `--prefix <prefix>`. No `--apply` (read-only).
 - `cache [options]` — Report or prune the bounded read-cache **state directory** (`<cache-dir>/state`, one small counter file per worklog dir ever seen; see `CONFIG.md`). Options: `--prune` (remove stale counters and enforce the file bound; default is report-only), `--dry-run` (report-only; always wins when combined with `--prune`), `--max-files <n>` (counter bound, default 1000), `--ttl-days <n>` (remove counters untouched for this many days, default 7). Works without a worklog (pure cache hygiene).
@@ -1555,6 +1766,45 @@ When the read-cache state directory holds pruneable counters, a synthetic
 finding with `checkId: "read-cache.state"` and `type: "maintenance"` is appended
 the same additive way (`itemId: null`); its `message` names the counts and points
 at `wl doctor cache` / `wl doctor cache --prune`.
+
+### `doctor dangling-parents` [options]
+
+Detect work items whose `parentId` no longer resolves to a **live** row — a hard-deleted parent, a **soft-deleted** parent (`status: deleted` / non-empty `deletedBy`), or a legacy sentinel such as `WL-NULL` — and optionally promote the stranded children to top-level.
+
+```sh
+# Report dangling references (default, read-only)
+wl doctor dangling-parents --dry-run
+
+# Machine-readable report
+wl --json doctor dangling-parents --dry-run
+
+# Detach every orphan (promote to top-level) and record attribution
+wl doctor dangling-parents --apply
+```
+
+Options:
+
+- `--dry-run` — Report dangling references without modifying them. This is the default when neither `--dry-run` nor `--apply` is given.
+- `--apply` — Detach each orphan by setting its `parentId` to `null` (promotion) and record an attribution comment naming the previous parent and the rationale (`promote-because-live` or `retire-because-stale`).
+- `--prefix <prefix>` — Override the default prefix (optional).
+
+Children of a **soft-deleted** parent are reported too: a soft-deleted parent is as unreachable as a hard-deleted one for every rollup and report, so its live children are orphans (R3b). A soft-deleted *child* is already retired and is not re-reported.
+
+**Grouped output.** Alongside the per-child list, the report summarises orphans **grouped by the id of the lost parent** (the child count and child ids), so one lost parent reads as one row instead of N unrelated findings:
+
+```text
+Doctor dangling-parents: found 3 work item(s) with dangling parent references.
+  - WL-CHILD1: "…" (parentId = WL-GONE)
+  - WL-CHILD2: "…" (parentId = WL-GONE)
+  - WL-CHILD3: "…" (parentId = WL-GONE)
+
+Grouped orphan summary (children per lost parent):
+  - WL-GONE: 3 child(ren) [WL-CHILD1, WL-CHILD2, WL-CHILD3]
+```
+
+In `--json` mode the payload carries `items` (per child), `count` and `groups` (`{ parentId, count, childIds }`). `--apply` returns `fixed` (the detached ids with their previous parent) and writes the attribution comment on each.
+
+**Retention and remediation.** Detaching is only the mechanical repair; the operator then applies the retention rule — **promote** when the child's subject is still live, **retire** when it is superseded, its target is gone, or the abandoned parent's feature was never delivered. See [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#orphan-retention-and-remediation).
 
 ### `doctor prefix` [options]
 

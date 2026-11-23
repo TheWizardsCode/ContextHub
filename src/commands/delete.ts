@@ -45,6 +45,7 @@ import type { WorkItem } from '../types.js';
 import { performSync, getSyncDefaults } from './sync.js';
 import { getConfiguredUserEmail } from '../sync.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
+import { recordOrphanAttribution } from '../orphan-attribution.js';
 
 /** Per-id result for a batch delete invocation. */
 interface DeleteResult {
@@ -180,6 +181,10 @@ export default function register(ctx: PluginContext): void {
         // Get descendants before deletion for reporting.
         const children = recursive ? db.getDescendants(idLookup) : [];
         const childrenCount = children.length;
+        // Direct children that will survive a non-recursive delete and become
+        // orphans (R2, WL-0MWGRKYG0006N2A8). Captured before the delete so the
+        // parent -> child link is still intact.
+        const orphanedChildren = !recursive ? db.getChildren(idLookup) : [];
 
         const deleted = db.delete(idLookup, recursive, { deletedBy, deleteReason });
         // Re-read the persisted item so the reported attribution is the value
@@ -192,6 +197,16 @@ export default function register(ctx: PluginContext): void {
           const message = `Work item not found: ${normalizedId}`;
           results.push({ id: normalizedId, success: false, error: message, message });
           continue;
+        }
+
+        // Explicit orphaning (R2, WL-0MWGRKYG0006N2A8): every surviving child
+        // gets a comment naming the previous parent and the explicit decision,
+        // so the survivorship is traceable back to the deleted parent.
+        for (const orphanedChild of orphanedChildren) {
+          recordOrphanAttribution(db, orphanedChild.id, normalizedId, {
+            via: 'wl delete --no-recursive',
+            reason: appliedReason,
+          });
         }
 
         const message = childrenCount > 0

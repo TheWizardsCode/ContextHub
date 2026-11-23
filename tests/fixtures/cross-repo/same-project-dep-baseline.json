@@ -6,7 +6,7 @@
   },
   "dep-list-json": {
     "status": 0,
-    "stdout": "{\n  \"success\": true,\n  \"item\": \"<LOCAL_DEPENDENT_JSON>\",\n  \"inbound\": [],\n  \"outbound\": [\n    {\n      \"id\": \"<LOCAL_BLOCKER_JSON>\",\n      \"title\": \"Local blocker one\",\n      \"status\": \"open\",\n      \"priority\": \"medium\",\n      \"direction\": \"depends-on\"\n    }\n  ]\n}\n",
+    "stdout": "{\n  \"success\": true,\n  \"item\": \"<LOCAL_DEPENDENT_JSON>\",\n  \"inbound\": [],\n  \"outbound\": [\n    {\n      \"id\": \"<LOCAL_BLOCKER_JSON>\",\n      \"title\": \"Local blocker one\",\n      \"status\": \"open\",\n      \"priority\": \"medium\",\n      \"startOn\": \"<TIMESTAMP>\",\n      \"direction\": \"depends-on\"\n    }\n  ]\n}\n",
     "stderr": ""
   },
   "dep-list-human": {
@@ -31,7 +31,7 @@
   },
   "dep-list-json-second": {
     "status": 0,
-    "stdout": "{\n  \"success\": true,\n  \"item\": \"<LOCAL_DEPENDENT_HUMAN>\",\n  \"inbound\": [],\n  \"outbound\": [\n    {\n      \"id\": \"<LOCAL_BLOCKER_HUMAN>\",\n      \"title\": \"Local blocker two\",\n      \"status\": \"open\",\n      \"priority\": \"medium\",\n      \"direction\": \"depends-on\"\n    }\n  ]\n}\n",
+    "stdout": "{\n  \"success\": true,\n  \"item\": \"<LOCAL_DEPENDENT_HUMAN>\",\n  \"inbound\": [],\n  \"outbound\": [\n    {\n      \"id\": \"<LOCAL_BLOCKER_HUMAN>\",\n      \"title\": \"Local blocker two\",\n      \"status\": \"open\",\n      \"priority\": \"medium\",\n      \"startOn\": \"<TIMESTAMP>\",\n      \"direction\": \"depends-on\"\n    }\n  ]\n}\n",
     "stderr": ""
   },
   "dep-rm-human": {

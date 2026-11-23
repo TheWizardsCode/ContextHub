@@ -16,7 +16,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (reused if it already exists) — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
-- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items and decides *busy* from two independent signals: a pane in the current workspace whose title contains the work-item ID (**primary**, producer rule WL-0MV1BWETT005GSUJ) and a **live per-child claim holder** (`<worklog>/locks/child-<id>.lock` currently `flock`ed — the second signal that keeps a pane-less driven session busy, WL-0MVWDAZL10025P8J). Only when both are negative is the claim released — `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage — and every release clears the scheduling hold (`assignee`) and records the previous holder in a `herdr-hydrator` audit comment. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
+- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items and decides *busy* from two independent signals: a pane in the current workspace whose title contains the work-item ID (**primary**, producer rule WL-0MV1BWETT005GSUJ) and a **live per-child claim holder** (`<worklog>/locks/child-<id>.lock` currently `flock`ed — the second signal that keeps a pane-less driven session busy, WL-0MVWDAZL10025P8J). Only when both are negative is the claim released — `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage — and every release clears the scheduling hold (`assignee`) and records the previous holder in a `herdr-hydrator` audit comment. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + `<Band> Group N` placement) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
 - **Per-request priority (`X-Priority`)** — The proxy's retired fast/cheap operating mode is replaced by a per-request priority. Herdr maps each dispatched work item's priority onto a request priority and conveys it as the pane-launch environment variable `HERDR_REQUEST_PRIORITY`, which the Worklog pi extension turns into the `X-Priority` provider header. See [Request priority](#request-priority-per-request-x-priority).
 - **Local capacity reservation** — Before launching a downtime pane the worker claims capacity atomically via `POST /llama/local/reserve`: a granted ticket travels into the pane as `PI_LOCAL_RESERVATION_TICKET` (its first request carries `X-Local-Reservation`), a `429` refusal defers with the proxy's `retry_after_s` and the decision log records the evidence, and an absent/failing endpoint fails open to the pre-reservation polling behaviour. An idle window admits at most one launch: a second launch needs a fresh status tick that shows the launched prefill registered plus its own granted ticket. See [Local capacity reservation](#downtime-worker-local-llm-idle-dispatch).
 - **Work-item pane indicator** — The selection list shows a green circle icon (🟢) in the icon prefix of every item with an open work-item pane in the current workspace: a pane whose title carries the work-item ID (the dispatch pane-title convention preserves the ID as a trailing suffix). The icon appears exactly when such a pane is open and never otherwise (producer's rule, WL-0MV1BWETT005GSUJ) — it is pane existence, not a live agent status. The worklist also records which pi agent pane is attached to each dispatched item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes (used for the hover tooltip). The icon occupies a fixed-width slot so the item-ID column never shifts. See [Green-circle icon (work-item pane open)](#green-circle-icon-work-item-pane-open).
@@ -26,7 +26,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, **assignee**, tags, audit info, its **active dependency blockers**, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
-- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values). Actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
+- **Priority-band grouping** — Work items are bucketed by **priority band first** (`critical` → `high` → `medium` → `low`), with `In Review` pinned last as a single global section; stage only sub-divides inside a band (`in-progress` → `plan_complete` → `intake_complete` → `idea` → other), so a high-priority `idea` item always renders above a medium-priority `plan_complete` item (WL-0MWMQ6AV6007ZUNK). Grouping uses the standard lifecycle stages only (`idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values); actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Priority-band grouping](#priority-band-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. Any markdown document opened in the viewer can also be annotated in place (`n,e` add/edit, `n,d` delete); podcast scripts sync notes to the worklog as child work items (PRD §7.3). See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
@@ -45,13 +45,25 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 # Clone the repository
 cd /path/to/worklog-repo
 
-# Build the repo — the postbuild hook automatically links the herdr plugin
+# Build the repo — compiles the plugin too, then the postbuild hook links it
 # and registers the prefix+l keybinding (idempotent; safe to re-run)
 npm run build
 
-# Build the plugin (also triggered by herdr's own [[build]] step)
+# Type-check the repo and the plugin before you push (a type error fails the
+# canonical suite, CI and the release gate). Also available as the
+# typecheck:root / typecheck:shared / typecheck:herdr sub-scripts.
+npm run typecheck
+
+# Or build the plugin on its own (also triggered by herdr's own [[build]] step)
 cd packages/herdr && npm run build
 ```
+
+Since WL-0MWKQ51G0006F3KV the root `npm run build` compiles `packages/herdr`
+(`build:herdr` → the plugin's `build:only`, after `build:shared`), so a plugin
+type error fails the build instead of shipping — the plugin can no longer merge
+broken while the root build stays green. `tsc` also runs with
+`noEmitOnError: true`, so a red tree leaves `dist/` untouched rather than
+writing JS that loads and then crashes the pane.
 
 `npm run build` runs `scripts/install-herdr.sh` via the root `postbuild` hook. The script:
 
@@ -264,7 +276,7 @@ The plugin respects the following environment variables:
 - `WL_COUNT` — Number of work items to fetch (default: 20, now superseded by `browseItemCount` in settings)
 - `HERDR_SOCKET_PATH` — Path to the herdr Unix socket used by the event subscription (default `~/.config/herdr/herdr.sock`). When unset/unreachable the plugin falls back to polling.
 - `HERDR_COORDINATION_DIR` — Machine coordination directory override (default `~/.herdr/downtime`); the host dispatch-budget ledger and its `budget.json` live here.
-- `HERDR_HOST_MAX_IMPLEMENT` / `HERDR_HOST_MAX_AUDIT` — Per-tier machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. Values clamp to `0`–`32`; `0` disables that tier host-wide (a per-tier kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`). `HERDR_HOST_MAX_IMPLEMENT` governs the implement tier; **`maxAudit` / `HERDR_HOST_MAX_AUDIT` are implement-tier-only for audit admission** — the audit budget is owned by the proxy (below), and `maxAudit` is only the one-release legacy cap and the local observability figure. See *Host-wide dispatch budget* under the downtime worker.
+- `HERDR_HOST_MAX_<KIND>` — Per-kind machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. One key per dispatch kind: `HERDR_HOST_MAX_IMPLEMENT`, `HERDR_HOST_MAX_AUDIT`, `HERDR_HOST_MAX_PLAN`, `HERDR_HOST_MAX_INTAKE`, `HERDR_HOST_MAX_RISK_EFFORT`. Values clamp to `0`–`32`; `0` disables that kind host-wide (a per-kind kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`; every other kind is uncapped unless configured). `HERDR_HOST_MAX_IMPLEMENT` governs the implement tier; **`audit` / `HERDR_HOST_MAX_AUDIT` are implement-tier-only for audit admission** — the audit budget is owned by the proxy (below), and `audit` is only the one-release legacy cap and the local observability figure. See *Host-wide dispatch budget* under the downtime worker.
 - `HERDR_AUDIT_LOCAL_BUDGET` — **one-release** escape hatch (`=1`) restoring the pre-proxy audit decision (`budget.json` `maxAudit` + the local ledger, never consulting the proxy). It is removed in the release after the proxy side (`LP-0MW95FYMH006XYNK`) ships. Unset → the proxy-owned audit budget is authoritative. The proxy URL is `downtimeProxyUrl` in `~/.config/herdr/worklog-plugin.json` (default `http://192.168.0.199:8000`), the same URL the status poller and reserve client use.
 
 #### Plugin Settings (config file)
@@ -351,8 +363,8 @@ The hydrator detects those claims and releases them:
   items.
 - **Selection-list marker** (WL-0MV1BWETT005GSUJ) — the same pane-title lookup
   drives the selection list's in-progress marker: an item with a matching pane
-  is rendered `in-progress` (marker + Group N) even when its worklog status is
-  still `open`, and loses the marker when the pane closes.
+  is rendered `in-progress` (marker + `<Band> Group N` placement) even when its
+  worklog status is still `open`, and loses the marker when the pane closes.
   Terminal `in_review`/`completed` items keep their own review marker. Because
   opening/closing a work-item pane does not touch the worklog DB (so the
   DB-change-gated refresh tick cannot update the marker for it), the marker is
@@ -409,16 +421,28 @@ dispatches; the other herdr instances coordinate instead of polling:
   [*Which cross-root mechanism applies when*](../../docs/dev/downtime-dispatcher.md#which-cross-root-mechanism-applies-when-offers-passive-instances-or-downtimeworklogroots)
   (a due scheduled prompt dispatches immediately on its own cadence —
   WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*). The offer rung reads the
-  machine-wide offer list and dispatches ENTRIES in **file order**,
-  iterating the **offers inside each entry** (each entry advertises up to one
-  nominee per bucket — see *Shared coordination file* above). Every offer is
+  machine-wide offer list and orders the **whole admissible candidate set** by
+  **least-recently-dispatched root**
+  (`orderRootsLeastRecentlyServed`/`orderCoordinationEntriesForDispatch` — a
+  pure read that writes nothing; unknown roots first, then oldest dispatch,
+  ties alphabetical), iterating the **offers inside each entry** (each entry
+  advertises up to one nominee per bucket — see *Shared coordination file*
+  above). Every offer is
   re-validated **at dispatch time**
   (`fetchItem` → `classifyItemForDispatch`/stage+status as the sole gate;
   no wall-clock prune — WL-0MTMPIQBE001J41P) and the same sequential
   safety filters (producer-review gate, code-freeze split-by-skill,
-  free-slot minimums) are applied **per offer**, unchanged. The cross-root **tier priority** and the **global
-  cross-project round-robin cursor** ordering are **retired**
-  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); the v2 bucket
+  free-slot minimums) are applied **per offer**, unchanged. The cross-root **tier priority** is **retired**
+  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); the root-level
+  round-robin cursor is LIVE — the candidate set is ordered by
+  least-recently-*dispatched* root (pure read) and only a CONSUMED offer charges
+  its root via `advanceRoundRobinCursor`, never at selection
+  (WL-0MWFIZ8H5005FVNN). While **a peer root has an admissible offer and
+  surplus capacity exists** (`freeSlots > 1`), a root that has already
+  dispatched **twice in succession** is deferred behind its peers
+  (`deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING = 2`, decision-log-sourced
+  and fail-open) — an ordering rule only, never a gate; a selected-but-held
+  root is never charged. The v2 bucket
   offers are a scoped reversal of that item's single-offer *contract* (what is
   offered, and how the leader walks it), never of that retirement —
   `COORDINATION_TIER_ORDER` stays retired and the classifier remains the single
@@ -547,16 +571,18 @@ dispatches; the other herdr instances coordinate instead of polling:
   proxy-derived by WL-0MW95GBEG005ERHS)** — the operator can cap how many
   agent panes this **machine** runs at once, regardless of how many herdr
   instances or projects are open.
-  - **Implement tier** — a machine-scoped ledger
+  - **Per-kind cap** — a machine-scoped ledger
     (`~/.herdr/downtime/dispatch-budget.json`, one entry per in-flight
-    dispatch) with the cap in `~/.herdr/downtime/budget.json` (`maxImplement:
-    2`; `0` disables the tier host-wide), overridable by
-    `HERDR_HOST_MAX_IMPLEMENT` — **not** a per-instance `settings.json` key,
+    dispatch) with the caps in `~/.herdr/downtime/budget.json` as a map over
+    kinds (`{ "implement": 2, "audit": 1, "plan": 3 }`; a kind absent from
+    the file is uncapped; the legacy `maxImplement` / `maxAudit` keys are still
+    read; `0` disables a kind host-wide), overridable by
+    `HERDR_HOST_MAX_<KIND>` — **not** a per-instance `settings.json` key,
     deliberately: a host cap stored per instance drifts by construction (which
     is why `downtimeRequiredFreeSlots` cannot express it), while one elected
     leader already dispatches for every root so a machine file is
     authoritative. Dispatcher-fired work over quota is a neutral skip
-    (`host-budget-implement`), never a prompt and never a `no-candidate`
+    (`host-budget-<kind>`), never a prompt and never a `no-candidate`
     cooldown; an unreadable ledger **fails closed** there
     (`host-budget-unknown`). The self-healing rewrite from the live pane list
     runs only when the pane read **succeeded**; a failed/unparseable pane read
@@ -568,6 +594,12 @@ dispatches; the other herdr instances coordinate instead of polling:
     a transient herdr hiccup can neither wipe the ledger's record of running
     work nor silently under-count it, and it never refuses a tick on its own
     (the fail-open admission rationale is preserved).
+  - **Counting asymmetry is audit-only** — every kind except `audit` counts
+    only fresh entries whose pane is in the machine-wide live pane list, so its
+    slot frees as soon as the pane leaves that list; `audit` keeps the
+    marker-era over-hold (fresh ledger entries with no live-pane requirement,
+    held until a release point or the 2 h stale window). An uncapped kind is
+    never counted and never recorded in the ledger.
   - **Audit tier is proxy-derived (cross-machine)** — the audit budget and the
     live audit-lease registry are **owned by the proxy** (the one local
     `llama-server` GPU every ContextHub host shares), and herdr queries
@@ -581,6 +613,28 @@ dispatches; the other herdr instances coordinate instead of polling:
     implement-tier-only for admission. The one-release
     `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
     decision for a single release.
+  - **A finished session frees its slot without closing its pane
+    (WL-0MWJVY6NR001E0FS).** The pane-close reaper releases a dispatch's
+    ledger entry when its Pi session is **finished** — the final assistant
+    message ends with the `</end_session>` marker, or the herdr agent status
+    is terminal (`done`/`exited`) — on its 60 s cadence and **independently of
+    any close**. This matters for the panes the close policy deliberately
+    leaves open: an `implement` pane is never auto-closed and a
+    terminal-status `audit` pane hits the dead-agent guard, so before this
+    they held their tier until the 2 h staleness window expired. Only the
+    budget is freed; the pane stays open. The release is identity-safe (keyed
+    by the finished **pane id**, so a sibling dispatch for the same item keeps
+    its entry) and kind-generic (it omits `kind`, so the ledger entry's own
+    kind keys it). A still-working or unknown session, and an unreadable pane
+    read, never release.
+    The release alone is not enough: the in-flight figure is a **union** of
+    ledger entries and live dispatcher panes no entry accounts for, so the
+    budget's pane feed also projects the full pane list onto the LIVE subset
+    (`host-dispatch-budget.live-panes.ts`, the shared `isPaneAgentLive`
+    definition). A `done`/`exited` agent therefore stops counting against its
+    tier in the admission **and** header paths within one cadence, even while
+    its finished pane remains open for inspection. Unknown/blank statuses stay
+    counted (fail-open — never over-admit on a herdr quirk).
   - **A refusal is a continuable hold on that candidate, not a whole-tick
     stop.** Both head-scan paths record the refusal (reason + `live`/`max`
     evidence) and keep scanning, so `plan`/`intake` ranked behind a refused
@@ -630,9 +684,11 @@ The filters walk the Herdr sequence in LIST ORDER — a filtered head simply mov
 to the first dispatchable item deeper in the same sequence (never a re-ranking). The same
 selection feeds the coordination check-in offer (`computeMostImportantItem`), so the
 leader's dispatch and each root's check-in agree on the ranking by construction
-(the leader dispatches ENTRIES in file order and the offers inside each in
-bucket order; the cross-root tier priority / round-robin
-cursor ordering are retired — see the *Leader dispatch* bullet above).
+(the leader orders the whole candidate set by least-recently-dispatched root
+  — with the twice-in-succession bound while a peer is admissible and surplus
+  capacity exists — and the offers inside each in bucket order; the cross-root
+  tier priority is retired and the root-level
+  round-robin cursor ordering is live — see the *Leader dispatch* bullet above).
 Per-root "critical first" is preserved inside the ranking: smart-selection always places
 critical items at the Herdr head, so a critical item dispatches as soon as it is the
 first classifyable list item (WL-0MSI8H3HP000K0RG audit, WL-0MSMAYPQP001FLR6 implement,
@@ -679,9 +735,12 @@ nothing dispatchable — before its own out-of-view backlog. Each root is read
 through the **same canonical ranking window** (`getHerdrListHead` plus the
 bounded extension) with the **full sequential filter chain** applied against
 that root's own state (freeze, review queue, in-flight panes, cooldown log,
-claim target). The sweep starts at the least-recently-served registry root via
-the `downtime-round-robin-by-root` cursor and visits the rest in registry
-order, so no single root can monopolise the leader. An unreadable/missing root
+claim target). The sweep starts at the least-recently-DISPATCHED registry root
+via the `downtime-round-robin-by-root` cursor (selection is a pure read — only
+a sweep CONSUMPTION charges its root, WL-0MWFIZ8H5005FVNN), applies the same
+twice-in-succession deferral as the offer path (a root at the ceiling is
+deferred behind its peers while surplus capacity exists), and visits the rest
+in registry order, so no single root can monopolise the leader. An unreadable/missing root
 is skipped without a strike, and a swept dispatch is recorded with
 `selectionPath: registered-root-sweep` and does **not** hand off leadership.
 An **absent or empty registry is a no-op** — the candidate universe stays
@@ -1402,9 +1461,20 @@ Semantics:
   never blocked or dropped. **Adopted (reused) tabs are never moved** — a
   reused tab's position is the operator's own arrangement. Automated
   (downtime dispatcher) tabs keep today's right-side placement unchanged.
+- **Ship release tab** (WL-0MW6FIZYI0003QEU) — the Ship It shortcut
+  (`/skill:ship release`) is a **global** command carrying no work-item ID,
+  so it would otherwise fall back to the current-pane split. On this path
+  only, the plugin substitutes the literal tab label **`Ship`** for the
+  missing item ID and reuses the same create-or-reuse machinery: the release
+  pane lands in a `Ship` tab (created on first use, reused thereafter),
+  placed left of the extensions tab when fresh, and the release pane is
+  focused/zoomed on open (`--focus`). A second Ship command while the first
+  release is still live in the `Ship` tab is rejected by the Ship Guard (see
+  [Ship It confirmation dialog](#ship-it-confirmation-dialog)).
 - **No-ID panes unchanged** — commands with no work-item association (the
   unbound **Open Pi Agent** action, the `P n` blank-prompt session, generic
-  commands) still split the current pane in the current tab.
+  commands) still split the current pane in the current tab. The Ship
+  release is the only no-ID command with an explicit tab label.
 - **Root-pane cleanup** — when a dispatch creates a fresh item tab, the
   tab's placeholder root pane (used only as the first split anchor) is closed
   once the new pane has spawned. Cleanup is **fail-safe** (the anchor is
@@ -2574,42 +2644,54 @@ first rows), so a long list never scrolls off the top.
   list, filtering, or refreshing resets the panel scroll so the top of the
   panel is always visible again.
 
-## Stage grouping
+## Priority-band grouping
 
-Work items are grouped by their Worklog **stage** using the standard
-lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
-`in_review`, `done`. No custom stage values are required for
+Work items are bucketed by **priority band first** — `critical` → `high` →
+`medium` → `low` → `In Review` (WL-0MWMQ6AV6007ZUNK) — so priority, not
+stage, decides the top-level section order: a `high@idea` item can never
+render below a `medium@plan_complete` one. Stage is used only as the
+intra-band sub-order (`in-progress` → `plan_complete` → `intake_complete` →
+`idea` → other) and as the sub-section scheme inside each band
+(`<Band> Group N`, `<Band> Idea`, `<Band> Other`); the file-path conflict
+groups and their `N` counter restart at `1` in every band. `In Review` stays
+a single global section pinned last, whatever the priority of its members.
+
+Grouping uses the standard lifecycle stages only — `idea`, `intake_complete`,
+`plan_complete`, `in_review`, `done`. No custom stage values are required for
 grouping, so podcast episode items group exactly as their frontmatter
 `pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
-in the canonical order (Critical → Group N → Idea → Other → In Review) as
-**collapsible heading rows** (WL-0MSL5MPSZ003TG94): each heading shows the
-group label plus its item count (`── Group 1 (4) ▼ ──`), and pressing **Tab**
+in the band-first order above as **collapsible heading rows**
+(WL-0MSL5MPSZ003TG94): each heading shows the group label plus its item count
+(`── High Group 1 (4) ▼ ──`), and pressing **Tab**
 while a heading is selected collapses/expands that group — collapsed groups
 hide their items from both the render and navigation (the heading itself
 stays). The **In Review** heading carries a grey background fill (ANSI 256
 colour 238) so the producer-review queue stands out from the other sections
 at a glance; every other heading keeps the plain bold/stage-coloured style
-(WL-0MUYJ8WJG0087VSU). Counts reflect the top-level items in the group (post stage-filter)
-regardless of collapse state. Stage changes re-group items on the next
-refresh. Non-critical actively-worked items (`status = in-progress`) join
-the file-path-partitioned `Group N` lists alongside
+(WL-0MUYJ8WJG0087VSU). Counts reflect the top-level items in the group (post
+stage-filter) regardless of collapse state. Stage or priority changes re-group
+items on the next refresh. Within a band, actively-worked items (`status = in-progress`)
+join the band's file-path-partitioned `<Band> Group N` lists alongside
 `plan_complete`/`intake_complete` items and, at equal priority, sort ahead of
-them; "Other" remains only as a safety net for
-unknown/custom stages (including the removed `in_progress`/`completed`
-stage values), so legacy rows still render deterministically.
+them; `<Band> Idea` holds the band's `idea` items, and `<Band> Other` remains
+only as a safety net for unknown/custom stages (including the removed
+`in_progress`/`completed` stage values), so legacy rows still render
+deterministically.
 
 ### Grouping stability (WL-0MVVLBTTP003Y4XO)
 
 Grouping is a **content-deterministic** function of the item set. Before the
 greedy first-fit packing runs, the selected items are canonicalised by a
-purely content-derived key — priority (high → medium → low) → stage sub-order →
-id. Timestamps are never part of the key, so a comment, an audit run or any
+purely content-derived key — priority band (critical → high → medium → low) →
+stage sub-order (`in-progress` → `plan_complete` → `intake_complete` →
+`idea` → remaining) → id. Timestamps are never part of the key, so a
+comment, an audit run or any
 other `updatedAt` churn cannot move an item between groups; only a material
 change can (its `**Key Files:**` section, its priority, its stage/status, or
 the item set itself).
 
-Within every group (including `Critical Group N` and `Group N`) the sort is
-**priority first** — every high-priority item ranks ahead of every
+Within every group (including `Critical Group N` and each band's
+`<Band> Group N`) the sort is **priority first** — every high-priority item ranks ahead of every
 medium-priority item, which ranks ahead of every low-priority item — then the
 stage sub-order (actively-worked → `plan_complete` → `intake_complete` →
 remaining), then `id` as a deterministic tie-break. Priority was the secondary
@@ -2806,6 +2888,7 @@ The Ship It shortcut (`S`, Shift+s) triggers a **dev→main release** via the sh
 
 - The dialog shows a prompt ("Ship it? Type 'ship' to confirm, Esc to cancel") and reflects your typed input with a block cursor.
 - Type `ship` (case-insensitive: `ship`, `Ship`, `SHIP`, …) and press **Enter** to dispatch `/skill:ship release` via the standard command-routing path — a global release, so **no work item id** is substituted. A "Sent" toast confirms.
+- **Dedicated `Ship` tab, focused on open** (WL-0MW6FIZYI0003QEU): the release pane is placed in a tab labelled exactly `Ship` in the invoking workspace — created on first use (immediately left of the Worklog/extensions tab) and reused thereafter — instead of splitting the current tab. The new pane is focused/zoomed so the operator immediately sees the release run. Placement is fail-open: if the `Ship` tab cannot be resolved or created, the dispatch falls back to the current-pane split. See [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - Typing anything else and pressing **Enter** clears the input buffer and keeps the dialog open so you can retry — nothing is dispatched.
 - **Esc** dismisses the dialog and returns to the selection list without dispatching anything.
 - While the dialog is open all keys are consumed by it (modal input); navigation resumes after Esc.
@@ -2817,13 +2900,14 @@ Before the confirmation dialog opens, the plugin runs a **Ship Guard** to make s
 - The guard lists every **live** agent pane machine-wide (`herdr pane list`) and matches work-item IDs embedded in pane labels against the actual set of work-item IDs in the current project's worklog. The worklog query requests **only** the `id` field (`wl list --json --fields id`) — the guard needs the ID set alone, so the payload stays small (~100 KB for ~2.3 k items instead of the full ~8.5 MB worklog) and cannot overflow Node's process buffer as the worklog grows (WL-0MUEK7H39008VVUF). A pane blocks when it carries a project work-item ID **and** its agent is live (present, status not `done`/`exited`).
 - If any pane blocks, the dialog is **not** opened. A full-pane modal notice (`⛔ SHIP MODE BLOCKED`) lists the offending work-item IDs and pane labels, and tells the operator to close those panes and retry. The notice is dismissed with `Esc`, `Enter`, or `q`; nothing is dispatched.
 - A pane whose agent is absent, `done`, or `exited` does **not** block, even when its label carries a project work-item ID. Work-item IDs from a different project do not block (membership is by ID, not prefix).
+- **One release at a time** (WL-0MW6FIZYI0003QEU): the guard also rejects a second Ship command while the first release is still active. A live agent pane inside the `Ship` tab (resolved from the invoking workspace's tab list) blocks the same way: the confirmation dialog never opens, a `⛔ SHIP MODE BLOCKED` notice names the running release, and no second pi pane is spawned. A dead/exited pane in the `Ship` tab — or the tab's bare placeholder root pane — does not block. Tab resolution is fail-open: if the tab list cannot be read, the guard cannot detect an active release and placement still works.
 - **Fail safe:** if `wl list` or `herdr pane list` is unavailable, the guard cannot verify the pane state and the dialog is **not** opened. The notice names **which** query failed (`worklog list unavailable` vs `pane list unavailable`) so the operator knows what to retry, rather than pretending the project is clear.
 
 ### Code Freeze on confirm
 
 Typing `ship` + Enter writes the Code Freeze marker **before** `/skill:ship release` is dispatched, so the freeze applies from the moment of confirmation (WL-0MUD6DDZC007ZSIW). The write is atomic (temp file + rename). If the dispatch fails — `onCommand` throws (e.g. no agent pane available) or the dispatch is a no-op — the plugin best-effort removes the marker **it wrote** and surfaces the error, so a release that never started cannot leave a stale freeze. A marker that was already active (written by the ship skill) is owned by the ship skill: the plugin neither overwrites nor clears it. The ship skill remains the authority that clears the marker on release exit.
 
-Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). `ship-guard.ts` holds the pure guard (project-ID set, blocking-pane filter, blocked-notice formatter) and `worklist.ts` gates `openShipItDialog()` on it and writes/clears the marker on confirm. The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
+Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). `ship-guard.ts` holds the pure guard (project-ID set, blocking-pane filter, active-`Ship`-tab filter, blocked-notice formatters) and `worklist.ts` gates `openShipItDialog()` on it and writes/clears the marker on confirm. The Ship dispatch resolves its `Ship` tab through the shared interactive item-tab machinery (`interactiveTabLabel` substitutes the label for the missing work-item id) and forwards `--anchor`/`--focus` to `send-to-pi.sh`. The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
 
 > **Behavior change:** the former manual-sync `S` binding (immediate `wl sync` with a toast) was removed; background auto-sync on the timer is unchanged.
 
@@ -3098,6 +3182,12 @@ python3 <test-skill>/scripts/run_tests.py --group herdr --json   # groups.herdr
 
 # Build TypeScript (compiles packages/shared first, then the plugin)
 cd packages/herdr && npm run build
+
+# Type-check the plugin (npm run typecheck from the repo root runs this plus
+# the root and packages/shared projects). This is the authoritative
+# type check — src/build-guard.test.ts below is a secondary, profile-local
+# assertion that only runs under --type herdr / --group herdr.
+npm --prefix ../.. run typecheck:herdr
 ```
 
 The `herdr` type is defined in `.pi/skills_extensions/test/extension.json`, and

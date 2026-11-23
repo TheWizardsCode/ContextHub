@@ -22,7 +22,8 @@
  *
  *     { "at": "<ISO-8601>", "op": "reserve" | "confirm" | "release" | "reap"
  *                                   | "sweep" | "repair",
- *       "kind": "implement" | "audit" | "all",
+ *       "kind": "implement" | "audit" | "plan" | "intake" | "risk-effort"
+ *               | "all",
  *       "itemId": "<work item id, '' when the mutation is not per-entry>",
  *       "paneId": "<pane id when known>",
  *       "instanceId": "<herdr instance or actor process>",
@@ -91,7 +92,13 @@ export type BudgetAuditOp =
   | 'repair';
 
 /** Entry kind of the mutation; `all` is a whole-document mutation (repair). */
-export type BudgetAuditKind = 'implement' | 'audit' | 'all';
+export type BudgetAuditKind =
+  | 'implement'
+  | 'audit'
+  | 'plan'
+  | 'intake'
+  | 'risk-effort'
+  | 'all';
 
 /** Sentinel for a count that cannot be determined (a repair over bad bytes). */
 export const BUDGET_AUDIT_UNKNOWN_COUNT = -1;

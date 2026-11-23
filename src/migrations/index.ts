@@ -9,7 +9,7 @@ import * as path from 'path';
 import { getDefaultDataPath } from '../jsonl.js';
 
 /** The schema version this build writes once every migration is applied. */
-export const CURRENT_SCHEMA_VERSION = '9';
+export const CURRENT_SCHEMA_VERSION = '10';
 
 /**
  * The preservation store for legacy `workitems.audit` text that cannot be
@@ -370,6 +370,41 @@ export const MIGRATION_CATALOG: MigrationEntry[] = [
         'dependency_edges_foreign_target',
         '1',
       );
+    }
+  },
+  {
+    id: '20261118-add-start-on',
+    description:
+      'Add the workitems.startOn scheduling column, index it, and back-fill startOn = createdAt for existing rows (WL-0MWMGEPY2004EDZ8)',
+    safe: true,
+    // The pending check keys on the BACK-FILL sentinel, never on the column's
+    // presence: the persistent store adds a missing `startOn` column
+    // additively on open (recording `startOn_added`), and keying on the column
+    // would let that repair silently retire the back-fill.
+    requiredColumn: '__meta:startOn_backfilled',
+    apply: (db: Database.Database) => {
+      if (tablePresent(db, 'workitems')) {
+        const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+        const columns = new Set(cols.map(c => String(c.name)));
+        if (!columns.has('startOn')) {
+          db.exec(`ALTER TABLE workitems ADD COLUMN startOn TEXT`);
+        }
+        // Idempotent back-fill: only rows with no stored instant are touched,
+        // so re-running can never overwrite an explicitly scheduled item. A
+        // partial/legacy `workitems` table without `createdAt` has nothing to
+        // back-fill from (the column is still added above so writes work).
+        if (columns.has('createdAt')) {
+          db.exec(
+            `UPDATE workitems SET startOn = createdAt WHERE startOn IS NULL OR trim(startOn) = ''`,
+          );
+        }
+        // Same index the store creates, so a database upgraded by
+        // `wl doctor upgrade` alone is complete (see docs/migrations/start_on.md).
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_workitems_startOn ON workitems(startOn)`);
+      }
+      const mark = db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)');
+      mark.run('startOn_added', '1');
+      mark.run('startOn_backfilled', '1');
     }
   }
 ];

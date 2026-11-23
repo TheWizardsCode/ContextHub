@@ -21,7 +21,7 @@ import type { WlError } from './fetcher.types.js';
  */
 export function formatWlError(err: WlError): string {
   if (err.initialized === false) {
-    return 'Worklog not initialized. Run "worklog init" first.';
+    return 'Worklog not initialized. Run "wl init" first.';
   }
   if (err.error) {
     return `Worklog error: ${err.error}`;

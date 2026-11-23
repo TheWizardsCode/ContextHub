@@ -144,7 +144,9 @@ describe('pickFields', () => {
   });
 
   it('VALID_FIELDS has no unexpected entries', () => {
-    expect(VALID_FIELDS).toHaveLength(14);
+    // 15 after `startOn` was added as a first-class stored field
+    // (WL-0MWMGEPY2004EDZ8).
+    expect(VALID_FIELDS).toHaveLength(15);
   });
 
   it('error message for unknown fields excludes id from valid fields list', () => {

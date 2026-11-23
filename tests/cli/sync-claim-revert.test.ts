@@ -17,16 +17,25 @@
  * **(a) Lost update with a fresh stamp — `import()` re-stamps the stale row.**
  * `performSync()` (`src/commands/sync.ts`) takes its local snapshot
  * (`db.getAll()`) *after* acquiring the lock, then parks on the network for
- * the fetch/merge. `withFileLock()` treats any lock older than `maxLockAge`
- * (5 min, `src/file-lock.ts` `DEFAULT_MAX_LOCK_AGE_MS`) as stale *even when
- * the holder is alive* and unlinks it, so a mutation that arrives during a
- * long sync acquires "the" lock, claims the item, and completes. The parked
- * sync then persists its pre-claim merged set. `WorklogDatabase.import()`
+ * the fetch/merge. The sync's lock outlives a **foreign-host** observer's
+ * notion of staleness: `withFileLock()` age-expires a lock older than
+ * `maxLockAge` (5 min, `src/file-lock.ts` `DEFAULT_MAX_LOCK_AGE_MS`) **when the
+ * holder's PID cannot be trusted — i.e. a lock from a different host** — and
+ * unlinks it, so a mutation arriving from another host during a long sync
+ * acquires "the" lock, claims the item, and completes. The parked sync then
+ * persists its pre-claim merged set. `WorklogDatabase.import()`
  * (`packages/shared/src/database.ts`) re-inserts that stale row and — because
  * its tracked fields differ from the row now in the database — stamps it
  * `updatedAt = new Date().toISOString()`. The claim is therefore lost *and*
  * the losing (stale) row becomes the newest row, so every later merge honours
  * it. `upsertItems()` (delta path) has the same re-stamp behaviour.
+ *
+ * **Same-host note (SA-0MVL7YG2S009L6PU).** For a *same-host* holder whose PID
+ * is alive, the lock is now authoritative and is never age-expired, so a
+ * same-host mutation can no longer steal a live sync's lock mid-operation and
+ * mechanism (a) is no longer reachable that way. It persists only for
+ * foreign-host locks — the residual hazard this suite models (see
+ * `expireLock`).
  *
  * **(b) Store-resolution divergence — a second store per repo.**
  * `.worklog/config.yaml` is tracked (`.gitignore` re-includes it), so every
@@ -47,7 +56,8 @@
  *    checkout's store and never creates a second store.
  * 2. `(a)` A claim that lands while a sync is parked cannot be reverted — and
  *    the (stale) losing row is not re-stamped newer — even when the sync's
- *    lock has age-expired and the claim therefore acquired it.
+ *    lock has age-expired (a foreign-host lock) and the claim therefore
+ *    acquired it.
  *
  * Both are deterministic: the fetch is parked by a `git` shim (the technique
  * from `sync-vs-mutation.test.ts`), and the "long sync" is simulated by
@@ -221,14 +231,20 @@ function lockPath(local: string): string {
 }
 
 /**
- * Back-date a held lock past `DEFAULT_MAX_LOCK_AGE_MS` (5 minutes) so the next
- * acquirer treats it as stale and steals it *while the holder is still
- * alive* — exactly what happens when a sync runs longer than the hard-coded
- * max lock age. Deterministic: no sleeping.
+ * Back-date a held lock past `DEFAULT_MAX_LOCK_AGE_MS` (5 minutes) and stamp
+ * it with a foreign host, so the next acquirer treats it as stale and steals
+ * it *while the holder is still alive*.
+ *
+ * Why foreign-host: after SA-0MVL7YG2S009L6PU a same-host lock whose holder
+ * PID is alive is authoritative and is never age-expired, so the only
+ * remaining age-expiry path is a lock from a different host (where a PID
+ * cannot be trusted). Stamping the back-dated lock with a foreign host models
+ * that residual hazard deterministically — no sleeping.
  */
 function expireLock(local: string): void {
   const p = lockPath(local);
   const info = JSON.parse(fs.readFileSync(p, 'utf8'));
+  info.hostname = 'some-other-host-that-is-not-this-one';
   info.acquiredAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   fs.writeFileSync(p, JSON.stringify(info));
 }
@@ -283,12 +299,16 @@ describe('wl sync cannot revert a held claim', () => {
     const sync = spawnCli(s.local, ['--json', 'sync', '--if-idle'], shimEnv(s));
     await waitForFile(s.marker, 20000);
 
-    // A sync that runs longer than DEFAULT_MAX_LOCK_AGE_MS has its lock treated
-    // as stale by the next acquirer. Back-date it to model that deterministically.
+    // A sync whose lock belongs to a foreign host and is older than
+    // DEFAULT_MAX_LOCK_AGE_MS has that lock treated as stale by the next
+    // acquirer. Back-date it (and stamp a foreign host) to model that
+    // deterministically — a same-host live lock would no longer be stolen
+    // (SA-0MVL7YG2S009L6PU).
     expireLock(s.local);
 
-    // Claim the item. Today this steals the "expired" lock, completes, and is
-    // then overwritten by the parked sync's pre-claim snapshot.
+    // Claim the item. This steals the age-expired foreign-host lock,
+    // completes, and is then overwritten by the parked sync's pre-claim
+    // snapshot; the claim-hold guard must prevent the revert.
     const claim = runCli(s.local, ['--json', 'update', id, '-s', 'in_progress', '--no-re-sort']);
     expect(claim.status, claim.stderr).toBe(0);
     const claimed = showItem(s.local, id);

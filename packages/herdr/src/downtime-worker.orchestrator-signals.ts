@@ -30,6 +30,8 @@ import {
   DOWNTIME_ERROR_STRIKE_LIMIT,
   type DecisionEntryFields,
 } from './downtime-worker.constants.js';
+import type { DowntimeDispatchOutcome } from './downtime-worker.dispatch-contract.js';
+import type { FairnessDecisionEvidence } from './downtime-worker.fairness.js';
 import type { CapacityStarvationObservation } from './capacity-starvation.js';
 import type {
   IdleTracker,
@@ -37,6 +39,45 @@ import type {
   PerSlotIdleTracker,
 } from './downtime-worker.types.js';
 import type { DowntimeWorkerConfig } from './downtime-worker.worker-contract.js';
+
+/**
+ * Compose the evidence fields of a no-dispatch decision entry from a dispatch
+ * outcome (WL-0MU8808ZY0091JIA, extended by the host-budget / reservation /
+ * CPU-gate / per-project-fairness items). Extracted from
+ * `downtime-worker.orchestrator-dispatch.ts` by WL-0MWKY141H002LULI so that
+ * module stays inside the split guard's 1,000-line ceiling.
+ *
+ * Behaviour is unchanged: the same `outcome` evidence is copied under the same
+ * names and in the same precedence order. `fairness` contributes the tick's
+ * `selectedRoot` and never a `dispatchingRoot` (nothing was consumed).
+ */
+export function refusalDecisionFields(
+  outcome: DowntimeDispatchOutcome,
+  base: DecisionEntryFields,
+  fairness: Partial<FairnessDecisionEvidence>,
+  reservationRefused: boolean,
+): DecisionEntryFields {
+  return {
+    ...base,
+    ...fairness,
+    ...(reservationRefused ? { reservationReason: outcome.reason } : {}),
+    ...(outcome.offerRejections !== undefined ? { offerRejections: outcome.offerRejections } : {}),
+    ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
+    ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+    ...(outcome.projectWorkspaceMismatch !== undefined
+      ? { projectWorkspaceMismatch: outcome.projectWorkspaceMismatch }
+      : {}),
+    ...(outcome.retryAfterS !== undefined ? { retryAfterS: outcome.retryAfterS } : {}),
+    ...outcome.reservation,
+    ...(outcome.hostCpuPercent !== undefined
+      ? {
+          hostCpuPercent: outcome.hostCpuPercent,
+          hostCpuSource: outcome.hostCpuSource,
+          cpuGatePercent: outcome.cpuGatePercent,
+        }
+      : {}),
+  };
+}
 
 /**
  * The slice of the orchestrator context these signal writers touch.

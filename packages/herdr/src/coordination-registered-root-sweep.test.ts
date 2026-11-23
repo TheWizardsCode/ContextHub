@@ -61,7 +61,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -499,6 +499,108 @@ describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
       expect(spawnCwd(deps)).toBe(rootBusy);
     },
   );
+});
+
+// ── Run-length bound on the sweep order (WL-0MWKY1839000JM5O) ──────────
+//
+// Parent AC1's twice-in-succession bound must not drift between the offer path
+// and the registered-root sweep: both order from the SAME candidate list and
+// both defer the ceiling root using the decision log (the fairness metric's
+// single run-length source). Fail-open: a missing/corrupt log keeps today's
+// cursor-first order.
+describe('registered-root sweep — run-length bound ordering (parent AC1)', () => {
+  /** Write a decision log holding `length` consecutive dispatches to `root`. */
+  function seedDecisionRun(cwd: string, root: string, length: number): void {
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    const lines: string[] = [];
+    for (let i = 1; i <= length; i += 1) {
+      lines.push(
+        JSON.stringify({
+          kind: 'decision',
+          operation: 'dispatch',
+          reason: 'dispatched',
+          outcome: 'dispatched',
+          dispatchingRoot: root,
+          consecutiveRunLength: i,
+          at: `2026-01-0${i}T00:00:00.000Z`,
+        }),
+      );
+    }
+    writeFileSync(
+      join(cwd, '.worklog', 'downtime-coordination.log'),
+      `${lines.join('\n')}\n`,
+      'utf-8',
+    );
+  }
+
+  /** Two registered roots: `rootA` due, `rootB` newer; both have dispatchable work. */
+  function twoRootFixture(): { rootA: string; rootB: string; leaderRoot: string } {
+    const leaderRoot = makeRoot('interval-leader');
+    const rootA = makeRoot('interval-a');
+    const rootB = makeRoot('interval-b');
+    saveRoundRobinCursor(coordinationDir, {
+      [rootA]: '2026-01-01T00:00:00.000Z',
+      [rootB]: '2026-01-02T00:00:00.000Z',
+    });
+    return { rootA, rootB, leaderRoot };
+  }
+
+  function depsFor(
+    leaderRoot: string,
+    rootA: string,
+    rootB: string,
+  ): DowntimeWorkerDeps {
+    return makeDeps({
+      getHerdrListHead: rankedHeads({
+        [leaderRoot]: [],
+        [rootA]: [headItem({ id: 'WL-A-HEAD' })],
+        [rootB]: [headItem({ id: 'WL-B-HEAD' })],
+      }),
+    });
+  }
+
+  it('defers a sweep starting root that already dispatched twice in succession', async () => {
+    const { rootA, rootB, leaderRoot } = twoRootFixture();
+    seedDecisionRun(leaderRoot, rootA, 2);
+    const deps = depsFor(leaderRoot, rootA, rootB);
+
+    const outcome = await dispatch(deps, [rootA, rootB], [], {
+      cwd: leaderRoot,
+      freeSlots: 8,
+      effectiveFreeSlots: 8,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-B-HEAD');
+    expect(spawnCwd(deps)).toBe(rootB);
+    // Only the dispatching root is charged; the deferred due root keeps its time.
+    const cursor = loadRoundRobinCursor(coordinationDir);
+    expect(cursor[rootA]).toBe('2026-01-01T00:00:00.000Z');
+    expect(Date.parse(cursor[rootB] ?? '')).toBeGreaterThan(
+      Date.parse('2026-01-02T00:00:00.000Z'),
+    );
+  });
+
+  it('fails open on a corrupt decision log: the due root starts the sweep as before', async () => {
+    const { rootA, rootB, leaderRoot } = twoRootFixture();
+    mkdirSync(join(leaderRoot, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(leaderRoot, '.worklog', 'downtime-coordination.log'),
+      'not-json{{{\n',
+      'utf-8',
+    );
+    const deps = depsFor(leaderRoot, rootA, rootB);
+
+    const outcome = await dispatch(deps, [rootA, rootB], [], {
+      cwd: leaderRoot,
+      freeSlots: 8,
+      effectiveFreeSlots: 8,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-A-HEAD');
+    expect(spawnCwd(deps)).toBe(rootA);
+  });
 });
 
 // ── Dispatch-driven charge (WL-0MWFIZ8H5005FVNN) ──────────────────────

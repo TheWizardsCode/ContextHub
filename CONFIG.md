@@ -184,39 +184,44 @@ proxy-owned budget* below.
 
 | Setting | Default | Range / meaning |
 |---|---|---|
-| `budget.json` → `maxImplement` | `2` | clamp `0`–`32`; `0` disables the implement tier host-wide |
-| `budget.json` → `maxAudit` | `1` | clamp `0`–`32`; **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local observability/divergence figure. `0` disables the legacy audit tier host-wide |
-| `HERDR_HOST_MAX_IMPLEMENT` | unset | Overrides `maxImplement`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning) |
-| `HERDR_HOST_MAX_AUDIT` | unset | Overrides `maxAudit`; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning). Implement-tier-only for audit admission — the proxy owns the default audit cap |
+| `budget.json` → `<kind>` (any `DowntimeSkillKind`: `implement`, `audit`, `plan`, `intake`, `risk-effort`) | `implement` `2`, `audit` `1`; other kinds uncapped | clamp `0`–`32`; a kind absent from the file is **uncapped** (never refused, never counted, never recorded); `0` disables that kind host-wide. The legacy `maxImplement` / `maxAudit` keys are still read as aliases for `implement` / `audit` |
+| `budget.json` → `maxImplement` (legacy alias) | `2` | clamp `0`–`32`; `0` disables the implement kind host-wide |
+| `budget.json` → `maxAudit` (legacy alias) | `1` | clamp `0`–`32`; **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local observability/divergence figure. `0` disables the legacy audit kind host-wide |
+| `HERDR_HOST_MAX_<KIND>` (`HERDR_HOST_MAX_IMPLEMENT`, `HERDR_HOST_MAX_AUDIT`, `HERDR_HOST_MAX_PLAN`, `HERDR_HOST_MAX_INTAKE`, `HERDR_HOST_MAX_RISK_EFFORT`) | unset | Overrides that kind's `budget.json` cap; clamped `0`–`32`; empty/invalid values keep the file/default figure (with a warning). `HERDR_HOST_MAX_AUDIT` is implement-tier-only for audit admission — the proxy owns the default audit cap |
 | `HERDR_AUDIT_LOCAL_BUDGET` | unset | **One-release** flag (`=1`) restoring the pre-proxy audit decision (`maxAudit` + local ledger, never consulting the proxy); removed in the release after the proxy side (`LP-0MW95FYMH006XYNK`) ships |
 | `HERDR_COORDINATION_DIR` | `~/.herdr/downtime` | Machine coordination directory holding the ledger and `budget.json` |
 
-`budget.json` shape (both keys optional; an absent file yields the defaults
-above):
+`budget.json` shape (a map over kinds; every key optional, an absent kind is
+**uncapped**, and an absent file yields the defaults above):
 
 ```json
-{ "maxImplement": 2, "maxAudit": 1 }
+{ "implement": 2, "audit": 1, "plan": 3 }
 ```
 
-Resolution order: `budget.json` → the built-in defaults → the env override →
-the `0..32` clamp. **`0` is a per-tier kill switch**, not "unlimited": that
-tier never dispatches on this host. A malformed `budget.json` (not an object,
-non-numeric, negative) falls back to the defaults for the invalid field and
-records a warning rather than throwing; an unresolvable coordination
+Resolution order: `budget.json` (kind-named key, then its legacy `max*` alias)
+→ the built-in defaults for `implement` / `audit` → the `HERDR_HOST_MAX_<KIND>`
+env override → the `0..32` clamp. **`0` is a per-kind kill switch**, not
+"unlimited": that kind never dispatches on this host. A malformed
+`budget.json` (not an object, non-numeric, negative) falls back to the default
+for a defaulted kind (`implement` / `audit`), leaves any other kind uncapped,
+and records a warning rather than throwing; an unresolvable coordination
 directory degrades to "no ledger" (dispatch behaves exactly as before the
 budget existed).
 
-The default `maxImplement: 2` is deliberately conservative: it bounds
+The default `implement: 2` is deliberately conservative: it bounds
 **in-flight agent work per machine** (operator intent), not LLM capacity — the
 proxy free-slot and prefill gates remain the inner limiter, and the budget can
-only reduce concurrency below them.
+only reduce concurrency below them. Only `audit` keeps the over-hold counting
+rule (fresh entries with no live-pane requirement); every other kind frees its
+slot as soon as the pane leaves the machine-wide live pane list.
 
 Fail directions differ by path by design: dispatcher-fired work **fails
 closed** on an unreadable ledger (`host-budget-unknown`, then a self-healing
-rewrite from the live pane list), while a hand-fired `/skill:implement` /
-`/skill:audit` shortcut **fails open with a visible notice** (a human owns the
-decision). Hand-fired over-quota dispatches open the confirmation dialog; a
-proceed records `override: { "by": "user" }` on the ledger entry. See
+rewrite from the live pane list), while a hand-fired `/skill:<kind>` shortcut
+**fails open with a visible notice** (a human owns the decision). Hand-fired
+over-quota dispatches open the confirmation dialog — for any capped kind; an
+uncapped kind never prompts — and a proceed records `override: { "by": "user" }`
+on the ledger entry. See
 [`docs/dev/downtime-dispatcher.md`](docs/dev/downtime-dispatcher.md#host-wide-dispatch-budget--gate-table-defaults-and-scope)
 for the gate table, reason tokens, audit-cap unification and the rolling-window
 out-of-scope note.
@@ -242,9 +247,8 @@ contending for the one local `llama-server` GPU.
   configuration** (sibling llm item `LP-0MW95FYMH006XYNK`) — raising
   `maxAudit` has no effect on default audit admission.
 - **Fallback for one release:** `HERDR_AUDIT_LOCAL_BUDGET=1` restores the
-  pre-proxy `maxAudit` + local-ledger decision (with the legacy
-  `audit-host-saturated` / `host-budget-audit` / `host-budget-unknown` tokens
-  and an `audit-budget-legacy` warning entry).
+  pre-proxy `maxAudit` + local-ledger decision (with the `host-budget-audit` /
+  `host-budget-unknown` tokens and an `audit-budget-legacy` warning entry).
 
 The **implement tier** (`maxImplement`, `HERDR_HOST_MAX_IMPLEMENT` and the
 per-instance-free machine ledger) is unchanged.

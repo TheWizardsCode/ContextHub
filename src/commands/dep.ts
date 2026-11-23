@@ -296,6 +296,10 @@ export default function register(ctx: PluginContext): void {
             title: dep.title || '(missing)',
             status: dep.status || 'deleted',
             priority: dep.priority || 'medium',
+            // Scheduling instant carried on the dependency listing too
+            // (WL-0MWMGEPY2004EDZ8): `startOn` must appear in every JSON
+            // surface a consumer can read an item from.
+            startOn: dep.startOn,
             direction: 'depends-on',
           };
         }
@@ -309,6 +313,7 @@ export default function register(ctx: PluginContext): void {
           status: foreignItem?.status || 'deleted',
           stage: foreignItem?.stage || '',
           priority: foreignItem?.priority || 'medium',
+          startOn: foreignItem?.startOn,
           direction: 'depends-on',
           foreign: true,
           foreign_dependency: foreign.state,
@@ -322,6 +327,7 @@ export default function register(ctx: PluginContext): void {
           title: dep?.title || '(missing)',
           status: dep?.status || 'deleted',
           priority: dep?.priority || 'medium',
+          startOn: dep?.startOn,
           direction: 'depended-on-by',
         };
       });
