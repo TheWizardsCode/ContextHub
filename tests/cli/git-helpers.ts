@@ -1,4 +1,5 @@
 import { execAsync } from './cli-helpers.js';
+import * as fs from 'fs';
 import * as path from 'path';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
@@ -9,6 +10,23 @@ export async function initRepo(dir: string): Promise<void> {
   await execAsync('git init -q', { cwd: dir });
   // Configure user and create an empty commit (fast, no file I/O)
   await execAsync('git config user.email "test@example.com" && git config user.name "Test User" && git commit --allow-empty -m "init" -q', { cwd: dir });
+  seedMockUserEmail(dir);
+}
+
+/**
+ * Seed the test mock git's `config user.email` value (`<repo>/.git/user-email`).
+ *
+ * The suite prepends `tests/cli/mock-bin` to PATH, and the mock's `config
+ * user.email` GET form reads this file (exiting 1 when absent). The push-side
+ * identity guard (WL-0MWGO58KL00187CO) refuses to publish under an empty
+ * identity, so a fixture repo that will push worklog data must carry a valid
+ * seeded identity. Harmless under real git (the file is simply ignored).
+ */
+export function seedMockUserEmail(dir: string, email = 'test@example.com'): void {
+  const gitDir = path.join(dir, '.git');
+  if (fs.existsSync(gitDir) && fs.statSync(gitDir).isDirectory()) {
+    fs.writeFileSync(path.join(gitDir, 'user-email'), `${email}\n`, 'utf8');
+  }
 }
 
 export async function initBareRepo(dir: string): Promise<void> {

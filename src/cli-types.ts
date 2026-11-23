@@ -196,6 +196,12 @@ export interface SyncOptions {
   ifIdle?: boolean;
   /** Override the author-identity gate for foreign-email commits (never bypasses the empty-email gate) */
   allowForeignAuthor?: boolean;
+  /**
+   * Incident remediation only: allow a deliberate one-off push even when the
+   * effective `user.email` is an incident-era sentinel identity. Never
+   * bypasses the empty-email refusal and never modifies `syncAllowedAuthors`.
+   */
+  allowSentinelAuthor?: boolean;
   /** Accept regressions: allow remote defaults to overwrite local non-default values */
   acceptRegressions?: boolean;
 }

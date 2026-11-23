@@ -19,8 +19,9 @@ import * as path from 'path';
 import { execAsync, escapeShellArg } from './git-exec.js';
 import { getRemoteTrackingRef } from './refs.js';
 import { getRepoRoot, getRepoRelativePath, assertDataFileInCwdRepo } from './repo-context.js';
+import { enforcePushAuthorIdentity } from './author-identity.js';
 import { withTempWorktree, listTrackedFiles, ensureDir } from './worktree.js';
-import type { GitTarget } from './types.js';
+import type { GitTarget, PushAuthorityOptions } from './types.js';
 
 /**
  * Push the serialized worklog data file to the dedicated remote ref.
@@ -36,8 +37,15 @@ import type { GitTarget } from './types.js';
 export async function gitPushDataFileToBranch(
   repoDataFilePath: string,
   commitMessage: string,
-  target: GitTarget
+  target: GitTarget,
+  authorityOptions: PushAuthorityOptions = {}
 ): Promise<void> {
+  // Push-side identity guard (WL-0MWGO58KL00187CO): refuse BEFORE committing or
+  // pushing when the effective user.email is empty or an incident-era sentinel.
+  // The guard lives on this shared commit path, so the `wl sync` push, the
+  // auto-sync/init callers and any future caller are all covered. The empty
+  // refusal is absolute; a sentinel is refused unless `--allow-sentinel-author`.
+  await enforcePushAuthorIdentity(authorityOptions);
   // Cross-project safety guard: never push the data file to a different
   // repository's remote ref than the one owning the file.
   await assertDataFileInCwdRepo(repoDataFilePath);
@@ -132,6 +140,11 @@ export async function rewriteAndForcePushDataFile(
   commitMessage: string,
   target: GitTarget
 ): Promise<string> {
+  // Push-side identity guard (WL-0MWGO58KL00187CO): a sentinel/empty identity
+  // must never author a force-rewritten worklog-data ref either. No escape
+  // hatch here — `wl doctor foreign-items --apply --push` is remediation of
+  // remote pollution, never a reason to publish a sentinel-authored commit.
+  await enforcePushAuthorIdentity();
   // Cross-project safety guard: never push a data file to a different
   // repository's remote ref than the one owning the file.
   await assertDataFileInCwdRepo(repoDataFilePath);

@@ -43,6 +43,12 @@ function createMockRepo(tmpDir: string): { localRepo: string; dataFilePath: stri
   const remoteRepo = path.join(tmpDir, 'remote-repo');
   fs.writeFileSync(path.join(localRepo, '.git', 'remote_origin'), remoteRepo, 'utf8');
 
+  // Push-side identity guard (WL-0MWGO58KL00187CO) reads `git config
+  // user.email`; seed a valid, non-sentinel identity so the guard passes (the
+  // mock git's `config user.email` get form reads .git/user-email and exits 1
+  // when absent — which the guard treats as an empty identity and refuses).
+  fs.writeFileSync(path.join(localRepo, '.git', 'user-email'), 'test@example.com\n', 'utf8');
+
   // Local .worklog with a data file so gitPushDataFileToBranch has something to push
   const worklogDir = path.join(localRepo, '.worklog');
   fs.mkdirSync(worklogDir, { recursive: true });

@@ -84,6 +84,39 @@ export interface AuthorIdentityResult {
 }
 
 /**
+ * Inputs to the push-side identity guard (WL-0MWGO58KL00187CO) — the outbound
+ * mirror of {@link AuthorIdentityOptions}: which identity is about to author a
+ * worklog-data commit, and whether the operator opted into a one-off override.
+ */
+export interface PushAuthorityOptions {
+  /** Effective `git config user.email`; read from git when omitted. */
+  effectiveEmail?: string;
+  /** Configured/expected store identity (informational; sentinels are refused regardless). */
+  configuredEmail?: string;
+  /** `wl sync --allow-sentinel-author` — never bypasses the empty-email refusal. */
+  allowSentinelAuthor?: boolean;
+  /** `syncAllowedAuthors` — non-sentinel allow-listed identities are never refused. */
+  allowedAuthors?: SyncAllowedAuthors;
+}
+
+/**
+ * Verdict of the push-side identity guard (WL-0MWGO58KL00187CO). Pure and
+ * deterministic, so a dry-run and a real sync reach the same decision.
+ */
+export interface PushAuthorityResult {
+  /** True when a worklog-data commit may be authored under this identity. */
+  allowed: boolean;
+  /** Machine-readable refusal reason; '' when allowed. */
+  reason: '' | 'empty-email' | 'sentinel-identity';
+  /** Normalized offending identity; '' when allowed or empty. */
+  identity: string;
+  /** True when a sentinel was deliberately overridden via `allowSentinelAuthor`. */
+  bypassed: boolean;
+  /** Operator-facing refusal naming the identity + remedy; '' when allowed. */
+  message: string;
+}
+
+/**
  * Result of reconstructing a remote worklog stream from ref history.
  */
 export interface DeltaReplayResult {
