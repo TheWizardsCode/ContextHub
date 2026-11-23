@@ -32,6 +32,7 @@ import type {
   LocalPreferenceReason,
 } from './local-preference.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
+import type { BudgetReliefEvidence } from './host-budget-relief.types.js';
 import type { PaneLifecycleKind } from './downtime-log.js';
 import type {
   DispatcherAnchor,
@@ -376,7 +377,7 @@ export interface DowntimeHostBudgetAdmission {
    * when the cooldown signal was unreadable (`reason:
    * 'model-cooldown-unreadable'`). `max` above is the EFFECTIVE cap.
    */
-  budgetRelief?: import('./host-budget-relief.js').BudgetReliefEvidence;
+  budgetRelief?: BudgetReliefEvidence;
 }
 
 /**
@@ -646,7 +647,7 @@ export interface DowntimeDispatchOutcome {
    * when the cooldown signal was unreadable (`reason:
    * 'model-cooldown-unreadable'`). `max` above is the EFFECTIVE cap.
    */
-  budgetRelief?: import('./host-budget-relief.js').BudgetReliefEvidence;
+  budgetRelief?: BudgetReliefEvidence;
   /**
    * Failing exchange on a fail-closed AUDIT-budget refusal
    * (`audit-budget-unknown`): `http-404` (endpoint-absent), `timeout` /

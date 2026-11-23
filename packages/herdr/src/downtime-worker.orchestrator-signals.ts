@@ -63,6 +63,7 @@ export function refusalDecisionFields(
     ...(reservationRefused ? { reservationReason: outcome.reason } : {}),
     ...(outcome.offerRejections !== undefined ? { offerRejections: outcome.offerRejections } : {}),
     ...(outcome.budget !== undefined ? { budget: outcome.budget } : {}),
+    ...(outcome.budgetRelief !== undefined ? { budgetRelief: outcome.budgetRelief } : {}),
     ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
     ...(outcome.projectWorkspaceMismatch !== undefined
       ? { projectWorkspaceMismatch: outcome.projectWorkspaceMismatch }

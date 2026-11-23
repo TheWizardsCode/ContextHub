@@ -69,6 +69,9 @@ import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 
 import type { HostBudgetKind, HostBudgetLivePane } from './host-dispatch-budget.js';
 import { decodeBudgetPaneLabel } from './host-dispatch-budget.repair.js';
+import type { BudgetReliefEvidence } from './host-budget-relief.types.js';
+
+export type { BudgetReliefEvidence };
 
 /** The fixed relief multiplier. Immutable by contract — never a setting/env. */
 export const HOST_BUDGET_RELIEF_MULTIPLIER = 2;
@@ -221,19 +224,6 @@ function resolvedKind(
   // relief. Relief must not grant on an unknown label, so require known.
   if (!decoded.kindKnown) return null;
   return isHostBudgetReliefKind(decoded.kind) ? decoded.kind : null;
-}
-
-/** The decision-log evidence recorded on an admission or a refusal. */
-export interface BudgetReliefEvidence {
-  kind: HostBudgetKind;
-  baseCap: number;
-  effectiveCap: number;
-  /** Pane ids whose active cooldown raised the cap. */
-  blockedPaneIds: string[];
-  /** `model-blocked` (granted) or `model-cooldown-unreadable` (refused). */
-  reason: string;
-  /** Latest matching `cooldownUntil`, or `null` when no relief is active. */
-  until: number | null;
 }
 
 /** The effective-cap verdict for one kind. */

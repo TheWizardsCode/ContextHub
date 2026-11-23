@@ -24,6 +24,7 @@ import {
   HOST_BUDGET_PLAN_REASON,
   HOST_BUDGET_RISK_EFFORT_REASON,
 } from './downtime-log-budget.js';
+import type { BudgetReliefEvidence } from './host-budget-relief.types.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -409,6 +410,13 @@ export interface DecisionEntryFields extends CapacityEvidence {
   auditBatchRemaining?: number;
   /** Why an armed batch ended (`cap` reached / `depth` dropped, AC5). */
   auditBatchEndReason?: string;
+  /**
+   * Budget-relief evidence (WL-0MWTAD9NV000IVK5 AC9): present when a
+   * model-blocked pane raised this kind's cap (`reason: 'model-blocked'`), or
+   * when the cooldown signal was unreadable (`reason:
+   * 'model-cooldown-unreadable'`, no relief). `budget.max` is the effective cap.
+   */
+  budgetRelief?: BudgetReliefEvidence;
   /**
    * Local-capacity reservation evidence (parent WL-0MVIKRFP0005JDL8 AC4,
    * slice C2): recorded on every polled decision entry produced by a

@@ -37,6 +37,7 @@ import {
 import { resolveScheduledPromptPriority } from './scheduled-prompts.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { DispatcherAnchor } from './dispatcher-anchor.js';
+import type { BudgetReliefEvidence } from './host-budget-relief.types.js';
 import {
   closePlaceholderRootPaneBestEffort,
   placementAttribution,
@@ -381,7 +382,6 @@ export async function dispatchClaimedTier(
       // no marker field (AC3: older wiring, today's byte-identical launch).
     }
   }
-
   // ── Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3,
   //    audit tier WL-0MVXY0XPF006YUHA F2) ────────────────────────────────
   //
@@ -395,7 +395,7 @@ export async function dispatchClaimedTier(
   // claim and BEFORE `recordDispatch` (AC3), the claim is rolled back on
   // refusal (AC2) and the refusal is a NEUTRAL skip (AC5).
   let budgetEvidence: { live: number; max: number } | undefined;
-  let budgetReliefEvidence: import('./host-budget-relief.js').BudgetReliefEvidence | undefined;
+  let budgetReliefEvidence: BudgetReliefEvidence | undefined;
   // The attempt token of THIS dispatch's reservation (WL-0MWFJD5T4003OM91):
   // every later abort path releases with it, never another attempt's entry.
   let budgetAttemptId: string | undefined;
