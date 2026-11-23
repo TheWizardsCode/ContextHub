@@ -81,6 +81,10 @@ import {
   readBudgetConfig,
   sweepClosedPanes,
 } from './host-dispatch-budget.js';
+// The budget's LIVE-pane projection (WL-0MWJVY6NR001E0FS): trims terminal-status
+// agents from the FULL pane-record set so a finished session whose pane stays
+// open stops counting against its tier.
+import { liveBudgetPanesFromRecords } from './host-dispatch-budget.live-panes.js';
 import {
   auditLeaseSessionId,
   createAuditLeaseClient,
@@ -412,12 +416,14 @@ async function hostBudgetLivePanes(
     const running = await readRunningPanes(cwd);
     if (!running.ok) return { ok: false };
     if (Array.isArray(running.records)) {
+      // Count only LIVE panes (WL-0MWJVY6NR001E0FS): a finished session whose
+      // pane stays open (implement is never auto-closed) is not in-flight WORK
+      // and must not hold a dispatch-budget slot. `records` is the FULL pane set
+      // (other consumers need every label suffix); the budget projection trims
+      // terminal-status agents so the header and admission stop counting them.
       return {
         ok: true,
-        panes: running.records.map((record) => ({
-          paneId: record.paneId,
-          ...(typeof record.label === 'string' ? { title: record.label } : {}),
-        })),
+        panes: liveBudgetPanesFromRecords(running.records),
       };
     }
     if (Array.isArray(running.paneIds)) {

@@ -34,6 +34,7 @@ import type {
 } from './downtime-worker.orchestrator-dispatch.js';
 import { reconcileBudgetLedger } from './host-dispatch-budget.reconcile.js';
 import type { HostBudgetLivePane } from './host-dispatch-budget.js';
+import { liveBudgetPanesFromRecords } from './host-dispatch-budget.live-panes.js';
 import { resolveEffectiveDir } from './coordination.js';
 
 /**
@@ -68,10 +69,7 @@ export async function reconcileHostBudgetPass(
       // UNKNOWN that the ledger must never treat as an empty list (an empty
       // list would sweep every confirmed entry off the ledger).
       panes = read.ok
-        ? (read.records ?? []).map((record) => ({
-            paneId: record.paneId,
-            ...(typeof record.label === 'string' ? { title: record.label } : {}),
-          }))
+        ? liveBudgetPanesFromRecords(read.records ?? [])
         : undefined;
     } catch {
       panes = undefined;

@@ -3226,6 +3226,22 @@ the reaper cadence (`PANE_CLOSE_REAPER_INTERVAL_MS`, 60 s) and is fail-open:
 a release error never crashes the reaper or blocks a dispatch, and a missed
 release is bounded by the staleness window. A dry run mutates nothing.
 
+**Releasing the entry is not, by itself, enough (WL-0MWJVY6NR001E0FS).**
+The in-flight figure is the union rule — *ledger entries + live dispatcher
+panes that no entry accounts for* — so a released entry whose pane is still
+listed would simply be re-counted as an *unreserved* live pane, and the tier
+would stay at its cap with idle, finished panes sitting open. The budget's
+pane feed therefore projects the full `herdr pane list` record set onto the
+**LIVE** subset (`liveBudgetPanesFromRecords` → the shared `isPaneAgentLive`
+definition: agent present, status not `done`/`exited`) in both the admission
+and header path (`hostBudgetLivePanes`) and the tick reconciliation pass. A
+session whose agent has ended stops counting in the same cadence, and its
+confirmed entry is swept (or reaped by the reaper's own release). The full
+record set is still what the in-flight guard and the pane-close paths read —
+only the *budget* projection trims terminal agents, so a finished pane can be
+logged and inspected while no longer holding a slot. Unknown/blank statuses
+stay counted (fail-open: a herdr quirk can never over-admit).
+
 A pane can still be closed *outside* those paths (the operator closes it in
 herdr, a session crashes, the window is torn down). Because the audit tier
 counts fresh entries **without** a live-pane requirement, such a dead entry
@@ -4784,6 +4800,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/downtime-log*.ts` | The downtime-log module family: the barrel (`downtime-log.ts`, re-exports only) over the sibling modules — storage/rotation policy and atomic append (`downtime-log-storage.ts`), host-budget refusal vocabulary (`downtime-log-budget.ts`), coordination/decision log (`downtime-log-coordination.ts`), dispatch log and pane-close entries (`downtime-log-entries.ts`), dispatched-marker readers and suppression decisions (`downtime-log-markers.ts`), recent-dispatches projection and time blocks (`downtime-log-recent.ts`) (full layout: [downtime-log module layout](#downtime-log-module-layout-wl-0mvgkhft4003x6jw)) |
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) and the shared finished-session predicate (`isSessionFinished`, `hasEndSessionMarker`) consumed by the reaper, the finished-session budget release and `pane-triage` (WL-0MUJL1NAH0042GOS, WL-0MWJVY6NR001E0FS) |
+| `packages/herdr/src/host-dispatch-budget.live-panes.ts` | The budget's LIVE-pane projection (`liveBudgetPanesFromRecords`): trims `done`/`exited` agents from the full pane-record set so a finished session whose pane stays open no longer counts against its tier (WL-0MWJVY6NR001E0FS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`, `finishedSessionReleaseIdentity`) — close decisions plus the finished-session budget release |
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
 | `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + `herdr pane process-info` + pi session logs (activity probes: agent status, recent file modifications, spawned child processes) |

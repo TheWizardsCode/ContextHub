@@ -627,6 +627,14 @@ dispatches; the other herdr instances coordinate instead of polling:
     its entry) and kind-generic (it omits `kind`, so the ledger entry's own
     kind keys it). A still-working or unknown session, and an unreadable pane
     read, never release.
+    The release alone is not enough: the in-flight figure is a **union** of
+    ledger entries and live dispatcher panes no entry accounts for, so the
+    budget's pane feed also projects the full pane list onto the LIVE subset
+    (`host-dispatch-budget.live-panes.ts`, the shared `isPaneAgentLive`
+    definition). A `done`/`exited` agent therefore stops counting against its
+    tier in the admission **and** header paths within one cadence, even while
+    its finished pane remains open for inspection. Unknown/blank statuses stay
+    counted (fail-open — never over-admit on a herdr quirk).
   - **A refusal is a continuable hold on that candidate, not a whole-tick
     stop.** Both head-scan paths record the refusal (reason + `live`/`max`
     evidence) and keep scanning, so `plan`/`intake` ranked behind a refused
