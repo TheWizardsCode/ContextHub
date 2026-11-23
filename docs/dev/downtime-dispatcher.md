@@ -1421,6 +1421,52 @@ rejection and a synchronous throw → `unreachable`/`network`, an expired timeou
 parser-rejected bodies → `unparsable`/`bad-body`, and the abort timer cleared
 (`vi.getTimerCount() === 0`) on both the success and failure paths.
 
+### Host-budget relief while a pane waits for a model (WL-0MWTAD9NV000IVK5)
+
+A pane parked in a machine-wide **model cooldown** is not using the model: it
+is waiting for a throttled provider to return. The host-budget dispatcher used
+to count it as productive capacity and refuse new work at the configured cap,
+which idled the local LLM during the 2026-11-22/23 overnight run.
+
+**Detection.** A pane is *model-blocked* when the machine-wide cooldown signal
+(`~/.herdr/downtime/model-cooldowns.json`, contract
+`packages/shared/src/model-cooldown.ts`) has an entry that matches its
+`paneId` (first) or `sessionId`, is still active (`cooldownUntil > now`), and
+resolves to the `implement` or `audit` kind (entry kind when present, else the
+pane label). The predicate is pure and unit-tested in
+`packages/herdr/src/host-budget-relief.ts`; no proxy
+`disabled`/`loading`/`switching` signal is consumed.
+
+**Relief rule.** While at least one model-blocked pane of a capped kind exists,
+that kind's admission cap is **exactly 2x** its configured cap
+(`min(baseCap * 2, 2 * baseCap)`). Relief is per kind, is a *total live* cap
+(the blocked panes stay counted), never revives a disabled tier
+(`baseCap === 0`), and never relaxes any other gate (free slots, prefill
+pacing, CPU, review-queue hold, producer review, attempt budget, code-freeze,
+audit freshness). It ends the instant the last matching cooldown expires or is
+cleared — the next admission read recomputes the base cap with no restart.
+
+**Fail closed.** `readModelCooldowns` returns `null` for an
+unreadable/corrupt file; relief grants **no** relief in that case and records
+`budgetRelief.reason = 'model-cooldown-unreadable'`. This is deliberately the
+opposite of the reader's own "assume active" convention: a corrupt file must
+never inflate the host budget.
+
+**Kill switch.** `downtimeBudgetReliefEnabled` (default `true`) restores the
+configured cap. The multiplier is a fixed module constant and **cannot** be
+raised by a setting or env var.
+
+**Audit arm.** The proxy audit lease remains authoritative. Relief is scoped
+to the one-release legacy local-budget path (`HERDR_AUDIT_LOCAL_BUDGET=1`)
+for the audit tier; with the proxy still granting `cap: 1`, an audit relief
+dispatch remains `audit-budget-saturated` because herdr never invents a second
+lease. The implement arm is not blocked on this dependency.
+
+**Surfaces.** The decision entry carries
+`budgetRelief: { kind, baseCap, effectiveCap, blockedPaneIds, reason, until }`
+and the worklist counter renders `n/effectiveCap` while relief is active
+(`budget-relief` is the header/decision vocabulary token).
+
 ### One launch per idle window (parent WL-0MVIKRFP0005JDL8 AC3, slice C3)
 
 **Problem (the residual half of the race).** The reservation handshake above is

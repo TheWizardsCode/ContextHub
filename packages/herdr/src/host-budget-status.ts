@@ -76,6 +76,11 @@ import {
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
 import { countLiveWork } from './host-dispatch-budget.counting.js';
+import {
+  resolveEffectiveHostBudgetCap,
+  resolveModelBlockedPanes,
+} from './host-budget-relief.js';
+import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 import { getMachineCoordinationDir } from './machine-coordination.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
@@ -116,6 +121,15 @@ export interface HostBudgetStatusOptions extends HostBudgetOptions {
    * kind (empty ≠ unknown). The read is non-mutating in every case.
    */
   livePanes?: readonly HostBudgetLivePane[];
+  /**
+   * Active machine-wide model cooldowns (WL-0MWTAD9NV000IVK5). When a kind is
+   * model-blocked the counter shows `n/effectiveCap` (2x) instead of
+   * `n/configuredCap`, so the header agrees with admission. `null` = the signal
+   * is unreadable/corrupt (no relief — fail closed).
+   */
+  modelCooldowns?: readonly ModelCooldownEntry[] | null;
+  /** Relay kill switch (`downtimeBudgetReliefEnabled`, default true). */
+  budgetReliefEnabled?: boolean;
 }
 
 /**
@@ -273,5 +287,43 @@ export function readHostBudgetStatus(
         ? auditDisplayCount(read.ledger.entries, livePaneIds, now, windowMs)
         : countLiveWork(read.ledger.entries, opts.livePanes, kind, now, windowMs).live;
   }
-  return summariseHostBudget(counts, config);
+  return summariseHostBudget(counts, effectiveConfig(config, opts, now));
+}
+
+/**
+ * Apply budget relief to the configured caps for the display counter
+ * (WL-0MWTAD9NV000IVK5 AC9: the worklist shows `n/effectiveCap`). Pure: the
+ * predicate and arithmetic are `host-budget-relief.ts`'s. A disabled/uncapped
+ * kind is never relieved, and an unreadable/absent signal leaves the cap as
+ * configured (relief is fail-closed).
+ */
+function effectiveConfig(
+  config: HostBudgetConfig,
+  opts: HostBudgetStatusOptions,
+  now: number,
+): HostBudgetConfig {
+  if (opts.modelCooldowns === undefined && opts.budgetReliefEnabled !== false) {
+    // No signal supplied by this caller (e.g. a test that only asserts the
+    // configured cap): keep the historical shape.
+    return config;
+  }
+  const blocked = resolveModelBlockedPanes({
+    cooldowns: opts.modelCooldowns,
+    panes: opts.livePanes ?? [],
+    now,
+  });
+  const effective: HostBudgetConfig = { ...config };
+  for (const kind of HOST_BUDGET_KINDS) {
+    const baseCap = config[kind];
+    if (baseCap === undefined) continue;
+    const cap = resolveEffectiveHostBudgetCap({
+      kind,
+      baseCap,
+      blockedPanes:
+        kind === 'implement' ? blocked.implement : kind === 'audit' ? blocked.audit : [],
+      ...(opts.budgetReliefEnabled === false ? { reliefEnabled: false } : {}),
+    });
+    if (cap.effectiveCap !== baseCap) effective[kind] = cap.effectiveCap;
+  }
+  return effective;
 }

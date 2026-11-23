@@ -134,6 +134,13 @@ import {
 } from './host-dispatch-budget.js';
 import { readHostBudgetLiveWork } from './host-dispatch-budget.counting.js';
 import {
+  resolveEffectiveHostBudgetCap,
+  resolveModelBlockedPanes,
+  type BudgetReliefEvidence,
+  type ModelBlockedPane,
+} from './host-budget-relief.js';
+import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
+import {
   HOST_BUDGET_AUDIT_REASON,
   HOST_BUDGET_CORRUPT_REASON,
   HOST_BUDGET_IMPLEMENT_REASON,
@@ -270,6 +277,21 @@ export interface HostBudgetAdmissionOptions extends HostBudgetOptions {
    * admission (a throwing sink is swallowed — logging is not a gate).
    */
   onAuditBudgetEvent?: (event: AuditBudgetLogEvent) => void;
+  /**
+   * The machine-wide active model cooldowns for THIS admission read
+   * (WL-0MWTAD9NV000IVK5). `[]`/absent = nothing recorded (no relief); `null` =
+   * unreadable/corrupt (no relief, evidence names the broken signal — fail
+   * closed). Relief is scoped to the implement tier and, for audit, the
+   * one-release legacy local-budget path only; the proxy lease stays
+   * authoritative.
+   */
+  modelCooldowns?: readonly ModelCooldownEntry[] | null;
+  /**
+   * Relay kill switch (`downtimeBudgetReliefEnabled`, default `true`). When
+   * `false` the configured cap is always used. The 2x multiplier is fixed and
+   * is NOT controlled here.
+   */
+  budgetReliefEnabled?: boolean;
 }
 
 /**
@@ -345,10 +367,52 @@ export interface HostBudgetAdmission {
    * refusal was not a 429.
    */
   retryAfterS?: number;
+  /**
+   * Budget-relief evidence (WL-0MWTAD9NV000IVK5 AC9): present when a
+   * model-blocked pane raised this kind's cap (`reason: 'model-blocked'`) or
+   * when the cooldown signal was unreadable (`reason:
+   * 'model-cooldown-unreadable'`, no relief). Absent when no relief applies.
+   */
+  budgetRelief?: BudgetReliefEvidence;
 }
 
 function refuseReason(kind: HostBudgetKind): HostBudgetRefusalReason {
   return HOST_BUDGET_KIND_REASONS[kind];
+}
+
+/**
+ * Resolve the effective cap for one capped kind, including budget relief
+ * (WL-0MWTAD9NV000IVK5). The predicate and the arithmetic live in
+ * `host-budget-relief.ts`; this helper only supplies the admission seams (the
+ * injected clock, the live pane projection and the cooldown read result) so
+ * admission never re-derives the cap.
+ *
+ * The live pane list is `undefined` when the pane read failed — relief then
+ * has no panes to match and grants nothing (fail closed), exactly like the
+ * counting rule.
+ */
+function resolveReliefForKind(
+  kind: HostBudgetKind,
+  baseCap: number,
+  opts: HostBudgetAdmissionOptions,
+): ReturnType<typeof resolveEffectiveHostBudgetCap> {
+  const now = opts.now ?? Date.now();
+  const blocked = resolveModelBlockedPanes({
+    cooldowns: opts.modelCooldowns,
+    panes: opts.livePanes ?? [],
+    now,
+  });
+  const blockedPanes: ModelBlockedPane[] =
+    kind === 'implement' ? blocked.implement : kind === 'audit' ? blocked.audit : [];
+  return resolveEffectiveHostBudgetCap({
+    kind,
+    baseCap,
+    blockedPanes,
+    ...(opts.budgetReliefEnabled === false ? { reliefEnabled: false } : {}),
+    ...(blocked.unreadable && blocked.reason !== undefined
+      ? { unreadableReason: blocked.reason }
+      : {}),
+  });
 }
 
 /**
@@ -678,14 +742,30 @@ function admitAuditLegacy(
   opts: HostBudgetAdmissionOptions,
 ): HostBudgetAdmission {
   const state = readAuditBudgetState(opts);
+  // Budget relief is scoped to this one-release legacy path
+  // (WL-0MWTAD9NV000IVK5 AC6, option 2): the proxy lease remains authoritative
+  // on the default path, so herdr never invents a second audit lease. Here the
+  // local cap is the only gate, so a model-blocked audit pane may raise it to
+  // exactly 2x.
+  const reliefCap = resolveReliefForKind('audit', state.max, opts);
+  const effectiveMax = reliefCap.effectiveCap;
+  const reliefEvidence =
+    reliefCap.relief !== null ? { budgetRelief: reliefCap.relief } : {};
   if (state.atCap) {
-    return {
-      admitted: false,
-      live: state.live,
-      max: state.max,
-      reason: state.reason ?? HOST_BUDGET_AUDIT_REFUSAL,
-      ...(state.repaired === true ? { repaired: true } : {}),
-    };
+    // Relief can lift a SATURATED-cap refusal only. A disabled tier, a corrupt
+    // ledger or an unknown read keeps its documented refusal — relief must
+    // never revive a disabled tier or paper over an unreadable ledger.
+    const saturated = state.reason === undefined || state.reason === HOST_BUDGET_AUDIT_REFUSAL;
+    if (!(saturated && state.live < effectiveMax)) {
+      return {
+        admitted: false,
+        live: state.live,
+        max: effectiveMax,
+        reason: state.reason ?? HOST_BUDGET_AUDIT_REFUSAL,
+        ...(state.repaired === true ? { repaired: true } : {}),
+        ...reliefEvidence,
+      };
+    }
   }
   const reserved = reserve(
     {
@@ -703,22 +783,24 @@ function admitAuditLegacy(
       // there is no ledger and no new failure mode — exactly as before the
       // budget existed. The audit tier must therefore admit without a
       // reservation (mirroring the implement tier's early no-dir return).
-      return { admitted: true, live: state.live, max: state.max };
+      return { admitted: true, live: state.live, max: effectiveMax, ...reliefEvidence };
     }
     // The reservation could not be recorded — the host's in-flight audits can
     // no longer be proven within budget, so fail closed (legacy semantics).
     return {
       admitted: false,
       live: state.live,
-      max: state.max,
+      max: effectiveMax,
       reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+      ...reliefEvidence,
     };
   }
   return {
     admitted: true,
     live: state.live,
-    max: state.max,
+    max: effectiveMax,
     ...(reserved.entry.attemptId !== undefined ? { attemptId: reserved.entry.attemptId } : {}),
+    ...reliefEvidence,
   };
 }
 
@@ -871,9 +953,23 @@ export function admitHostDispatch(
   }
 
   const max = configured;
+  // Budget relief (WL-0MWTAD9NV000IVK5): a model-blocked pane of this kind
+  // raises the cap to exactly 2x while its cooldown is active. The configured
+  // cap is the base; relief never revives a disabled tier and never touches
+  // any other gate.
+  const reliefCap = resolveReliefForKind(input.kind, configured, opts);
+  const effectiveMax = reliefCap.effectiveCap;
+  const reliefEvidence =
+    reliefCap.relief !== null ? { budgetRelief: reliefCap.relief } : {};
   if (max === 0) {
     // AC4: disabled tier — refused host-wide with the documented 0/0 evidence.
-    return { admitted: false, live: 0, max: 0, reason: refuseReason(input.kind) };
+    return {
+      admitted: false,
+      live: 0,
+      max: 0,
+      reason: refuseReason(input.kind),
+      ...reliefEvidence,
+    };
   }
 
   // The ONE in-flight rule (WL-0MWFJDD8R005F5BV): ledger entries PLUS live
@@ -884,7 +980,7 @@ export function admitHostDispatch(
   if (!count.ok) {
     if (!count.unknown && count.reason === 'no-coordination-dir') {
       // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
-      return { admitted: true, live: 0, max };
+      return { admitted: true, live: 0, max: effectiveMax, ...reliefEvidence };
     }
     // NO repair (WL-0MWFJD8ZO000J1R8): an admission read never rewrites the
     // ledger. Repairs are an explicit operator action
@@ -896,17 +992,19 @@ export function admitHostDispatch(
     return {
       admitted: false,
       live: 0,
-      max,
+      max: effectiveMax,
       reason: count.unknown ? HOST_BUDGET_CORRUPT_REFUSAL : HOST_BUDGET_UNKNOWN_REFUSAL,
+      ...reliefEvidence,
     };
   }
 
-  if (count.live >= max) {
+  if (count.live >= effectiveMax) {
     return {
       admitted: false,
       live: count.live,
-      max,
+      max: effectiveMax,
       reason: refuseReason(input.kind),
+      ...reliefEvidence,
     };
   }
 
@@ -926,8 +1024,9 @@ export function admitHostDispatch(
     return {
       admitted: false,
       live: count.live,
-      max,
+      max: effectiveMax,
       reason: HOST_BUDGET_UNKNOWN_REFUSAL,
+      ...reliefEvidence,
     };
   }
   // The union figure (WL-0MWFJDD8R005F5BV) AND the release identity
@@ -936,8 +1035,9 @@ export function admitHostDispatch(
   return {
     admitted: true,
     live: count.live,
-    max,
+    max: effectiveMax,
     ...(reserved.entry.attemptId !== undefined ? { attemptId: reserved.entry.attemptId } : {}),
+    ...reliefEvidence,
   };
 }
 

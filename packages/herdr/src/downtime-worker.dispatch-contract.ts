@@ -370,6 +370,13 @@ export interface DowntimeHostBudgetAdmission {
    * when the proxy did not serve one or the refusal was not a 429.
    */
   retryAfterS?: number;
+  /**
+   * Budget-relief evidence (WL-0MWTAD9NV000IVK5 AC9): present when a
+   * model-blocked pane raised this kind's cap (`reason: 'model-blocked'`) or
+   * when the cooldown signal was unreadable (`reason:
+   * 'model-cooldown-unreadable'`). `max` above is the EFFECTIVE cap.
+   */
+  budgetRelief?: import('./host-budget-relief.js').BudgetReliefEvidence;
 }
 
 /**
@@ -633,6 +640,13 @@ export interface DowntimeDispatchOutcome {
    * outcome the admission seam annotated); absent everywhere else.
    */
   budget?: { live: number; max: number };
+  /**
+   * Budget-relief evidence (WL-0MWTAD9NV000IVK5 AC9): present when a
+   * model-blocked pane raised this kind's cap (`reason: 'model-blocked'`) or
+   * when the cooldown signal was unreadable (`reason:
+   * 'model-cooldown-unreadable'`). `max` above is the EFFECTIVE cap.
+   */
+  budgetRelief?: import('./host-budget-relief.js').BudgetReliefEvidence;
   /**
    * Failing exchange on a fail-closed AUDIT-budget refusal
    * (`audit-budget-unknown`): `http-404` (endpoint-absent), `timeout` /

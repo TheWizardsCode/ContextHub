@@ -56,6 +56,7 @@ import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import {
   getMachineCoordinationDir,
   readStoredModelCooldowns,
+  readActiveModelCooldowns,
   clearStoredModelCooldown,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
@@ -1580,6 +1581,12 @@ export function createDowntimeDeps(
         return { admitted: true, live: 0, max: 0, capped: false };
       }
       const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
+      // Budget relief (WL-0MWTAD9NV000IVK5): ONE active-cooldown read per
+      // admission attempt. `null` (unreadable/corrupt) grants no relief and is
+      // named in the evidence; the relay kill switch restores the configured
+      // cap without a restart.
+      const modelCooldowns = readActiveModelCooldowns();
+      const budgetReliefEnabled = loadSettings().downtimeBudgetReliefEnabled !== false;
       const audit = input.kind === 'audit';
       // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN):
       // read the SAME availability the dispatcher's pre-check read and hand
@@ -1621,6 +1628,8 @@ export function createDowntimeDeps(
           // admission sees `undefined` (UNKNOWN) — freshness counting, never
           // reap, never repair (WL-0MW9VQX5T001GCUP).
           livePanes: livePanes.ok ? livePanes.panes : undefined,
+          modelCooldowns,
+          budgetReliefEnabled,
           ...(audit
             ? {
                 onAuditBudgetEvent: (event: AuditBudgetLogEvent) =>

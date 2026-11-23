@@ -395,6 +395,7 @@ export async function dispatchClaimedTier(
   // claim and BEFORE `recordDispatch` (AC3), the claim is rolled back on
   // refusal (AC2) and the refusal is a NEUTRAL skip (AC5).
   let budgetEvidence: { live: number; max: number } | undefined;
+  let budgetReliefEvidence: import('./host-budget-relief.js').BudgetReliefEvidence | undefined;
   // The attempt token of THIS dispatch's reservation (WL-0MWFJD5T4003OM91):
   // every later abort path releases with it, never another attempt's entry.
   let budgetAttemptId: string | undefined;
@@ -424,6 +425,7 @@ export async function dispatchClaimedTier(
       admission = { admitted: false, live: 0, max: 0, reason: 'host-budget-unknown' };
     }
     budgetEvidence = { live: admission.live, max: admission.max };
+    budgetReliefEvidence = admission.budgetRelief;
     budgetAttemptId = admission.attemptId;
     budgetCapped = admission.capped !== false;
     if (!admission.admitted) {
@@ -455,6 +457,7 @@ export async function dispatchClaimedTier(
         // implement rungs of the terminal-reason precedence.
         kind,
         budget: budgetEvidence,
+        ...(budgetReliefEvidence !== undefined ? { budgetRelief: budgetReliefEvidence } : {}),
         // The failing exchange on a fail-closed audit read
         // (`audit-budget-unknown`): carried so the hold and the decision entry
         // can name the broken proxy contract (AC3).
@@ -471,7 +474,6 @@ export async function dispatchClaimedTier(
     }
     if (admission.lease !== undefined) leaseHeld = true;
   }
-
   // ── Placement: project workspace + item-ID tab, then the fallbacks ──────
   // Resolved HERE, after the last admission gate and immediately before the
   // marker write (WL-0MW5JE0SZ0057K30): provisioning the item-ID tab earlier
@@ -491,7 +493,6 @@ export async function dispatchClaimedTier(
   }
   const anchorId = placement.anchorId;
   const anchorIsTabRoot = placement.anchorIsTabRoot;
-
   let marked = false;
   // Capture ONE timestamp shared by the success marker and its post-spawn
   // enrichment entry (WL-0MUBVL251006JAQ0 / F6 AC6.2) so the marker readers
@@ -762,7 +763,7 @@ export async function dispatchClaimedTier(
       : {}),
   });
 
-  return { dispatched: true, candidate, kind };
+  return { dispatched: true, candidate, kind, ...(budgetReliefEvidence !== undefined ? { budgetRelief: budgetReliefEvidence } : {}) };
 }
 
 /**
