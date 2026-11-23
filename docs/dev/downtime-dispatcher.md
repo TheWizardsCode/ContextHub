@@ -314,6 +314,93 @@ roots are still reported, and the failure is named in the payload and on
 stderr); `2` usage error or no roots available. An unreadable source is never
 rendered as an empty, healthy-looking bucket set.
 
+### Recorded prep-supply window (2026-11-23 10:15Z, WL-0MWTBJ9AM003MLLL)
+
+Child 3 of WL-0MWTAD1KM0081UUD records the AC1 evidence: the per-root
+prep-supply table produced by the command above — not a hand sample — for the
+six active roots, pinned to the overnight window's evaluation instant and
+reconciled against the intake snapshot in the parent item.
+
+**Recorded command (the raw-JSON reference).**
+
+```bash
+npx tsx packages/herdr/src/prep-supply-report-cli.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/Tableau-Card-Engine \
+  --root /home/rgardler/projects/tce-the-rising \
+  --root /home/rgardler/projects/games_curator \
+  --now 2026-11-23T10:15:00Z --json
+```
+
+`--now 2026-11-23T10:15:00Z` is the intake snapshot's evaluation instant. The
+payload is schema v1 and two consecutive runs were byte-identical
+(`sha256 d176cc3e5387f2da1c5ca47760e5d4dc68705ea5e358176f019a47f137f450c0`),
+which is what makes the window reproducible. The command, the `--now` and the
+payload hash are recorded on WL-0MWTAD1KM0081UUD; re-running the command
+regenerates the raw JSON.
+
+**Per-root buckets (command output, `--now 2026-11-23T10:15:00Z`).**
+
+| Root | producer-review | dispatch-marker | assignee-hold | dependency | startOn | other-gated | attempt-budget | cooldown | offerable | prep total |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ContextHub | 3 | 1 | 0 | 19 | 3 | 0 | 0 | 0 | 10 | 36 |
+| AI_Hell | 5 | 0 | 0 | 64 | 1 | 0 | 0 | 0 | 13 | 83 |
+| SorraAgents | 9 | 1 | 0 | 147 | 1 | 0 | 0 | 0 | 83 | 241 |
+| Tableau-Card-Engine | 0 | 0 | 0 | 0 | 11 | 0 | 0 | 0 | 1 | 12 |
+| tce-the-rising | 1 | 0 | 0 | 26 | 1 | 0 | 0 | 0 | 15 | 43 |
+| games_curator | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
+| **total** | 18 | 2 | 0 | 256 | 17 | 0 | 0 | 0 | 123 | 416 |
+
+`prep total` is the sum of the nine buckets — the arithmetic invariant, not a
+claim: every in-scope prep item gets exactly one bucket, so `prep total`
+reconciles with no silent drops. Non-prep items appear in no bucket; the
+per-root excluded `terminal-status` / `not-prep-stage` counts are ContextHub
+174/14, AI_Hell 14/9, SorraAgents 66/3, Tableau-Card-Engine 134/2,
+tce-the-rising 23/2 and games_curator 4/0, so `prep total + excluded == merged
+items` for every root.
+
+**Snapshot vs command: the historical-vs-current divergence.**
+
+The parent item's 10:15Z snapshot was a hand reading of the dispatch window;
+the command's full per-root read measures the whole root. Every row corrects,
+so every row carries a note saying why:
+
+| Root | 10:15Z snapshot (prep / admissible) | Command prep total | Existed at 10:15Z (`createdAt` filter) | Offerable | Correction note |
+|---|---|---|---|---|---|
+| ContextHub | 3 / 0 | 36 | 27 | 10 | Snapshot was a windowed reading, not the root's prep set: 27 prep items existed at 10:15Z, 10 of them offerable. |
+| AI_Hell | 4 / 0 | 83 | 78 | 13 | Same windowed undercount; 78 prep items existed, 13 offerable. |
+| SorraAgents | 1 / 0 | 241 | 238 | 83 | Same; 238 existed (93 `open`, 145 `blocked`), 83 offerable. |
+| Tableau-Card-Engine | 0 / 0 | 12 | 11 | 1 | Snapshot's "no prep items" was a windowed miss; 11 existed, 1 offerable. |
+| tce-the-rising | 0 / 0 | 43 | 42 | 15 | Snapshot's "no prep items" was a windowed miss; 42 existed, 15 offerable. |
+| games_curator | 0 / 0 | 1 | 1 | 1 | Snapshot's "no prep items" was a windowed miss; 1 existed and was offerable. |
+
+The re-derived counts filter the command's full read by `createdAt <=
+2026-11-23T10:15:00Z`; every `offerable` id was created at or before the
+snapshot instant, so the offerable column is not an artefact of later-created
+items. The correction's direction is unambiguous: the snapshot under-counted
+prep supply by roughly an order of magnitude on the large roots, so the "empty
+prep bucket" was a **window/visibility** finding, not an absence of prep work.
+Reconciled with the evidence logs, the leader's 10:14–10:16Z check-ins
+(ContextHub `10:14:51Z`, AI_Hell `10:15:10Z`, SorraAgents `10:14:33Z`,
+tce-the-rising `10:11:08Z`/`10:16:13Z`, games_curator `10:14:52Z`) each offered
+exactly ONE candidate and it was never a prep item — a `plan_complete` item on
+ContextHub and `in_review`/`completed` audit candidates on the others — which
+confirms the prep *offer* starved while prep *supply* existed. The full
+root-cause statement (counts and remediation) is child 5
+(WL-0MWTBJCIV006BEGE) and child 6 (WL-0MWTBJEI2008UGUR); this section records
+only the measurement.
+
+**What `--now` pins — and what it cannot.** `--now` freezes the time-derived
+gates (`startOn`, dispatch-marker staleness, non-terminal cooldown). It does
+NOT version item state: `wl` has no historical item snapshots, so status,
+dependency, assignee and `needsProducerReview` are read live. The table is
+therefore "live item state, 10:15Z clock". That is why the re-derivation uses
+`createdAt` (the one field that pins an item to the window) rather than claiming
+an exact replay of 10:15Z state; a true historical replay would need a
+versioned item store.
+
 ### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
 
 The leader keeps ONE entry per instance and iterates the offers **inside** it:
