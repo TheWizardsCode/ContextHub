@@ -741,7 +741,7 @@ export async function performDispatch(
       const fairness =
         ctx.opts.coordinationDir !== undefined
           ? await dispatchDecisionFairness({
-              cwd: cfg.cwd,
+              coordinationDir: ctx.opts.coordinationDir,
               tickSelectedRoot,
               selectedRootOverride: outcome.selectedRoot,
               dispatchingRoot: outcome.attemptedRoot,

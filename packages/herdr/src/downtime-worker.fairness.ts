@@ -22,22 +22,25 @@
  * the tick's offer snapshot and owns the decision-log write, composes the final
  * evidence here.
  *
- * ## Run-length source (design decision, recorded for the fix item)
+ * ## Run-length source (WL-0MWT3Z9M9002Z9BF — leadership-independent)
  *
- * The run length is **derived from the tail of the coordination decision log**
- * rather than stored in a second durable cursor. Rationale:
+ * The run length is read from, and written to, a **machine-scoped run ledger**
+ * in the coordination directory (`~/.herdr/downtime/downtime-run-by-root.json`
+ * via `downtime-run-ledger.ts`), NOT the leader's own decision log.
  *
- *  - restart-safe and single-source-of-truth: a restarted leader reads the
- *    same history an auditor reads;
- *  - no new on-disk state and no extra lock acquisition — the on-disk
- *    round-robin cursor (`downtime-round-robin-by-root.json`) keeps its
- *    documented `{ "<worklogRoot>": "<ISO-8601>" }` format unchanged;
- *  - one bounded local file read per consumed offer (the log is already
- *    written per root and capped by the rolling policy).
+ * The previous design derived the run length from the tail of the leader's own
+ * `<leader-root>/.worklog/downtime-coordination.log`. Because decision rows are
+ * appended with the *leader's* `cwd`, a leadership hand-off to a different root
+ * left the new leader's log empty of the previous leader's dispatches, so
+ * `previousDispatchRun` returned `null` and the ceiling failed **open** for the
+ * first two dispatches of every new leadership (two live runs of 3 were the
+ * observed consequence, WL-0MWNN84HO004DXQU).
  *
- * A durable run cursor was rejected because it would add a file, an extra
- * coordination-lock acquisition and a second source of truth that can drift
- * from the entry it describes.
+ * The machine ledger is the only leadership-independent store the dispatcher
+ * already trusts, is keyed on the same `worklogRoot` identity as the round-robin
+ * cursor, and costs one read-modify-write under the existing coordination lock
+ * (no nested lock, ~60 dispatches/hour). The full decision and its rejected
+ * alternatives are recorded on WL-0MWT3Z9M9002Z9BF and in `downtime-run-ledger.ts`.
  *
  * ## Fail-open
  *
@@ -48,9 +51,9 @@
 
 import type { CoordinationEntry } from './coordination.js';
 import {
-  readCoordinationLogEntries,
-  type CoordinationLogEntry,
-} from './downtime-log-coordination.js';
+  readCurrentDispatchRun,
+  recordDispatchRun,
+} from './downtime-run-ledger.js';
 import { selectLeastRecentlyServed, orderRootsLeastRecentlyServed } from './downtime-round-robin-by-root.js';
 import { entryOffers } from './downtime-worker.offer-selection.js';
 
@@ -95,91 +98,6 @@ export function selectedRootForTick(
   return selectLeastRecentlyServed(coordinationDir, eligibleOfferRoots(entries));
 }
 
-/** A decision entry as the run-length scan needs to see it (defensive read). */
-function dispatchRunOf(entry: CoordinationLogEntry): {
-  root: string;
-  length: number | null;
-} | null {
-  if (entry.kind !== 'decision') return null;
-  const root = entry.dispatchingRoot;
-  if (typeof root !== 'string' || root.length === 0) return null;
-  const length =
-    typeof entry.consecutiveRunLength === 'number' &&
-    Number.isFinite(entry.consecutiveRunLength) &&
-    entry.consecutiveRunLength > 0
-      ? Math.trunc(entry.consecutiveRunLength)
-      : null;
-  return { root, length };
-}
-
-/**
- * The most recent dispatch recorded in a decision-log history: its dispatching
- * root and the run length it recorded (or, for an older entry that predates the
- * field, the number of consecutive same-root entries visible in the tail).
- *
- * Entries that are not dispatch decisions (`no-dispatch` refusals, check-ins,
- * prune records) are skipped — a no-dispatch tick neither extends nor breaks a
- * run of dispatches. Returns `null` when the history holds no dispatch.
- *
- * Pure and total: never throws, tolerant of malformed entries.
- */
-export function previousDispatchRun(
-  entries: readonly CoordinationLogEntry[],
-): { root: string; length: number } | null {
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const current = dispatchRunOf(entries[i]);
-    if (current === null) continue;
-    if (current.length !== null) {
-      return { root: current.root, length: current.length };
-    }
-    // No recorded length (an entry written before the field existed): count
-    // the consecutive same-root dispatch entries visible in the tail.
-    let length = 0;
-    for (let j = i; j >= 0; j -= 1) {
-      const row = dispatchRunOf(entries[j]);
-      if (row === null) continue;
-      if (row.root !== current.root) break;
-      length += 1;
-    }
-    return { root: current.root, length };
-  }
-  return null;
-}
-
-/**
- * The consecutive-run length to record for a dispatch to `root`, given the
- * decision-log history: one more than the previous dispatch's run when that
- * dispatch went to the same root, otherwise `1`.
- *
- * Pure and total: a corrupt/absent history (or any parse failure by the
- * caller) yields the fail-open default `1`.
- */
-export function nextConsecutiveRunLength(
-  entries: readonly CoordinationLogEntry[],
-  root: string,
-): number {
-  if (root.length === 0) return 1;
-  const previous = previousDispatchRun(entries);
-  if (previous === null || previous.root !== root) return 1;
-  return previous.length + 1;
-}
-
-/**
- * Read this leader's bounded decision log (`<cwd>/.worklog/downtime-coordination.log`)
- * and compute the run length for `root`.
- *
- * Fail-open: an unreadable/absent log is "no history", so a dispatch still
- * records the default `1` and proceeds — never blocks, fails or delays.
- */
-export async function nextRunLengthForRoot(cwd: string, root: string): Promise<number> {
-  try {
-    const entries = await readCoordinationLogEntries(cwd);
-    return nextConsecutiveRunLength(entries, root);
-  } catch {
-    return 1; // fail-open: unknown history records the default run length
-  }
-}
-
 /**
  * The consecutive-run bound (parent WL-0MWKE9VF800101V9 AC1): while a peer root
  * has an admissible offer and surplus capacity exists, a root that has already
@@ -188,19 +106,24 @@ export async function nextRunLengthForRoot(cwd: string, root: string): Promise<n
 export const RUN_LENGTH_CEILING = 2;
 
 /**
- * Read the previous dispatch run from this leader's decision log.
+ * Read the previous dispatch run from the MACHINE-scoped run ledger
+ * (WL-0MWT3Z9M9002Z9BF).
  *
- * This is the ONE run-length accounting source (WL-0MWKY141H002LULI); the
- * ordering helpers below consume it rather than keeping a second durable
- * cursor. Fail-open: a missing/unreadable/corrupt log (or any read failure)
- * resolves `null` — "no previous dispatch" — so ordering degrades to today's
- * behaviour and dispatch is never blocked, failed or delayed.
+ * This is the ONE run-length accounting source; the ordering helpers below
+ * consume it rather than reading the leader's own decision log, so a leadership
+ * hand-off between roots cannot reset a live run to `1`. `coordinationDir` is
+ * the machine coordination directory (`~/.herdr/downtime/`), shared by every
+ * leader on the host.
+ *
+ * Fail-open: a missing/unreadable/corrupt ledger (or any read failure) resolves
+ * `null` — "no previous dispatch" — so ordering degrades to today's behaviour
+ * and dispatch is never blocked, failed or delayed.
  */
 export async function readPreviousDispatchRun(
-  cwd: string,
+  coordinationDir: string,
 ): Promise<{ root: string; length: number } | null> {
   try {
-    return previousDispatchRun(await readCoordinationLogEntries(cwd));
+    return readCurrentDispatchRun(coordinationDir);
   } catch {
     return null; // fail-open: no history, no deferral
   }
@@ -254,10 +177,11 @@ export function deferRunLengthCeilingRoot(
  */
 export async function orderCoordinationEntriesForDispatch(
   entries: readonly CoordinationEntry[],
-  opts: { coordinationDir: string; countingCwd: string; surplusCapacity: boolean },
+  opts: { coordinationDir: string; surplusCapacity: boolean },
 ): Promise<CoordinationEntry[]> {
   const roots = orderRootsLeastRecentlyServed(opts.coordinationDir, eligibleOfferRoots(entries));
-  const previousRun = roots.length > 1 ? await readPreviousDispatchRun(opts.countingCwd) : null;
+  const previousRun =
+    roots.length > 1 ? await readPreviousDispatchRun(opts.coordinationDir) : null;
   const orderedRoots = deferRunLengthCeilingRoot(roots, previousRun, opts.surplusCapacity);
   const rank = new Map(orderedRoots.map((root, index) => [root, index]));
   if (rank.size === 0) return [...entries];
@@ -273,26 +197,33 @@ export async function orderCoordinationEntriesForDispatch(
  *    supplied one, else the offer-path selection). `dispatchingRoot` is absent
  *    rather than fabricated.
  *  - `dispatched`: `selectedRoot` plus the root that actually dispatched and
- *    its run length, read fail-open from the decision log.
+ *    its run length, RECORDED to (and returned from) the machine-scoped run
+ *    ledger so the log and the ledger name the same value.
+ *
+ * This is the SINGLE write site for the run ledger: every dispatched outcome
+ * that carries a `dispatchingRoot` (offer path, registered-root sweep, own
+ * backlog) passes through here, so the accounting covers all dispatch paths
+ * and stays leadership-independent.
  *
  * `tickSelectedRoot` may be `null` when the offer list selected nothing (for
  * example an own-backlog dispatch); a successful dispatch then names its own
  * dispatching root as the selection rather than recording a misleading null.
  */
 export async function dispatchDecisionFairness(input: {
-  cwd: string;
+  coordinationDir: string;
   tickSelectedRoot: string | null;
   selectedRootOverride?: string | null;
   dispatchingRoot?: string;
   dispatched: boolean;
 }): Promise<FairnessDecisionEvidence> {
-  const { cwd, tickSelectedRoot, selectedRootOverride, dispatchingRoot, dispatched } = input;
+  const { coordinationDir, tickSelectedRoot, selectedRootOverride, dispatchingRoot, dispatched } =
+    input;
   if (!dispatched || dispatchingRoot === undefined) {
     return { selectedRoot: selectedRootOverride ?? tickSelectedRoot };
   }
   return {
     selectedRoot: selectedRootOverride ?? tickSelectedRoot ?? dispatchingRoot,
     dispatchingRoot,
-    consecutiveRunLength: await nextRunLengthForRoot(cwd, dispatchingRoot),
+    consecutiveRunLength: recordDispatchRun(coordinationDir, dispatchingRoot),
   };
 }

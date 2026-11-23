@@ -441,9 +441,12 @@ dispatches; the other herdr instances coordinate instead of polling:
   (WL-0MWFIZ8H5005FVNN). While **a peer root has an admissible offer and
   surplus capacity exists** (`freeSlots > 1`), a root that has already
   dispatched **twice in succession** is deferred behind its peers
-  (`deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING = 2`, decision-log-sourced
-  and fail-open) — an ordering rule only, never a gate; a selected-but-held
-  root is never charged. The v2 bucket
+  (`deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING = 2`, machine
+  run-ledger-sourced and fail-open) — an ordering rule only, never a gate; a
+  selected-but-held root is never charged. The run length is read from the
+  **machine-scoped run ledger** (`~/.herdr/downtime/downtime-run-by-root.json`),
+  not the leader's own decision log, so a leadership hand-off between roots
+  cannot reset a live run to `1` (WL-0MWT3Z9M9002Z9BF). The v2 bucket
   offers are a scoped reversal of that item's single-offer *contract* (what is
   offered, and how the leader walks it), never of that retirement —
   `COORDINATION_TIER_ORDER` stays retired and the classifier remains the single

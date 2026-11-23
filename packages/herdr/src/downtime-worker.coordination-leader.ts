@@ -500,7 +500,6 @@ async function dispatchFromCoordinationGated(
   // eagerly and dispatch continues to the next offer (WL-0MTMPIQBE001J41P).
   const orderedEntries = await orderCoordinationEntriesForDispatch(entries, {
     coordinationDir: opts.coordinationDir,
-    countingCwd: opts.cwd,
     surplusCapacity: opts.freeSlots === undefined || opts.freeSlots > 1,
   });
 

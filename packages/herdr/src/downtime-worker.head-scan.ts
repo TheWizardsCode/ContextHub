@@ -469,14 +469,15 @@ export async function dispatchFromRegisteredRoots(
   // pure read — it charges nothing; only a consumed item charges its root
   // below, WL-0MWFIZ8H5005FVNN). The whole candidate set follows the same
   // ordering, and the parent AC1 run-length bound (the leader's SAME
-  // decision-log source) defers a root that already dispatched twice in
-  // succession behind its peers while surplus capacity exists — so the sweep
-  // and the offer path cannot drift (WL-0MWKY1839000JM5O). Fail-open: an
-  // absent/corrupt log means no deferral, exactly today's ordering.
+  // machine-scoped run ledger source) defers a root that already dispatched
+  // twice in succession behind its peers while surplus capacity exists — so the
+  // sweep and the offer path cannot drift (WL-0MWKY1839000JM5O,
+  // WL-0MWT3Z9M9002Z9BF). Fail-open: an absent/corrupt ledger means no
+  // deferral, exactly today's ordering.
   const selection = orderRootsLeastRecentlyServed(opts.coordinationDir, roots);
   const first = selection[0] ?? null;
   const previousRun =
-    selection.length > 1 ? await readPreviousDispatchRun(opts.cwd) : null;
+    selection.length > 1 ? await readPreviousDispatchRun(opts.coordinationDir) : null;
   const ordered = deferRunLengthCeilingRoot(
     selection,
     previousRun,
