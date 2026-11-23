@@ -4402,7 +4402,12 @@ state them with any result so it can be reproduced.
   Threshold: **no project above twice its even share**.
 - **Consecutive run.** Merge every project's rows chronologically and take the
   longest maximal same-project sequence. Threshold: **no run longer than 2**
-  (`RUN_LENGTH_CEILING`).
+  (`RUN_LENGTH_CEILING`) — the bound the code enforces while **two or more roots
+  have an *admissible* offer and surplus capacity exists** (parent
+  WL-0MWKE9VF800101V9 AC1). A longer run is therefore a breach only after the
+  precondition is checked: a run of 3 or more on ticks where every peer offer
+  was refused by a gate is the documented fall-through, so attribute the breach
+  against the peer check-ins / `no-dispatch` rows before calling it a defect.
 - **Kind mix.** Dispatches per project per `kind` (`intake` / `plan` /
   `risk-effort` / `implement` / `audit`).
 - **Accounting identity.** Count `dispatchingRoot` over the window's
@@ -4424,6 +4429,28 @@ preceding pre-fix window (2026-11-19T00:00Z–12:22Z, 13 dispatches, 5 projects)
 still shows the signature — SorraAgents 6 (2.31× even share) — which confirms
 the method detects the defect when the fixed code is not running. Re-measurement
 after a dispatcher restart is tracked by **WL-0MWNN84HO004DXQU**.
+
+*Recorded measurement — 2026-11-22T15:30:00Z → 2026-11-23T10:10:00Z
+(WL-0MWNN84HO004DXQU; concentration PASS, run-length FAIL).* The post-restart
+window held 5 active projects and 53 dispatches, even share 10.6: SorraAgents 16
+(**1.51×**; `audit` 7 / `implement` 5 / `plan` 3 / `risk-effort` 1), AI_Hell 13
+(1.23×), ContextHub 9 (0.85×), Tableau-Card-Engine 8 (0.75×), tce-the-rising 7
+(0.66×). No project exceeded twice its even share, but the longest consecutive
+run was **3**, twice (SorraAgents 2026-11-22T21:02Z→21:35Z; Tableau-Card-Engine
+2026-11-23T00:46Z→00:58Z) against a ceiling of 2. The accounting identity agrees
+**exactly** on the decision-covered sub-window (03:17Z→10:07Z, 13 dispatches,
+max `consecutiveRunLength` 2): every dispatch has exactly one matching
+`dispatched` decision row. Two measured evidence limits qualify the result: the
+leader's decision log rotates ≈ every 2.2 h at the observed tick rate (466
+decision rows per 2 h 15 m; four 500-line generations ≈ 6.5 h), so the first 40
+dispatches have no decision-log counterpart and the two runs' precondition
+cannot be re-derived; and the run-length read is per-leader (its own log's
+current file), so a leadership hand-off resets it to the fail-open `1`. In the
+retained rows `selectedRoot` is pinned to `tce-the-rising` (uncharged because
+its offer was never consumed) while `dispatchingRoot` rotates across all five
+served roots — the whole-set rotation and its fall-through working as designed,
+with `dispatchingRoot` as the accounting key. Follow-up:
+**WL-0MWT3Z9M9002Z9BF**.
 
 **Run-length source: the decision-log tail.** `consecutiveRunLength` is derived
 from the tail of the same decision log (a bounded, fail-open read) rather than a
