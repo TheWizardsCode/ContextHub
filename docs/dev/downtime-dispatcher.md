@@ -487,7 +487,7 @@ that evidence — the same rule this section documents.
 | AI_Hell | AH-0MWFDQ9EY004NO4X | `question-loop` | `comment:AH-C0MWI5L6HD004KW3P` | 8d 4h | yes | needs-producer-input |
 | AI_Hell | AH-0MWL7OWPF003E4TP | `question-loop` | `comment:AH-C0MWLANMGN004OL0L` | 5d 23h | yes | needs-producer-input |
 | AI_Hell | AH-0MWL7P1AO003LKXT | `question-loop` | `comment:AH-C0MWLBFLER000V8GL` | 5d 22h | yes | needs-producer-input |
-| AI_Hell | AH-0MWLLPA1Q0006U2P | `manual` | none (dependency-held) | unknown | no | can-clear-now |
+| AI_Hell | AH-0MWLLPA1Q0006U2P | `manual` | none (claimed dependency-held †) | unknown | no | can-clear-now † |
 | SorraAgents | SA-0MSN9UXKJ002JK42 | `question-loop` | `comment:SA-C0MWMTG2ZX001R5A9` | 4d 21h | yes | needs-producer-input |
 | SorraAgents | SA-0MU9VU8GB009P523 | `question-loop` | `comment:SA-C0MUJNHTF4007Q22T` | 57d 12h | yes | needs-producer-input |
 | SorraAgents | SA-0MVNPSBEJ006Z59T | `question-loop` | `comment:SA-C0MWG935ZP003GX87` | 9d 11h | yes | needs-producer-input |
@@ -514,6 +514,59 @@ recorded above because they were in scope at the snapshot instant. Conversely
 `needs-producer-input` (fail-closed) — a question for the producer, not a
 silent clear.
 
+**Correction (†) — 2026-11-23T23:37Z, WL-0MWTVPJAN003GLAV.** The
+`AH-0MWLLPA1Q0006U2P` row's "dependency-held" deciding evidence was a
+**direction misread**: its six unmet edges are inbound `depended-on-by` edges —
+items that depend on it (AH-0MWLLPAQL003IEXE, AH-0MWSSU092006M4M8,
+AH-0MWSTFHRK000IX0J, AH-0MWSTG4YA001PVW5, AH-0MWSTGHL20014OVQ,
+AH-0MWSTGTSD0034HD1) — not outbound `depends-on` dependencies. Its only
+outbound dependency, AH-0MWLLP9CS00994RD, is `completed`, so the dispatcher's
+dependency gate does not hold it and the independent-hold exception does not
+apply. The live re-run groups the row `needs-producer-input`; its flag was
+**not** cleared.
+
+### Stale-flag clearing run (2026-11-23T23:37Z, WL-0MWTVPJAN003GLAV)
+
+Child 4a of WL-0MWTAD1KM0081UUD re-ran the rule above over the live prep-stage
+`needsProducerReview` set on the six active roots, cleared only rows grouped
+`can-clear-now`, and re-read the set afterwards. **Nothing was cleared: the
+live `can-clear-now` set was empty.**
+
+| root | before | can clear now | needs producer input | after |
+|---|---|---|---|---|
+| ContextHub | 1 | 0 | 1 | 1 |
+| AI_Hell | 5 | 0 | 5 | 5 |
+| SorraAgents | 9 | 0 | 9 | 9 |
+| Tableau-Card-Engine | 0 | 0 | 0 | 0 |
+| games_curator | 0 | 0 | 0 | 0 |
+| tce-the-rising | 1 | 0 | 1 | 1 |
+| **total** | **16** | **0** | **16** | **16** |
+
+**Read.** The live flagged prep set is the recorded audit set minus the two
+externally cleared ContextHub `ruff DTZ007` items, with `AH-0MWLLPA1Q0006U2P`
+regraded `needs-producer-input` (correction above). The other 15 rows are
+unchanged from the recorded audit: 14 remain `question-loop` with an unanswered
+producer question on record (no later answer comment exists) and
+`SA-0MVSCS0M80007X23` remains `manual` fail-closed (no surviving evidence).
+Inputs were `wl list --needs-producer-review`, `wl comment list`, `wl
+audit-show`, `wl dep list` and the root's rolling `downtime-dispatches.log`;
+holds were derived from the dispatcher predicates (outbound `depends-on` edges
+to non-terminal blockers, `assignee`, `startOn`). The run applied
+`classifyProducerReviewProvenance` / `assembleProducerReviewProvenance` at
+`--now 2026-11-23T23:37:23Z`.
+
+**No mutation.** With an empty `can-clear-now` group, no `wl update
+--needs-producer-review false` ran, no clear-evidence comment was needed and no
+item was reassigned. The flagged set was byte-identical before and after (16
+ids), the `needs-producer-input` set is unchanged and no dispatch marker was
+written. `AH-0MWLLPA1Q0006U2P` joins the 4b producer-interview batch
+(WL-0MWTVPK65009NTER) instead of being cleared.
+
+**Runner gap.** Unlike the prep-supply read, the provenance rule has no
+packaged read-only command, so this run used a one-off script; a follow-up
+(WL-0MWTWQSN8005FK5P) tracks a reproducible read that derives holds from the
+dispatcher predicates rather than hand-collected edges.
+
 **Sanity check against documented history** (parent AC: at least three items,
 mismatches recorded as open questions):
 
@@ -528,9 +581,12 @@ mismatches recorded as open questions):
   re-ruling states "this ruling remains open for the producer and is not
   closed" → `question-loop`, needs producer input. **Matches.**
 - `AH-0MWLLPA1Q0006U2P` — implementation aborted 2026-11-23T05:01Z with a new
-  blocker item; no question is recorded and six unmet dependencies hold it →
-  `manual`/unknown age, `can-clear-now` via the independent-hold exception.
-  **Matches** the history (flagging it cannot dispatch it).
+  blocker item; no question is recorded and six unmet dependencies were
+  recorded as holding it → `manual`/unknown age, recorded `can-clear-now` via
+  the independent-hold exception. **Partially mismatched:** the six edges are
+  inbound dependents, not unmet dependencies (see *Correction (†)* above), so
+  the live re-run groups it `needs-producer-input`. The flag source (`manual`)
+  still matches the history; the exception does not apply.
 - `SA-0MVSCS0M80007X23` — a plan was recorded on 2026-11-17 with no question,
   no audit and no attempt-budget evidence. The rule cannot prove why it is
   flagged, so it is grouped `needs-producer-input` rather than cleared.
@@ -747,9 +803,14 @@ created under WL-0MWTAD1KM0081UUD:
 | 4d prep seeding | WL-0MWTVPM0D009FMG3 | dispatcher maintainer / operator | AC1 per-root table (all six roots >=1 offerable; 123/416); root cause item 1 ("no prep supply" refuted) | none |
 
 **Why each bucket.** 4a clears only the single row the rule proves clearable
-(`AH-0MWLLPA1Q0006U2P`, dependency-held, no recorded question); the 17 rows with
-an unanswered question are 4b's batch. 4c prevents recurrence: 16 of the 18
-flagged rows are `question-loop` sourced, so routine clarifying questions must
+(`AH-0MWLLPA1Q0006U2P`, recorded as dependency-held, no recorded question); the
+17 rows with an unanswered question are 4b's batch. **Execution outcome
+(2026-11-23T23:37Z, WL-0MWTVPJAN003GLAV):** the dependency hold did not survive
+re-read (see *Correction (†)* above), so 4a cleared **nothing** and that row
+joined 4b's batch — live set 16 flagged prep rows, all
+`needs-producer-input` (*Stale-flag clearing run* above). 4c prevents
+recurrence: 16 of the 18 flagged rows are `question-loop` sourced, so routine
+clarifying questions must
 not set the persistent hold. 4d is a guard, not a correction: the six active
 roots all had at least one offerable prep item at the recorded 10:15Z clock, so
 it seeds only a root a live read finds empty.
