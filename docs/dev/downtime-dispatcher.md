@@ -835,6 +835,109 @@ sets were byte-identical before and after: no flag was cleared, no assignee was
 written, no dispatch marker was created. The four new items are `open` /
 `intake_complete` and do not enter either set.
 
+### Verification and findings handoff (2026-11-24 00:32Z, WL-0MWTBJGBS0085DG1, child of WL-0MWTAD1KM0081UUD)
+
+Child 7 records parent AC5 (the per-root prep nominee, or the classification
+reason none exists) and parent AC6 (findings and follow-ups recorded, with no
+dispatcher behaviour change). It is a **verification record only**: no gate,
+cap, budget, selection or skill code was touched, so the dispatched-item set and
+the offer computation are unchanged (evidence below).
+
+**How the nominee is read.** A live leader check-in persists only the single
+head offer (`workItemId`), not the v2 per-bucket `offers` payload, so a prep
+nominee behind a non-prep head is invisible to it. The parent plan therefore
+uses the AC-approved equivalent read — the prep-supply report command above —
+and records its `offerable` set per root with the read timestamp. The nominee
+quoted per root is the canonical **first** id of that root's `offerable`
+bucket (the report emits bucket ids id-sorted), i.e. a measured "this root has
+an admissible prep item", not a claim about which item the dispatcher would
+head-offer.
+
+**Read.**
+
+```bash
+npx tsx packages/herdr/src/prep-supply-report-cli.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/Tableau-Card-Engine \
+  --root /home/rgardler/projects/tce-the-rising \
+  --root /home/rgardler/projects/games_curator \
+  --now 2026-11-24T00:32:00Z --json
+```
+
+- **Evaluation instant:** `--now 2026-11-24T00:32:00Z`; payload captured
+  `2026-11-24T00:32:20Z`. Item state is read live at that instant (`wl` has no
+  historical snapshots), so the hash identifies the exact payload recorded
+  here, not a replayable past window.
+- **Payload:** schema v1, `sha256
+  29454f6f8e590c94b60a822830a27e9a8923edde91dfefae80247c5cf69e0054`; a
+  back-to-back re-run with the same `--now` was byte-identical.
+- **Reconciliation:** prep total **409** + excluded **445** = merged **854**
+  across the six roots, and the cross-root totals sum to the per-root counts
+  (`409`).
+
+**Per-root prep nominee and the AC5 target.** The target is "at least one
+admissible prep item on every active root, or a documented, justified
+exception".
+
+| Root | Offerable | Prep nominee (first offerable id) | producer-review | dependency | other held | AC5 outcome | Follow-up needed |
+|---|---|---|---|---|---|---|---|
+| ContextHub | 15 | `WL-0MVRN37Y1000WP6Q` | 1 | 16 | dispatch-marker 1, other 1 | **met** — admissible prep exists | none needed |
+| AI_Hell | 17 | `AH-0MVMH2OPY001X6M3` | 2 | 59 | other 1 | **met** — admissible prep exists | none needed |
+| SorraAgents | 84 | `SA-0MVB70WW30070JUO` | 9 | 147 | dispatch-marker 1 | **met** — admissible prep exists | none needed |
+| Tableau-Card-Engine | 2 | `CG-0MS98IBEC009GEO7` | 0 | 0 | startOn 10 | **met** — admissible prep exists | none needed |
+| tce-the-rising | 15 | `RISE-0MWKP0W3I009TD02` | 2 | 25 | assignee-hold 1 | **met** — admissible prep exists | none needed |
+| games_curator | 1 | `CUR-0MWJ4GDXQ002T2H5` | 0 | 0 | — | **met** — admissible prep exists | none needed |
+| **total** | **134** | — | **14** | **247** | dispatch-marker 2, startOn 10, other 2 | — | — |
+
+Every root satisfies the target at the read instant, so **no root needs an
+exception and no root maps to a remediation follow-up** (4a WL-0MWTVPJAN003GLAV,
+4b WL-0MWTVPK65009NTER, 4c WL-0MWTVPL1A005KB4D, 4d WL-0MWTVPM0D009FMG3 are "none
+needed" for the AC5 target). This is the state at verification time only: the
+producer-review and dependency buckets still hold the bulk of prep supply, so
+the remediation follow-ups remain the mechanism that turns *supply* into
+*offers*, but they are not needed to *create* a nominee on any root.
+
+**Check-in evidence (where a live check-in exists).** The most recent check-in
+lines at/around the read confirm the head offer is never a prep item — the
+root-cause finding — and that the prefix `prep` nominee is not persisted:
+ContextHub `2026-11-24T00:30:50Z` head `WL-0MVP7TT08006816Z`; games_curator
+`2026-11-24T00:30:49Z` `all-window-items-gated` (window 4, producer-review 3,
+audit-fresh 1); tce-the-rising `2026-11-24T00:26:22Z` head
+`RISE-0MWRZNCMQ004V5C8`. This is exactly why the AC-approved prep-supply read,
+not the check-in payload, is the AC5 evidence source.
+
+**No-behaviour-change evidence (AC6).** This child performs no code change, so
+the dispatched-item set and the offer computation are unchanged. Two independent
+witnesses:
+
+1. **Live, immediately before → after the report run.** For all six roots the
+   full `wl worklist --json` payload (the consolidated read the dispatcher and
+   Herdr worklist consume) was hashed at `2026-11-24T00:31:48Z`, the report was
+   run, and it was hashed again at `2026-11-24T00:31:57Z`: all six hashes are
+   byte-identical (no worklist, dispatch marker, flag or assignee changed).
+2. **Regression tests pinning the invariant.**
+   `packages/herdr/src/downtime-worker.prep-supply.test.ts` → *"leaves the
+   dispatcher classification byte-identical"* asserts the dispatcher's
+   `classifyItemForDispatchDetail` decisions are unchanged by the
+   prep-supply read and that the report quotes the classifier's own gate;
+   `packages/herdr/src/downtime-worker.prep-supply-report.test.ts` → *"leaves
+   the dispatcher decision set byte-identical"* asserts the same for the report
+   builder, with sibling tests pinning the import boundary (pure siblings only)
+   and input immutability.
+
+**Parent evidence pointer table.** Where each parent AC is evidenced:
+
+| Parent AC | Evidence | Location |
+|---|---|---|
+| AC1 — per-root prep-supply table | WL-0MWTBJ9AM003MLLL (comment `WL-C0MWTQO4WW006YDIC`) | this section's command + *Recorded prep-supply window (2026-11-23 10:15Z)* |
+| AC2 — producer-review provenance audit | WL-0MWTBJAV7002ZZQI (comment `WL-C0MWTTIOEN000M9LN`) | *Producer-review provenance* / *Recorded producer-review provenance audit (2026-11-23 22:15Z)* |
+| AC3 — root-cause statement | WL-0MWTBJCIV006BEGE (comment `WL-C0MWTUHK5H004OL7E`) | *Root cause: the 2026-11-22/23 empty prep bucket* |
+| AC4 — remediation plan + follow-ups | WL-0MWTBJEI2008UGUR (comments `WL-C0MWTVR7SQ004VR8C`, `WL-C0MWTWDXSC008898M`) | *Remediation plan and follow-up items* |
+| AC5 — per-root prep nominee / exception | WL-0MWTBJGBS0085DG1 (**this child**) | this section: *Per-root prep nominee and the AC5 target* |
+| AC6 — findings recorded, no behaviour change | WL-0MWTBJGBS0085DG1 (**this child**) | this section: *No-behaviour-change evidence (AC6)* + the two regression tests above |
+
 ### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
 
 The leader keeps ONE entry per instance and iterates the offers **inside** it:
