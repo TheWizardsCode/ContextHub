@@ -831,7 +831,7 @@ export interface DowntimeWorkerConfig {
      * `coordinationLogMaxEntries × (1 + coordinationLogMaxRotatedFiles)`
      * entries and never falls below
      * `coordinationLogMaxEntries × coordinationLogMaxRotatedFiles + 1`.
-     * Defaults (500/file, 3 rotated: always 1,501–2,000 entries ≈ ≥ 25 h at the observed ≥ 60 decisions/hour) come from
+     * Defaults (500/file, 3 rotated: always 1,501–2,000 entries; retained TIME depends on the tick rate — measured ≈ 207 decisions/hour gives ≈ 6.5–9.7 h, NOT ≥ 24 h) come from
      * `COORDINATION_LOG_MAX_ENTRIES` / `COORDINATION_LOG_MAX_ROTATED_FILES`
      * in `downtime-log.ts`, and values are clamped by
      * `resolveCoordinationLogPolicy` (10–10,000 entries, 0–20 siblings;

@@ -37,7 +37,9 @@ export const DOWNTIME_LOG_MAX_ENTRIES = 100;
  * Per-file entry cap for the COORDINATION log before it rotates to a
  * numbered sibling (WL-0MVKNC28B003UOLX AC2). The dispatch log keeps its
  * smaller single-file bound (`DOWNTIME_LOG_MAX_ENTRIES`); only the
- * coordination/decision log carries the 24 h retention. Default: 500
+ * coordination/decision log rotates. The bound is in ENTRIES, not hours —
+ * the retained TIME depends on the tick rate (see
+ * `docs/dev/downtime-dispatcher.md` § Retention & rotation). Default: 500
  * entries per file.
  */
 export const COORDINATION_LOG_MAX_ENTRIES = 500;
@@ -47,9 +49,12 @@ export const COORDINATION_LOG_MAX_ENTRIES = 500;
  * AC2). Together with `COORDINATION_LOG_MAX_ENTRIES` the retained window is
  * bounded by `maxEntries × (1 + maxRotatedFiles)` entries and never falls
  * below `maxEntries × maxRotatedFiles + 1` — the documented default (500
- * per file, 3 rotated) therefore always holds 1,501–2,000 entries, covering
- * ≥ 25 h at the observed ≥ 60 decision entries/hour (a full overnight
- * post-mortem window) while bounding disk use to ~2,000 JSONL lines.
+ * per file, 3 rotated) therefore always holds 1,501–2,000 entries while
+ * bounding disk use to ~2,000 JSONL lines. Retained TIME is NOT bounded to
+ * ≥ 24 h: the measured post-fix rate (≈ 207 decision entries/hour; 466 rows
+ * in 2 h 15 m) gives ≈ 6.5–9.7 h, so the log is not a multi-day store —
+ * capture the aggregates while the evidence is live
+ * (WL-0MWT3Z9M9002Z9BF AC4).
  */
 export const COORDINATION_LOG_MAX_ROTATED_FILES = 3;
 

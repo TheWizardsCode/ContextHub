@@ -228,8 +228,10 @@ export interface CoordinationLogEntry {
   /**
    * Per-project fairness accounting (WL-0MWKY141H002LULI, AC3): the
    * dispatching root's consecutive run length INCLUDING this dispatch, derived
-   * from the tail of this decision log (see `downtime-worker.fairness.ts` for
-   * the recorded design rationale). `1` means the previous dispatch went to a
+   * from the machine-scoped run ledger (`downtime-run-ledger.ts` /
+   * `downtime-run-by-root.json`, WL-0MWT3Z9M9002Z9BF), whose fail-open fallback
+   * is the tail of this decision log (see `downtime-worker.fairness.ts` for the
+   * recorded design rationale). `1` means the previous dispatch went to a
    * different root, or there was none. Present only alongside
    * `dispatchingRoot`. Additive/optional.
    */
@@ -266,9 +268,12 @@ export interface CoordinationLogEntry {
  * whole current file rotates to `.1` and a fresh current file starts, so the
  * entry that triggers the rotation is never lost). `policy` is optional and
  * defaults to `COORDINATION_LOG_MAX_ENTRIES` ×
- * `COORDINATION_LOG_MAX_ROTATED_FILES` (documented default ≈ ≥ 24 h at the
- * observed ≥ 60 decisions/hour). Fail-closed: never throws; a write failure
- * is swallowed (audit logging must never crash the worker).
+ * `COORDINATION_LOG_MAX_ROTATED_FILES` (documented default 500/file × 3
+ * rotated). The bound is in ENTRIES; measured at the observed ≈ 207
+ * decisions/hour it retains ≈ 6.5–9.7 h, NOT ≥ 24 h (see
+ * `docs/dev/downtime-dispatcher.md` § Retention & rotation). Fail-closed:
+ * never throws; a write failure is swallowed (audit logging must never crash
+ * the worker).
  */
 export async function appendCoordinationLogEntry(
   cwd: string,

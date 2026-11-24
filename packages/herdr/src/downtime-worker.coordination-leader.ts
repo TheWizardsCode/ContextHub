@@ -179,9 +179,10 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
  *
  * ## Run-length bound (parent AC1)
  *
- * The decision log (the fairness metric's SINGLE run-length source) defers a
- * root that already dispatched twice in succession behind its peers while
- * surplus capacity exists — ordering only, fail-open, no gate touched.
+ * The machine-scoped run ledger (`downtime-run-ledger.ts`) is the fairness
+ * metric's SINGLE run-length source (decision-log tail: fail-open fallback
+ * only). It defers a root that already dispatched twice in succession behind its peers
+ * while surplus capacity exists — ordering only, fail-open, no gate touched.
  *
  * Fail-closed at every boundary: a wl failure fetching an entry resolves
  * `wl-error` only when EVERY entry failed (a fully broken lookup — a
