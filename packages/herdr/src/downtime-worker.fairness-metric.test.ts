@@ -49,7 +49,7 @@ import {
 import {
   RUN_LEDGER_FILE_NAME,
   readCurrentDispatchRun,
-  recordDispatchRun,
+  writeDispatchRunLocked,
 } from './downtime-run-ledger.js';
 import {
   recordDecision,
@@ -60,6 +60,7 @@ import {
   type RoundRobinByRootData,
 } from './downtime-round-robin-by-root.js';
 import {
+  withCoordLock,
   writeCoordinationFile,
   type CoordinationEntry,
 } from './coordination.js';
@@ -116,6 +117,14 @@ function makeEntry(instanceId: string, workItemId: string, worklogRoot: string):
     assignedAt: at,
     lastUpdated: at,
   };
+}
+
+/** Seed a run the way the production charge does (under the coordination lock). */
+function seedDispatchRun(runRoot: string, now: number): void {
+  const written = withCoordLock(coordinationDir, () =>
+    writeDispatchRunLocked(coordinationDir, runRoot, now),
+  );
+  if (written === null) throw new Error('coordination lock unavailable in test');
 }
 
 /** Seed the round-robin cursor file. */
@@ -175,6 +184,7 @@ async function recordOutcomeDecision(
 ): Promise<CoordinationLogEntry> {
   const fairness = await dispatchDecisionFairness({
     coordinationDir,
+    countingCwd: leaderCwd,
     tickSelectedRoot,
     selectedRootOverride: outcome.selectedRoot,
     dispatchingRoot: outcome.attemptedRoot,
@@ -360,10 +370,10 @@ describe('registered-root sweep fairness evidence', () => {
 // source, so a leadership hand-off to another root cannot reset a live run.
 describe('run length is recorded to the machine-scoped run ledger', () => {
   it('extends a run for the same root and resets it on a root change', async () => {
-    // Seed the ledger as a previous leader would have, then record dispatches
-    // through the fairness composer (the single ledger write path).
-    recordDispatchRun(coordinationDir, '/repo/a', 1_000);
-    recordDispatchRun(coordinationDir, '/repo/a', 2_000);
+    // Seed the ledger as a previous leader would have, then dispatch through
+    // the leader (the round-robin charge is the single ledger write path).
+    seedDispatchRun('/repo/a', 1_000);
+    seedDispatchRun('/repo/a', 2_000);
     expect(readCurrentDispatchRun(coordinationDir)).toEqual({ root: '/repo/a', length: 2 });
 
     seedCursor({});
@@ -378,7 +388,7 @@ describe('run length is recorded to the machine-scoped run ledger', () => {
   });
 
   it('records a no-dispatch decision without advancing the run ledger', async () => {
-    recordDispatchRun(coordinationDir, '/repo/a', 1_000);
+    seedDispatchRun('/repo/a', 1_000);
     // A held offer dispatches nothing, so the run ledger must be untouched.
     const deps = makeDeps({
       fetchItem: vi.fn().mockResolvedValue({
@@ -412,6 +422,75 @@ describe('run length is recorded to the machine-scoped run ledger', () => {
     expect(outcome.dispatched).toBe(true);
     const entry = await recordOutcomeDecision(outcome, '/repo/a');
     expect(entry.consecutiveRunLength).toBe(1);
+  });
+
+  it('keys the ledger on the same worklogRoot identity as the round-robin cursor', async () => {
+    seedCursor({});
+    const outcome = await dispatchTick(makeDeps(), [makeEntry('inst-a', 'WL-A', '/repo/a')]);
+    expect(outcome.dispatched).toBe(true);
+    await recordOutcomeDecision(outcome, '/repo/a');
+
+    const cursor = JSON.parse(
+      readFileSync(join(coordinationDir, ROUND_ROBIN_BY_ROOT_FILE_NAME), 'utf-8'),
+    ) as Record<string, string>;
+    expect(Object.keys(cursor)).toEqual(['/repo/a']);
+    expect(readCurrentDispatchRun(coordinationDir)).toEqual({ root: '/repo/a', length: 1 });
+    // The ledger key IS the cursor key (the `worklogRoot` project identity).
+    expect(readCurrentDispatchRun(coordinationDir)!.root).toBe(Object.keys(cursor)[0]);
+  });
+});
+
+// ── 4b. Fail-open fallback chain (WL-0MWT54AR8005LMKN AC4) ──────────────
+//
+// The recorded `consecutiveRunLength` must be derived from the SAME source as
+// the bound: the ledger first, then the leader's own rotated decision log, then
+// `1`. A missing ledger therefore cannot cause a hard failure or a blocked
+// dispatch.
+describe('recorded run length — decision-log fallback chain', () => {
+  async function appendDispatchDecision(runRoot: string, runLength: number): Promise<void> {
+    await appendCoordinationLogEntry(leaderCwd, {
+      kind: 'decision',
+      operation: 'dispatch',
+      outcome: 'dispatched',
+      instanceId: 'inst-a',
+      reason: 'dispatched',
+      dispatchingRoot: runRoot,
+      consecutiveRunLength: runLength,
+      at: new Date().toISOString(),
+    } as CoordinationLogEntry);
+  }
+
+  async function compose() {
+    return dispatchDecisionFairness({
+      coordinationDir,
+      countingCwd: leaderCwd,
+      tickSelectedRoot: '/repo/a',
+      dispatchingRoot: '/repo/a',
+      dispatched: true,
+    });
+  }
+
+  it('falls back to the leader\'s rotated decision log when the ledger is missing', async () => {
+    await appendDispatchDecision('/repo/a', 1);
+    await appendDispatchDecision('/repo/a', 2);
+    expect(readCurrentDispatchRun(coordinationDir)).toBeNull();
+    await expect(compose()).resolves.toMatchObject({ consecutiveRunLength: 3 });
+  });
+
+  it('falls back to the decision log when the ledger is corrupt', async () => {
+    writeFileSync(join(coordinationDir, RUN_LEDGER_FILE_NAME), 'not-json{{{\n', 'utf-8');
+    await appendDispatchDecision('/repo/a', 2);
+    await expect(compose()).resolves.toMatchObject({ consecutiveRunLength: 3 });
+  });
+
+  it('resolves 1 when neither the ledger nor the decision log has history', async () => {
+    await expect(compose()).resolves.toMatchObject({ consecutiveRunLength: 1 });
+  });
+
+  it('prefers the ledger over the decision log (the ledger is the single source)', async () => {
+    seedDispatchRun('/repo/a', 1_000); // ledger says run = 1
+    await appendDispatchDecision('/repo/a', 5); // log says 5: must be ignored
+    await expect(compose()).resolves.toMatchObject({ consecutiveRunLength: 1 });
   });
 });
 

@@ -43,6 +43,7 @@ import { createLeaderElectionManager, LEASE_FILE } from './leader-election.js';
 import { probeCoordinationLeafAuditAdmission } from './downtime-worker.gates.js';
 import { threeSlotPoolStatus, writeDowntimeLog } from './downtime-worker.fixtures.js';
 import { readCoordinationLogEntries, type CoordinationLogEntry } from './downtime-log.js';
+import { readCurrentDispatchRun } from './downtime-run-ledger.js';
 import { defaultSettings } from './settings.js';
 import {
   writeCoordinationFile,
@@ -1232,10 +1233,16 @@ describe('dispatch-driven round-robin charge (WL-0MWFIZ8H5005FVNN)', () => {
       // The selected-but-held root must never be charged — selection is pure
       // (this half fails on the current code for EVERY row).
       expect(after[CHARGE_ROOT_A]).toBe(CHARGE_SEED_A);
+      // The machine run ledger advances under the SAME charge critical section
+      // and on EXACTLY the consumed outcomes (WL-0MWT54AR8005LMKN AC2):
+      // `dispatched`, `spawn-failed`, `marker-write-failed`.
+      const ledger = readCurrentDispatchRun(testDir);
       if (row.charges) {
         expect(after[CHARGE_ROOT_B]).toBe(new Date(CHARGE_NOW).toISOString());
+        expect(ledger).toEqual({ root: CHARGE_ROOT_B, length: 1 });
       } else {
         expect(after[CHARGE_ROOT_B]).toBe(CHARGE_SEED_B);
+        expect(ledger).toBeNull();
         // A neutral hold must not charge — but "nothing charges" is also true
         // before the charge exists at all. Pin the positive half so this row
         // stays RED until the consumed-offer charge lands (WL-0MWFJT3H9008A0LM).

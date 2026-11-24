@@ -52,8 +52,8 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch (per-offer iteration), own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
 | `downtime-worker.offer-selection.ts` | The leader's drain-aware tie-break over one entry's ADMISSIBLE offers (pure ordering arithmetic — never a gate, never a cross-root ranking) | `entryOffers`, `drainAwareRank`, `orderAdmissibleOffers` |
-| `downtime-worker.fairness.ts` | Per-project fairness accounting: whole-set candidate ordering, the twice-in-succession run-length bound (machine-run-ledger-sourced, fail-open) and the fairness decision evidence | `orderCoordinationEntriesForDispatch`, `deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING`, `selectedRootForTick`, `dispatchDecisionFairness` |
-| `downtime-run-ledger.ts` | Machine-scoped consecutive-run ledger (`~/.herdr/downtime/downtime-run-by-root.json`, one `{ root, runLength, at }` record updated under the coordination lock) — the leadership-independent run-length source that replaced the per-leader decision-log tail (WL-0MWT3Z9M9002Z9BF) | `recordDispatchRun`, `readCurrentDispatchRun`, `peekNextRunLength`, `RUN_LEDGER_FILE_NAME` |
+| `downtime-worker.fairness.ts` | Per-project fairness accounting: whole-set candidate ordering, the twice-in-succession run-length bound (machine-run-ledger-sourced with a decision-log fallback, fail-open) and the fairness decision evidence | `orderCoordinationEntriesForDispatch`, `deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING`, `selectedRootForTick`, `readPreviousDispatchRun`, `dispatchDecisionFairness` |
+| `downtime-run-ledger.ts` | Machine-scoped consecutive-run ledger (`~/.herdr/downtime/downtime-run-by-root.json`, one `{ root, runLength, at }` record written INSIDE the round-robin charge critical section on every consumed outcome) — the leadership-independent run-length source that replaced the per-leader decision-log tail (WL-0MWT3Z9M9002Z9BF, WL-0MWT54AR8005LMKN) | `writeDispatchRunLocked`, `readCurrentDispatchRun`, `loadDispatchRun`, `RUN_LEDGER_FILE_NAME` |
 | `downtime-worker.terminal-reason.ts` | The neutral terminal-reason precedence chain for a tick that dispatched nothing | `resolveTerminalOutcome` |
 | `downtime-worker.head-scan.ts` | Bounded head/extension candidate scan over ONE root, plus the registered-root sweep that applies it per root in round-robin order | `dispatchFromOwnHead`, `dispatchFromRegisteredRoots` |
 | `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
@@ -5092,10 +5092,12 @@ The run length is read from the **machine-scoped run ledger**
 (`~/.herdr/downtime/downtime-run-by-root.json`), not from the leader's own
 decision log, so a leadership hand-off between roots cannot reset it
 (WL-0MWT3Z9M9002Z9BF; see [Run-length source](#run-length-source-the-machine-run-ledger)).
-Fail-open: a missing/unreadable/corrupt ledger means "no previous dispatch", so
-no deferral happens and dispatch proceeds. The registered-root sweep uses the
-same ordered candidate list and the same deferral helper, so the two paths
-cannot drift.
+Fail-open: a missing/unreadable/corrupt ledger falls back to the tail of the
+leader's own ROTATED decision log (`readCoordinationLogAllEntries`), then to
+`1`, so no deferral happens and dispatch proceeds. That fallback covers only
+the upgrade / ledger-loss boundary — the next consumed charge recreates the
+ledger (WL-0MWT54AR8005LMKN). The registered-root sweep uses the same ordered
+candidate list and the same deferral helper, so the two paths cannot drift.
 
 **A selected-but-held root is never charged.** Selection
 (`selectLeastRecentlyServed` / `orderRootsLeastRecentlyServed`) is a **pure
@@ -5111,11 +5113,14 @@ nothing to dispatch, and would make the cursor disagree with the dispatch log.
 Fairness for a held root comes from the held offer itself (the log names the
 gate), not from the cursor.
 
-**Accounting identity:** the cursor file and `.worklog/downtime-dispatches.log`
-agree about who was served — every dispatch row in the log corresponds to
-exactly one charge of that root's cursor entry, and a charge never happens
-without a consumed offer (`dispatched` / `spawn-failed` /
-`marker-write-failed`), while a selected-but-held root is charged nothing.
+**Accounting identity:** the cursor file, the machine run ledger and
+`.worklog/downtime-dispatches.log` agree about who was served — every dispatch
+row in the log corresponds to exactly one charge of that root's cursor entry,
+and a charge never happens without a consumed offer (`dispatched` /
+`spawn-failed` / `marker-write-failed`), while a selected-but-held root is
+charged nothing. The run ledger is advanced in the SAME `advanceRoot`
+critical section as the cursor, so the two files cannot drift
+(WL-0MWT54AR8005LMKN).
 
 **Per-project fairness metric (WL-0MWKY141H002LULI, parent
 WL-0MWKE9VF800101V9 AC3).** Every coordination decision entry — a successful
@@ -5216,8 +5221,9 @@ state them with any result so it can be reproduced.
   against the peer check-ins / `no-dispatch` rows before calling it a defect.
   The code enforces the run length from the machine run ledger
   (`downtime-run-by-root.json`), which survives a leadership hand-off and log
-  rotation; the decision-log `consecutiveRunLength` is the **cross-check**, not
-  the source.
+  rotation and is advanced on every **consumed** outcome
+  (`dispatched` / `spawn-failed` / `marker-write-failed`); the decision-log
+  `consecutiveRunLength` is the **cross-check**, not the source.
 - **Kind mix.** Dispatches per project per `kind` (`intake` / `plan` /
   `risk-effort` / `implement` / `audit`).
 - **Accounting identity.** Count `dispatchingRoot` over the window's
@@ -5227,7 +5233,10 @@ state them with any result so it can be reproduced.
   — but the leader's decision log rotates in hours (see [Retention &
   rotation](#rolling-log-trimming-retention--rotation)), so treat a missing
   decision counterpart as an evidence limit, not a mismatch, and treat the
-  machine run ledger as the authoritative run source.
+  machine run ledger as the authoritative run source. Because the run counts
+  CONSUMED offers, a `spawn-failed` / `marker-write-failed` refusal advances it
+  without a `dispatched` row; read such a row as an advance when reconciling
+  (`isConsumedDispatchOutcome` is the shared predicate).
 
 *Recorded measurement — 2026-11-19T12:22:49Z onward (NOT a pass).* The window
 held 4 active projects and 8 dispatches (12:37:40Z → 14:09:22Z): AI_Hell 4
@@ -5311,23 +5320,29 @@ rotation](#rolling-log-trimming-retention--rotation) for the capture recipe.
 recorded to, and the ceiling reads from, a **machine-scoped run ledger**
 (`~/.herdr/downtime/downtime-run-by-root.json`, one `{ root, runLength, at }`
 record) in the coordination directory every leader already trusts
-(WL-0MWT3Z9M9002Z9BF). Decision + trade-off:
+(WL-0MWT3Z9M9002Z9BF, revised by WL-0MWT54AR8005LMKN). Decision + trade-off:
 
 - **Leadership-independent.** One record any leader on the host reads/writes, so
   a hand-off between roots cannot reset a live run to the fail-open `1` — the
   defect that produced the two length-3 runs above.
 - **Keyed on the round-robin cursor's `worklogRoot` identity,** so a future
   remote-host ledger (WL-0MWNYIL3Y0093GY0) can key it the same way.
-- **Cost:** one read-modify-write under the **existing** coordination lock
-  (`tryAcquireCoordLock`, the same lock `advanceRoot` uses) on each dispatch —
-  a separate acquisition from the cursor charge, never nested, and dispatches
-  are bounded (~60/h), so it is negligible. Selection remains a pure read.
+- **Cost: ZERO extra lock acquisitions.** The record is a read-modify-write
+  inside the **existing round-robin charge critical section** (`advanceRoot`'s
+  `tryAcquireCoordLock` hold, the same one that updates
+  `downtime-round-robin-by-root.json`). It is not a second acquisition and
+  never nests, so the "one lock, one critical section" property holds and the
+  two files cannot drift. It advances on every **consumed** outcome
+  (`dispatched` / `spawn-failed` / `marker-write-failed`), exactly the
+  `isConsumedDispatchOutcome` charge points. Selection remains a pure read.
 - **One record, not a per-root map:** a map cannot express dispatch ORDER, so it
   could not answer "what was the last dispatch?", which the current run's
   identity depends on.
-- **Fail-open end-to-end:** a missing/unreadable/corrupt ledger, lock
-  contention, or a failed write all degrade to "no previous dispatch" (`1`) —
-  never a block, failure or delay.
+- **Fail-open end-to-end:** a missing/unreadable/corrupt ledger falls back to
+  the tail of the leader's own ROTATED decision log, then to `1`; lock
+  contention or a failed write leave the record unchanged. Never a block,
+  failure or delay. The fallback covers only the upgrade / ledger-loss
+  boundary — the next consumed charge recreates the ledger.
 
 Rejected alternatives: a cross-generation read of the leader's own log (still
 per-leader-root — it widens the window within one leadership but cannot survive
@@ -5717,7 +5732,7 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
 | `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — records each root's LAST DISPATCH; the least-recently-dispatched root starts the offer ordering and the registered-root sweep. Selection is a pure read; only a consumed offer charges the cursor (WL-0MTJDX4M4007YH5U, WL-0MWFIZ8H5005FVNN; fail-open) |
-| `~/.herdr/downtime/downtime-run-by-root.json` | Machine-scoped consecutive-run ledger — a single `{ "root": "<worklogRoot>", "runLength": N, "at": "<ISO-8601>" }` record of the last **dispatched** run, extended/reset on each dispatch under the coordination lock. The leadership-independent run-length source the twice-in-succession bound reads (WL-0MWT3Z9M9002Z9BF; fail-open) |
+| `~/.herdr/downtime/downtime-run-by-root.json` | Machine-scoped consecutive-run ledger — a single `{ "root": "<worklogRoot>", "runLength": N, "at": "<ISO-8601>" }` record of the last **consumed** dispatch run, extended/reset on each consumed dispatch (`dispatched` / `spawn-failed` / `marker-write-failed`) INSIDE the existing round-robin charge critical section (one lock acquisition for both files). The leadership-independent run-length source the twice-in-succession bound reads, with the leader's own rotated decision log as its fail-open fallback (WL-0MWT3Z9M9002Z9BF, WL-0MWT54AR8005LMKN; fail-open) |
 | `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight capped dispatch of any kind (WL-0MVXY0WQF0069YDJ; uncapped kinds are never recorded, WL-0MW50EHZ6007QBPB); audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
 | `~/.herdr/downtime/budget.json` | Optional per-kind caps as a map over kinds, e.g. `{ "implement": 2, "audit": 1, "plan": 3 }` (absent → the `implement: 2` / `audit: 1` defaults, every other kind uncapped; `0` disables a kind; `HERDR_HOST_MAX_<KIND>` overrides — the single env vocabulary). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
 | `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired and deleted** (WL-0MVXY0XPF006YUHA F2, WL-0MWF34IEP00221NU): no reader, writer or remover remains; a leftover file is ignored entirely |
@@ -6141,8 +6156,9 @@ What **cannot** be re-derived after rotation (state it explicitly in the report)
 the per-tick peer-admissibility verdict at the moment of a run, and any dispatch
 timestamp older than the retained window. What **is** durable: the current run
 (`~/.herdr/downtime/downtime-run-by-root.json`) and each root's last-dispatch
-time (`downtime-round-robin-by-root.json`) — both machine-scoped, updated under
-the coordination lock, unaffected by rotation or leadership hand-off.
+time (`downtime-round-robin-by-root.json`) — both machine-scoped, updated
+inside the SAME round-robin charge lock hold, unaffected by rotation or
+leadership hand-off.
 
 ### Backward compatibility
 

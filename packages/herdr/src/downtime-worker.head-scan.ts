@@ -156,6 +156,14 @@ export interface HeadScanBase {
   holds: HeadScanHolds;
   /** Producer-review flag writes already performed this cycle (deduped). */
   flaggedForBudget: Set<string>;
+  /**
+   * Machine-wide coordination directory (round-robin cursor + run ledger).
+   * Optional so a pure filter-chain test can omit it; every production scan
+   * path supplies it, and the consumed-dispatch charge happens HERE so the
+   * own-backlog, audit-batch-continuation and registered-root-sweep paths all
+   * charge (and advance the run ledger) in ONE lock hold (WL-0MWT54AR8005LMKN).
+   */
+  coordinationDir?: string;
 }
 
 /** A fully-resolved scan over exactly ONE root's canonical window. */
@@ -367,6 +375,13 @@ export async function dispatchFromOwnHead(
     // Per-project fairness (WL-0MWKY141H002LULI AC3): the caller records this
     // attempted root as `dispatchingRoot` only when the outcome dispatched.
     outcome.attemptedRoot = ctx.root;
+    // Every CONSUMED outcome charges this root and advances the machine run
+    // ledger in the SAME lock hold (WL-0MWT54AR8005LMKN). Charging here covers
+    // the own-backlog fallback, the audit-batch continuation and the
+    // registered-root sweep uniformly; the leader offer loop charges its own.
+    if (ctx.coordinationDir !== undefined && isConsumedDispatchOutcome(outcome)) {
+      advanceRoundRobinCursor(ctx.coordinationDir, ctx.root, now);
+    }
     if (outcome.dispatched) return outcome;
     // A non-continuable outcome (wl-error, spawn-failed, marker-write-failed,
     // anchor-unavailable, …) is returned unchanged so the caller's strike/skip
@@ -477,7 +492,7 @@ export async function dispatchFromRegisteredRoots(
   const selection = orderRootsLeastRecentlyServed(opts.coordinationDir, roots);
   const first = selection[0] ?? null;
   const previousRun =
-    selection.length > 1 ? await readPreviousDispatchRun(opts.coordinationDir) : null;
+    selection.length > 1 ? await readPreviousDispatchRun(opts.coordinationDir, opts.cwd) : null;
   const ordered = deferRunLengthCeilingRoot(
     selection,
     previousRun,
@@ -512,25 +527,15 @@ export async function dispatchFromRegisteredRoots(
     );
     // A dispatch, or a terminal (strike/spawn-failed/…) outcome, ends the
     // tick. A root with nothing dispatchable returns `null` and the sweep
-    // continues to the next registered root.
+    // continues to the next registered root. The consumed-offer charge (and the
+    // run-ledger advance in the same lock hold) already happened inside
+    // `dispatchFromOwnHead` (WL-0MWT54AR8005LMKN).
     if (outcome !== null) {
-      // Consumed-offer charge (WL-0MWFJTCJ5004BKE4, parent WL-0MWFIZ8H5005FVNN):
-      // a sweep dispatch, or a claim that was consumed without a pane
-      // (spawn-failed / marker-write-failed), charges EXACTLY the dispatching
-      // root. A neutral hold that keeps the offer (reservation `admit: false`,
-      // host/audit-budget, claim-failed, anchor-unavailable) and a
-      // nothing-dispatchable visit (`null`, `continue` above) charge nothing.
-      // Fail-open: `advanceRoot` skips a lost charge under lock contention or
-      // an I/O error — never blocks a dispatch.
-      if (isConsumedDispatchOutcome(outcome)) {
-        advanceRoundRobinCursor(opts.coordinationDir, root, now);
-        // Per-project fairness accounting (WL-0MWKY141H002LULI AC3): the
-        // sweep's OWN selection rides the outcome so the orchestrator records
-        // `selectedRoot` for the registry candidate universe (the offer-list
-        // selection is a different universe and would misattribute a sweep).
-        return { ...outcome, selectedRoot: first };
-      }
-      return outcome;
+      // Per-project fairness accounting (WL-0MWKY141H002LULI AC3): the
+      // sweep's OWN selection rides the outcome so the orchestrator records
+      // `selectedRoot` for the registry candidate universe (the offer-list
+      // selection is a different universe and would misattribute a sweep).
+      return isConsumedDispatchOutcome(outcome) ? { ...outcome, selectedRoot: first } : outcome;
     }
   }
   return null;

@@ -5,7 +5,9 @@
  *
  * Work item: WL-0MWT3Z9M9002Z9BF (make run-length accounting
  * leadership-independent and auditable; parent WL-0MWKE9VF800101V9 AC1).
- * Introduced to replace the previous per-leader-root decision-log source.
+ * Introduced to replace the previous per-leader-root decision-log source;
+ * revised by WL-0MWT54AR8005LMKN (remediation: write it inside the existing
+ * round-robin charge critical section, on every consumed outcome).
  *
  * ## Why this file exists (the defect it fixes)
  *
@@ -33,12 +35,16 @@
  * - **One small JSON record, not a per-root map.** A per-root map cannot
  *   express dispatch ORDER, so it could not answer "what was the last
  *   dispatch?", which the current run's identity depends on.
- * - **Cost: one read-modify-write under the EXISTING coordination lock**
- *   (`tryAcquireCoordLock`, the same lock `advanceRoot` uses for the cursor).
- *   It is a separate acquisition from the cursor charge (the charge happens in
- *   the leader before the decision is recorded; this ledger is written when
- *   the dispatch is recorded), but it never nests inside another lock and
- *   dispatches are bounded (~60/hour), so the cost is negligible.
+ * - **Cost / lock trade-off: ZERO extra lock acquisitions.** The record is a
+ *   read-modify-write inside the EXISTING round-robin charge critical section
+ *   (`advanceRoot` → `tryAcquireCoordLock`, the same lock hold that updates
+ *   `downtime-round-robin-by-root.json`). There is no second acquisition and
+ *   no nested lock, so the "one lock, one critical section" property holds and
+ *   the ledger cannot drift from the cursor it accompanies. It advances on
+ *   every **consumed** outcome — `dispatched`, `spawn-failed`,
+ *   `marker-write-failed`, the exact `isConsumedDispatchOutcome` charge points
+ *   — so a failed spawn still counts as service to that root, exactly as it
+ *   charges the cursor.
  *
  * Alternatives considered and rejected on the work item: a cross-generation
  * read of the leader's own log (still per-leader-root — cannot satisfy
@@ -50,14 +56,17 @@
  * ## Fail-open (unchanged contract)
  *
  * Every reader/writer here is total and never throws: a missing, unreadable or
- * corrupt ledger degrades to "no previous dispatch" (run length `1`), and a
- * failed write is swallowed. Nothing here can block, fail or delay a dispatch.
+ * corrupt ledger degrades to "no previous dispatch" (this module), and a failed
+ * write is swallowed. The caller (`readPreviousDispatchRun` in
+ * `downtime-worker.fairness.ts`) then falls back to the tail of the leader's
+ * own rotated decision log (`readCoordinationLogAllEntries`) and finally to
+ * `1`. That fallback covers only the upgrade / ledger-loss boundary — the next
+ * consumed charge recreates the record — so the hand-off defect cannot return.
+ * Nothing here can block, fail or delay a dispatch.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
-import { tryAcquireCoordLock } from './coordination.js';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -70,10 +79,10 @@ export const RUN_LEDGER_FILE_NAME = 'downtime-run-by-root.json';
  * The last consumed dispatch's run state.
  *
  * `root` is the `worklogRoot` whose offer was consumed, `runLength` is how
- * many dispatches in succession went to that root INCLUDING this one (`>= 1`),
- * and `at` is when it happened. Only `dispatched` outcomes are recorded (a
- * consumed-but-not-dispatched claim keeps the cursor charge but, as before,
- * neither extends nor breaks a run).
+ * many consumed dispatches in succession went to that root INCLUDING this one
+ * (`>= 1`), and `at` is when it happened. Every consumed outcome records
+ * (`dispatched`, `spawn-failed`, `marker-write-failed`) — the same outcomes
+ * that charge the round-robin cursor.
  */
 export interface DispatchRunRecord {
   root: string;
@@ -153,8 +162,8 @@ function saveDispatchRun(coordinationDir: string, record: DispatchRunRecord): vo
  *
  * This is the **ordering** read (used by `readPreviousDispatchRun`): at
  * ordering time this tick has not yet dispatched, so the record describes the
- * PREVIOUS dispatch — exactly the value the run-length ceiling rule needs.
- * Pure read, never throws.
+ * PREVIOUS consumed dispatch — exactly the value the run-length ceiling rule
+ * needs. Pure read, never throws.
  */
 export function readCurrentDispatchRun(
   coordinationDir: string,
@@ -164,58 +173,39 @@ export function readCurrentDispatchRun(
 }
 
 /**
- * The run length a dispatch to `root` WOULD record, derived from the current
- * ledger without mutating it. `1` on a missing/corrupt ledger or a root change.
- *
- * Used for the fail-open value when the ledger cannot be advanced (lock
- * contention or a skipped write), so the recorded figure stays consistent with
- * what the ledger says. Pure read, never throws.
- */
-export function peekNextRunLength(coordinationDir: string, root: string): number {
-  if (root.length === 0) return 1;
-  const previous = loadDispatchRun(coordinationDir);
-  if (previous === null || previous.root !== root) return 1;
-  return previous.runLength + 1;
-}
-
-/**
  * Record a consumed dispatch to `root` and return its new run length.
  *
- * Read-modify-write under the coordination lock: the previous record extends
- * the run when it names the same root, otherwise a fresh run of `1` starts.
- * The returned value is written to the decision entry as
- * `consecutiveRunLength`, so the log and the ledger name the same number.
+ * **The caller MUST already hold the coordination lock.** This is called from
+ * `advanceRoot`'s round-robin charge critical section (which has already
+ * acquired `tryAcquireCoordLock` for the cursor) and never acquires one
+ * itself — a dispatch therefore costs exactly ONE lock acquisition for both
+ * files.
  *
- * **Fail-open:** lock contention or a failed write leaves the ledger
- * unchanged and returns {@link peekNextRunLength} (never throws, never blocks).
+ * Read-modify-write: the previous record extends the run when it names the
+ * same root, otherwise a fresh run of `1` starts. The returned value is the
+ * value the ledger now holds (the recorded `consecutiveRunLength` is read back
+ * from this same record).
+ *
+ * **Fail-open:** a failed write is swallowed; dispatch continues and the
+ * caller's read degrades to the decision-log fallback.
  *
  * @param coordinationDir — The machine coordination directory.
  * @param root — The `worklogRoot` whose offer was consumed.
  * @param now — Current timestamp (ms).
  * @returns The run length to record (`>= 1`).
  */
-export function recordDispatchRun(
+export function writeDispatchRunLocked(
   coordinationDir: string,
   root: string,
   now: number = Date.now(),
 ): number {
   if (root.length === 0) return 1;
-  const release = tryAcquireCoordLock(coordinationDir);
-  if (release === null) {
-    // Lock contention — leave the ledger untouched and report the value the
-    // ledger already implies (fail-open, never blocks the dispatch).
-    return peekNextRunLength(coordinationDir, root);
-  }
-  try {
-    const previous = loadDispatchRun(coordinationDir);
-    const runLength = previous !== null && previous.root === root ? previous.runLength + 1 : 1;
-    saveDispatchRun(coordinationDir, {
-      root,
-      runLength,
-      at: new Date(now).toISOString(),
-    });
-    return runLength;
-  } finally {
-    release();
-  }
+  const previous = loadDispatchRun(coordinationDir);
+  const runLength = previous !== null && previous.root === root ? previous.runLength + 1 : 1;
+  saveDispatchRun(coordinationDir, {
+    root,
+    runLength,
+    at: new Date(now).toISOString(),
+  });
+  return runLength;
 }
