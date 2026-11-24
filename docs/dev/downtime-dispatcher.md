@@ -4165,6 +4165,38 @@ project's implement/audit dispatch; that is tracked separately
 (WL-0MWAM5N75004ROSW). Full rationale, the tier table and the subprocess
 inventory: [release-dispatch-budget-evaluation.md](release-dispatch-budget-evaluation.md).
 
+### Tick budget reconciliation pass — isolation contract for tick harnesses
+(WL-0MWUON2T9003Q0MU)
+
+The worker tick runs the host-budget reconciliation pass (sweep → reap →
+adopt) at a bounded cadence — 60 s (`HOST_BUDGET_RECONCILE_INTERVAL_MS`), so
+it always fires on a worker's **first** tick. It is deliberately
+**fire-and-forget** (a pre-dispatch `await` would let a second tick win the
+single-flight dispatch race), it never gates a dispatch, and every failure is
+surfaced as a NON-BLOCKING `host-budget-reconcile-failed` observation recorded
+through the same `deps.recordDecision` sink the refusal paths use.
+
+Two consequences are load-bearing for tests:
+
+- **The ledger dir comes from `cfg.cwd`** (`resolveEffectiveDir`): a tmp-root
+  cwd reconciles its own root ledger, while any other path resolves to the
+  live machine dir `~/.herdr/downtime`. Every harness that calls
+  `worker.tick()` therefore MUST use a tmp-root cwd — never a literal
+  `'/repo'`. Otherwise a unit test reads/writes the live ledger, and because
+  the coordination lock is a single non-blocking attempt
+  (`withCoordLock` → `lock-contention`), a concurrent real dispatcher or a
+  corrupt live ledger makes the pass fail and inject an unrelated
+  `host-budget-reconcile-failed` decision into that tick. A decision
+  assertion must therefore name the decision it requires
+  (`toHaveBeenCalledWith(expect.objectContaining({ reason: … }))`), not index
+  `mock.calls[0]`.
+- **Teardown races the pass.** Because the pass is not awaited, it can still
+  be creating its `<root>/downtime-coordination.lock` / `dispatch-budget.json`
+  while a test's `afterEach` removes the root. Shared temp-dir trackers
+  (`createTempDirTracker` in `downtime-worker.fixtures.ts`) retry `rmSync`
+  (`maxRetries`/`retryDelay`) and concede after that, so a transient
+  `ENOTEMPTY`/`EBUSY` is debris rather than a failing test.
+
 ### Unified budget observability (F5 WL-0MVXY0ZYW009NEJD)
 
 The budget's numbers are surfaced through the existing observability tools —

@@ -841,7 +841,20 @@ export function createTempDirTracker(): TempDirTracker {
       return dir;
     },
     cleanup(): void {
-      for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+      for (const dir of dirs.splice(0)) {
+        // Several tick passes are deliberately fire-and-forget (the host-budget
+        // reconciliation pass in particular), so one can still be creating its
+        // lock/ledger files inside the root while `afterEach` removes it. On a
+        // loaded host that races `rmSync` into a transient `ENOTEMPTY`/
+        // `EBUSY` teardown failure for an unrelated test
+        // (WL-0MWUON2T9003Q0MU). Retry with backoff — Node's documented
+        // remedy — then concede: a leftover tmp dir is debris, not a verdict.
+        try {
+          rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+        } catch {
+          // best effort: never fail a test in teardown over a racing writer
+        }
+      }
     },
   };
 }
