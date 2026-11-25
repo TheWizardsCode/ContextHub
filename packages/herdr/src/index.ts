@@ -69,6 +69,7 @@ import {
   admitHostDispatch as admitHostBudgetDispatch,
   confirmHostDispatch as confirmHostBudgetDispatch,
   decideAuditAvailability,
+  deriveAuditRetryAfterS,
   detectAuditDivergence,
   readAuditBudgetState,
   readAuditLocalEvidence,
@@ -853,6 +854,15 @@ export function createDowntimeDeps(
                 divergence,
               });
             }
+            // The pre-check refusal names its cooldown (WL-0MWJE9N7L001V6XI):
+            // derived from the held lease's `expiresAt` in the SAME availability
+            // observation admission would have seen. A refused availability
+            // still never acquires a lease, so nothing is churned; a payload
+            // without a usable lease leaves the field absent rather than
+            // inventing a deferral.
+            const retryAfterS = deriveAuditRetryAfterS(
+              outcome !== undefined && outcome.status === 'ok' ? outcome.availability : undefined,
+            );
             return {
               ok: true,
               active: true,
@@ -860,6 +870,7 @@ export function createDowntimeDeps(
               ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
               ...(decision.budget !== undefined ? { budget: decision.budget } : {}),
               ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
+              ...(retryAfterS !== undefined ? { retryAfterS } : {}),
               ...(proxyAvailability !== undefined ? { availability: proxyAvailability } : {}),
             };
           }

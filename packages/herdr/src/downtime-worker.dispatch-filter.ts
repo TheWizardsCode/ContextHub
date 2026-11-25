@@ -26,7 +26,10 @@
  * fail-closed audit read, WL-0MWDDHVF2004PTYX AC3) and the scan steps to the
  * next candidate, so prep work ranked
  * behind the refused budgeted candidate still dispatches and the caller can
- * report the neutral terminal reason when nothing else does. Every other
+ * report the neutral terminal reason when nothing else does. A pre-check
+ * refusal derived from a held lease records its cooldown on
+ * `flags.hostBudgetRetryAfterS` (WL-0MWJE9N7L001V6XI), so the terminal
+ * decision names it exactly like an admission `429`. Every other
  * non-dispatched outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
  * `anchor-unavailable`, …) returns immediately, preserving the strike/skip
  * semantics.
@@ -265,7 +268,14 @@ export async function dispatchFromHerdrList(
     auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean;
     cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean;
     auditHostSaturated: boolean; hostBudgetReason?: string;
-    hostBudget?: { live: number; max: number }; hostBudgetDetail?: string },
+    hostBudget?: { live: number; max: number }; hostBudgetDetail?: string;
+    /**
+     * The cooldown the audit pre-check derived from the availability payload's
+     * held lease (WL-0MWJE9N7L001V6XI): carried so the terminal decision names
+     * when the tier re-checks, exactly like the admission `429` arm's
+     * `retryAfterS`. Absent when the payload named no usable lease.
+     */
+    hostBudgetRetryAfterS?: number },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -458,7 +468,7 @@ export async function dispatchFromHerdrList(
       // `host-budget-unknown` for any host-wide source) plus its live/max
       // evidence, so the terminal reason is reported
       // rather than inferred here. `detail` records the failing proxy exchange.
-      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide' || active.source === 'proxy') { flags.auditHostSaturated = true; if (typeof active.reason === 'string') { flags.hostBudgetReason = active.reason; } if (active.budget !== undefined) { flags.hostBudget = active.budget; } if (typeof active.detail === 'string') { flags.hostBudgetDetail = active.detail; } } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide' || active.source === 'proxy') { flags.auditHostSaturated = true; if (typeof active.reason === 'string') { flags.hostBudgetReason = active.reason; } if (active.budget !== undefined) { flags.hostBudget = active.budget; } if (typeof active.detail === 'string') { flags.hostBudgetDetail = active.detail; } if (typeof active.retryAfterS === 'number') { flags.hostBudgetRetryAfterS = active.retryAfterS; } } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
     }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion

@@ -2493,7 +2493,7 @@ admission agree and quote the SAME token. The proxy always wins:
 | Availability read | Audit decision | Decision-log reason | Header token |
 |---|---|---|---|
 | proxy `available: true` | admit (reserve locally for observability only) | — | — |
-| proxy `available: false` | skip that audit candidate and keep scanning (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) | `budget-audit` |
+| proxy `available: false` | skip that audit candidate and keep scanning (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) + `retryAfterS` derived from the held lease's `leases[].expiresAt` (epoch ms → seconds, earliest expiry, rounded up, clamped `>= 0`) | `budget-audit` |
 | `endpoint-absent` (`404`, the proxy predates the endpoint) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'http-404'` | `budget-unknown` |
 | `unreachable` (`timeout` / `network` / `http-<status>`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + the failing exchange as `detail` | `budget-unknown` |
 | `unparsable` (`bad-body`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'bad-body'` | `budget-unknown` |
@@ -2501,7 +2501,14 @@ admission agree and quote the SAME token. The proxy always wins:
 
 The two fail-closed tokens are the proxy's own vocabulary, so a dispatcher
 admission and a proxy refusal cannot disagree about *why* an audit was
-refused (AC2). Every non-`ok` outcome stops audit dispatch with a named
+refused (AC2). A `saturated` refusal names its cooldown WITHOUT a second
+proxy call: `deriveAuditRetryAfterS` reads the availability payload's held
+lease(s), so the pre-check refusal carries the same `retryAfterS` the
+admission `429` arm does (WL-0MWJE9N7L001V6XI). The derivation is
+`available:false`-only (a refused read never churns a lease — the acquire is
+still attempted only when the pre-check admits), and a proxy that serves
+`leases: []` while saturated degrades to "no cooldown named" rather than an
+invented value. Every non-`ok` outcome stops audit dispatch with a named
 reason (AC3) rather than silently reverting to the per-host cap; a missing
 seam fails closed too, never open, because the audit tier cannot prove
 availability without it.

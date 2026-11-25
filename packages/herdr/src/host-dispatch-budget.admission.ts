@@ -152,6 +152,7 @@ import {
   AUDIT_BUDGET_UNAVAILABLE_REASON,
 } from './downtime-worker.audit-availability.contract.js';
 import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
+import type { AuditAvailability } from './downtime-worker.audit-availability.contract.js';
 import type { AuditLeaseAcquireOutcome } from './downtime-worker.audit-lease.js';
 import {
   AUDIT_BUDGET_DIVERGENCE_REASON,
@@ -496,6 +497,49 @@ export function decideAuditAvailability(
     return { active: true, reason: AUDIT_BUDGET_SATURATED_REASON, budget };
   }
   return { active: false, budget };
+}
+
+/**
+ * Derive the audit tier's cooldown (seconds) from the availability payload's
+ * held lease (WL-0MWJE9N7L001V6XI, parent WL-0MWJ7QYX0001KAQX AC3).
+ *
+ * The pre-check refuses BEFORE admission whenever the proxy answers
+ * `available: false` — exactly the state a held foreign lease produces — so
+ * the admission `429` arm's `retry_after_s` rarely runs and its refusal named
+ * no cooldown at all. The availability contract already pins
+ * `leases[].expiresAt` as epoch milliseconds, so the cooldown is derivable
+ * from the observation the pre-check already made (no extra proxy call).
+ *
+ * Rules (the pre-check path must never throw):
+ *  - only a REFUSED availability (`available === false`) yields a cooldown —
+ *    a granted read names none, and the refusal path still never churns a
+ *    lease (the acquire is only attempted when the pre-check admits);
+ *  - the EARLIEST usable expiry wins: that is the first lease release, i.e.
+ *    when the tier can next admit;
+ *  - the delta is rounded UP (a partial second still means "not yet") and
+ *    clamped to `>= 0`, so an already-past expiry reports `0` ("re-check
+ *    now") rather than a negative deferral;
+ *  - a missing/empty `leases` array (the shipped proxy serves `leases: []`
+ *    while idle) or an entry with no finite expiry degrades to `undefined` —
+ *    "no cooldown named" — and is never silently invented.
+ */
+export function deriveAuditRetryAfterS(
+  availability: AuditAvailability | undefined,
+  now: number = Date.now(),
+): number | undefined {
+  if (availability === undefined || availability.available !== false) return undefined;
+  const leases = availability.leases;
+  if (leases === undefined || leases.length === 0) return undefined;
+  let earliest: number | undefined;
+  for (const lease of leases) {
+    const expiresAt = lease?.expiresAt;
+    if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) continue;
+    if (earliest === undefined || expiresAt < earliest) earliest = expiresAt;
+  }
+  if (earliest === undefined) return undefined;
+  const reference = Number.isFinite(now) ? now : Date.now();
+  const seconds = Math.ceil((earliest - reference) / 1000);
+  return Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
 }
 
 /**

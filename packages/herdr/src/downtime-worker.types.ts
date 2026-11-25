@@ -758,7 +758,6 @@ export type DowntimeClaimResult =
  * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV),
  * generalised to the host-wide dispatch budget by WL-0MVXY0XPF006YUHA F2 and
  * made proxy-derived for the audit tier by WL-0MWAMSDNW000SL0E.
- *
  *  - `{ok:true, active:true}` — the audit tier is skipped this tick; `source`
  *    says why: `'proxy'` (the proxy refuses or the read failed closed),
  *    `'host-wide'` (the legacy machine ledger is at/over `maxAudit`, or
@@ -771,7 +770,6 @@ export type DowntimeClaimResult =
  *    failure): fail-open — the audit tier is skipped and dispatch falls
  *    through to the next tier; all dispatch is never blocked by an
  *    unanswerable check.
- *
  * `reason`/`budget` carry the refusal token and its `live`/`cap` evidence. The
  * proxy path uses the proxy's own vocabulary (`audit-budget-saturated` /
  * `audit-budget-unknown`), never `host-budget-*`; the retained host-wide source
@@ -796,6 +794,8 @@ export type DowntimeActiveAuditResult =
        * `timeout` / `network` / `http-<status>` / `bad-body` / `seam-absent`.
        */
       detail?: string;
+      /** The pre-check's derived cooldown in seconds (WL-0MWJE9N7L001V6XI); absent when no lease was named. */
+      retryAfterS?: number;
       /**
        * The RAW proxy observation the pre-check mapped; the attempt threads it
        * into admission so ONE read answers it (WL-0MWJE9IEH001R3P1 AC1).
