@@ -1,6 +1,6 @@
-# Producer interview batch — 2026-11-25T16:01:53.100Z
+# Producer interview batch — 2026-11-25T16:37:25.000Z
 
-**Batch id:** `2026-11-25T16:01:53.100Z` · **Rows:** 17 · **Roots:** 4
+**Batch id:** `2026-11-25T16:37:25.000Z` · **Rows:** 17 · **Roots:** 4
 
 **Per-root counts:** `/home/rgardler/projects/AI_Hell` 5 rows · `/home/rgardler/projects/ContextHub` 1 row · `/home/rgardler/projects/SorraAgents` 9 rows · `/home/rgardler/projects/tce-the-rising` 2 rows
 
@@ -19,7 +19,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/AI_Hell`
 - **Title:** Post-MVP Hangar War: hull upgrade bays as a reward axis
 - **Deciding evidence:** `comment:AH-C0MWGX0EL7000ZLLB`
-- **Flag age:** 10d 18h
+- **Flag age:** 10d 19h
 
 **Question**
 
@@ -140,7 +140,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/ContextHub`
 - **Title:** Decide whether to remove the own-backlog fallback and its leadership step-down (superseded premise)
 - **Deciding evidence:** `comment:WL-C0MWHP2X210072E21`
-- **Flag age:** 10d 5h
+- **Flag age:** 10d 6h
 
 **Question**
 
@@ -155,7 +155,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/SorraAgents`
 - **Title:** Merge conflict: feature/wl-42-test-change
 - **Deciding evidence:** `comment:SA-C0MWMTG2ZX001R5A9`
-- **Flag age:** 6d 15h
+- **Flag age:** 6d 16h
 
 **Question**
 
@@ -171,7 +171,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/SorraAgents`
 - **Title:** Run the 24h STE100 experiment: apply treatment, measure, report, revert
 - **Deciding evidence:** `comment:SA-C0MUJNHTF4007Q22T`
-- **Flag age:** 59d 5h
+- **Flag age:** 59d 6h
 
 **Question**
 
@@ -195,7 +195,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/SorraAgents`
 - **Title:** Standup: separate auto-dispatched from manually dispatched items in 'Yesterday I completed work on...'
 - **Deciding evidence:** `comment:SA-C0MWG935ZP003GX87`
-- **Flag age:** 11d 5h
+- **Flag age:** 11d 6h
 
 **Question**
 
@@ -224,7 +224,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/SorraAgents`
 - **Title:** plan-if-needed overwrites operator-confirmed effort/risk
 - **Deciding evidence:** `comment:SA-C0MWG8SP9K000Q2EW`
-- **Flag age:** 11d 5h
+- **Flag age:** 11d 6h
 
 **Question**
 
@@ -354,7 +354,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/SorraAgents`
 - **Title:** Audit full-suite cache check still uses the loose worktree key after the pre-push gate became tree-keyed
 - **Deciding evidence:** `comment:SA-C0MWJ3PXQC008QPZY`
-- **Flag age:** 9d 5h
+- **Flag age:** 9d 6h
 
 **Question**
 
@@ -381,7 +381,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/SorraAgents`
 - **Title:** Driven child in a foreign-project worktree cannot resolve its owning worklog store
 - **Deciding evidence:** `comment:SA-C0MWROFKMI003FIDJ`
-- **Flag age:** 3d 5h
+- **Flag age:** 3d 6h
 
 **Question**
 
@@ -400,7 +400,7 @@ Recommendations below are **advisory only** — answer however you prefer and yo
 - **Root:** `/home/rgardler/projects/tce-the-rising`
 - **Title:** Slow down Face Offs
 - **Deciding evidence:** `comment:RISE-C0MWMSPLPT002T2L6`
-- **Flag age:** 6d 15h
+- **Flag age:** 6d 16h
 
 **Question**
 

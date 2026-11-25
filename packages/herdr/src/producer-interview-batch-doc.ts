@@ -117,8 +117,14 @@ interface GroupedRows {
 /**
  * Group rows by root, ordering roots by codepoint and preserving the snapshot
  * order within each root (the numbering is the producer's answer interface).
+ *
+ * Exported so the delivery comment lists the invited rows in the SAME order as
+ * the document — the producer answers by row number, and two different
+ * orderings in one batch would be ambiguous.
  */
-function groupRowsByRoot(rows: ReadonlyArray<ProducerInterviewRow>): GroupedRows[] {
+export function groupProducerInterviewRowsByRoot(
+  rows: ReadonlyArray<ProducerInterviewRow>,
+): GroupedRows[] {
   const groups = new Map<string, ProducerInterviewRow[]>();
   for (const row of rows) {
     const bucket = groups.get(row.root);
@@ -128,6 +134,16 @@ function groupRowsByRoot(rows: ReadonlyArray<ProducerInterviewRow>): GroupedRows
   return [...groups.entries()]
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([root, grouped]) => ({ root, rows: grouped }));
+}
+
+/**
+ * The document's row order, flattened: roots by codepoint, snapshot order
+ * within a root. Used wherever the batch's rows are listed for the producer.
+ */
+export function orderProducerInterviewRowsByRoot(
+  rows: ReadonlyArray<ProducerInterviewRow>,
+): ProducerInterviewRow[] {
+  return groupProducerInterviewRowsByRoot(rows).flatMap((group) => group.rows);
 }
 
 function recommendationLine(row: ProducerInterviewRow): string {
@@ -176,7 +192,7 @@ function recommendationsSuffix(): string {
  * deterministic: identical input yields a byte-identical string.
  */
 export function renderProducerInterviewBatchDoc(snapshot: ProducerInterviewSnapshot): string {
-  const groups = groupRowsByRoot(snapshot.interview);
+  const groups = groupProducerInterviewRowsByRoot(snapshot.interview);
   const total = snapshot.interview.length;
   const lines: string[] = [];
 

@@ -718,14 +718,85 @@ evidence and never decides the row's fate:
 | an unanswered question (comment or description appendix) | answer the question, then clear the flag |
 | no surviving evidence (fail-closed) | confirm whether it still needs producer attention |
 
-#### Recorded batch document (2026-11-25T16:01:53.100Z)
+#### Recorded batch document (2026-11-25T16:37:25.000Z)
 
-Rendered from the live snapshot at `2026-11-25T16:01:53.100Z`:
+Rendered from the live snapshot at `2026-11-25T16:37:25.000Z` (refreshed from
+the earlier `2026-11-25T16:01:53.100Z` render when the batch was delivered —
+see *Producer-interview delivery* below; the invited row set is identical, 17
+items):
 [`docs/dev/producer-interview-batch-2026-11-25.md`](./producer-interview-batch-2026-11-25.md)
 — **17** rows grouped by root (AI_Hell 5, ContextHub 1, SorraAgents 9,
 tce-the-rising 2), **0** `can-clear-now`. Every row carries exactly one
 advisory `**Recommended:**` line; four rows carry no surviving evidence and
 render the fail-closed question.
+
+### Producer-interview delivery (WL-0MWVMRX4X003DKCT, child 3 of WL-0MWTVPK65009NTER)
+
+Delivery is the single moment the batch reaches the producer. The command
+posts **one** comment on the originating remediation item (`WL-0MWTAD1KM0081UUD`)
+and **one** on the batch item (`WL-0MWTVPK65009NTER`), both quoting the batch id
+(the snapshot timestamp), the document path, the row count, the per-root counts
+and every invited item id, plus how to answer:
+
+```bash
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  --json > /tmp/producer-interview-snapshot.json
+
+npx tsx scripts/producer-interview-batch-doc.ts \
+  --snapshot /tmp/producer-interview-snapshot.json
+
+npx tsx scripts/producer-interview-deliver.ts \
+  --snapshot /tmp/producer-interview-snapshot.json \
+  --root /home/rgardler/projects/ContextHub [--dry-run|--json]
+```
+
+`--dry-run` prints the composed comment and posts nothing (useful before a real
+run); `--json` prints the machine result (`comments[].commentId`, counts). Both
+recipients default to the two documented items and can be overridden with
+`--remediation` / `--batch-item`; the default document path is the
+`docs/dev/producer-interview-batch-<UTC date>.md` file for the batch id.
+
+**Idempotent — nobody is asked twice.** Every delivery comment carries the
+stable marker `[producer-interview-batch:<batchId>]`. Before posting to a
+recipient the module reads that recipient's comments; when the marker is
+already there it reuses the existing comment id instead of posting. A second run
+for the same batch id therefore posts nothing and reports *already delivered*,
+and a run interrupted between the two posts is completed by posting only the
+missing comment. The marker is keyed on the batch id, so a marker for an earlier
+snapshot never suppresses a later batch.
+
+**Order.** The remediation item is posted first, then the batch item, so the
+batch item's reference always finds the remediation reference already recorded.
+Both comment ids are returned in the result and recorded on the batch item's
+completion comment.
+
+**The document must be this snapshot's artefact.** Delivery is refused — loudly,
+before anything is posted — when the document is missing on disk, declares a
+different batch id, declares a different row count than the snapshot payload, or
+was written **before** the snapshot instant it claims (stale: the live flagged
+set moved on after the render). A `wl` rejection is reported with the recipient
+item and the comments already recorded, so a re-run completes idempotently.
+
+**No lifecycle change.** Delivery adds two comments and nothing else: no status,
+stage, flag or assignee is written, so the `completed` / `in_review` remediation
+item keeps its state (verified live below). Unanswered rows stay flagged and
+remain grouped `needs-producer-input`; answering a row is the authorisation for
+that row's clear.
+
+#### Recorded live delivery (2026-11-25T16:37:25.000Z)
+
+- **Batch id:** `2026-11-25T16:37:25.000Z` · **Rows:** 17 · **Document:**
+  [`docs/dev/producer-interview-batch-2026-11-25.md`](./producer-interview-batch-2026-11-25.md)
+- **Per-root counts:** AI_Hell 5 · ContextHub 1 · SorraAgents 9 · tce-the-rising 2
+- **Reference comment on `WL-0MWTAD1KM0081UUD`:** `WL-C0MWWCP6EV000EUKE`
+  (posted first; the item stayed `completed` / `in_review` with
+  `needsProducerReview=true` and no assignee)
+- **Delivery comment on `WL-0MWTVPK65009NTER`:** `WL-C0MWWCP730009671T`
+- **Re-run:** reported *already delivered* and posted nothing.
 
 ### Root cause: the 2026-11-22/23 empty prep bucket (WL-0MWTBJCIV006BEGE)
 
