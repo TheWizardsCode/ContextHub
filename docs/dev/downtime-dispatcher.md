@@ -881,6 +881,93 @@ rule in the SorraAgents skill tree
 (`SorraAgents/docs/dev/routine-vs-producer-handoff.md`): only a genuine producer
 decision raises the flag, and the answer is recorded where the flag is released.
 
+### Producer-interview reconciliation and no-change assertion (WL-0MWVMRYL60019FD1, child 5 of WL-0MWTVPK65009NTER)
+
+The batch must be **provable** after it runs: the operator sees exactly what
+changed per root, and cannot mistake a silent clear for a reconciled row. This
+child re-runs the snapshot command LIVE at the end of the batch and diffs the
+two grouped sets, then asserts the batch's change set never touched dispatcher
+gating, audit budget or dispatcher-selection code paths.
+
+```bash
+# The frozen BEFORE input (the batch document's snapshot).
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root … --json > /tmp/producer-interview-snapshot-before.json
+
+# … deliver the batch, collect answers, apply them (--json output kept) …
+npx tsx scripts/producer-interview-apply-answers.ts \
+  --snapshot /tmp/producer-interview-snapshot-before.json \
+  --answers /tmp/producer-answers.json --json > /tmp/producer-applied-answers.json
+
+# The reconciliation (re-runs the snapshot LIVE as the AFTER state).
+npx tsx scripts/producer-interview-reconcile.ts \
+  --before /tmp/producer-interview-snapshot-before.json \
+  --applied /tmp/producer-applied-answers.json \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  --changed-range <before-batch>..HEAD [--post] [--json|--dry-run]
+```
+
+Omit `--applied` to assert a no-answer run (it legitimately reports **0
+cleared, N still flagged**). `--post` records the table on
+`WL-0MWTVPK65009NTER`; the comment carries the stable marker
+`[producer-interview-reconciliation:<batch>]`, so a re-run updates the table
+instead of posting a second one.
+
+**What the table records — one row per root:** flagged before, cleared against
+an answer, still flagged and the total invited. The "before" side is the frozen
+batch snapshot; the "after" side is the fresh re-run of the same snapshot
+command. Every cleared row links to its answer entry (`comment:<id>`) and its
+clear comment (`comment:<id>`).
+
+**Fail-closed rows.** A row that left `needs-producer-input` with no recorded
+answer (`cleared_without_answer`), an answer with no clear-comment link
+(`cleared_without_clear_comment`), a "keep waiting" row cleared anyway
+(`deferral_row_cleared`), an answered row whose clear did not take
+(`answer_clear_did_not_take`), or an unanswered/deferred row that is still
+flagged but regrouped away from `needs-producer-input`
+(`unanswered_row_regrouped` / `deferral_row_regrouped`) is a **failure**, never
+a reconciliation. The failed table is still recorded (marked
+`**Validity:** FAILED`) so the operator sees it, but the command exits 1.
+
+**The unanswered-row assertion.** Every unanswered row is asserted — by the
+check, not by eyeball — to still carry `needsProducerReview=true` and to still
+group `needs-producer-input` in the fresh re-run; the rendered table shows both
+columns. An unanswered row therefore never dispatches: the producer-review gate
+refuses it.
+
+**The no-change assertion.** The CLI runs `git diff --name-only <range>` over
+the batch's diff range and asserts no changed path matches
+`packages/herdr/src/downtime-worker.ts` (gating),
+`packages/herdr/src/downtime-log-budget.ts` (audit budget) or
+`packages/herdr/src/downtime-round-robin*.ts` (dispatcher selection). The
+command and its output are recorded with the table.
+
+#### Recorded live run (2026-11-25T17:46:29Z, batch `2026-11-25T16:37:25.000Z`)
+
+BEFORE = the batch document's snapshot (17 invited rows). AFTER = the fresh
+re-run at `17:46:29.294Z`. No producer answers had been applied: **0 cleared**,
+**16 still flagged**.
+
+| root | flagged before | cleared against an answer | still flagged | total invited |
+|---|---|---|---|---|
+| `/home/rgardler/projects/AI_Hell` | 5 | 0 | 4 | 5 |
+| `/home/rgardler/projects/ContextHub` | 1 | 0 | 1 | 1 |
+| `/home/rgardler/projects/SorraAgents` | 9 | 0 | 9 | 9 |
+| `/home/rgardler/projects/tce-the-rising` | 2 | 0 | 2 | 2 |
+| **all roots** | 17 | 0 | 16 | 17 |
+
+The check did **not** silently reconcile a cleared row: `AH-0MWW5BI5C006WOI3`
+left `needs-producer-input` with no recorded producer answer (its flag was
+cleared when `/skill:plan` ran at `17:16Z` after an intake that had paused for a
+producer decision). It is recorded as `cleared_without_answer` and the run is
+marked FAILED — the operator sees exactly which row changed without an answer.
+One row appeared after the batch (`AH-0MWW5FW4Y009GNBN`) and is reported as
+newly flagged, not as a failure. The no-change assertion over the batch's diff
+range found no protected dispatcher path change.
+
 ### Root cause: the 2026-11-22/23 empty prep bucket (WL-0MWTBJCIV006BEGE)
 
 Child 5 of WL-0MWTAD1KM0081UUD states the AC3 root cause from the AC1
