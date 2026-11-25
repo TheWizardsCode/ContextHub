@@ -2539,7 +2539,7 @@ parity-complete with the CLI's default filter (WL-0MWMGET8N009KG33):
 - **Visible read-only.** The worklist display opts in to not-yet-started items
   so a scheduled item is surfaced rather than silently hidden. It carries the
   per-row marker `[not started until <date>]`, the header count
-  `[not started: N]`, and — when **zero** window items have started — the
+  `[Future items: N]`, and — when **zero** window items have started — the
   banner ``Not started — all N of M dispatch-window item(s) start after
   <earliest>; no downtime dispatch possible``. The surface mirrors the
   assignee-hold convention (`dispatch-window-start.ts`): derived from the

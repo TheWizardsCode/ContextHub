@@ -15,7 +15,7 @@
  * window into
  *
  *  - a read-only {@link DispatchWindowStartSummary} (counts plus the earliest
- *    start instant), surfaced in the worklist header (AC: `[not started: N]`),
+ *    start instant), surfaced in the worklist header (AC: `[Future items: N]`),
  *  - a warning banner when the window has **zero** already-started items
  *    (AC: `Not started — all N of M …`), and
  *  - a per-row marker `[not started until <date>]` so individual rows read
@@ -137,15 +137,18 @@ export function summariseDispatchWindowStart(
 }
 
 /**
- * Header indicator naming how many window items are not yet started:
- * `[not started: N]`. `null` when nothing is scheduled, so no chrome row or
- * header segment is added for the overwhelmingly common case.
+ * Header indicator naming how many window items are scheduled for a future
+ * instant: `[Future items: N]`. The copy names what the count IS (items whose
+ * effective start is still ahead) rather than a lifecycle status the row does
+ * not carry — every counted item may well be `open`. `null` when nothing is
+ * scheduled, so no chrome row or header segment is added for the
+ * overwhelmingly common case.
  */
 export function notStartedStatusText(
   summary: DispatchWindowStartSummary | null | undefined,
 ): string | null {
   if (summary === null || summary === undefined || summary.notStartedCount === 0) return null;
-  return `[not started: ${summary.notStartedCount}]`;
+  return `[Future items: ${summary.notStartedCount}]`;
 }
 
 /**

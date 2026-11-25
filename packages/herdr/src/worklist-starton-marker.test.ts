@@ -5,7 +5,7 @@
  * Pins three observable behaviours:
  *  - the per-row `[not started until <date>]` marker distinguishes a scheduled
  *    row from an already-started one;
- *  - the header count `[not started: N]` and the all-not-started banner render
+ *  - the header count `[Future items: N]` and the all-not-started banner render
  *    from the display items;
  *  - rendering never mutates the item or its scheduling fields.
  */
@@ -94,7 +94,7 @@ describe('header count and all-not-started banner', () => {
       notStartedStatusText(summary),
       notStartedBannerText(summary),
     );
-    expect(output).toContain('[not started: 2]');
+    expect(output).toContain('[Future items: 2]');
     expect(output).toContain(
       `Not started — all 2 of 2 dispatch-window item(s) start after ${clock.isoAt(60_000)}; no downtime dispatch possible`,
     );
@@ -112,7 +112,7 @@ describe('header count and all-not-started banner', () => {
       notStartedBannerText(summary),
     );
     // Header count still reports the scheduled row ...
-    expect(output).toContain('[not started: 1]');
+    expect(output).toContain('[Future items: 1]');
     // ... but no warning banner.
     expect(output).not.toContain('no downtime dispatch possible');
   });
@@ -125,7 +125,7 @@ describe('header count and all-not-started banner', () => {
     });
     expect(summary.notStartedCount).toBe(0);
     const output = renderWithNotStarted(items, null, null);
-    expect(output).not.toContain('[not started:');
+    expect(output).not.toContain('[Future items:');
     expect(output).not.toContain('no downtime dispatch possible');
   });
 
@@ -134,7 +134,7 @@ describe('header count and all-not-started banner', () => {
     // and the row marker is the only change.
     const items = [item('A', 60_000)];
     const before = structuredClone(items);
-    renderWithNotStarted(items, '[not started: 1]', null);
+    renderWithNotStarted(items, '[Future items: 1]', null);
     expect(items).toEqual(before);
   });
 });
@@ -179,7 +179,7 @@ describe('held-item semantics are unchanged alongside the schedule marker', () =
     // ... and the schedule bucket still reports the scheduled item.
     expect(start.notStartedCount).toBe(1);
     expect(start.allNotStarted).toBe(false);
-    expect(notStartedStatusText(start)).toBe('[not started: 1]');
+    expect(notStartedStatusText(start)).toBe('[Future items: 1]');
     expect(notStartedBannerText(start)).toBeNull();
   });
 

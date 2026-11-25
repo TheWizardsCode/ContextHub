@@ -2336,9 +2336,9 @@ export function createListRenderer(getShowIcons?: () => boolean): (
    */
   hostBudgetStatus?: string | null,
   /**
-   * Header segment naming how many dispatch-window items are not yet started
-   * (`[not started: N]`, WL-0MWMGEWH7004VUFI). Display-only; null renders
-   * nothing.
+   * Header segment naming how many dispatch-window items are scheduled for a
+   * future instant (`[Future items: N]`, WL-0MWMGEWH7004VUFI). Display-only;
+   * null renders nothing.
    */
   notStartedStatus?: string | null,
   /**
