@@ -109,8 +109,9 @@ run rather than one per test file.
 - **Never rebuild.** The preflight only `stat`s; the suite must not mutate the
   checkout (the live-repo mutation guard would report it) and a silent rebuild
   would make the suite pass against a build nobody asked for. Run the printed
-  command yourself; `implement.py finish`'s own `npm run build` already does
-  this before it tests, which is why gated runs are never affected.
+  command yourself; `implement.py start` builds a fresh worktree's shared
+  package up front (see below) and `implement.py finish`'s own `npm run build`
+  runs again before it tests, which is why gated runs are never affected.
 - **Fail-open.** An unresolvable package with no discoverable repository root,
   a package outside a `packages/` workspace, and an unreadable directory all
   proceed silently — the guard may only fire for a genuinely stale or absent
@@ -135,6 +136,39 @@ rebuild command.
 > verdict; subsequent runs hit the refreshed entry. The cache key and the
 > reason a rebuild is invisible to it are the runner's own behaviour
 > (WL-0MWRZZ98Y007RKZ4), not this guard's.
+
+## Fresh-worktree shared build at `implement.py start` (WL-0MW3EDP6D002U6V4)
+
+The full-suite guard above catches a stale build in *any* checkout. A **fresh
+implement worktree** has the complementary, harder failure:
+`packages/shared/dist/` is gitignored, and `implement.py start` materialises a
+`node_modules` link farm that points `@worklog/shared` at the worktree's *own*
+(unbuilt) package — so every TypeScript suite that imports the package fails
+with a cascade of import errors before a single test runs.
+
+`implement.py start` therefore ensures the worktree's `packages/shared/dist`
+exists and is fresh before the agent touches the tree (SorraAgents framework,
+SA-0MWHUVJFO009R9EC — framework half of WL-0MW3EDP6D002U6V4):
+
+- **Freshness-based, unconditional on the change set** (producer decision
+  Q2=A): build when `dist/` is missing or older than the newest
+  `packages/shared/src/**` file (the same mtime comparison as `isDistFresh()`
+  above), skip when fresh, and no-op for a repo without a workspace
+  `@worklog/shared` package. The shared `_newest_mtime` /
+  `_shared_dist_freshness` helper is reused by WL-0MW8G1X3V007CGAE's guard.
+- **Worktree-local only.** It builds the package the worktree resolves (never
+  the main checkout), and only when the resolution points inside the worktree.
+- **Best-effort, one diagnostic.** A build failure does not abort `start`; the
+  start report records `steps.shared_build` with a single actionable message
+  naming the resolved `packages/shared` path and `npm run build:shared` — never
+  N import errors.
+
+This is the start-time complement to the full-suite `globalSetup` guard: the
+guard decides whether a run in an *existing* checkout may proceed; the start
+step makes a *fresh* worktree importable in the first place.
+
+See also [wl-shared-dist-diagnostic.md](./wl-shared-dist-diagnostic.md),
+WL-0MW8G1X3V007CGAE (stale build) and WL-0MW3EDP6D002U6V4 (umbrella).
 
 ## The type check rides the full suite (WL-0MWKQ51G0006F3KV)
 

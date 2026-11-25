@@ -78,6 +78,43 @@ shared-basename unit-vs-CLI variants — e.g. `tests/audit.test.ts` +
 > `ship` release gate re-runs the suite on the merged `dev`→`main` tree — do
 > not treat a bypassed push as full-suite evidence.
 
+### Changed-scope selection (implement finish)
+
+`implement.py finish` validates the *changed* code before a push. The test
+skill's `run_tests.py --scope changed` maps the changed files to the smallest
+sufficient test set, in this order:
+
+1. A named **group** from `.pi/test-config.json` whose `paths` match the
+   change (preferred), unioned with file-level selection for any changed file
+   the group's `paths` does not cover.
+2. **Convention mapping** — `src/foo.py` → `tests/test_foo.py`, and the node /
+   vitest forms (`*.test.mjs`, `*.test.ts`, `*.spec.ts`, `.tsx`, …) by stem.
+3. **Import-graph expansion** — Python via its AST, and **TypeScript via a
+   static import-graph scan** (SA-0MWHUVI5J005RQHZ, framework half of
+   WL-0MW3EDP6D002U6V4). Editing a `.ts`/`.tsx` module selects the tests that
+   import it, directly or transitively: static `import` / `export … from`
+   statements are followed (barrel re-exports count as edges) and the
+   TypeScript ESM `x.js` specifier resolves to the `x.ts`/`x.tsx` source.
+   Over-matching is preferred to under-matching — an extra test runs, never
+   fewer; dynamic `import()`/`require()` and path aliases are out of scope.
+   A change set with no `.ts`/`.tsx` files never walks the TS graph, so a
+   TypeScript-less change pays nothing.
+
+For the WL-0MW0JF5YE008LV1R layout, an edit to `src/github-sync.ts` (a barrel)
+now selects `tests/github-sync-comments.test.ts`,
+`tests/github-sync-output.test.ts`,
+`tests/github-import-label-resolution.test.ts` and
+`tests/integration/github-throttler-concurrency.test.ts` — the tests that
+import `'../src/github-sync.js'` — instead of selecting nothing and falling
+back to the full suite.
+
+A **fresh implement worktree** is importable before the gate runs:
+`implement.py start` builds the worktree's `packages/shared/dist` when it is
+missing or stale (freshness-based, unconditional on the change set), with one
+`npm run build:shared` diagnostic on failure instead of N import errors — see
+[fresh-worktree shared build](./pre-push-hook.md#fresh-worktree-shared-build-at-implementpy-start-wl-0mw3edp6d002u6v4)
+and [wl-shared-dist-diagnostic.md](./wl-shared-dist-diagnostic.md).
+
 ### The herdr package suite is a separate, opt-in gate
 
 The `packages/herdr/src` suite (211 files / 5,878 tests, re-verified
