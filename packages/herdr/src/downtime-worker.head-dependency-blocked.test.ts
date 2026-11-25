@@ -23,13 +23,12 @@
  * dispatched at itself. The legacy tier chain's
  * `resolveDependencyFrontier` is not reached on this path.
  *
- * These specs therefore assert the FIXED behaviour and fail against the
- * pre-fix source. They are committed as vitest `it.fails(...)` (the repo's
- * documented TDD pattern — see `downtime-worker.orchestrator.test.ts`,
- * `coordination-dispatch.test.ts` and `host-dispatch-budget.test.ts`) so the
- * suite stays green while the defect is open, and the implementation child
- * **WL-0MWWMPBL8003X59M** (F2, the shared dependency-frontier guard) flips
- * each body to `it` as it lands. The RED state is recorded in the F1
+ * These specs assert the FIXED behaviour. They were committed by F1 as vitest
+ * `it.fails(...)` (the repo's documented TDD pattern — see
+ * `downtime-worker.orchestrator.test.ts`, `coordination-dispatch.test.ts` and
+ * `host-dispatch-budget.test.ts`) so the suite stayed green while the defect
+ * was open; F2 (WL-0MWWMPBL8003X59M, the shared dependency-frontier guard)
+ * flipped each body to `it` as it landed. The RED state is recorded in the F1
  * work-item comment.
  *
  * ## Injected blocker seam
@@ -167,7 +166,7 @@ afterEach(() => {
 // the frontier to nothing: no dispatch at the blocked item this tick.
 
 describe('AC1: dependency-blocked critical leaf — chain bottoms (RED witness)', () => {
-  it.fails(
+  it(
     'no dispatch at a plan_complete critical whose dependency chain bottoms in an in_progress blocker',
     async () => {
       const BLOCKED = 'WL-BLOCKED-LEAF';
@@ -192,7 +191,7 @@ describe('AC1: dependency-blocked critical leaf — chain bottoms (RED witness)'
     },
   );
 
-  it.fails(
+  it(
     'the offer path also refuses a chain-bottoming blocked item',
     async () => {
       const BLOCKED = 'WL-BLOCKED-LEAF';
@@ -220,7 +219,7 @@ describe('AC1: dependency-blocked critical leaf — chain bottoms (RED witness)'
 // (`implement`).
 
 describe('AC1/AC2: dependency-blocked critical leaf — frontier available (RED witness)', () => {
-  it.fails(
+  it(
     'dispatches the nearest open blocker with its stage-appropriate skill, never the blocked item',
     async () => {
       const BLOCKED = 'WL-BLOCKED-LEAF';
@@ -251,7 +250,7 @@ describe('AC1/AC2: dependency-blocked critical leaf — frontier available (RED 
     },
   );
 
-  it.fails(
+  it(
     'the offer path offers the blocker, never the blocked item (direct/offer parity)',
     async () => {
       const BLOCKED = 'WL-BLOCKED-LEAF';
@@ -277,7 +276,7 @@ describe('AC1/AC2: dependency-blocked critical leaf — frontier available (RED 
 // is the same "unavailable" signal (the legacy parser's fail-closed shape).
 
 describe('Fail-closed: a blocker-lookup failure yields no dispatch (RED witness)', () => {
-  it.fails(
+  it(
     'a blocker-fetcher exception fails closed — no dispatch at the blocked item, no crash',
     async () => {
       const BLOCKED = 'WL-BLOCKED-LEAF';
@@ -293,7 +292,7 @@ describe('Fail-closed: a blocker-lookup failure yields no dispatch (RED witness)
     },
   );
 
-  it.fails(
+  it(
     'a null blocker result fails closed — no dispatch at the blocked item',
     async () => {
       const BLOCKED = 'WL-BLOCKED-LEAF';

@@ -1071,6 +1071,12 @@ export function createDowntimeDeps(
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
+    // Dependency-frontier blocker lookup for the Herdr-head dispatch/offer
+    // paths (F2, WL-0MWWMPBL8003X59M): the SAME `wl dep list` seam the legacy
+    // critical tier uses, so the head paths can resolve a dependency-blocked
+    // critical item to its nearest open blocker (or nothing) without a second
+    // worklog query surface.
+    fetchCriticalBlockers,
     // Leader-coordination item fetch (parent WL-0MST3OJ8S0001ROL AC4):
     // resolve ONE item by id for the leader's per-entry tier
     // classification. `wl show` does not serve the audit timestamp, so for

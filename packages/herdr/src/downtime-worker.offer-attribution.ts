@@ -82,6 +82,14 @@ export type DispatchGateToken =
   | 'review-queue-hold'
   /** A live working pane already exists for the (critical) item. */
   | 'in-flight-pane'
+  /**
+   * The item carries a live outbound `depends-on` edge to a non-terminal
+   * blocker, so it must never be dispatched/offered at itself. The
+   * critical-first scan redirects to the nearest open dispatchable blocker;
+   * the normal pass rejects the blocked item with this token.
+   * (F2, WL-0MWWMPBL8003X59M.)
+   */
+  | 'dependency-blocked'
   /** No slot can host a pane this cycle (single-pane tier minimum unmet). */
   | 'slots-unavailable'
   /**
@@ -156,7 +164,13 @@ export type EmptyOfferReason =
   /** No slot could host a pane (single-pane tier minimum unmet). */
   | 'slots-unavailable'
   /** The offer computation failed (wl/CLI error) — the entry is kept. */
-  | 'wl-error';
+  | 'wl-error'
+  /**
+   * A dependency-blocker lookup (`wl dep list`) failed, so the offer is
+   * failed CLOSED: nothing is offered this computation rather than risking a
+   * silent wrong target (F2, WL-0MWWMPBL8003X59M).
+   */
+  | 'dependency-lookup-failed';
 
 /** One rejected candidate of an offer computation (in-memory attribution). */
 export interface OfferRejection {

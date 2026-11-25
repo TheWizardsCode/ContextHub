@@ -201,6 +201,8 @@ export interface DowntimeWorkerDeps {
    * still at its dispatched-at stage is excluded).
    */
   getNextCriticalCandidate(cwd: string): Promise<DowntimeNextResult>;
+  /** Dependency-frontier blocker lookup (F2, WL-0MWWMPBL8003X59M); optional, inert when absent. */
+  fetchCriticalBlockers?: import('./downtime-worker.dispatch-contract.js').DowntimeDispatchDeps['fetchCriticalBlockers'];
   /**
    * Fetch ONE work item by id (leader-only coordination path): the leader
    * re-checks each coordination entry's item against its CURRENT worklog
@@ -939,9 +941,7 @@ export interface DowntimeWorker {
   /**
    * Whether the worker is enabled per the current settings (re-read) AND the
    * per-instance in-memory override: effective enabled = `override ??
-   * cfg.enabled` (the override takes precedence when set). The getter re-reads
-   * the global setting each call, so a settings change applies live while the
-   * override stays in force.
+   * cfg.enabled`. A settings change applies live while an override stays in force.
    */
   readonly enabled: boolean;
   /**

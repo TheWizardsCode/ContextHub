@@ -106,6 +106,7 @@ export type ProjectWorkspaceFallbackReason =
  */
 export type AnchorFailureReport = (detail: PlacementFailureDetail) => void;
 import type { CoordinationOfferRejection } from './downtime-worker.offer-attribution.js';
+import type { CriticalCandidate } from './downtime-worker.parsers.js';
 import type {
   DowntimeActiveAuditResult,
   DowntimeCandidate,
@@ -151,6 +152,15 @@ export interface DowntimeDispatchDeps {
   getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null>;
   /** Critical-first candidate lookup (see `DowntimeWorkerDeps`). */
   getNextCriticalCandidate(cwd: string): Promise<DowntimeNextResult>;
+  /**
+   * Dependency-frontier blocker lookup (F2, WL-0MWWMPBL8003X59M): resolves an
+   * item's outbound `depends-on` blockers (`wl dep list` + one `wl show` per
+   * blocker) so the Herdr-head dispatch/offer paths never target a
+   * dependency-blocked critical item. Returns the enriched blockers, or `null`
+   * on the legacy fail-closed signal. Optional — absent keeps every existing
+   * caller byte-identical (no dependency guard).
+   */
+  fetchCriticalBlockers?(cwd: string, itemId: string): Promise<CriticalCandidate[] | null>;
   /** Interim audit-freshness re-check (see `DowntimeWorkerDeps`). */
   hasFreshAudit(itemId: string, cwd: string): Promise<boolean>;
   /**

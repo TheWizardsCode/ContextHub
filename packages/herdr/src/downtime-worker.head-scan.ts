@@ -57,6 +57,7 @@ import {
   type DowntimeDispatchOutcome,
 } from './downtime-worker.dispatch-contract.js';
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
+import { resolveHeadDependencyFrontier } from './downtime-worker.dispatch-filter.js';
 import {
   auditItemEligible,
   auditPinAdmits,
@@ -287,6 +288,21 @@ export async function dispatchFromOwnHead(
     const kind = classifyItemForDispatch(item, now);
     if (kind === null) continue;
     if (ctx.kinds !== null && !ctx.kinds.includes(kind)) continue;
+    // Dependency-frontier guard (F2, WL-0MWWMPBL8003X59M): a dependency-blocked
+    // critical item is never dispatched at itself. The head/offer paths own the
+    // redirect to the nearest open blocker; this scan (own-backlog fallback,
+    // audit-batch continuation, registered-root sweep) SKIPS the blocked item so
+    // the same bug cannot reappear on a foreign root. A lookup failure fails the
+    // scan CLOSED with the stable `dependency-lookup-failed` reason.
+    if (item.priority === 'critical' && deps.fetchCriticalBlockers !== undefined) {
+      const guarded = await resolveHeadDependencyFrontier(
+        { item, kind },
+        deps.fetchCriticalBlockers,
+        ctx.root,
+      );
+      if (!guarded.ok) return { dispatched: false, reason: guarded.reason };
+      if (guarded.target === null || guarded.target.item.id !== item.id) continue;
+    }
     const marker = ownMarkerMaps[kind]?.get(item.id);
     if (
       marker !== undefined &&

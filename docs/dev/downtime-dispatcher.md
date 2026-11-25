@@ -5430,6 +5430,46 @@ computation already applied the marker-TTL fallback).
 > [downtime-dispatcher-post-fix-verification.md](downtime-dispatcher-post-fix-verification.md)
 > (WL-0MUBVL5770009DO9 / F7).
 
+#### Dependency-frontier guard — display includes blocked items, dispatch never targets one (WL-0MWWMPBL8003X59M)
+
+The worklist **deliberately shows** dependency-blocked items
+(WL-0MV6TFX0600145M2): an operator must see that an item is waiting on a
+blocker. Dispatch is the opposite: a critical item with a live outbound
+`depends-on` edge to a non-terminal blocker must **never be the dispatch
+target or an offer at itself**. At `plan_complete` with in-cap risk/effort it
+would otherwise classify as `implement` and burn a whole agent session on work
+it cannot legally do (parent WL-0MWWLLGD2001QKAL; observed on
+`AH-0MWWARFUK009KQM7`).
+
+**The invariant: display includes dependency-blocked items, dispatch never
+targets one — on every path.**
+
+`resolveHeadDependencyFrontier` (`downtime-worker.dispatch-filter.ts`) is the
+ONE place the head/coordination paths consult `depends-on`. It reuses the
+legacy frontier walk (`resolveDependencyFrontier`) so the
+nearest-open-dispatchable-blocker semantics, the implement caps, the
+producer-review exclusion and the cycle/depth bounds are defined once. Every
+caller resolves through that helper — they cannot drift:
+
+| Path | Where | Behaviour |
+| --- | --- | --- |
+| Direct dispatch — critical-first scan | `dispatchFromHerdrList` | redirects to the nearest open blocker (with ITS stage-appropriate skill), or dispatches nothing; a blocked item is never the target |
+| Direct dispatch — normal scan | `dispatchFromHerdrList` | skips a dependency-blocked critical item (the critical-first scan owns the redirect) |
+| Offer computation — critical-first scan | `computeMostImportantItem` | offers the nearest open blocker, or nothing |
+| Offer computation — normal pass | `computeMostImportantItem` | rejects a dependency-blocked critical item with the `dependency-blocked` gate token |
+| Own-backlog fallback / audit-batch continuation / registered-root sweep | `dispatchFromOwnHead` (`downtime-worker.head-scan.ts`) | skips a dependency-blocked critical item; the blocker is dispatched from its own root's head |
+
+**Fail closed.** A `wl dep list` failure (thrown lookup or the legacy `null`
+signal) produces **no dispatch** and is recorded with the stable
+`dependency-lookup-failed` reason — the dispatcher never falls through to a
+silent wrong target. The offer path surfaces the same token as its
+`EmptyOfferAttribution.reason`. A chain that legitimately bottoms in closed /
+non-dispatchable items simply dispatches nothing at that candidate.
+
+**Display is untouched.** No candidate is removed from the Herdr head or the
+worklist: the guard only decides whether a *dispatch/offer* happens, so the
+operator still sees every blocked item (and can clear its blocker).
+
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open
 **critical** item at ANY stage via `wl list --priority critical --status open

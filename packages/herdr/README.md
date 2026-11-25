@@ -1410,6 +1410,19 @@ skill (intake/plan/implement). The chain bottoms (blocker closed,
 non-dispatchable stage, above-caps, or a cycle — bounded) → no frontier
 candidate → the tier falls through to the non-critical order.
 
+The same dependency-frontier rule is enforced on the production **Herdr-head**
+paths, so a blocked critical item is never dispatched or offered at itself
+there either (WL-0MWWMPBL8003X59M): the direct dispatcher
+(`dispatchFromHerdrList`) and the coordination offer computation
+(`computeMostImportantItem`) both resolve every critical candidate through the
+shared `resolveHeadDependencyFrontier` guard, and the own-backlog fallback /
+audit-batch continuation / registered-root sweep (`dispatchFromOwnHead`) skip
+a dependency-blocked critical item. **The invariant: the worklist display
+still includes dependency-blocked items (the operator must see why an item is
+waiting), but dispatch never targets one — on every path.** A `wl dep list`
+failure fails closed (no dispatch this tick) with the stable
+`dependency-lookup-failed` reason, never a silent wrong target.
+
 The critical dispatch flows through the same `dispatchClaimedTier` pipeline
 as every other tier — CAS claim (with the stage-appropriate `TIER_EXPECTED`
 entry, stale-claim aborts), dispatched-marker write before spawn, then the
