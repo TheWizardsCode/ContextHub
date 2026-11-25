@@ -669,6 +669,64 @@ unchanged.
 `needs-producer-input` fail-closed and their interview question is the
 canonical *does it still need producer attention?*.
 
+### Producer-interview batch document (WL-0MWVMRWEU005LDYP, child 2 of WL-0MWTVPK65009NTER)
+
+The snapshot above is the machine input to the producer's **single-pass answer
+sheet**. The renderer turns every `needs-producer-input` row into one numbered
+row grouped by root, so the producer answers the whole batch once instead of
+being asked one item at a time.
+
+```bash
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  --json \
+  | npx tsx scripts/producer-interview-batch-doc.ts [--out <path>] [--stdout|--json]
+```
+
+With no `--out`, the document is written to
+`docs/dev/producer-interview-batch-<UTC date>.md`, where the date comes from the
+snapshot's `generatedAt`. `--stdout` prints the markdown without writing;
+`--json` writes the file and prints `{ documentPath, rows, roots }`.
+
+**What the document contains.** The header carries the batch id (the snapshot
+timestamp), the row count and the per-root counts, followed by *How to answer*:
+reply once per row number, a row you do not answer **stays flagged**, and
+answering a row **is the authorisation** for that row's flag clear. Every row
+carries its id, root, title, deciding evidence reference (`comment:<id>`, a
+`description:<id>:OPEN_QUESTION` appendix reference, or `none (no surviving
+evidence)`), flag age, the question text verbatim, and exactly one
+`**Recommended:** <option> — <one-line rationale>` line marked advisory only.
+A row with no surviving evidence renders the fail-closed question *does it
+still need producer attention?* rather than being dropped or silently cleared.
+
+**Deterministic and pure.** `renderProducerInterviewBatchDoc` takes the
+snapshot payload and returns a string — no I/O, no clock, no locale-dependent
+collation. Root groups are ordered by codepoint and the snapshot order is
+preserved within a root, so identical input yields byte-identical output. An
+empty interview renders an explicit *No rows to interview* document, never an
+empty file.
+
+**Advisory recommendations.** A recommendation is derived from the row's own
+evidence and never decides the row's fate:
+
+| row evidence | recommended option (advisory) |
+|---|---|
+| a recorded independent `dependency` hold | clear the flag — an outbound dependency already gates dispatch |
+| an unanswered question (comment or description appendix) | answer the question, then clear the flag |
+| no surviving evidence (fail-closed) | confirm whether it still needs producer attention |
+
+#### Recorded batch document (2026-11-25T16:01:53.100Z)
+
+Rendered from the live snapshot at `2026-11-25T16:01:53.100Z`:
+[`docs/dev/producer-interview-batch-2026-11-25.md`](./producer-interview-batch-2026-11-25.md)
+— **17** rows grouped by root (AI_Hell 5, ContextHub 1, SorraAgents 9,
+tce-the-rising 2), **0** `can-clear-now`. Every row carries exactly one
+advisory `**Recommended:**` line; four rows carry no surviving evidence and
+render the fail-closed question.
+
 ### Root cause: the 2026-11-22/23 empty prep bucket (WL-0MWTBJCIV006BEGE)
 
 Child 5 of WL-0MWTAD1KM0081UUD states the AC3 root cause from the AC1

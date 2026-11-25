@@ -136,6 +136,13 @@ export interface ProducerInterviewRow {
   evidenceCommentId: string | null;
   /** `formatProducerReviewAge` of the deciding evidence. */
   flagAge: string;
+  /**
+   * Independent dispatcher holds the provenance rule recorded (for example
+   * `dependency`). Omitted when the rule recorded none, so a hold-free row's
+   * JSON stays byte-identical to the pre-holds payload. The batch document
+   * reads this to recommend from the row's own evidence, never to decide.
+   */
+  holds?: string[];
 }
 
 /** One classified row (every flagged prep item, both groups). */
@@ -514,7 +521,7 @@ export async function collectProducerInterviewSnapshot(
     .filter((verdict) => verdict.group === 'needs-producer-input')
     .map((verdict) => {
       const context = rowContexts.get(verdict.id);
-      return {
+      const row: ProducerInterviewRow = {
         id: verdict.id,
         root: context?.root ?? '',
         title: verdict.title,
@@ -524,6 +531,8 @@ export async function collectProducerInterviewSnapshot(
         evidenceCommentId: commentIdFromReference(verdict.evidence.reference),
         flagAge: formatProducerReviewAge(verdict.flagAgeMs),
       };
+      if (verdict.holds.length > 0) row.holds = [...verdict.holds];
+      return row;
     });
 
   return {
