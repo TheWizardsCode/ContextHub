@@ -798,6 +798,89 @@ that row's clear.
 - **Delivery comment on `WL-0MWTVPK65009NTER`:** `WL-C0MWWCP730009671T`
 - **Re-run:** reported *already delivered* and posted nothing.
 
+### Producer-interview answers (WL-0MWVMRXUZ0031P1S, child 4 of WL-0MWTVPK65009NTER)
+
+The producer answers the batch once. That single reply is transcribed into a
+**batch answer file** (row number → answer) and applied deterministically: each
+answer is recorded in that row's own worklog Appendix, and an answered row's
+hold is released with an audit comment that names the answer.
+
+```bash
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  --json > /tmp/producer-interview-snapshot.json
+
+npx tsx scripts/producer-interview-apply-answers.ts \
+  --snapshot /tmp/producer-interview-snapshot.json \
+  --answers /tmp/producer-answers.json [--dry-run|--json]
+```
+
+The batch answer file:
+
+```json
+{
+  "batchId": "2026-11-25T16:37:25.000Z",
+  "documentPath": "docs/dev/producer-interview-batch-2026-11-25.md",
+  "answeringParty": "Map",
+  "clearingAgent": "Map",
+  "author": "implement",
+  "answers": {
+    "1": "clear it — option (a)",
+    "3": "keep waiting because the design question is unresolved",
+    "7": { "answer": "clear it", "answerCommentId": "AH-C0MW..." }
+  }
+}
+```
+
+Row numbers are the batch document's: roots in codepoint order and the snapshot
+order within a root. An unanswered row number is simply absent and stays
+flagged. An out-of-range row number is refused (exit 2) rather than silently
+dropped, because it means the document is stale. `--dry-run` prints the
+composed Appendix entry and the clear/left-flagged decision for every answered
+row and writes nothing.
+
+**No answer, no clear.** Clearing is refused — before any write — when the
+answer entry is not on the row or is not this batch's recorded answer. A row
+with no recorded answer is never cleared, and a test asserts the refusal posts
+nothing and flips no flag.
+
+**The answer entry** (marker `[producer-answer:<item>:<batch>]`) records the
+question as asked, the answer verbatim, the answering party, the batch id, the
+document path and the evidence link (the producer's answer comment id when the
+reply arrived as a comment). Re-running for the same row and batch id **updates**
+the existing entry — never a duplicate.
+
+**The clear** runs answer-first, then `wl reviewed <id> false` on the row's own
+root, then posts the audit comment (marker
+`[producer-answer-clear:<item>:<batch>]`) naming the answer entry, the document
+path and the clearing agent. It is reversible (`wl reviewed <id> true`). A
+re-run never clears or posts twice; a clear comment already on the row is final,
+so a producer who re-raises the hold later is respected.
+
+**Keep waiting / do not proceed** is recorded as an answer and the row is
+**left flagged**; the Appendix entry states the producer's reason and that the
+hold was left in place. No clear comment is posted.
+
+**Cross-root.** Every row write carries the row's own root
+(`--worklog-dir <root>/.worklog`), so an answer lands only in the originating
+root's store. Nothing about the row is re-created in ContextHub's worklog. The
+applied-answers summary (below) is the one intentional write to the batch item's
+own store.
+
+**Applied-answers summary.** After applying, the command posts one idempotent
+summary comment (marker `[producer-answer-summary:<batch>]`) on
+`WL-0MWTVPK65009NTER` with one row per answered item: row id → answer comment
+id → clear comment id, and the clear/left-flagged outcome. With **no answers on
+record** it records that explicitly and clears nothing.
+
+The Appendix-recording convention follows the routine-versus-genuine-handoff
+rule in the SorraAgents skill tree
+(`SorraAgents/docs/dev/routine-vs-producer-handoff.md`): only a genuine producer
+decision raises the flag, and the answer is recorded where the flag is released.
+
 ### Root cause: the 2026-11-22/23 empty prep bucket (WL-0MWTBJCIV006BEGE)
 
 Child 5 of WL-0MWTAD1KM0081UUD states the AC3 root cause from the AC1
