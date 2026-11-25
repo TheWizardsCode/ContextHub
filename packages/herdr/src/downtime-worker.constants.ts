@@ -762,6 +762,12 @@ export const DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS = 30_000;
  * classifier and its unit tests are retained for that future redesign — do
  * not re-enable without reworking the double-close race. See
  * `docs/dev/downtime-dispatcher.md` and `packages/herdr/README.md`.
+ *
+ * Record ownership (WL-0MWJ7QYX0001KAQX AC1): because this monitor never runs,
+ * its `recordPaneClose` writer (rolling-log `entryType:'pane-close'` record +
+ * host-budget/audit-lease releases) is INTENTIONALLY RETAINED for the same
+ * redesign — the scheduled reaper now owns that record in production, in one
+ * close block with its own releases.
  */
 export const PANE_LIFECYCLE_MONITOR_ENABLED: boolean = false;
 /**

@@ -20,6 +20,7 @@ import { closeSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { PaneStatus, ReaperDeps } from './pane-close-reaper.js';
+import type { PaneCloseLogEntry } from './downtime-log-entries.js';
 import { sessionIdFromSessionPath } from './downtime-worker.route-outcome.js';
 import { terminateProcessGroup } from './process-group.js';
 // Canonical label→id / label→kind parsing lives in `pane-label.ts`
@@ -339,10 +340,12 @@ export interface HerdrReaperIo {
   /**
    * Optional combined item-info lookup (parent AC6). When supplied it
    * supersedes `getNeedsProducerReview` and additionally populates
-   * `PaneStatus.itemStage` so the close-decision snapshot records the
-   * work-item stage. Absent → falls back to `getNeedsProducerReview`.
+   * `PaneStatus.itemStage` (the close-decision snapshot) and
+   * `PaneStatus.itemTitle` (the pane-close record's `itemTitle`,
+   * WL-0MWJ7QYX0001KAQX AC1). Absent → falls back to
+   * `getNeedsProducerReview`.
    */
-  getItemInfo?(itemId: string): Promise<{ needsProducerReview: boolean; stage?: string }>;
+  getItemInfo?(itemId: string): Promise<{ needsProducerReview: boolean; stage?: string; title?: string }>;
   /**
    * Count session-scoped child processes for a pane (parent AC1/AC3);
    * absent → 0. Receives the parsed pane so callers can probe by session
@@ -384,6 +387,17 @@ export interface HerdrReaperIo {
    * best-effort. Absent → legacy callers skip the release.
    */
   releaseAuditLease?(pane: PaneStatus): Promise<void>;
+  /**
+   * Rolling-log pane-close record (WL-0MWJ7QYX0001KAQX AC1): called once per
+   * successfully closed pane from the reaper's single close block. Wired by
+   * `index.ts` to `appendPaneCloseLogEntry(cwd, entry)` — the ONLY production
+   * writer of the `entryType:'pane-close'` record, since the disabled
+   * pane-lifecycle monitor's `recordPaneClose` never runs. Feeds
+   * `isNonTerminalCooldownActive`, the recent-dispatch view and (via
+   * `readClosedPaneIds`) cross-run idempotency. Best-effort (the reaper wraps
+   * it fail-open). Absent → legacy callers write no rolling-log record.
+   */
+  recordPaneCloseEntry?(entry: PaneCloseLogEntry): Promise<void>;
   /**
    * Dead-pane ledger sweep (WL-0MW5KC8J300942EA): called once per reaper run
    * with the RAW parsed pane list of that run. Receives `ParsedHerdrPane[]`
@@ -476,11 +490,13 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
         // combined `getItemInfo`; fall back to the boolean-only lookup.
         let needsProducerReview = false;
         let itemStage: string | undefined;
+        let itemTitle: string | undefined;
         if (itemId !== '' && typeof io.getItemInfo === 'function') {
           try {
             const info = await io.getItemInfo(itemId);
             needsProducerReview = info.needsProducerReview === true;
             itemStage = typeof info.stage === 'string' && info.stage !== '' ? info.stage : undefined;
+            itemTitle = typeof info.title === 'string' && info.title !== '' ? info.title : undefined;
           } catch {
             // fail-closed: an unreadable item must never be closed without
             // evidence — treat as review-blocked (never auto-close).
@@ -499,6 +515,7 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           kind: paneKindFromLabel(pane.label),
           itemId,
           itemStage,
+          itemTitle,
           title: pane.label || pane.paneId,
           workspaceId: pane.workspaceId,
           tabId: pane.tabId,
@@ -542,6 +559,11 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
     async releaseAuditLease(pane: PaneStatus): Promise<void> {
       if (typeof io.releaseAuditLease !== 'function') return;
       await io.releaseAuditLease(pane);
+    },
+
+    async recordPaneCloseEntry(entry: PaneCloseLogEntry): Promise<void> {
+      if (typeof io.recordPaneCloseEntry !== 'function') return;
+      await io.recordPaneCloseEntry(entry);
     },
 
     async sweepBudgetLedger(): Promise<void> {

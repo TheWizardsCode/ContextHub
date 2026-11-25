@@ -1321,6 +1321,16 @@ export function createDowntimeDeps(
     // Record a pane-close lifecycle entry in the rolling dispatch log
     // (WL-0MU308WSF0002JWN). Fail-closed: `appendPaneCloseLogEntry` never
     // throws.
+    //
+    // INTENTIONALLY RETAINED FOR REDESIGN (WL-0MWJ7QYX0001KAQX AC1, following
+    // the WL-0MWHWH6XL0025YX2 AC2 precedent): this writer is reachable only
+    // from the DISABLED pane-lifecycle monitor (`PANE_LIFECYCLE_MONITOR_ENABLED
+    // === false`), so it never runs in production. The reaper — the only ACTIVE
+    // close path — now owns the single rolling-log pane-close record
+    // (`recordPaneCloseEntry` in `runPaneCloseReaper`), together with the
+    // host-budget and proxy audit-lease releases, so the record and the
+    // releases cannot drift apart. Do NOT re-enable the monitor to use this
+    // path; fold any future monitor redesign onto the reaper instead.
     async recordPaneClose(entry, cwd: string): Promise<void> {
       // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
       // AC2) and its marker surface is DELETED (WL-0MWF34IEP00221NU AC5): the
@@ -1418,11 +1428,14 @@ export function createDowntimeDeps(
             { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, cwd },
           );
           const parsed = extractJson(stdout) as {
-            workItem?: { needsProducerReview?: boolean; stage?: string };
+            workItem?: { needsProducerReview?: boolean; stage?: string; title?: string };
           };
           return {
             needsProducerReview: parsed?.workItem?.needsProducerReview === true,
             stage: parsed?.workItem?.stage,
+            // Recorded as the pane-close record's `itemTitle`
+            // (WL-0MWJ7QYX0001KAQX AC1). Tolerant: absent → pane title.
+            title: parsed?.workItem?.title,
           };
         },
         // Live-child probe (parent AC1/AC3): count foreground processes in
@@ -1497,6 +1510,16 @@ export function createDowntimeDeps(
             actor: `herdr:${process.pid}`,
           });
         },
+        // Single close record (WL-0MWJ7QYX0001KAQX AC1): the reaper is the
+        // only ACTIVE auto-close path, so it — not the disabled monitor's
+        // `recordPaneClose` — writes the rolling-log `entryType:'pane-close'`
+        // record that `isNonTerminalCooldownActive` and the recent-dispatch
+        // view read. The reaper writes it in the same block as the host-budget
+        // and proxy audit-lease releases. Idempotent across runs: the same
+        // record is what `readClosedPaneIds` feeds back as
+        // `alreadyClosedPaneIds` below. Fail-closed inside
+        // `appendPaneCloseLogEntry`; the reaper also wraps it fail-open.
+        recordPaneCloseEntry: (entry) => appendPaneCloseLogEntry(cwd, entry),
         // Finished-session budget release (WL-0MWJVY6NR001E0FS): a pane whose
         // Pi session is FINISHED gives its tier slot back even when the close
         // policy leaves the pane OPEN (an `implement` pane is never
@@ -1526,10 +1549,11 @@ export function createDowntimeDeps(
         },
         {
           ledgerPath: opts.ledgerPath ?? join(cwd, '.worklog', 'pane-close-ledger.jsonl'),
-          // Coexistence with the dispatch monitor (WL-0MU308WSF0002JWN): a
-          // pane the monitor already closed (recorded in the rolling log with
-          // `closed:true`) is never handled a second time. `readDowntimeLogEntries`
-          // is fail-safe (returns [] on any error).
+          // Idempotency across runs (WL-0MWJ7QYX0001KAQX AC1): the reaper
+          // itself now writes the rolling-log pane-close record, so this read
+          // of the SAME single record is a real cross-run guard (it also
+          // still carries any historical disabled-monitor entries).
+          // `readDowntimeLogEntries` is fail-safe (returns [] on any error).
           alreadyClosedPaneIds: await readClosedPaneIds(cwd),
         },
       );

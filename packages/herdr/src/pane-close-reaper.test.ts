@@ -20,7 +20,10 @@
  *  9. Close failure for one pane does not abort others
  * 10. `--dry-run` performs zero close calls
  */
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import type { ReaperDeps, ReaperOptions, ReaperResult, PaneStatus } from './pane-close-reaper';
 
@@ -1007,5 +1010,236 @@ describe('reaper — proxy audit lease release on the active close path (WL-0MWJ
     expect(results2).toHaveLength(0); // the already-closed pane is skipped outright
     expect(deps.closePane).toHaveBeenCalledTimes(1);
     expect(deps.releaseAuditLease).toHaveBeenCalledTimes(1); // unchanged
+  });
+});
+
+// ── The reaper owns the single pane-close record (WL-0MWJ7QYX0001KAQX AC1) ─
+// The success-path `recordPaneClose` writer is reachable only from the
+// DISABLED pane-lifecycle monitor, so the rolling-log `entryType:'pane-close'`
+// record — the input to `isNonTerminalCooldownActive` and the recent-dispatch
+// view — was never written in production. The reaper is the only ACTIVE close
+// path, so it writes that record in the same block as the host-budget and
+// proxy audit-lease releases. These tests drive `runReaper` (never
+// `recordPaneClose`) and pin the shared field set.
+
+describe('reaper — owns the rolling-log pane-close record (WL-0MWJ7QYX0001KAQX AC1)', () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeTempCwd(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'reaper-pane-close-'));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  /** A pane the classifier closes on the session-end marker. */
+  function closable(overrides: Partial<PaneStatus> = {}): PaneStatus {
+    return pane({
+      kind: 'plan',
+      lastAssistantText: 'Done\n\n</end_session>',
+      agentProcessAlive: false,
+      idleMs: 120_000,
+      ...overrides,
+    });
+  }
+
+  it('AC1: writes one rolling-log record for a closed pane with the recordPaneClose field set', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [
+      closable({
+        id: 'w1:p2',
+        kind: 'plan',
+        itemId: 'WL-PLAN',
+        itemTitle: 'Plan me',
+        itemStage: 'intake_complete',
+        title: 'Downtime triggered plan Plan me - WL-PLAN',
+      }),
+    ];
+    const deps = { ...makeDeps(panes), recordPaneCloseEntry: vi.fn().mockResolvedValue(undefined) };
+
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+
+    expect(deps.recordPaneCloseEntry).toHaveBeenCalledTimes(1);
+    const entry = (deps.recordPaneCloseEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(entry).toMatchObject({
+      entryType: 'pane-close',
+      itemId: 'WL-PLAN',
+      itemTitle: 'Plan me',
+      paneId: 'w1:p2',
+      kind: 'plan',
+      outcome: 'closed-as-plan-complete',
+      reasonCode: 'none',
+      stage: 'intake_complete',
+      closed: true,
+    });
+    expect(typeof entry.reason).toBe('string');
+    expect(entry.reason).toContain('reaper');
+    expect(typeof entry.timestamp).toBe('string');
+    expect(Number.isNaN(Date.parse(entry.timestamp))).toBe(false);
+  });
+
+  it('AC1: maps an intake close to the intake outcome and falls back to the pane title when the item title is unknown', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [
+      closable({ id: 'w1:p3', kind: 'intake', itemId: 'WL-INTAKE', title: 'Downtime triggered intake - WL-INTAKE' }),
+    ];
+    const deps = { ...makeDeps(panes), recordPaneCloseEntry: vi.fn().mockResolvedValue(undefined) };
+
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+
+    const entry = (deps.recordPaneCloseEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(entry).toMatchObject({
+      itemId: 'WL-INTAKE',
+      itemTitle: 'Downtime triggered intake - WL-INTAKE',
+      kind: 'intake',
+      outcome: 'closed-as-intake-complete',
+      reasonCode: 'none',
+      closed: true,
+    });
+  });
+
+  it('AC1: does not invent an audit verdict — an audit close is requires-attention with its decision reason code', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closable({ id: 'w1:p4', kind: 'audit', itemId: 'WL-AUDIT', itemTitle: 'Audit me', itemStage: 'in_review' })];
+    const releaseAuditLease = vi.fn().mockResolvedValue(undefined);
+    const deps = {
+      ...makeDeps(panes),
+      recordPaneCloseEntry: vi.fn().mockResolvedValue(undefined),
+      releaseAuditLease,
+    };
+
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+
+    // The record and the audit-lease release happen in one close block.
+    const entry = (deps.recordPaneCloseEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(entry).toMatchObject({
+      kind: 'audit',
+      outcome: 'requires-attention',
+      reasonCode: 'marker',
+      stage: 'in_review',
+      closed: true,
+    });
+    expect(releaseAuditLease).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC1: writes NO record and releases nothing on a dry run', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closable({ id: 'w1:p5', kind: 'audit', itemId: 'WL-AUDIT' })];
+    const deps = {
+      ...makeDeps(panes),
+      recordPaneCloseEntry: vi.fn().mockResolvedValue(undefined),
+      releasePaneBudget: vi.fn().mockResolvedValue(undefined),
+      releaseAuditLease: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, dryRun: true });
+
+    expect(deps.recordPaneCloseEntry).not.toHaveBeenCalled();
+    expect(deps.releasePaneBudget).not.toHaveBeenCalled();
+    expect(deps.releaseAuditLease).not.toHaveBeenCalled();
+  });
+
+  it('AC1: writes NO closed record and releases nothing when the close failed', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closable({ id: 'w1:p6', kind: 'audit', itemId: 'WL-AUDIT' })];
+    const deps = {
+      ...makeDeps(panes, { success: false }),
+      recordPaneCloseEntry: vi.fn().mockResolvedValue(undefined),
+      releasePaneBudget: vi.fn().mockResolvedValue(undefined),
+      releaseAuditLease: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+
+    expect(results[0].success).toBe(false);
+    expect(deps.recordPaneCloseEntry).not.toHaveBeenCalled();
+    expect(deps.releasePaneBudget).not.toHaveBeenCalled();
+    expect(deps.releaseAuditLease).not.toHaveBeenCalled();
+  });
+
+  it('AC1: is idempotent across runs — an already-recorded pane is skipped with no second record or release', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closable({ id: 'w1:p7', kind: 'audit', itemId: 'WL-AUDIT' })];
+    const deps = {
+      ...makeDeps(panes),
+      recordPaneCloseEntry: vi.fn().mockResolvedValue(undefined),
+      releaseAuditLease: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.recordPaneCloseEntry).toHaveBeenCalledTimes(1);
+    expect(deps.releaseAuditLease).toHaveBeenCalledTimes(1);
+
+    // Run 2 reads this run's own rolling-log record back as
+    // `alreadyClosedPaneIds` (the reconciled single record), so the pane is
+    // skipped outright — no duplicate record, no second release.
+    const results2 = await runReaper(deps, {
+      idleThresholdMs: THRESHOLD_MS,
+      alreadyClosedPaneIds: new Set(['w1:p7']),
+    });
+
+    expect(results2).toHaveLength(0);
+    expect(deps.recordPaneCloseEntry).toHaveBeenCalledTimes(1);
+    expect(deps.releaseAuditLease).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC1: a throwing record sink never blocks, crashes or un-closes a pane (fail-open)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [closable({ id: 'w1:p8' })];
+    const deps = {
+      ...makeDeps(panes),
+      recordPaneCloseEntry: vi.fn().mockRejectedValue(new Error('log unwritable')),
+    };
+
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+
+    expect(results[0].success).toBe(true);
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC1: an unknown-kind pane writes no record (no false dispatch tier) but is still ledgered', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const cwd = makeTempCwd();
+    const ledgerPath = join(cwd, 'ledger.jsonl');
+    const panes = [closable({ id: 'w1:p9', kind: 'unknown', itemId: '' })];
+    const deps = { ...makeDeps(panes), recordPaneCloseEntry: vi.fn().mockResolvedValue(undefined) };
+
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, ledgerPath });
+
+    expect(deps.recordPaneCloseEntry).not.toHaveBeenCalled();
+    const rows = readFileSync(ledgerPath, 'utf8').trim().split('\n');
+    expect(rows).toHaveLength(1);
+  });
+
+  it('AC1: the record round-trips through the real rolling log and arms the non-terminal cooldown', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const { appendPaneCloseLogEntry, readDowntimeLogEntries, isNonTerminalCooldownActive } = await import(
+      './downtime-log'
+    );
+    const cwd = makeTempCwd();
+    const panes = [
+      closable({ id: 'w1:p10', kind: 'audit', itemId: 'WL-AUD', itemTitle: 'Audit me', itemStage: 'in_review' }),
+      closable({ id: 'w1:p11', kind: 'plan', itemId: 'WL-PLAN', itemTitle: 'Plan me', itemStage: 'intake_complete' }),
+    ];
+    const deps = {
+      ...makeDeps(panes),
+      recordPaneCloseEntry: (entry: Parameters<typeof appendPaneCloseLogEntry>[1]) =>
+        appendPaneCloseLogEntry(cwd, entry),
+    };
+
+    await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+
+    const entries = await readDowntimeLogEntries(cwd);
+    const closes = entries.filter((e) => e.entryType === 'pane-close');
+    expect(closes).toHaveLength(2);
+
+    // The restored input: a marker-backed audit close cannot invent a verdict,
+    // so it is NON-terminal and the minimum cooldown holds re-dispatch.
+    expect(isNonTerminalCooldownActive(entries, 'WL-AUD', 'audit', 'in_review', 30 * 60 * 1000)).toBe(true);
+    // A terminal kind close records `reasonCode: 'none'`, so it never arms it.
+    expect(isNonTerminalCooldownActive(entries, 'WL-PLAN', 'plan', 'intake_complete', 30 * 60 * 1000)).toBe(false);
   });
 });
