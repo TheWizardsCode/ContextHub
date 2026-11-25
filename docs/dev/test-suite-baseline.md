@@ -80,10 +80,11 @@ shared-basename unit-vs-CLI variants — e.g. `tests/audit.test.ts` +
 
 ### The herdr package suite is a separate, opt-in gate
 
-The `packages/herdr/src` suite (107 files / ~3,500 tests) is **not** part of
-the canonical full suite — a producer decision recorded on
-**WL-0MVFZVIA50062TJ8** ("the herdr tests will not be run as part of the
-canonical full suite"). It is a sanctioned, cache-recorded profile instead:
+The `packages/herdr/src` suite (211 files / 5,878 tests, re-verified
+2026-11-25 by WL-0MVP7TT08006816Z) is **not** part of the canonical full
+suite — a producer decision recorded on **WL-0MVFZVIA50062TJ8** ("the herdr
+tests will not be run as part of the canonical full suite"). It is a
+sanctioned, cache-recorded profile instead:
 
 ```bash
 # by type — types.herdr in .pi/skills_extensions/test/extension.json
@@ -104,6 +105,9 @@ the audit.
 - **Runtime (re-measured 2026-10-21):** ~67 s cold on a 16-core shared host
   at load average 4.8–12.2 (load-dominated). WL-0MVFE1IRB0004X1U measured
   ~130 s on an idle host. Budget a couple of minutes, not tens of minutes.
+  The 2026-11-25 re-verification (211 files / 5,878 tests) ran in 42 s on a
+  similarly loaded host; the file count and runtime both grow, so re-measure
+  rather than trusting this figure.
 
 ### Type-map contract
 
