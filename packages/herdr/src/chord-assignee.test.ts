@@ -181,9 +181,10 @@ interface DriveResult {
  */
 async function driveChord(
   keys: string[],
-  options: { withOwnRefresh?: boolean } = {},
+  options: { withOwnRefresh?: boolean; useBundled?: boolean } = {},
 ): Promise<DriveResult> {
-  const { withOwnRefresh = true } = options;
+  const { withOwnRefresh = true, useBundled = false } = options;
+  const registry = useBundled ? loadShortcutConfig() : loadShortcutConfig(tmpDir);
   const onCommand = vi.fn();
   const onRefresh = vi.fn();
   const fetch = vi.fn(async () => ITEMS);
@@ -195,7 +196,7 @@ async function driveChord(
 
   let tui: Promise<WorkItem | undefined> | undefined;
   try {
-    tui = runWorklistTui(fetch, ITEMS, loadShortcutConfig(tmpDir), {
+    tui = runWorklistTui(fetch, ITEMS, registry, {
       autoRefresh: false,
       autoSync: false,
       onCommand,
@@ -310,6 +311,65 @@ describe('assignee chords o p / o a / o n (WL-0MWHV7VG5009JMTW)', () => {
       'a,a',
       'a,r',
       'a,y',
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Production bundled registry — verifies the shipped `shortcuts.json`
+// entries (WL-0MWHV7Y5J0043AIH AC1–AC5), not just the temp fixture above.
+// ---------------------------------------------------------------------------
+describe('bundled assignee chords in shortcuts.json (WL-0MWHV7Y5J0043AIH)', () => {
+  it('registers o p / o a / o n with the expected commands and background routing', () => {
+    const registry = loadShortcutConfig();
+
+    const expectEntry = (keys: string[], command: string) => {
+      const entry = registry.lookupChordEntry(keys, 'list');
+      expect(entry, `missing bundled chord ${keys.join(' ')}`).toBeDefined();
+      expect(entry?.command).toBe(command);
+      expect(entry?.view).toBe('both');
+      // Runs in the background: no pane, completion-refresh hook forwarded.
+      expect(entry?.openPane).toBe(false);
+      expect(entry?.label).toBeTruthy();
+      expect(entry?.description).toBeTruthy();
+    };
+
+    expectEntry(['o', 'p'], '!!wl update <id> --assignee producer');
+    expectEntry(['o', 'a'], '!!wl update <id> --assignee agent');
+    expectEntry(['o', 'n'], '!!wl update <id> --assignee ""');
+  });
+
+  it('dispatches every bundled chord against the focused item via the real input loop', async () => {
+    for (const [keys, command] of [
+      [['o', 'p'], '!!wl update TEST-1 --assignee producer'],
+      [['o', 'a'], '!!wl update TEST-1 --assignee agent'],
+      [['o', 'n'], '!!wl update TEST-1 --assignee ""'],
+    ] as Array<[string[], string]>) {
+      const { onCommand, onRefresh } = await driveChord(keys, { useBundled: true });
+      expect(onCommand).toHaveBeenCalledTimes(1);
+      expect(onCommand).toHaveBeenCalledWith(
+        command,
+        undefined,
+        false,
+        onRefresh,
+        'Item TEST-1',
+      );
+    }
+  });
+
+  it('does not collide with the a-leader audit family and is the only o family', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['a', 'a'], 'list')?.command).toBe('/skill:audit <id>');
+    expect(registry.lookupChordEntry(['a', 'y'], 'list')?.command).toBe(
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+    );
+    expect(registry.lookupChordEntry(['a', 'r'], 'list')?.command).toBe(
+      "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+    );
+    expect(registry.getChordByLeader('o', 'list').map((e) => e.chord.join(',')).sort()).toEqual([
+      'o,a',
+      'o,n',
+      'o,p',
     ]);
   });
 });

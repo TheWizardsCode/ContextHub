@@ -173,6 +173,39 @@
   },
   {
     "chord": [
+      "o",
+      "p"
+    ],
+    "command": "!!wl update <id> --assignee producer",
+    "view": "both",
+    "label": "assignee producer",
+    "description": "Set the focused item's assignee to producer — a persistent scheduling hold the downtime dispatcher respects (o p).",
+    "open_pane": false
+  },
+  {
+    "chord": [
+      "o",
+      "a"
+    ],
+    "command": "!!wl update <id> --assignee agent",
+    "view": "both",
+    "label": "assignee agent",
+    "description": "Set the focused item's assignee to agent — a session claim (o a).",
+    "open_pane": false
+  },
+  {
+    "chord": [
+      "o",
+      "n"
+    ],
+    "command": "!!wl update <id> --assignee \"\"",
+    "view": "both",
+    "label": "assignee clear",
+    "description": "Clear the focused item's assignee so it becomes dispatchable again (o n).",
+    "open_pane": false
+  },
+  {
+    "chord": [
       "u",
       "p",
       "l"
