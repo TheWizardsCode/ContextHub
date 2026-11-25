@@ -1067,6 +1067,21 @@ with the measured per-call wall time. The remainder is reported explicitly as
 calls) — see the `residual` column. Reconciliation target: **≥ 90 %** of the
 call attributed; the profiler exits non-zero when a scenario misses it.
 
+**Test-side convention for live samples (WL-0MWW355UL0038DDI).** A live
+in-process call is a few milliseconds, so on a contended host the untimed gaps
+(GC, preemption, event-loop stalls) can push the residual share past 10 % on a
+single run — the measured suites are serialised for exactly this reason
+(`vitest.config.ts` `MEASURED_SUITES`). Assertions over **live** samples in the
+parallel `suite` project (e.g. `tests/bench/inproc-harness-profile.test.ts`)
+therefore assert the host-independent contract — the `reconciled` flag agrees
+with the reported residual share (no silently dropped residual), the attributed
+total equals the phase-mark sum, and the residual stays under a loose ≤ 50 %
+coverage bound — rather than a forced ≥ 90 % outcome. The ≥ 90 % rule itself is
+pinned deterministically on synthetic records (`inproc-harness-profile.test.ts`
+attribution tests) and on the checked-in baseline artefact in the serialised
+measured project (`tests/cli/inproc-harness-budget.test.ts`). Do not reintroduce
+a live quiet-host share assertion into the parallel project.
+
 ### Attribution — fresh temporary store (the regime the suite uses)
 
 Milliseconds, median of 5 runs per scenario:
