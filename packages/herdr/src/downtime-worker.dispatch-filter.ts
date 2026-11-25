@@ -64,6 +64,7 @@ import type {
   DowntimeStage,
   InFlightPanes,
 } from './downtime-worker.types.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
 
 // ── Herdr list-head filter dispatcher (WL-0MTK1ILM2009QYB2 AC1–2) ────
 
@@ -273,8 +274,14 @@ export async function dispatchFromHerdrList(
     // audit is in-flight the audit tier is skipped entirely, so we must
     // check this before filtering dispatched items (a dispatched item may
     // still be the active-audit item that should cause the skip).
+    // Proxy availability threaded into admission (WL-0MWJE9IEH001R3P1 AC1):
+    // the audit pre-check below reads it ONCE for THIS candidate and the
+    // dispatch attempt hands that same observation to admission, so the two
+    // can never disagree and no second GET is issued.
+    let auditAvailability: AuditAvailabilityOutcome | undefined;
     if (k === 'audit') {
       const active = await deps.getActiveAudit(ctx.cwd);
+      if (active.ok) auditAvailability = active.availability;
       // Audit-budget refusal (WL-0MWAMSDNW000SL0E, proxy-derived; formerly the
       // host-wide ledger, WL-0MVXY0XPF006YUHA F2): the source tells the
       // proxy/host-wide budget refusal from the per-worklog marker check, and
@@ -389,6 +396,7 @@ export async function dispatchFromHerdrList(
       localPreferenceMode: ctx.localPreferenceMode,
       selectionPath: 'normal-scan',
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
+      ...(auditAvailability !== undefined ? { auditAvailability } : {}),
     });
     if (outcome.dispatched) return outcome;
     // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): record the first

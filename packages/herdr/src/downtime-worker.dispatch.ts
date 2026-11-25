@@ -702,12 +702,12 @@ export async function dispatchDowntimeWork(
         // (mirrors the code-freeze skip, WL-0MSQ0RPQP00636JY) and the next
         // idle tick re-checks. `{ok:false}` (the check could not complete,
         // e.g. a worklog query failure) fails open: the audit tier is
-        // skipped and dispatch falls through to the next tier — the
-        // dispatch loop is never blocked by an unanswerable check, and
-        // when the fallback backlog is also empty the outcome is a
-        // wl-error strike (partial information must not pause the worker
-        // with no-candidate).
+        // skipped and dispatch falls through to the next tier — the dispatch
+        // loop is never blocked by an unanswerable check; an empty fallback
+        // backlog is a wl-error strike (no-candidate must not be assumed).
         const activeAudit = await deps.getActiveAudit(opts.cwd);
+        // ONE proxy observation per audit candidate (WL-0MWJE9IEH001R3P1 AC1).
+        const auditOpts = activeAudit.ok ? { ...opts, auditAvailability: activeAudit.availability } : opts;
         if (activeAudit.ok) {
           if (activeAudit.active) {
             auditInFlight = true;
@@ -786,13 +786,13 @@ export async function dispatchDowntimeWork(
                       );
                       // Fall through to the next tier (implement/plan/intake).
                     } else {
-                      return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
+                      return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...auditOpts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
                     }
                   } catch {
                     // Fail-open: the freshness check could not complete (e.g.
                     // wl/CLI error) — proceed with the dispatch (conservative
                     // default). The item is treated as "not fresh" for this tick.
-                    return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
+                    return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...auditOpts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
                   }
                 }
               }

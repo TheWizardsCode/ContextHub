@@ -165,6 +165,7 @@ import {
 } from './downtime-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import type { AuditCandidateScopeResult } from './downtime-worker.gates.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
 import {
   appendCoordinationLogEntry,
   appendDowntimeLogEntry,
@@ -784,6 +785,11 @@ export function createDowntimeDeps(
         // ONE-RELEASE legacy escape hatch (parent AC3): `HERDR_AUDIT_LOCAL_BUDGET=1`
         // restores the pre-change `budget.json` + local-ledger decision for the
         // audit tier and never consults the proxy.
+        //
+        // The proxy observation (when taken) is carried out of this block on
+        // every return (WL-0MWJE9IEH001R3P1): the dispatch attempt threads it
+        // into admission so ONE read answers the whole attempt.
+        let proxyAvailability: AuditAvailabilityOutcome | undefined;
         if (isLegacyAuditBudgetEnabled()) {
           const coordinationDir = getMachineCoordinationDir();
           if (coordinationDir !== null) {
@@ -822,6 +828,11 @@ export function createDowntimeDeps(
             this.readAuditAvailability === undefined
               ? undefined
               : await this.readAuditAvailability();
+          // ONE observation per gate evaluation (WL-0MWJE9IEH001R3P1 AC1):
+          // the SAME typed outcome is reported on every proxy return, so the
+          // dispatch attempt can thread it into admission instead of paying a
+          // second proxy GET that could race this one.
+          proxyAvailability = outcome;
           const decision = decideAuditAvailability(outcome);
           if (decision.active) {
             // AC2 inverse divergence: the proxy REFUSES while the local ledger
@@ -849,6 +860,7 @@ export function createDowntimeDeps(
               ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
               ...(decision.budget !== undefined ? { budget: decision.budget } : {}),
               ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
+              ...(proxyAvailability !== undefined ? { availability: proxyAvailability } : {}),
             };
           }
         }
@@ -870,7 +882,12 @@ export function createDowntimeDeps(
         );
         if (auditCandidateIds.size === 0) {
           // Cheap fast-path: no non-stale audit markers → no active audit.
-          return { ok: true, active: false, source: 'proxy' };
+          return {
+            ok: true,
+            active: false,
+            source: 'proxy',
+            ...(proxyAvailability !== undefined ? { availability: proxyAvailability } : {}),
+          };
         }
         // Intersect with the worklog's in_progress items: a marker only
         // counts as an ACTIVE audit while its item is still in_progress
@@ -888,7 +905,12 @@ export function createDowntimeDeps(
           return { ok: false, error: 'in_progress parse error' } as const;
         }
         const active = [...auditCandidateIds].some((id) => inProgress.has(id));
-        return { ok: true, active, source: 'per-worklog' };
+        return {
+          ok: true,
+          active,
+          source: 'per-worklog',
+          ...(proxyAvailability !== undefined ? { availability: proxyAvailability } : {}),
+        };
       } catch (err) {
         // Fail-open: a wl failure yields {ok:false} — the dispatcher skips
         // the audit tier and falls through to the next tier; dispatch is
@@ -1613,12 +1635,19 @@ export function createDowntimeDeps(
       const budgetReliefEnabled = loadSettings().downtimeBudgetReliefEnabled !== false;
       const audit = input.kind === 'audit';
       // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN):
-      // read the SAME availability the dispatcher's pre-check read and hand
-      // the typed outcome to admission, so both reach the SAME decision. The
-      // one-release legacy flag skips the proxy entirely.
+      // answer from the SAME availability observation the dispatcher's
+      // pre-check made for THIS attempt (WL-0MWJE9IEH001R3P1 AC1/AC2). The
+      // caller threads `input.auditAvailability`, so no second proxy GET is
+      // issued (the two racing reads this item removes). Only when no
+      // pre-check ran (a path without one) does admission take its single
+      // fail-closed fallback read. The one-release legacy flag skips the
+      // proxy entirely, threaded outcome or not.
       const auditAvailability =
-        audit && !isLegacyAuditBudgetEnabled() && this.readAuditAvailability !== undefined
-          ? await this.readAuditAvailability()
+        audit && !isLegacyAuditBudgetEnabled()
+          ? (input.auditAvailability ??
+            (this.readAuditAvailability === undefined
+              ? undefined
+              : await this.readAuditAvailability()))
           : undefined;
       // Audit-lease ACQUIRE (WL-0MWFJH3NW006F5GN AC2): the availability read
       // is a PRE-CHECK that can never admit on its own — the admission

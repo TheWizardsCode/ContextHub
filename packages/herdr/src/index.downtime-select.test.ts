@@ -873,6 +873,9 @@ describe('createDowntimeDeps', () => {
       source: 'proxy',
       reason: 'audit-budget-saturated',
       budget: { live: 2, max: 2 },
+      // AC1 (WL-0MWJE9IEH001R3P1): the raw observation rides on the result so
+      // the dispatch attempt threads it into admission.
+      availability: { status: 'ok', availability: { cap: 2, live: 2, available: false } },
     });
   });
 

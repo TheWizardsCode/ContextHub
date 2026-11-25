@@ -46,6 +46,7 @@ import {
 import type {
   DowntimeDispatchDeps,
   DowntimeDispatchOutcome,
+  DowntimeHostBudgetAdmissionInput,
   DowntimeReservationEvidence,
   ProjectWorkspaceMismatch,
 } from './downtime-worker.dispatch-contract.js';
@@ -246,6 +247,8 @@ export async function dispatchClaimedTier(
      * `localPreference` verbatim and add no marker fields.
      */
     localPreferenceMode?: LocalPreferenceMode;
+    /** The attempt's proxy observation, threaded into admission (WL-0MWJE9IEH001R3P1). */
+    auditAvailability?: DowntimeHostBudgetAdmissionInput['auditAvailability'];
   },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
@@ -385,15 +388,11 @@ export async function dispatchClaimedTier(
   // ── Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3,
   //    audit tier WL-0MVXY0XPF006YUHA F2) ────────────────────────────────
   //
-  // ONE ledger read per dispatch attempt, placed IMMEDIATELY BEFORE the
-  // dispatch marker is written. Both dispatcher paths
-  // (`dispatchDowntimeWork` and `dispatchFromCoordination`) reach this point
-  // through `dispatchClaimedTier`, so neither can bypass the machine-wide cap
-  // (F3 AC1). EVERY kind is offered to the generic admission
-  // (WL-0MWF34932000SNTX F2): a capped kind is enforced, an uncapped kind is
-  // admitted without a reservation. The reservation is taken AFTER the CAS
-  // claim and BEFORE `recordDispatch` (AC3), the claim is rolled back on
-  // refusal (AC2) and the refusal is a NEUTRAL skip (AC5).
+  // ONE ledger read per dispatch attempt, IMMEDIATELY BEFORE the marker is
+  // written: both dispatcher paths reach it through `dispatchClaimedTier`, so
+  // neither bypasses the machine-wide cap (F3 AC1). EVERY kind is offered to
+  // the generic admission (WL-0MWF34932000SNTX F2), and a refusal is a
+  // NEUTRAL skip (AC5) with the claim rolled back (AC2/AC3).
   let budgetEvidence: { live: number; max: number } | undefined;
   let budgetReliefEvidence: BudgetReliefEvidence | undefined;
   // The attempt token of THIS dispatch's reservation (WL-0MWFJD5T4003OM91):
@@ -415,6 +414,7 @@ export async function dispatchClaimedTier(
         itemId: candidate.id,
         kind,
         cwd: opts.cwd,
+        auditAvailability: opts.auditAvailability,
       });
     } catch {
       // Fail closed: an admission reader that throws cannot prove the host is

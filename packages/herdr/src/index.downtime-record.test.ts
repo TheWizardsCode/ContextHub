@@ -88,7 +88,14 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
 
     const result = await deps.getActiveAudit(makeTempDir());
 
-    expect(result).toEqual({ ok: true, active: false, source: 'proxy' });
+    expect(result).toEqual({
+      ok: true,
+      active: false,
+      source: 'proxy',
+      // AC1 (WL-0MWJE9IEH001R3P1): the pre-check hands the RAW observation on
+      // so admission consumes it instead of reading the proxy again.
+      availability: availabilityOk({ cap: 4, live: 1 }),
+    });
     // AC: the availability read is invoked exactly once per gate evaluation.
     expect(read).toHaveBeenCalledTimes(1);
   });
@@ -108,6 +115,7 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
       source: 'proxy',
       reason: 'audit-budget-saturated',
       budget: { live: 2, max: 2 },
+      availability: availabilityOk({ cap: 2, live: 2, available: false }),
     });
     // One vocabulary: the proxy path never emits the legacy host-budget tokens.
     const reason = (result as { reason?: string }).reason;
@@ -130,7 +138,12 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     const result = await deps.getActiveAudit(makeTempDir());
 
     // The proxy admits despite the local maxAudit:0 — the local cap is unused.
-    expect(result).toEqual({ ok: true, active: false, source: 'proxy' });
+    expect(result).toEqual({
+      ok: true,
+      active: false,
+      source: 'proxy',
+      availability: availabilityOk({ cap: 3, live: 1, available: true }),
+    });
   });
 
   it('fails closed as audit-budget-unknown for every unusable proxy exchange (AC3)', async () => {
@@ -183,6 +196,7 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
         source: 'proxy',
         reason: 'audit-budget-unknown',
         detail: testCase.detail,
+        availability: testCase.outcome,
       });
       expect((result as { reason?: string }).reason).not.toBe('host-budget-unknown');
     }
@@ -236,7 +250,12 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
     deps.readAuditAvailability = vi.fn().mockResolvedValue(availabilityOk());
     const result = await deps.getActiveAudit(cwd);
 
-    expect(result).toEqual({ ok: true, active: true, source: 'per-worklog' });
+    expect(result).toEqual({
+      ok: true,
+      active: true,
+      source: 'per-worklog',
+      availability: availabilityOk(),
+    });
     expect(wlCalls(mockExec)).toHaveLength(1);
   });
 
@@ -253,7 +272,12 @@ describe('proxy-derived audit admission (WL-0MWAMSDNW000SL0E)', () => {
 
     const result = await deps.getActiveAudit(makeTempDir());
 
-    expect(result).toEqual({ ok: true, active: false, source: 'proxy' });
+    expect(result).toEqual({
+      ok: true,
+      active: false,
+      source: 'proxy',
+      availability: availabilityOk(),
+    });
   });
 
   it('recordPaneClose releases the audit ledger reservation (AC5)', async () => {

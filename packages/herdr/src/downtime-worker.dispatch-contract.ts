@@ -42,6 +42,7 @@ import type {
 } from './dispatcher-anchor.js';
 import type { DowntimeSpawnResult } from './downtime-worker.pane.js';
 import type { DowntimeAuditBatchStatus, AuditCandidateScopeResult } from './downtime-worker.gates.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
 
 /**
  * Placement-failure detail vocabulary (WL-0MWHCUZ5C000I7S6): naming the
@@ -310,6 +311,15 @@ export interface DowntimeHostBudgetAdmissionInput {
   kind: DowntimeDispatchKind;
   /** Worklog root the dispatch operates on. */
   cwd: string;
+  /**
+   * The proxy audit-availability observation the dispatcher's PRE-CHECK
+   * already made for THIS attempt (WL-0MWJE9IEH001R3P1 AC1). Threaded so
+   * admission answers from the SAME observation instead of issuing a second
+   * `GET` that could race the first. Present only for audit attempts whose
+   * pre-check ran on the proxy path; absent everywhere else, where admission
+   * keeps its fail-closed fallback read.
+   */
+  auditAvailability?: AuditAvailabilityOutcome;
 }
 
 /**

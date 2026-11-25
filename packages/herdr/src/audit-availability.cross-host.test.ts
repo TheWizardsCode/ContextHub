@@ -298,9 +298,12 @@ function createHost(opts: {
   };
 
   // Mirror `index.ts`'s proxy-derived pre-check (WL-0MWAMSDNW000SL0E): the
-  // proxy verdict decides the audit tier; a failed read fails CLOSED.
+  // proxy verdict decides the audit tier; a failed read fails CLOSED. The RAW
+  // observation rides on the result so the attempt threads it into admission
+  // (WL-0MWJE9IEH001R3P1 AC1) instead of paying a second GET.
   const getActiveAudit: DowntimeWorkerDeps['getActiveAudit'] = async () => {
-    const decision = decideAuditAvailability(await readAvailability());
+    const outcome = await readAvailability();
+    const decision = decideAuditAvailability(outcome);
     opts.decisionLog.preChecks.push({
       host: opts.id,
       active: decision.active,
@@ -308,11 +311,14 @@ function createHost(opts: {
       ...(decision.budget !== undefined ? { budget: decision.budget } : {}),
       ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
     });
-    if (!decision.active) return { ok: true, active: false, source: 'proxy' };
+    if (!decision.active) {
+      return { ok: true, active: false, source: 'proxy', availability: outcome };
+    }
     return {
       ok: true,
       active: true,
       source: 'proxy',
+      availability: outcome,
       ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
       ...(decision.budget !== undefined ? { budget: decision.budget } : {}),
       ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
@@ -321,13 +327,17 @@ function createHost(opts: {
 
   // Mirror `index.ts`'s admission seam (WL-0MWFJH3NW006F5GN AC2): the SAME
   // availability pre-check AND the proxy's atomic audit lease decide, so the
-  // pre-check and admission agree and quote one vocabulary. The acquire is
-  // attempted ONLY when the pre-check admits (never any churn on a refused
-  // read) and the session id is derived from the item, so a retry renews
-  // rather than competes.
+  // pre-check and admission agree and quote one vocabulary. The threaded
+  // observation is consumed FIRST (WL-0MWJE9IEH001R3P1): a path with no
+  // pre-check keeps the single fallback read. The acquire is attempted ONLY
+  // when the pre-check admits (never any churn on a refused read) and the
+  // session id is derived from the item, so a retry renews rather than
+  // competes.
   const admit: DowntimeWorkerDeps['admitHostDispatch'] = async (input) => {
     const audit = input.kind === 'audit';
-    const auditAvailability = audit ? await readAvailability() : undefined;
+    const auditAvailability = audit
+      ? (input.auditAvailability ?? (await readAvailability()))
+      : undefined;
     const preCheck =
       audit && auditAvailability !== undefined
         ? decideAuditAvailability(auditAvailability)
