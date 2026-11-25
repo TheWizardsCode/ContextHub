@@ -5307,6 +5307,48 @@ served roots — the whole-set rotation and its fall-through working as designed
 with `dispatchingRoot` as the accounting key. Follow-up:
 **WL-0MWT3Z9M9002Z9BF**.
 
+*Recorded measurement — 2026-11-24T12:19:00Z → 2026-11-25T11:09:00Z (PASS on
+both thresholds).* The window starts at the live-worker restart of
+2026-11-24T12:19:53Z, which loaded both runtime fix commits — `4df6fc24f` (the
+machine run ledger, WL-0MWT3Z9M9002Z9BF) and `862339848` (ledger written inside
+the round-robin charge critical section plus the decision-log fallback,
+WL-0MWT54AR8005LMKN). The only later fix commits are test-isolation and comment
+refresh, so the window exercises the complete runtime fix. The **regime check
+passes**: the leader's `downtime-coordination.log` carries `selectedRoot` rows
+throughout (leader instance `c8d80de3-…`, latest decision row
+2026-11-25T11:10Z), so the running worker includes the fairness accounting and
+the whole-set rotation.
+
+Counts (rows with a `paneId`, deduped; project key = `cwd` basename): **27
+dispatches, 4 active projects, even share 6.75**:
+
+| Project | Dispatches | × even share | Longest run | Kind mix |
+|---|---|---|---|---|
+| ContextHub | 12 | **1.78×** | 2 | `plan` 5, `implement` 3, `audit` 3, `intake` 1 |
+| AI_Hell | 9 | 1.33× | 2 | `implement` 6, `plan` 2, `intake` 1 |
+| Tableau-Card-Engine | 4 | 0.59× | 1 | `audit` 2, `plan` 1, `implement` 1 |
+| tce-the-rising | 2 | 0.30× | 1 | `plan` 2 |
+
+No project exceeded twice its even share (max **1.78×**) and the longest
+consecutive run was **2**, against a ceiling of 2 — **both thresholds are met**.
+The only multi-dispatch runs were ContextHub at 2026-11-24T14:27Z→14:32Z and
+AI_Hell at 2026-11-25T05:25Z→05:32Z, each length 2.
+
+**Accounting identity** (decision-covered sub-window 2026-11-25T08:43Z→11:09Z,
+3 dispatches): every `outcome:"dispatched"` decision row carries
+`dispatchingRoot` + `consecutiveRunLength`, all length 1, matching the
+dispatch-log rows one-for-one; no `spawn-failed`/`marker-write-failed` consumed
+outcome occurred in the retained window, and the machine run ledger
+(`downtime-run-by-root.json` = tce-the-rising, `runLength` 1 at 11:01:05Z)
+agrees.
+
+**Sample-size caveat.** 27 dispatches over 22 h 50 m is smaller than the
+pre-fix 53-dispatch window, but it comfortably exceeds the ≥3-active-projects
+precondition, and both the concentration ratio (1.78×) and the hard run-length
+pass (max 2) sit well inside their thresholds. This window supersedes the
+2026-11-22/23 result, whose run-length failure was the leadership-hand-off
+defect fixed by WL-0MWT3Z9M9002Z9BF and re-audited via WL-0MWT54AR8005LMKN.
+
 *Attribution of the two length-3 runs (WL-0MWT3Z9M9002Z9BF AC5).* The two runs
 are attributed to the **leadership-hand-off defect now fixed**, not to a
 dispatching defect in the peers:
