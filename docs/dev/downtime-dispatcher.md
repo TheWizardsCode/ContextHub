@@ -593,6 +593,82 @@ mismatches recorded as open questions):
   **Deliberate fail-closed mismatch, recorded as an open question** (does this
   item still need producer attention?).
 
+### Producer-interview snapshot (WL-0MWVMRVOV0026OWM, child 1 of WL-0MWTVPK65009NTER)
+
+The 2026-11-23 provenance audit grouped 17 prep items `needs-producer-input`
+from a **snapshot** of the flag set. By the time the batched interview is
+written, rows can be cleared externally and new rows can appear, so inviting
+the frozen list would interview the wrong items. The snapshot command re-reads
+the **live** flagged prep set on every active root and classifies it through the
+ONE provenance rule (`classifyProducerReviewProvenance` +
+`assembleProducerReviewProvenance`, *Producer-review provenance* above) — never
+a second, hand-rolled rule.
+
+```bash
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  [--root …] [--now <iso>] [--json|--markdown]
+```
+
+`--now <iso>` freezes the evaluation instant; `--root` is repeatable and falls
+back to the `downtimeWorklogRoots` registry when omitted, so no root is
+hard-coded. JSON goes to stdout (the machine path for the next child) and the
+markdown table to stderr by default; `--markdown` moves the table to stdout and
+`--json` suppresses it.
+
+**What it emits.** For every row grouped `needs-producer-input`: item id, root,
+title, the open question text (or the fail-closed question *does it still need
+producer attention?* when no question survives), the deciding evidence comment
+id and the flag age (`formatProducerReviewAge`). Flagged items in a non-prep
+stage are counted as `skippedNotPrep` so the exclusion is measured, never
+silent.
+
+**Read-only.** The only commands issued are the four documented evidence reads
+(*Evidence commands (read-only)* below):
+
+```bash
+wl --worklog-dir <root>/.worklog list --json --needs-producer-review --include-not-started
+wl --worklog-dir <root>/.worklog comment list <id> --json
+wl --worklog-dir <root>/.worklog audit-show <id> --json
+wl --worklog-dir <root>/.worklog dep list <id> --json
+```
+
+Every argument vector passes through a read-only guard that refuses `update`,
+`comment add`, `reviewed`, `audit-set`, `create`, `close`, `delete` and `sync`.
+No flag is cleared, no item is reassigned and no dispatch marker is written.
+
+#### Recorded live run (2026-11-25T15:20:02Z)
+
+Read-only snapshot at `2026-11-25T15:20:02.717Z`: **15** flagged prep items,
+all grouped `needs-producer-input` (**0** `can-clear-now`); 165 flagged
+non-prep items skipped. Tableau-Card-Engine and games_curator had no flagged
+prep items.
+
+| root | ids (grouped `needs-producer-input`) |
+|---|---|
+| AI_Hell | `AH-0MWEUSVJ1007EXJY` (10d 17h), `AH-0MWLLPA1Q0006U2P` (unknown), `AH-0MWW6PNA5008NC91` (unknown) |
+| ContextHub | `WL-0MWAJ3RPX000HQIG` (10d 4h) |
+| SorraAgents | `SA-0MSN9UXKJ002JK42` (6d 14h), `SA-0MU9VU8GB009P523` (59d 5h), `SA-0MVNPSBEJ006Z59T` (11d 5h), `SA-0MVQKMGGN0091NAR` (11d 5h), `SA-0MVSCS0M80007X23` (unknown), `SA-0MVXVC9FM003ZJKJ` (9d 12h), `SA-0MW5KKEHL005BR0L` (7d 18h), `SA-0MWAXZHOU000UBG1` (9d 5h), `SA-0MWROFAG800719G4` (3d 5h) |
+| tce-the-rising | `RISE-0MWMS0TAN008G2SY` (6d 15h), `RISE-0MWTXTO86004BKXJ` (unknown) |
+
+Compared with the 2026-11-23 seed (17 rows): **5 rows are now absent** —
+`AH-0MWFDQ9EY004NO4X`, `AH-0MWL7OWPF003E4TP` and `AH-0MWL7P1AO003LKXT` are
+`completed`/`in_review` with the flag cleared; `WL-0MWQYC2ZQ002NGZP` and
+`WL-0MWQYC3MZ0013YLS` are `plan_complete` with the flag cleared (the two
+`ruff DTZ007` rows cleared externally at `22:00Z` on 2026-11-23). **3 rows are
+new since the seed** — `AH-0MWLLPA1Q0006U2P` (the audit's sole `can-clear-now`
+row, regraded `needs-producer-input` by the *Correction (†)* above),
+`AH-0MWW6PNA5008NC91` and `RISE-0MWTXTO86004BKXJ`. The other 12 seed rows are
+unchanged.
+
+`AH-0MWLLPA1Q0006U2P`, `AH-0MWW6PNA5008NC91`, `SA-0MVSCS0M80007X23` and
+`RISE-0MWTXTO86004BKXJ` carry no surviving evidence: they are grouped
+`needs-producer-input` fail-closed and their interview question is the
+canonical *does it still need producer attention?*.
+
 ### Root cause: the 2026-11-22/23 empty prep bucket (WL-0MWTBJCIV006BEGE)
 
 Child 5 of WL-0MWTAD1KM0081UUD states the AC3 root cause from the AC1
