@@ -18,6 +18,7 @@
 import type { CoordinationEntry, CoordinationOffer } from './coordination.js';
 import { toOfferBucket } from './coordination.js';
 import type { ReviewQueueGateResult } from './downtime-worker.gates.js';
+import type { CoordinationOfferRejection, DispatchGateToken } from './downtime-worker.offer-attribution.js';
 import type { DowntimeItemInfo, DowntimeSkillKind } from './downtime-worker.types.js';
 
 /** One offer that survived the leader's sequential filter chain. */
@@ -40,6 +41,25 @@ export function entryOffers(entry: CoordinationEntry): ReadonlyArray<Coordinatio
   if (Array.isArray(entry.offers) && entry.offers.length > 0) return entry.offers;
   const id = typeof entry.workItemId === 'string' ? entry.workItemId : '';
   return id.length > 0 ? [{ kind: 'implement', workItemId: id }] : [];
+}
+
+/**
+ * Per-offer rejections for a whole entry list at one gate (WL-0MVR8FKMU009XTED
+ * AC2): attribute EVERY offer of every entry, so a coarse gate can never
+ * collapse a v2 entry's three nominees into one. Shared by the leader's
+ * slots-unavailable and audit-batch refusal arms.
+ */
+export function rejectionsForEntries(
+  entries: readonly CoordinationEntry[],
+  gate: DispatchGateToken,
+): CoordinationOfferRejection[] {
+  return entries.flatMap((entry) =>
+    entryOffers(entry).map((offer) => ({
+      workItemId: offer.workItemId,
+      worklogRoot: entry.worklogRoot ?? entry.directory,
+      gate,
+    })),
+  );
 }
 
 /**

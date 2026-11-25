@@ -616,6 +616,13 @@ export interface DowntimeDispatchOutcome {
    * no-candidate pause is armed only when the offer list holds no peer
    * offer (`hasPeerOffer`, AC2). No new outcome flag was introduced for
    * either behaviour, so this contract stays the complete reason surface.
+   *
+   * Fleet version skew (WL-0MWJE9MIR005SBQK AC4): `lease-capability-absent`
+   * is a NEUTRAL refusal — an AUDIT offer came from a peer whose coordination
+   * entry did not advertise audit-lease support, so dispatching it would have
+   * run availability-only admission and reopened the cross-host audit race.
+   * The offer is kept and the peer's implement/prep offers are unaffected;
+   * the same token names the per-offer rejection gate.
    * already running — a non-stale kind=audit dispatch marker maps to an
    * `in_progress` item — so the audit tier was skipped; a skip that leaves
    * an empty remaining backlog reports this reason, NEVER 'no-candidate',

@@ -18,7 +18,7 @@
  * log, offer computation, attribution helper) — never the barrel.
  */
 
-import { getEntry, removeEntry, upsertEntry, toOfferBucket, type CoordinationEntry, type CoordinationOffer } from './coordination.js';
+import { getEntry, removeEntry, upsertEntry, toOfferBucket, AUDIT_LEASE_CAPABILITY, type CoordinationEntry, type CoordinationOffer } from './coordination.js';
 import {
   appendCoordinationLogEntry,
   type CoordinationLogPolicy,
@@ -187,6 +187,11 @@ export async function runCoordinationCheckIn(
     assignedAt: current?.assignedAt ?? new Date(now).toISOString(),
     lastUpdated: new Date(now).toISOString(),
     ...(offers.length > 0 ? { offers } : {}),
+    // Fleet version skew (WL-0MWJE9MIR005SBQK AC4): every check-in advertises
+    // audit-lease support so the leader can tell a modern pane from an old one
+    // BEFORE dispatching an audit to it. Additive — a legacy entry without the
+    // field stays readable and is refused for audits (fail-closed) by the leader.
+    capabilities: [AUDIT_LEASE_CAPABILITY],
   };
   const updated = upsertEntry(coordinator.coordinationDir, entry);
   // Audit trail (WL-0MSXHAE290067VAL): log the offered item on every

@@ -24,6 +24,8 @@ import {
   removeEntry,
   removeOffer,
   getEntry,
+  AUDIT_LEASE_CAPABILITY,
+  hasAuditLeaseCapability,
   pruneStaleEntries,
   pruneDeadEntries,
   mergeEntries,
@@ -966,5 +968,90 @@ describe('live-but-idle entry survives a read-then-merge cycle unchanged', () =>
     expect((after as unknown as { offers?: unknown[] }).offers ?? []).toEqual([]);
     // Still the only entry.
     expect(readCoordinationFile(testDir)!.entries).toHaveLength(1);
+  });
+});
+
+// ── Audit-lease capability advertisement (WL-0MWJE9MIR005SBQK) ──────────
+//
+// Fleet version skew fails closed: a modern worker advertises `audit-lease`
+// on its coordination entry so the leader can tell it apart from a pane that
+// predates the proxy audit lease (WL-0MWFJH3NW006F5GN). The field is
+// ADDITIVE — a legacy entry omits it and stays readable, and it is the
+// leader's refusal gate (pinned in coordination-dispatch.test.ts).
+
+describe('audit-lease capability advertisement (WL-0MWJE9MIR005SBQK)', () => {
+  it('round-trips the capability through upsertEntry/getEntry', () => {
+    const entry: CoordinationEntry = {
+      ...makeEntry('inst-cap', 'WL-ABC'),
+      capabilities: [AUDIT_LEASE_CAPABILITY],
+    };
+    expect(upsertEntry(testDir, entry)).toBe(true);
+
+    const stored = getEntry(testDir, 'inst-cap')!;
+    expect(stored.capabilities).toEqual([AUDIT_LEASE_CAPABILITY]);
+    expect(hasAuditLeaseCapability(stored)).toBe(true);
+  });
+
+  it('reads a legacy entry without capabilities unchanged — absent means NOT capable (fail-closed)', () => {
+    // A pre-capability writer's file: no `capabilities` key at all.
+    const now = new Date().toISOString();
+    writeFileSync(
+      COORD_PATH(),
+      JSON.stringify({
+        version: COORDINATION_FILE_VERSION,
+        entries: [
+          {
+            instanceId: 'legacy-1',
+            workItemId: 'WL-LEGACY',
+            directory: testDir,
+            worklogRoot: testDir,
+            assignedAt: now,
+            lastUpdated: now,
+          },
+        ],
+      }),
+      'utf-8',
+    );
+
+    const data = readCoordinationFile(testDir)!;
+    expect(data.entries).toHaveLength(1);
+    expect(data.entries[0].workItemId).toBe('WL-LEGACY');
+    // No crash, no fabricated capability, and the entry is NOT lease-capable.
+    expect(data.entries[0].capabilities).toBeUndefined();
+    expect(hasAuditLeaseCapability(data.entries[0])).toBe(false);
+  });
+
+  it('drops a malformed or unknown capability payload fail-safe (never a fabricated capability)', () => {
+    const now = new Date().toISOString();
+    writeFileSync(
+      COORD_PATH(),
+      JSON.stringify({
+        version: COORDINATION_FILE_VERSION,
+        entries: [
+          { instanceId: 'str', workItemId: 'WL-1', capabilities: 'audit-lease', assignedAt: now, lastUpdated: now },
+          { instanceId: 'unknown', workItemId: 'WL-2', capabilities: ['teleport'], assignedAt: now, lastUpdated: now },
+          { instanceId: 'mixed', workItemId: 'WL-3', capabilities: ['teleport', AUDIT_LEASE_CAPABILITY], assignedAt: now, lastUpdated: now },
+        ],
+      }),
+      'utf-8',
+    );
+
+    const byId = new Map(readCoordinationFile(testDir)!.entries.map((e) => [e.instanceId, e]));
+    // A non-array value is dropped entirely.
+    expect(byId.get('str')!.capabilities).toBeUndefined();
+    expect(hasAuditLeaseCapability(byId.get('str')!)).toBe(false);
+    // Unknown-only values are dropped, so the entry stays NOT capable.
+    expect(byId.get('unknown')!.capabilities).toBeUndefined();
+    expect(hasAuditLeaseCapability(byId.get('unknown')!)).toBe(false);
+    // A known value survives alongside an unknown one.
+    expect(byId.get('mixed')!.capabilities).toEqual([AUDIT_LEASE_CAPABILITY]);
+    expect(hasAuditLeaseCapability(byId.get('mixed')!)).toBe(true);
+  });
+
+  it('preserves the capability across an unrelated read/write cycle', () => {
+    upsertEntry(testDir, { ...makeEntry('inst-cap2', 'WL-ABC'), capabilities: [AUDIT_LEASE_CAPABILITY] });
+    const data = readCoordinationFile(testDir)!;
+    writeCoordinationFile(testDir, { ...data });
+    expect(hasAuditLeaseCapability(getEntry(testDir, 'inst-cap2')!)).toBe(true);
   });
 });

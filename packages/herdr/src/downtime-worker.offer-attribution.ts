@@ -92,7 +92,25 @@ export type DispatchGateToken =
    */
   | 'audit-budget'
   /** The item could not be read (wl/CLI failure) — entry kept, fail-open. */
-  | 'wl-error';
+  | 'wl-error'
+  /**
+   * An AUDIT offer from a peer whose coordination entry does not advertise
+   * the audit-lease capability (WL-0MWJE9MIR005SBQK AC4). Fail-closed: the
+   * old peer would run availability-only admission and reopen the cross-host
+   * audit race. The offer is KEPT (neutral hold) and the peer's non-audit
+   * offers are unaffected. Surfaces the same token as the terminal reason
+   * {@link LEASE_CAPABILITY_ABSENT_REASON}.
+   */
+  | 'lease-capability-absent';
+
+/**
+ * Neutral terminal reason when the only refused work was an AUDIT offer from a
+ * peer that does not advertise the audit-lease capability
+ * (WL-0MWJE9MIR005SBQK AC4). Shares the string with the
+ * {@link DispatchGateToken} so the refusal is observable both as the per-offer
+ * attribution and as the tick's no-dispatch reason (never `no-candidate`).
+ */
+export const LEASE_CAPABILITY_ABSENT_REASON = 'lease-capability-absent';
 
 /**
  * The subset of {@link DispatchGateToken} produced by

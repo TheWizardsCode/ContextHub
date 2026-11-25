@@ -1923,6 +1923,7 @@ bucket (`implement` / `audit` / `prep`), so at most three offers per entry;
 {"version":2,"entries":[
   {"instanceId":"<uuid>","workItemId":"<wl-id>","directory":"<worklog-root>","worklogRoot":"<worklog-root>",
    "assignedAt":"<iso>","lastUpdated":"<iso>",
+   "capabilities":["audit-lease"],
    "offers":[
      {"kind":"implement","workItemId":"<wl-id>"},
      {"kind":"audit",     "workItemId":"<wl-id>"},
@@ -1947,6 +1948,19 @@ bucket (`implement` / `audit` / `prep`), so at most three offers per entry;
 - **No schema-level change elsewhere.** The file still holds ONE entry per
   instance, one lock and one atomic tmp+rename write (the v2 payload is
   nested, so `instanceId`-keyed lease/liveness logic is untouched).
+- **Capability advertisement (fleet version skew, WL-0MWJE9MIR005SBQK).** Each
+  check-in also advertises an additive `capabilities` array; a modern pane
+  advertises `["audit-lease"]` so the leader knows it can acquire the proxy
+  audit lease (WL-0MWFJH3NW006F5GN). The field is OPTIONAL: a legacy entry (or
+  an old writer) omits it and an old reader ignores it, so both directions
+  interoperate. The leader **refuses audit dispatch to a peer that does not
+  advertise `audit-lease`** (fail-closed): such a pane predates the lease
+  wiring and would run availability-only admission — the cross-host race the
+  lease gate removes. The refusal is a neutral hold — the offer is kept (the
+  peer advertises the capability on its next check-in once upgraded), no
+  strike or no-candidate cooldown is armed, the peer's implement/prep offers
+  flow unchanged, and the tick reports the distinct
+  `lease-capability-absent` token (also the per-offer rejection gate token).
 
 **The leader block (WL-0MW1VINII003IL7R).** The `entries` array is an OFFER list,
 and a check-in removes the instance's own entry whenever its window is empty

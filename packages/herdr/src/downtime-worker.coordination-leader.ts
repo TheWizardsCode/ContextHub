@@ -18,7 +18,7 @@
  */
 
 import { resolveSprintViewWindow } from './browse-window.js';
-import { removeOffer, type CoordinationEntry } from './coordination.js';
+import { hasAuditLeaseCapability, removeOffer, type CoordinationEntry } from './coordination.js';
 import type { DowntimeLogEntry } from './downtime-log.js';
 import { orderCoordinationEntriesForDispatch } from './downtime-worker.fairness.js';
 import {
@@ -46,6 +46,7 @@ import {
 import {
   entryOffers,
   orderAdmissibleOffers,
+  rejectionsForEntries,
   type AdmissibleOffer,
 } from './downtime-worker.offer-selection.js';
 import { resolveTerminalOutcome } from './downtime-worker.terminal-reason.js';
@@ -329,19 +330,6 @@ async function dispatchFromCoordinationGated(
       ...(assignee !== undefined && assignee.trim().length > 0 ? { assignee: assignee.trim() } : {}),
     });
   };
-  // Attribution is PER OFFER, not per instance (parent AC4): a v2 entry advertises
-  // up to three nominees, so flatten every entry's offer list.
-  const rejectedOffers = (
-    list: CoordinationEntry[],
-    gate: DispatchGateToken,
-  ): CoordinationOfferRejection[] =>
-    list.flatMap((entry) =>
-      entryOffers(entry).map((offer) => ({
-        workItemId: offer.workItemId,
-        worklogRoot: entry.worklogRoot ?? entry.directory,
-        gate,
-      })),
-    );
 
   // Dead-entry prune (WL-0MWFJTKGM006BHLQ): only entries whose instance
   // STOPPED CHECKING IN are pruned (leader check-in path) — LIVE offers
@@ -375,7 +363,7 @@ async function dispatchFromCoordinationGated(
     // continues to the audit-only offer scan instead.
     return withOfferRejections(
       { dispatched: false, reason: 'no-candidate' },
-      rejectedOffers(entries, 'slots-unavailable'),
+      rejectionsForEntries(entries, 'slots-unavailable'),
     );
   }
 
@@ -686,6 +674,13 @@ async function dispatchFromCoordinationGated(
           continue;
         }
       }
+      // Fleet version skew fails closed (WL-0MWJE9MIR005SBQK AC4): an AUDIT
+      // offer from a peer lacking the audit-lease capability is refused (an
+      // old pane would reopen the cross-host race); the offer is KEPT.
+      if (kind === 'audit' && !hasAuditLeaseCapability(entry)) {
+        rejectOffer(offer, worklogRoot, 'lease-capability-absent');
+        continue;
+      }
       admissible.push({ kind, info: result.info, offer });
     }
 
@@ -993,6 +988,9 @@ async function dispatchFromCoordinationGated(
     inFlightHold,
     pinHeld,
     pinnedAuditItemId,
+    // Derived from the per-offer attribution already collected: a neutral
+    // fleet-capability refusal must end on its own token, not `no-candidate`.
+    leaseCapabilityHold: offerRejections.some((r) => r.gate === 'lease-capability-absent'),
     auditBudgetHold,
     hostBudgetHold,
   });

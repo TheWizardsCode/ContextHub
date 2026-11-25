@@ -49,6 +49,7 @@ import {
   writeCoordinationFile,
   readCoordinationFile,
   getEntry,
+  AUDIT_LEASE_CAPABILITY,
   COORDINATION_FILE,
   type CoordinationEntry,
   type CoordinationData,
@@ -76,6 +77,10 @@ function makeEntry(instanceId: string, workItemId: string, directory?: string): 
     directory: directory ?? '/worklog/root',
     assignedAt: now,
     lastUpdated: now,
+    // A modern worker advertises audit-lease support on every check-in
+    // (WL-0MWJE9MIR005SBQK AC4); legacy/no-capability interop is pinned by a
+    // dedicated test that omits this field.
+    capabilities: [AUDIT_LEASE_CAPABILITY],
   };
 }
 
@@ -1429,6 +1434,21 @@ describe('runCoordinationCheckIn', () => {
     const entry = getEntry(testDir, 'inst-1');
     expect(entry?.workItemId).toBe('WL-IMP');
     expect(entry?.directory).toBe('/repo');
+  });
+
+  it('advertises the audit-lease capability on every check-in entry (WL-0MWJE9MIR005SBQK AC4)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [headItem({ id: 'WL-IMP', title: 'Most important', stage: 'idea', status: 'open' })],
+      }),
+    });
+    await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1' });
+
+    // The advertised capability is written through the coordination file (not
+    // just held in memory), so the leader reads it back on the next tick.
+    const entry = getEntry(testDir, 'inst-1')!;
+    expect(entry.capabilities).toEqual(['audit-lease']);
   });
 
   it('offers the head using the effective browseItemCount (AC1, WL-0MUNS8X97007C9H9)', async () => {
@@ -5094,6 +5114,10 @@ function v2Entry(instanceId: string, worklogRoot: string, offers: CoordOfferWitn
     directory: worklogRoot,
     assignedAt: now,
     lastUpdated: now,
+    // A v2 entry is written by a modern worker, which advertises the
+    // audit-lease capability (WL-0MWJE9MIR005SBQK AC4). Legacy entries omit
+    // it and are pinned separately.
+    capabilities: [AUDIT_LEASE_CAPABILITY],
     offers,
   } as unknown as CoordinationEntry;
 }
@@ -5613,4 +5637,177 @@ describe('host-wide dispatch budget — generalised kinds (T1 contract; F2 green
       expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     });
   }
+});
+
+// ── Audit-lease capability gate (WL-0MWJE9MIR005SBQK, parent AC4) ──────
+//
+// Fleet version skew fails CLOSED: a peer whose pane predates the proxy
+// audit-lease wiring (WL-0MWFJH3NW006F5GN) runs availability-only admission —
+// the exact cross-host race the lease gate removes. Such a peer does not
+// advertise the additive `audit-lease` capability on its coordination entry,
+// so the leader refuses its AUDIT offers with the distinct
+// `lease-capability-absent` token while its implement/prep offers flow
+// unchanged. The refusal is neutral (the offer is kept and the peer can
+// re-advertise once upgraded) and never crashes the leader.
+
+/** A v2-shaped entry with NO capability advertisement (an old peer). */
+function v2EntryWithoutCapability(
+  instanceId: string,
+  worklogRoot: string,
+  offers: CoordOfferWitness[],
+): CoordinationEntry {
+  const now = new Date().toISOString();
+  return {
+    instanceId,
+    worklogRoot,
+    directory: worklogRoot,
+    assignedAt: now,
+    lastUpdated: now,
+    offers,
+  } as unknown as CoordinationEntry;
+}
+
+/** A legacy v1-shaped entry (single `workItemId`, NO offers, NO capability). */
+function legacyEntryWithoutCapability(
+  instanceId: string,
+  workItemId: string,
+  worklogRoot: string,
+): CoordinationEntry {
+  const now = new Date().toISOString();
+  return {
+    instanceId,
+    workItemId,
+    directory: worklogRoot,
+    worklogRoot,
+    assignedAt: now,
+    lastUpdated: now,
+  };
+}
+
+const auditOfferItem = (id: string): Partial<DowntimeItemInfo> & { id: string } => ({
+  id,
+  status: 'completed',
+  stage: 'in_review',
+  updatedAt: new Date(Date.now() - 60_000).toISOString(),
+});
+
+describe('audit-lease capability gate (WL-0MWJE9MIR005SBQK AC4)', () => {
+  it('refuses an AUDIT offer from a peer that does not advertise the capability (fail-closed), keeps the offer, and surfaces the distinct gate token', async () => {
+    const entry = v2EntryWithoutCapability('inst-old', '/roots/old', [offerAudit('WL-AUD')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({ 'WL-AUD': auditOfferItem('WL-AUD') }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    // The availability-only race the peer would run is closed.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('lease-capability-absent');
+    // Observable on the per-offer attribution path with a distinct token.
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-AUD', gate: 'lease-capability-absent' }),
+      ]),
+    );
+    // Neutral refusal: no claim, no pane, and the offer is KEPT (the peer
+    // re-advertises on its next check-in once upgraded).
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(getEntry(testDir, 'inst-old')).not.toBeNull();
+  });
+
+  it('a peer without the capability still has its implement/prep offers flow unchanged', async () => {
+    const entry = v2EntryWithoutCapability('inst-old', '/roots/old', [
+      offerAudit('WL-AUD'),
+      offerPrep('WL-PREP'),
+    ]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({
+        'WL-AUD': auditOfferItem('WL-AUD'),
+        'WL-PREP': { id: 'WL-PREP', status: 'open', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    // The audit is refused, but the SAME entry's prep offer dispatches.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-AUD', gate: 'lease-capability-absent' }),
+      ]),
+    );
+    const spawn = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(String(spawn[0])).toContain('WL-PREP');
+  });
+
+  it('dispatches an AUDIT offer from a peer that DOES advertise the capability (no false refusal)', async () => {
+    // The `v2Entry` helper advertises `audit-lease` — a modern peer.
+    const entry = v2Entry('inst-new', '/roots/new', [offerAudit('WL-AUD')]);
+    writeCoordinationFile(testDir, { version: 2, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({ 'WL-AUD': auditOfferItem('WL-AUD') }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+  });
+
+  it('refuses a legacy v1-shape no-capability peer whose item classifies as an audit — without crashing or dropping the entry', async () => {
+    // Interop pin (AC: legacy entry shape + no-capability peer): a v1 file has
+    // no `offers` payload, so the bucket is only known after the dispatch-time
+    // classification. A completed/in_review item classifies as an audit and is
+    // therefore refused — the leader stays up and the entry is still readable.
+    const entry = legacyEntryWithoutCapability('inst-legacy', 'WL-AUD-LEGACY', '/roots/legacy');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      fetchItem: fetchById({ 'WL-AUD-LEGACY': auditOfferItem('WL-AUD-LEGACY') }),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 2,
+      browseItemCount: 5,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('lease-capability-absent');
+    expect(outcome.offerRejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'WL-AUD-LEGACY', gate: 'lease-capability-absent' }),
+      ]),
+    );
+    // Not dropped, and the file stays parseable (no crash).
+    expect(getEntry(testDir, 'inst-legacy')).not.toBeNull();
+    expect(readCoordinationFile(testDir)!.entries).toHaveLength(1);
+  });
 });
