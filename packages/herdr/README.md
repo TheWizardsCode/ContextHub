@@ -437,6 +437,15 @@ dispatches; the other herdr instances coordinate instead of polling:
   (single `workItemId`, no `offers`) is read as a one-offer entry (kind derived
   by the classifier) and rewritten as v2 on the next check-in — no v1 file is
   dropped by the upgrade.
+  **Capability advertisement (WL-0MWJE9MIR005SBQK):** an entry may also carry
+  an additive `capabilities` array (a modern pane advertises `["audit-lease"]`).
+  The field is optional and ignored by old readers; the leader uses it
+  **fail-closed** — an audit offer from a peer that does not advertise
+  `audit-lease` is refused as a neutral hold (the offer is kept, no strike, no
+  `no-candidate` cooldown; the tick reports `lease-capability-absent`), because
+  such a pane predates the audit-lease wiring and would fall back to the
+  availability-only race. Its implement/prep offers still dispatch. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#audit-lease-acquisition-and-release-discipline).
 - **Leader dispatch** — only the leader polls the proxy; once idle for the
   threshold it walks the single canonical candidate universe, in the one order
   stated in
@@ -638,6 +647,26 @@ dispatches; the other herdr instances coordinate instead of polling:
     implement-tier-only for admission. The one-release
     `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
     decision for a single release.
+  - **Audit-lease admission gate (WL-0MWFJH3NW006F5GN).** The availability
+    read is only a PRE-CHECK: it observes leases and never reserves one, so two
+    hosts reading the same `available: 1` could both dispatch. The admission
+    decision is the proxy's atomic
+    `POST /llama/local/audit/lease` (session id derived from the item, so a
+    re-dispatch renews instead of competing): `200` admits, `429` /
+    `503` / unreachable / unparsable refuse that audit candidate (the `429`
+    names the proxy's bounded `retry_after_s`). The acquire is attempted only
+    when the pre-check admits, so a refused read never churns a lease. One
+    availability observation answers the whole attempt — the pre-check threads
+    it into admission, which never issues a second `GET` — and a saturated
+    pre-check derives the same cooldown from the held lease's `expiresAt`
+    instead of going unnamed. The lease is released on **every** terminal
+    path: the dispatch abort paths, and — for a closed pane — the
+    pane-closure reaper, which is the only ACTIVE close path and performs the
+    host-budget release, the lease release and the rolling-log pane-close
+    record in one block (the disabled dispatch monitor never runs). Releases
+    are idempotent and best-effort; a leaked lease is bounded by the proxy's
+    own expiry. See
+    [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#audit-lease-acquisition-and-release-discipline).
   - **A finished session frees its slot without closing its pane
     (WL-0MWJVY6NR001E0FS).** The pane-close reaper releases a dispatch's
     ledger entry when its Pi session is **finished** — the final assistant
@@ -1580,10 +1609,19 @@ mechanisms cannot diverge:
 
 **Reaper orchestration (`pane-close-reaper.ts`).** `runReaper(deps, options)`
 scans panes, classifies each, closes eligible panes, and appends one JSONL
-row per pane to the ledger (default `.worklog/pane-close-ledger.jsonl`); each
-row carries the decision's `reasonSnapshot` alongside the decision and
-timestamp. I/O is injected via `ReaperDeps` (`listPanes`, `closePane`,
-`terminateProcessGroup`) so the orchestration is fully testable.
+row per evaluated pane to the per-run diagnostic ledger (default
+`.worklog/pane-close-ledger.jsonl`); each row carries the decision's
+`reasonSnapshot` alongside the decision and timestamp. A **successful** close
+additionally performs its three side effects in one per-pane block — the
+host-budget release, the proxy audit-lease release (for an `audit` pane) and
+the rolling-log `entryType:'pane-close'` record (WL-0MWJ7QYX0001KAQX AC1). The
+reaper is the only ACTIVE close path, so that record — the input to the
+non-terminal cooldown and the recent-dispatch view, and (via
+the pane ids it carries) the cross-run idempotency key — has exactly one
+production writer; the disabled dispatch monitor's writer never runs. A dry
+run or a failed close writes no close record and releases nothing. I/O is
+injected via `ReaperDeps` (`listPanes`, `closePane`, `terminateProcessGroup`)
+so the orchestration is fully testable.
 `runReaperCli(deps, argv)` is the CLI entrypoint and accepts `--dry-run`,
 `--threshold-minutes <n>` and `--ledger <path>`.
 
@@ -1612,10 +1650,13 @@ already excluded `implement` panes. It was observed to close panes prematurely
 and to race with the reaper — the two share only a non-atomic idempotency key,
 so a pane could be closed twice — so it is switched off
 (`PANE_LIFECYCLE_MONITOR_ENABLED` is `false`) and the scheduled reaper is the
-only active auto-close path. The classifier and its unit tests are retained
-for a future redesign; do not re-enable it without first reworking the
-double-close race. The reaper still skips pane ids already recorded as handled
-in the dispatch log, so any historical monitor entries remain honoured.
+only active auto-close path. Its `recordPaneClose` writer is therefore also
+dead code in production: the reaper owns the rolling-log pane-close record and
+the releases, and a future monitor redesign must fold onto the reaper rather
+than re-enable this path. The classifier and its unit tests are retained for
+that redesign; do not re-enable it without first reworking the double-close
+race. The reaper still skips pane ids already recorded as handled in the
+dispatch log (its own close records plus any historical monitor entries).
 Headless (JSON/RPC) modes are unaffected — closure is only performed by the
 scheduled reaper over Herdr panes.
 
