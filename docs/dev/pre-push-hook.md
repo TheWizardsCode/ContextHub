@@ -22,9 +22,35 @@ returns the same constant. All three therefore emit identical text.
 
 **Changing the template** means changing all three artifacts together
 (`PRE_PUSH_HOOK_CONTENT`, `.githooks/pre-push`, the fixture). `wl doctor upgrade`
-reports any content difference as `outdated` and overwrites the file, so a
-template that is *older* than a project's committed hook silently downgrades
-that project — the regression WL-0MW2N56M2004PSRP fixes.
+reports any content difference at the **same marker version** as `outdated` and
+overwrites the file, so a template that is *older* than a project's committed
+hook silently downgrades that project — the regression WL-0MW2N56M2004PSRP fixes.
+
+### The `vN` marker is an age contract
+
+Every hook carries a marker line — `# worklog:pre-push-hook:v3`,
+`# worklog:post-pull-hook:v1` — and `wl doctor upgrade` compares those numbers
+before it compares content (`hookMarkerVersion()` in
+`src/doctor/hook-upgrade.ts`):
+
+| Project hook vs reference | Verdict | Effect |
+| --- | --- | --- |
+| newer (`v4` vs template `v3`) | `newer` | **never written** — reported and left byte-identical |
+| older (`v1` vs template `v3`) | `outdated` | upgraded to the template |
+| same version, different content | `outdated` | upgraded to the template (the WL-0MW2N56M2004PSRP reconciliation) |
+| no marker | skipped entirely (not a Worklog hook) | untouched |
+
+A project that improves its hook past the template therefore keeps its hook: the
+fix for the improvement belongs **upstream**, in `PRE_PUSH_HOOK_CONTENT`, not in
+a forced downgrade of the project (WL-0MWWS66JM0090RQ5 — measured on
+`llm`'s `v4` pre-push, which `wl doctor upgrade` used to rewrite to `v3`).
+
+**The upgrade does not commit.** Hook content is pinned by the consuming
+project's own tests (e.g. `llm:tests/test_git_hooks.py` asserts
+`ERROR: no test runner found`), so a same-version refresh is a contract change
+the operator reviews and commits with a work item — never an auto-commit from a
+`doctor` command. The one destructive path (downgrading a newer hook) is now
+closed, so the remaining writes are always reviewable diffs.
 
 ## Behaviours the template must carry
 

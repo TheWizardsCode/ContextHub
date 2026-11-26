@@ -14,6 +14,23 @@ const WORKLOG_MARKERS = [
   'worklog:post-checkout-hook:',
 ] as const;
 
+/**
+ * The `worklog:<kind>-hook:vN` marker as a number, or `null` when the content
+ * carries no marker.
+ *
+ * The marker is an **age contract**, not decoration: a project hook whose `vN`
+ * is higher than the reference (the embedded template, or the project's
+ * committed `.githooks/` copy) has evolved past it and must never be
+ * overwritten — that is the silent-downgrade regression WL-0MWWS66JM0090RQ5 /
+ * WL-0MW2N56M2004PSRP.
+ */
+export function hookMarkerVersion(content: string): number | null {
+  const match = /worklog:[a-z-]+-hook:v(\d+)/.exec(content);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 // Hooks in .githooks/ that should be tracked
 const HOOK_NAMES = [
   'pre-push',
@@ -489,7 +506,7 @@ export interface HookInfo {
   committedPath: string;
   committedContent: string;
   currentContent?: string;
-  status: 'up-to-date' | 'outdated' | 'not-installed';
+  status: 'up-to-date' | 'outdated' | 'newer' | 'not-installed';
   reason?: string;
 }
 
@@ -499,13 +516,15 @@ export interface HookDryRunResult {
   hooks: Array<{
     name: string;
     hookPath: string;
-    status: 'up-to-date' | 'outdated' | 'not-installed';
+    status: 'up-to-date' | 'outdated' | 'newer' | 'not-installed';
     reason?: string;
     upgraded: string[];
   }>;
   upgraded: string[]; // names of hooks that would be upgraded
   outdatedCount: number;
   upToDateCount: number;
+  /** Project hooks newer than the reference — deliberately left untouched. */
+  newerCount: number;
   notInstalledCount: number;
 }
 
@@ -515,7 +534,7 @@ export interface HookUpgradeResult {
   hooks: Array<{
     name: string;
     hookPath: string;
-    status: 'up-to-date' | 'outdated' | 'not-installed';
+    status: 'up-to-date' | 'outdated' | 'newer' | 'not-installed';
     reason?: string;
   }>;
   upgraded: string[];
@@ -600,6 +619,29 @@ export function listOutdatedHooks(
       continue;
     }
 
+    // Age contract: a hook that has evolved past the reference is newer, never
+    // outdated. Overwriting it would silently downgrade the project's gate.
+    const currentVersion = hookMarkerVersion(currentContent);
+    const referenceVersion = hookMarkerVersion(committedContent);
+    if (
+      currentVersion !== null &&
+      referenceVersion !== null &&
+      currentVersion > referenceVersion
+    ) {
+      info.push({
+        name,
+        hookPath,
+        committedPath: isSelfCheck ? hookPath : committedPath,
+        committedContent,
+        currentContent,
+        status: 'newer',
+        reason: isSelfCheck
+          ? `Hook '${name}' is at v${currentVersion}, newer than the v${referenceVersion} template — left untouched (project-evolved hook; contribute the change upstream instead of downgrading)`
+          : `Hook '${name}' is at v${currentVersion}, newer than .githooks/${name} at v${referenceVersion} — left untouched`,
+      });
+      continue;
+    }
+
     if (isHookOutdated(currentContent, committedContent)) {
       info.push({
         name,
@@ -638,6 +680,7 @@ export function dryRunHooks(
   const upgraded: string[] = [];
   let outdatedCount = 0;
   let upToDateCount = 0;
+  let newerCount = 0;
   let notInstalledCount = 0;
 
   const hooks = outdatedHooks.map(h => {
@@ -655,6 +698,8 @@ export function dryRunHooks(
       hookResult.upgraded.push(h.name);
     } else if (h.status === 'up-to-date') {
       upToDateCount++;
+    } else if (h.status === 'newer') {
+      newerCount++;
     } else {
       notInstalledCount++;
     }
@@ -669,6 +714,7 @@ export function dryRunHooks(
     upgraded,
     outdatedCount,
     upToDateCount,
+    newerCount,
     notInstalledCount,
   };
 }
@@ -724,6 +770,15 @@ export function upgradeHooks(
         name: h.name,
         hookPath: h.hookPath,
         status: 'up-to-date' as const,
+      };
+    } else if (h.status === 'newer') {
+      // Never downgrade a project-evolved hook. Reported, not written.
+      skipped.push(h.name);
+      return {
+        name: h.name,
+        hookPath: h.hookPath,
+        status: 'newer' as const,
+        reason: h.reason,
       };
     } else {
       skipped.push(h.name);
