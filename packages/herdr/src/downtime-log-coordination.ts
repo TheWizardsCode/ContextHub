@@ -21,6 +21,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { AuditBudgetDivergence, HostBudgetEvidence } from './downtime-log-budget.js';
+import { dispatchSourceFields } from './source-identity.js';
 import {
   COORDINATION_LOG_FILE,
   appendRollingJsonl,
@@ -196,6 +197,18 @@ export interface CoordinationLogEntry {
   /** The wl/CLI error that caused an entry-kept check-in (`reason: 'wl-error'`). */
   error?: string;
   /**
+   * Running-code freshness (WL-0MWWMPDVM009LTQR): the full commit hash of the
+   * source this dispatcher process loaded, its process start time and whether
+   * that runtime predates the checkout `HEAD`. Attached to EVERY entry while
+   * the dispatcher identity is configured (`index.ts`), so a dispatch record
+   * can be tied to a specific source commit without `ps` archaeology. Absent
+   * when no identity is configured (tests and unwired callers) — the log
+   * shape stays backward compatible.
+   */
+  sourceCommit?: string;
+  sourceStartedAt?: string;
+  sourceStale?: boolean;
+  /**
    * Per-bucket widening signal (WL-0MWFJ8R1P005G1H1): recorded on a
    * successful `operation: 'checkin'` entry whose computation filled at
    * least one bucket from beyond the visible window. `buckets` names those
@@ -285,7 +298,9 @@ export async function appendCoordinationLogEntry(
     await appendRollingJsonl(
       cwd,
       COORDINATION_LOG_FILE,
-      JSON.stringify(entry),
+      // Freshness fields go FIRST so an explicit entry value (the
+      // `dispatcher-start` record) wins over the ambient identity.
+      JSON.stringify({ ...dispatchSourceFields(), ...entry }),
       resolveCoordinationLogPolicy(policy),
     );
   } catch {

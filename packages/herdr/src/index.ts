@@ -179,6 +179,11 @@ import {
   readDowntimeLogEntries,
   recentAuditDispatchedItemIds,
 } from './downtime-log.js';
+import { logDispatcherStart } from './dispatcher-start-log.js';
+import {
+  configureDispatcherSourceIdentity,
+  resolveSourceIdentity,
+} from './source-identity.js';
 import {
   resumeStalledPane,
   scanStalledPanes,
@@ -2121,6 +2126,19 @@ export async function main(): Promise<void> {
       };
     },
   });
+
+  // Running-code freshness (WL-0MWWMPDVM009LTQR): resolve the checkout commit
+  // this process is actually running and record it ONCE per dispatcher start
+  // (`.worklog/downtime-coordination.log` → `kind: 'dispatcher-start'`).
+  // Configuring the ambient identity also attaches `sourceCommit` /
+  // `sourceStartedAt` / `sourceStale` to every subsequent decision entry, so a
+  // dispatch record can be tied to a source commit without `ps` archaeology.
+  // Fail-open: an unresolvable checkout writes the start record without source
+  // fields and emits no warning. A runtime that predates checkout HEAD gets
+  // one actionable stderr warning naming the restart remedy.
+  const sourceIdentity = resolveSourceIdentity();
+  configureDispatcherSourceIdentity(sourceIdentity);
+  await logDispatcherStart(downtimeWorker.instanceId, targetCwd, sourceIdentity);
 
   const selectedItem = await runWorklistTui(
     fetcher,

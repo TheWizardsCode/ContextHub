@@ -2966,6 +2966,56 @@ Double dispatch is still impossible: the claim flips the item to
 `in_progress` (or, on the audit tier, is CAS-guarded on `--if-assignee ""`) and
 the tier's dispatched marker excludes it for the marker lifetime.
 
+### Running-code freshness — which commit is the dispatcher actually running? (WL-0MWWMPDVM009LTQR)
+
+The plugin runs from the live checkout (`npx tsx src/start.ts`), so a
+long-lived worklist pane keeps executing the module graph it loaded at process
+start. Checkout advances (commits, `git pull`, a rebased `dev`) are invisible
+to the running dispatcher until the pane is restarted — the 2026-11-25
+dependency-blocked dispatch investigation could not tell "the fix is wrong"
+from "the fix is not loaded".
+
+At dispatcher start (`main()` in `packages/herdr/src/index.ts`) the plugin
+resolves:
+
+- the checkout `HEAD` commit hash and its committer timestamp
+  (`git log -1 --format=%H%n%cI`), and
+- the process start time derived from `process.uptime()`.
+
+It then writes ONE `kind: 'dispatcher-start'` record to
+`<worklog-root>/.worklog/downtime-coordination.log`:
+
+```json
+{"kind":"dispatcher-start","operation":"start","instanceId":"…",
+ "sourceCommit":"a1b2c3d4e5f6…","sourceStartedAt":"2026-11-24T12:00:00.000Z",
+ "sourceStale":false,"at":"2026-11-24T13:00:00.000Z"}
+```
+
+While the identity is configured, **every** coordination-log entry — every
+`kind: 'decision'` dispatch or refusal record included — carries the same
+`sourceCommit` / `sourceStartedAt` / `sourceStale` fields, so a dispatch can be
+tied to the commit that produced it without `ps` archaeology. To check whether
+a record's runtime is still current, compare its `sourceCommit` with
+`git rev-parse HEAD`; a mismatch means the pane must be restarted.
+
+**Staleness warning.** When the process started BEFORE the checkout `HEAD`
+commit was committed (the checkout advanced after this process loaded its
+modules), the plugin emits exactly ONE actionable stderr warning:
+
+```
+[worklog-plugin] Downtime dispatcher is running stale code: this process started
+<startedAt>, before checkout HEAD <shortCommit> was committed (<committedAt>).
+Restart the Worklog plugin pane to load the current checkout.
+```
+
+A runtime that is current at start emits no warning. The signal is deliberately
+observability-only: it never gates, delays or refuses a dispatch.
+
+Fail-open: an unavailable/foreign git checkout, a malformed `git log` payload
+or a git timeout resolves no identity — the start record is still written
+(without source fields) and no warning is emitted. A log-write failure is
+swallowed, so freshness observability can never crash the dispatcher.
+
 ### Producer-hold sentinel (WL-0MV85WDOM007BKF8)
 
 The **scheduling-hold convention**: a non-empty `assignee` means the item is
@@ -6383,6 +6433,8 @@ likewise re-read live every tick and clamped on load
 |---|---|
 | `packages/herdr/src/dispatcher-anchor*.ts` | The dispatcher-anchor module family: the barrel (`dispatcher-anchor.ts`, re-exports only) over the sibling modules — constants/types (`contract.ts`), `herdr` output parsers (`cli-parsers.ts`), subprocess helpers + deps factory (`herdr-cli.ts`), anchor/tab-anchor persistence (`persistence.ts`), Dispatcher provisioning and per-prefix tab anchors (`tab-anchors.ts`), project workspace + item-ID placement (`placement.ts`) (full layout: [dispatcher-anchor module layout](#dispatcher-anchor-module-layout-wl-0mvghcp9005sjpz)) |
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
+| `packages/herdr/src/source-identity.ts` | Running-code freshness (`resolveSourceIdentity`, `processStartMs`, `formatStaleSourceWarning`, ambient dispatcher identity) — the loaded commit + process start time attached to coordination-log entries (WL-0MWWMPDVM009LTQR) |
+| `packages/herdr/src/dispatcher-start-log.ts` | Writes the once-per-start `kind: 'dispatcher-start'` record and the one-off stale-runtime warning (WL-0MWWMPDVM009LTQR) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
 | `packages/herdr/src/downtime-worker*.ts` | The downtime-worker module family: the barrel (`downtime-worker.ts`, re-exports only) over the sibling modules — worker tick orchestration (`downtime-worker.orchestrator*.ts`, `worker-contract.ts`, `launch-fence.ts`), dispatch (`dispatch.ts`, `dispatch-filter.ts`, `dispatch-claims.ts`, `dispatch-cpu-gate.ts`, `dispatch-contract.ts`), coordination (`coordination.ts`, `coordination-leader.ts`), the bounded head scan + registered-root sweep (`head-scan.ts`), gates/prompts/stalled-resume, pane, idle/poller, parsers/selection, constants/types/clamps (full layout: [Module layout](#module-layout)) |
