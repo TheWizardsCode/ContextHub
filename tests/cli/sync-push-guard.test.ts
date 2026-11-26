@@ -106,7 +106,11 @@ function seedPollutedRemote(local: string, prefix: string): void {
     },
   });
   fs.writeFileSync(dataPath, `${mk(`${prefix}-1`, 'own one')}\n${mk('WL-101', 'foreign one')}\n`, 'utf-8');
-  git(local, 'checkout', '-q', '-b', 'main');
+  // Branch-agnostic: `git init` already lands on `main` when the developer's
+  // `init.defaultBranch` says so, and `-b` would then fail with
+  // "a branch named 'main' already exists" (WL-0MWWSCXEC001BQ3I). `-B` resets
+  // the branch to HEAD when it exists and creates it otherwise.
+  git(local, 'checkout', '-q', '-B', 'main');
   git(local, 'add', '-A');
   git(local, 'commit', '-q', '-m', 'init');
   git(local, 'checkout', '--orphan', 'worklog/data');
