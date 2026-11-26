@@ -59,6 +59,10 @@ import {
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
 import { resolveHeadDependencyFrontier } from './downtime-worker.dispatch-filter.js';
 import {
+  memoizeBlockerFetcher,
+  type DependencyRecheckMemo,
+} from './downtime-worker.claim-dependency-guard.js';
+import {
   auditItemEligible,
   auditPinAdmits,
   classifyItemForDispatch,
@@ -157,6 +161,11 @@ export interface HeadScanBase {
   holds: HeadScanHolds;
   /** Producer-review flag writes already performed this cycle (deduped). */
   flaggedForBudget: Set<string>;
+  /**
+   * One tick's dependency-read memo (F3, WL-0MWWMPCD2008HSSP), shared with the
+   * leader's offer loop so a candidate costs at most one `wl dep list` per tick.
+   */
+  dependencyRecheckMemo?: DependencyRecheckMemo;
   /**
    * Machine-wide coordination directory (round-robin cursor + run ledger).
    * Optional so a pure filter-chain test can omit it; every production scan
@@ -283,6 +292,10 @@ export async function dispatchFromOwnHead(
     'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
   };
   const ownInFlight = await ctx.inFlightForRoot(ctx.root);
+  const fetchBlockers =
+    deps.fetchCriticalBlockers === undefined || ctx.dependencyRecheckMemo === undefined
+      ? deps.fetchCriticalBlockers
+      : memoizeBlockerFetcher(deps.fetchCriticalBlockers, ctx.dependencyRecheckMemo);
   for (const item of candidates) {
     // Sequential filters — the same contract as the offer path.
     const kind = classifyItemForDispatch(item, now);
@@ -294,10 +307,10 @@ export async function dispatchFromOwnHead(
     // audit-batch continuation, registered-root sweep) SKIPS the blocked item so
     // the same bug cannot reappear on a foreign root. A lookup failure fails the
     // scan CLOSED with the stable `dependency-lookup-failed` reason.
-    if (item.priority === 'critical' && deps.fetchCriticalBlockers !== undefined) {
+    if (item.priority === 'critical' && fetchBlockers !== undefined) {
       const guarded = await resolveHeadDependencyFrontier(
         { item, kind },
-        deps.fetchCriticalBlockers,
+        fetchBlockers,
         ctx.root,
       );
       if (!guarded.ok) return { dispatched: false, reason: guarded.reason };
@@ -386,6 +399,7 @@ export async function dispatchFromOwnHead(
         localPreferenceMode: opts.localPreferenceMode,
         selectionPath: ctx.selectionPath,
         selectionReason: ctx.selectionReason,
+        dependencyRecheckMemo: ctx.dependencyRecheckMemo,
       },
     );
     // Per-project fairness (WL-0MWKY141H002LULI AC3): the caller records this

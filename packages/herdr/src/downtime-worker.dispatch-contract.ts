@@ -633,6 +633,15 @@ export interface DowntimeDispatchOutcome {
    * run availability-only admission and reopened the cross-host audit race.
    * The offer is kept and the peer's implement/prep offers are unaffected;
    * the same token names the per-offer rejection gate.
+   *
+   * Claim-boundary dependency re-check (WL-0MWWMPCD2008HSSP):
+   * `dependency-blocked` (a live outbound `depends-on` edge to a non-terminal
+   * item was found immediately before the CAS claim) and
+   * `dependency-lookup-failed` (the `wl dep list` lookup threw or returned the
+   * legacy `null` signal — fail closed). Both are NEUTRAL refusals: no claim,
+   * no marker, no spawn, no strike and no non-terminal cooldown. The audit tier
+   * is exempt (it re-checks freshness instead). See
+   * `downtime-worker.claim-dependency-guard.ts`.
    * already running — a non-stale kind=audit dispatch marker maps to an
    * `in_progress` item — so the audit tier was skipped; a skip that leaves
    * an empty remaining backlog reports this reason, NEVER 'no-candidate',

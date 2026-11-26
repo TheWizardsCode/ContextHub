@@ -5477,6 +5477,36 @@ non-dispatchable items simply dispatches nothing at that candidate.
 worklist: the guard only decides whether a *dispatch/offer* happens, so the
 operator still sees every blocked item (and can clear its blocker).
 
+#### Claim-boundary dependency re-check (WL-0MWWMPCD2008HSSP)
+
+The selection guards above cannot cover an offer computed by a **peer
+instance**: the leader claims and spawns an offer it did not compute, and the
+item re-fetch seam (`fetchItem` → `classifyItemForDispatchDetail`) carries no
+dependency-edge information. So the LAST gate before the CAS claim — inside
+`dispatchClaimedTier` (`downtime-worker.dispatch-claims.ts`) — re-checks the
+candidate's outbound `depends-on` edges through the new
+`recheckDependenciesForClaim` (`downtime-worker.claim-dependency-guard.ts`):
+
+| Situation | Verdict | Decision-log reason |
+| --- | --- | --- |
+| No live outbound `depends-on` edge | claim/spawn proceed | — |
+| A live edge (target not `completed`/`deleted`, stage not `in_review`/`done`) | refused BEFORE the claim | `dependency-blocked` |
+| `wl dep list`/`wl show` throws, or the legacy `null` signal | refused (fail closed) | `dependency-lookup-failed` |
+| AUDIT kind | exempt — it re-checks freshness (`hasFreshAudit`) and audits terminal items | — |
+
+Both refusals are **neutral**: no CAS claim, no marker, no pane, no
+try-strike and no non-terminal cooldown. The leader's offer loop returns the
+token instead of falling through to `no-candidate` (which would arm the
+no-candidate cooldown), so the next idle tick simply re-checks.
+
+**One read per candidate per tick.** Each dispatch entry point creates ONE
+`DependencyRecheckMemo` and passes it to `dispatchClaimedTier`; the F2
+selection guard (`resolveHeadDependencyFrontier`) and the claim guard share it
+through `memoizeBlockerFetcher`. A candidate a tick inspects twice (e.g. a
+critical item walked by the frontier guard and then claimed, or an offer the
+leader refuses and later sees again in its own-backlog fallback) therefore
+costs exactly one `wl dep list`.
+
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open
 **critical** item at ANY stage via `wl list --priority critical --status open

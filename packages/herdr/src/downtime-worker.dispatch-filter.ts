@@ -60,6 +60,10 @@ import {
   type DowntimeDispatchOutcome,
 } from './downtime-worker.dispatch-contract.js';
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
+import {
+  createDependencyRecheckMemo,
+  memoizeBlockerFetcher,
+} from './downtime-worker.claim-dependency-guard.js';
 import { criticalSkillKind, type CriticalCandidate } from './downtime-worker.parsers.js';
 import { resolveDependencyFrontier } from './downtime-worker.selection.js';
 import type {
@@ -278,6 +282,13 @@ export async function dispatchFromHerdrList(
     hostBudgetRetryAfterS?: number },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
+  // ONE dependency-read memo for this dispatch tick (F3, WL-0MWWMPCD2008HSSP):
+  // shared by the F2 selection guard and the claim-boundary guard below, so a
+  // candidate costs at most one `wl dep list` even when both inspect it.
+  const dependencyRecheckMemo = createDependencyRecheckMemo();
+  const fetchBlockers = deps.fetchCriticalBlockers === undefined
+    ? undefined
+    : memoizeBlockerFetcher(deps.fetchCriticalBlockers, dependencyRecheckMemo);
   const entries = await _readDowntimeEntries(ctx.cwd);
   // Item ids already flagged this call so the producer-review flag is set at
   // most ONCE per dispatch even when the same critical item is visited by
@@ -322,7 +333,7 @@ export async function dispatchFromHerdrList(
     // recorded as the stable `dependency-lookup-failed` decision-log reason.
     const guarded = await resolveHeadDependencyFrontier(
       rawCriticalFirst,
-      deps.fetchCriticalBlockers,
+      fetchBlockers,
       ctx.cwd,
     );
     if (!guarded.ok) return { dispatched: false, reason: guarded.reason };
@@ -386,6 +397,7 @@ export async function dispatchFromHerdrList(
       localPreferenceMode: ctx.localPreferenceMode,
       selectionPath: 'critical-first',
       selectionReason: guard.reason,
+      dependencyRecheckMemo,
     });
     if (outcome.dispatched) return outcome;
     // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): a host-budget refusal
@@ -438,10 +450,10 @@ export async function dispatchFromHerdrList(
     // dependency-blocked critical item is skipped here (never dispatched at
     // itself). A lookup failure fails closed for the tick. Non-critical items
     // keep today's unchanged behaviour.
-    if (item.priority === 'critical' && deps.fetchCriticalBlockers !== undefined) {
+    if (item.priority === 'critical' && fetchBlockers !== undefined) {
       const guarded = await resolveHeadDependencyFrontier(
         { item, kind: k },
-        deps.fetchCriticalBlockers,
+        fetchBlockers,
         ctx.cwd,
       );
       if (!guarded.ok) return { dispatched: false, reason: guarded.reason };
@@ -575,6 +587,7 @@ export async function dispatchFromHerdrList(
       selectionPath: 'normal-scan',
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
       ...(auditAvailability !== undefined ? { auditAvailability } : {}),
+      dependencyRecheckMemo,
     });
     if (outcome.dispatched) return outcome;
     // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): record the first
