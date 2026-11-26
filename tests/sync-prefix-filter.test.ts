@@ -117,7 +117,7 @@ describe('filterRemoteDataByPrefix (SA-0MSC0BM1V0032UYT)', () => {
     expect(result.comments.map(c => c.id)).toEqual(['c1']);
   });
 
-  it('drops dependency edges that touch dropped foreign items', () => {
+  it('keeps edges whose either endpoint is a local item, drops only both-foreign edges', () => {
     const ownA = makeItem('GUA-001');
     const ownB = makeItem('GUA-002');
     const foreign = makeItem('WL-001');
@@ -128,9 +128,52 @@ describe('filterRemoteDataByPrefix (SA-0MSC0BM1V0032UYT)', () => {
     ];
     const result = filterRemoteDataByPrefix([ownA, ownB, foreign], [], edges, [], 'GUA');
 
+    // local→local kept, local→foreign kept, foreign→local kept
     expect(result.edges).toEqual([
       { fromId: 'GUA-001', toId: 'GUA-002', createdAt: '2024-01-01T00:00:00.000Z' },
+      { fromId: 'GUA-001', toId: 'WL-001', createdAt: '2024-01-01T00:00:00.000Z' },
+      { fromId: 'WL-001', toId: 'GUA-002', createdAt: '2024-01-01T00:00:00.000Z' },
     ]);
+    expect(result.droppedEdges).toEqual([]);
+  });
+
+  it('drops only edges whose both endpoints are foreign', () => {
+    const foreignA = makeItem('WL-001');
+    const foreignB = makeItem('SA-002');
+    const edges: DependencyEdge[] = [
+      { fromId: 'WL-001', toId: 'SA-002', createdAt: '2024-01-01T00:00:00.000Z' },
+    ];
+    const result = filterRemoteDataByPrefix([foreignA, foreignB], [], edges, [], 'GUA');
+
+    expect(result.edges).toEqual([]);
+    expect(result.droppedEdges).toEqual(['WL-001->SA-002']);
+  });
+
+  it('keeps local→foreign cross-repo edges and reports dropped both-foreign edges', () => {
+    // Regression case for WL-0MWXBHODR002ZLJG → SA-0MWFFD9N0050SP5
+    const local = makeItem('WL-0MWXBHODR002ZLJG');
+    const foreign = makeItem('SA-0MWFFD9N0050SP5');
+    const edges: DependencyEdge[] = [
+      { fromId: 'WL-0MWXBHODR002ZLJG', toId: 'SA-0MWFFD9N0050SP5', createdAt: '2024-01-01T00:00:00.000Z' },
+    ];
+    const result = filterRemoteDataByPrefix([local, foreign], [], edges, [], 'WL');
+
+    expect(result.edges).toEqual([
+      { fromId: 'WL-0MWXBHODR002ZLJG', toId: 'SA-0MWFFD9N0050SP5', createdAt: '2024-01-01T00:00:00.000Z' },
+    ]);
+    expect(result.droppedEdges).toEqual([]);
+  });
+
+  it('reports dropped both-foreign edge ids for observability', () => {
+    const foreignA = makeItem('WL-001');
+    const foreignB = makeItem('SA-002');
+    const edges: DependencyEdge[] = [
+      { fromId: 'WL-001', toId: 'SA-002', createdAt: '2024-01-01T00:00:00.000Z' },
+      { fromId: 'WL-002', toId: 'SA-003', createdAt: '2024-01-01T00:00:00.000Z' },
+    ];
+    const result = filterRemoteDataByPrefix([foreignA, foreignB, makeItem('WL-002'), makeItem('SA-003')], [], edges, [], 'GUA');
+
+    expect(result.droppedEdges.sort()).toEqual(['WL-001->SA-002', 'WL-002->SA-003']);
   });
 
   it('drops audit results of dropped foreign items, keeps audits of own items', () => {
@@ -181,9 +224,18 @@ describe('sync prefix filter — polluted remote ref (SA-0MSC0BM1V0032UYT)', () 
     // Seed the "remote" worklog ref with own + foreign items (and their
     // comments/edges) — simulating a polluted remote snapshot.
     const lines = [
-      jsonlLine('workitem', makeItem('GUA-100', { title: 'Own item' })),
-      jsonlLine('workitem', makeItem('WL-200', { title: 'Foreign item' })),
+      jsonlLine('workitem', {
+        ...makeItem('GUA-100', { title: 'Own item' }),
+        // Cross-repo blocker owned by the local item — must survive sync.
+        dependencies: [{ from: 'GUA-100', to: 'SA-0MWFFD9N0050SP5' }],
+      }),
+      jsonlLine('workitem', {
+        ...makeItem('WL-200', { title: 'Foreign item' }),
+        // Fully-foreign edge — must be dropped and reported.
+        dependencies: [{ from: 'WL-200', to: 'SA-300' }],
+      }),
       jsonlLine('workitem', makeItem('SA-300', { title: 'Another foreign item' })),
+      jsonlLine('workitem', makeItem('SA-0MWFFD9N0050SP5', { title: 'Sibling blocker' })),
       jsonlLine('comment', makeComment('cc1', 'GUA-100')),
       jsonlLine('comment', makeComment('cc2', 'WL-200')),
       jsonlLine('audit_result', makeAudit('GUA-100')),
@@ -228,5 +280,59 @@ describe('sync prefix filter — polluted remote ref (SA-0MSC0BM1V0032UYT)', () 
     for (const it of items) {
       expect(it.id.startsWith('GUA-'), `foreign item imported: ${it.id}`).toBe(true);
     }
+  }, 90000);
+
+  it('keeps a local→foreign cross-repo edge through a full sync (WL-0MWXIT6H3006TY2I)', async () => {
+    const sync = await execWithInput(
+      `tsx ${cliPath} --worklog-dir ${repoA}/.worklog sync --no-push`,
+      '',
+      { cwd: repoA, timeout: 60000 }
+    );
+    expect(sync.exitCode, `${sync.stdout}\n${sync.stderr}`).toBe(0);
+
+    // Keep foreign discovery fast and deterministic: point the projects root at
+    // an empty directory so `dep list` never scans the shared temp parent.
+    const emptyProjectsRoot = createTempDir();
+    try {
+      const configPath = path.join(repoA, '.worklog', 'config.yaml');
+      fs.appendFileSync(configPath, `\nprojectsRoot: ${emptyProjectsRoot}\n`, 'utf8');
+
+      // The owning item imported with its foreign blocker still attached.
+      const depList = await execWithInput(
+        `tsx ${cliPath} --worklog-dir ${repoA}/.worklog dep list GUA-100 --json`,
+        '',
+        { cwd: repoA, timeout: 30000 }
+      );
+      expect(depList.exitCode, `${depList.stdout}\n${depList.stderr}`).toBe(0);
+      const payload = JSON.parse(depList.stdout);
+      const outbound = (payload.outbound ?? []) as Array<{ id: string; foreign?: boolean }>;
+      expect(outbound.map(e => e.id)).toContain('SA-0MWFFD9N0050SP5');
+    } finally {
+      cleanupTempDir(emptyProjectsRoot);
+    }
+
+    // And it is present in the dependency_edges table, not just the CLI view.
+    const Database = (await import('better-sqlite3')).default;
+    const raw = new Database(path.join(repoA, '.worklog', 'worklog.db'), { readonly: true });
+    try {
+      const rows = raw
+        .prepare('SELECT fromId, toId FROM dependency_edges WHERE fromId = ?')
+        .all('GUA-100') as Array<{ fromId: string; toId: string }>;
+      expect(rows.map(r => r.toId)).toContain('SA-0MWFFD9N0050SP5');
+    } finally {
+      raw.close();
+    }
+  }, 120000);
+
+  it('reports both-foreign edges it drops (never silent)', async () => {
+    const sync = await execWithInput(
+      `tsx ${cliPath} --worklog-dir ${repoA}/.worklog sync --no-push`,
+      '',
+      { cwd: repoA, timeout: 60000 }
+    );
+    expect(sync.exitCode, `${sync.stdout}\n${sync.stderr}`).toBe(0);
+    const output = `${sync.stdout}\n${sync.stderr}`;
+    expect(output).toMatch(/dropped \d+ edge\(s\)/i);
+    expect(output).toContain('WL-200->SA-300');
   }, 90000);
 });

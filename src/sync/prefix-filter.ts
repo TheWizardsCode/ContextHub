@@ -42,8 +42,11 @@ export function isOwnProjectItemId(id: string, projectPrefix: string): boolean {
 
 /**
  * Filter remote sync data so only records belonging to the project prefix
- * can enter the merge. Comments, dependency edges and audit results that
- * reference dropped foreign items are removed with them.
+ * can enter the merge. Comments and audit results that reference dropped
+ * foreign items are removed with them. Dependency edges whose **both**
+ * endpoints are foreign are dropped; edges whose **either** endpoint
+ * resolves to a local item (including `local → foreign` cross-repo edges)
+ * are kept — so a cross-project blocker survives sync (WL-0MWXIT6H3006TY2I).
  *
  * @param items - Remote work items fetched from the remote ref.
  * @param comments - Remote comments.
@@ -64,6 +67,7 @@ export function filterRemoteDataByPrefix(
   edges: DependencyEdge[];
   audits: AuditResult[];
   droppedItems: string[];
+  droppedEdges: string[];
 } {
   const allowedItemIds = new Set<string>();
   const keptItems: WorkItem[] = [];
@@ -79,7 +83,15 @@ export function filterRemoteDataByPrefix(
   }
 
   const keptComments = comments.filter(c => allowedItemIds.has(c.workItemId));
-  const keptEdges = edges.filter(e => allowedItemIds.has(e.fromId) && allowedItemIds.has(e.toId));
+  const keptEdges: DependencyEdge[] = [];
+  const droppedEdges: string[] = [];
+  for (const edge of edges) {
+    if (allowedItemIds.has(edge.fromId) || allowedItemIds.has(edge.toId)) {
+      keptEdges.push(edge);
+    } else {
+      droppedEdges.push(`${edge.fromId}->${edge.toId}`);
+    }
+  }
   const keptAudits = audits.filter(a => allowedItemIds.has(a.workItemId));
 
   return {
@@ -88,5 +100,6 @@ export function filterRemoteDataByPrefix(
     edges: keptEdges,
     audits: keptAudits,
     droppedItems,
+    droppedEdges,
   };
 }

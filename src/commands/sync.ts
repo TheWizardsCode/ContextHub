@@ -269,6 +269,14 @@ export async function performSync(
           console.log(`\nForeign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching project prefix '${projectPrefix}' (${preview}${ellipsis})`);
         }
       }
+      if (filtered.droppedEdges.length > 0) {
+        const preview = filtered.droppedEdges.slice(0, 5).join(', ');
+        const ellipsis = filtered.droppedEdges.length > 5 ? ', …' : '';
+        logLine(`Foreign-prefix filter: dropped ${filtered.droppedEdges.length} edge(s) with both endpoints foreign (${preview}${ellipsis})`);
+        if (!isJsonMode && !isSilent) {
+          console.log(`\nForeign-prefix filter: dropped ${filtered.droppedEdges.length} edge(s) with both endpoints foreign (${preview}${ellipsis})`);
+        }
+      }
       remoteItems = filtered.items;
       remoteComments = filtered.comments;
       remoteEdges = filtered.edges;

@@ -142,19 +142,28 @@ snapshot. The repo-context guard is not enough against already-running
 processes that never re-read the binary/source.
 
 As defense-in-depth, `wl sync` now applies a **prefix filter at merge time**
-(`filterRemoteDataByPrefix` in `src/sync.ts`): work items fetched from the
-remote ref whose ID prefix does not match the project's configured prefix
-(`--prefix`, or `.worklog/config.yaml` → `prefix`) are **never imported**, and
-their comments, dependency edges and audit results are dropped with them. IDs
+(`filterRemoteDataByPrefix` in `src/sync/prefix-filter.ts`): work items fetched
+from the remote ref whose ID prefix does not match the project's configured
+prefix (`--prefix`, or `.worklog/config.yaml` → `prefix`) are **never
+imported**, and their comments and audit results are dropped with them. IDs
 without a `-` separator are unclassifiable and are kept (matching
 `wl doctor foreign-items`). The filter is the last line of defence: even a
 sync that somehow reaches the merge step with a polluted remote snapshot
 cannot re-import foreign items.
 
+**Dependency edges are the one exception** (WL-0MWXIT6H3006TY2I): an edge that
+has **either** endpoint among the kept local items is retained, so a recorded
+`local → foreign` cross-repo blocker survives a full or delta sync. Only an
+edge whose **both** endpoints are foreign is dropped — it references data this
+project never imports. When that happens the count and ids are reported
+(never silently discarded):
+
 ```bash
 # A sync against a polluted remote ref logs/prints the dropped foreign items
 wl sync
 # e.g. "Foreign-prefix filter: dropped N remote item(s) not matching project prefix 'SA'"
+# and, for a fully-foreign edge:
+# "Foreign-prefix filter: dropped 1 edge(s) with both endpoints foreign (WL-200->SA-300)"
 ```
 
 ## Daemon / long-running process restart procedure

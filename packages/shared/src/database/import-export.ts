@@ -221,10 +221,12 @@ export function importWorkItems(
 
     if (dependencyEdges) {
       // Replace the edge set differentially: drop edges absent from the
-      // incoming set, write only new/changed edges whose endpoints exist.
+      // incoming set, write only new/changed edges whose **either** endpoint
+      // exists locally — so a `local → foreign` cross-repo edge survives
+      // the destructive replace (WL-0MWXIT6H3006TY2I).
       const desiredEdges = new Map<string, DependencyEdge>();
       for (const edge of dependencyEdges) {
-        if (ctx.store.getWorkItem(edge.fromId) && ctx.store.getWorkItem(edge.toId)) {
+        if (ctx.store.getWorkItem(edge.fromId) || ctx.store.getWorkItem(edge.toId)) {
           desiredEdges.set(`${edge.fromId}\u0000${edge.toId}`, edge);
         }
       }
@@ -240,7 +242,14 @@ export function importWorkItems(
       for (const [key, edge] of desiredEdges) {
         const stored = storedEdgeKey.get(key);
         if (!stored || stored.createdAt !== edge.createdAt) {
-          ctx.store.saveDependencyEdge(edge);
+          // `dependency_edges` has a foreign key on `fromId`, so an edge whose
+          // owner is not a local item cannot be stored (a `foreign → local`
+          // edge never arises from the JSONL export, which only emits edges
+          // owned by exported local items). Skip it rather than abort the
+          // whole sync transaction.
+          if (ctx.store.getWorkItem(edge.fromId)) {
+            ctx.store.saveDependencyEdge(edge);
+          }
         }
       }
     }
@@ -292,6 +301,10 @@ export function importWorkItems(
  *
  * When `dependencyEdges` is provided, only edges whose `fromId` or `toId`
  * belongs to the provided items are upserted; all other edges are untouched.
+ * An upserted edge is persisted when **either** endpoint resolves to a stored
+ * item, so a `local → foreign` cross-repo blocker is retained
+ * (WL-0MWXIT6H3006TY2I); only an edge whose both endpoints are unresolvable
+ * is skipped.
  *
  * If `items` is empty the method is a no-op (no export/sync triggered).
  */
@@ -325,10 +338,14 @@ export function upsertItems(
   if (dependencyEdges) {
     const affectedIds = new Set(items.map(i => i.id));
     for (const edge of dependencyEdges) {
+      const ownerLocal = ctx.store.getWorkItem(edge.fromId);
       if (
         (affectedIds.has(edge.fromId) || affectedIds.has(edge.toId)) &&
-        ctx.store.getWorkItem(edge.fromId) &&
-        ctx.store.getWorkItem(edge.toId)
+        // Keep when either endpoint resolves (a `local → foreign` cross-repo
+        // edge has a foreign target), but the owner must exist locally: the
+        // `dependency_edges` schema has a foreign key on `fromId`, so a
+        // `foreign → local` edge is unstorable and is skipped.
+        ownerLocal
       ) {
         ctx.store.saveDependencyEdge(edge);
       }

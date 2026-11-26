@@ -485,6 +485,47 @@ describe('JSONL Import/Export', () => {
       expect(dependencyEdges[0].toId).toBe('WI-002');
     });
 
+    it('should round-trip a local→foreign cross-repo dependency edge (WL-0MWXIT6H3006TY2I)', () => {
+      const items: WorkItem[] = [
+        {
+          id: 'WL-001',
+          title: 'Local owner',
+          description: 'Blocked on a sibling repo',
+          status: 'blocked',
+          priority: 'medium',
+          sortIndex: 0,
+          parentId: null,
+          createdAt: '2024-01-01T00:00:00.000Z',
+          updatedAt: '2024-01-01T00:00:00.000Z',
+          tags: [],
+          assignee: '',
+          stage: '',
+          issueType: '',
+          createdBy: '',
+          deletedBy: '',
+          deleteReason: '',
+          risk: '' as const,
+          effort: '' as const,
+        },
+      ];
+
+      const edges = [
+        { fromId: 'WL-001', toId: 'SA-0MWFFD9N0050SP5', createdAt: '2024-01-03T00:00:00.000Z' },
+      ];
+
+      exportToJsonl(items, [], testFilePath, edges);
+
+      const { items: importedItems, dependencyEdges } = importFromJsonl(testFilePath);
+
+      // The owning item's `dependencies` array carries the foreign target…
+      const item = importedItems.find(it => it.id === 'WL-001');
+      expect(item?.dependencies).toEqual([{ from: 'WL-001', to: 'SA-0MWFFD9N0050SP5' }]);
+      // …and the import re-hydrates it as an edge.
+      expect(dependencyEdges).toHaveLength(1);
+      expect(dependencyEdges[0].fromId).toBe('WL-001');
+      expect(dependencyEdges[0].toId).toBe('SA-0MWFFD9N0050SP5');
+    });
+
     it('should default missing dependencies to empty array', () => {
       const content = [
         JSON.stringify({ type: 'workitem', data: {
