@@ -5932,7 +5932,10 @@ retained rows `selectedRoot` is pinned to `tce-the-rising` (uncharged because
 its offer was never consumed) while `dispatchingRoot` rotates across all five
 served roots — the whole-set rotation and its fall-through working as designed,
 with `dispatchingRoot` as the accounting key. Follow-up:
-**WL-0MWT3Z9M9002Z9BF**.
+**WL-0MWT3Z9M9002Z9BF**. The sub-window evidence limit is inherent to *this*
+window (its earlier generations had rotated); the later 2026-11-27 window below
+re-verifies the identity across every dispatch because its whole window fits in
+the retained history.
 
 *Recorded measurement — 2026-11-24T12:19:00Z → 2026-11-25T11:09:00Z (PASS on
 both thresholds).* The window starts at the live-worker restart of
@@ -5975,6 +5978,72 @@ precondition, and both the concentration ratio (1.78×) and the hard run-length
 pass (max 2) sit well inside their thresholds. This window supersedes the
 2026-11-22/23 result, whose run-length failure was the leadership-hand-off
 defect fixed by WL-0MWT3Z9M9002Z9BF and re-audited via WL-0MWT54AR8005LMKN.
+
+*Recorded measurement — 2026-11-27T09:32:44Z → 2026-11-27T17:00:00Z (full
+coordination-log retention; both thresholds met).* This window closes the
+WL-0MWNN84HO004DXQU AC4 evidence limit on the 2026-11-22/23 record: it is read
+from **all four retained coordination-log generations** (`.log.3` → `.log`, one
+leader instance `8aed93da-…`, contiguous 09:32Z→17:00Z), so the accounting
+identity is checked across **every** dispatch in the window rather than a
+decision-covered sub-window. The older window could verify only its last 13
+dispatches because its earlier generations had already rotated past the window
+start; at ≈ 6.5–9.7 h of retention (see [Retention &
+rotation](#rolling-log-trimming-retention--rotation)) a window chosen inside
+the retained history verifies completely.
+
+Counts (rows with a `paneId`, deduped; project key = `cwd` basename): **13
+dispatches, 4 active projects, even share 3.25**:
+
+| Project | Dispatches | × even share | Longest run | Kind mix |
+|---|---|---|---|---|
+| tce-the-rising | 5 | **1.54×** | 1 | `audit` 3, `implement` 1, `intake` 1 |
+| SorraAgents | 4 | 1.23× | 1 | `audit` 2, `implement` 1, `intake` 1 |
+| AI_Hell | 3 | 0.92× | 1 | `implement` 2, `audit` 1 |
+| Tableau-Card-Engine | 1 | 0.31× | 1 | `intake` 1 |
+
+No project exceeded twice its even share (max **1.54×**) and the longest
+consecutive run was **1**, against a ceiling of 2 — **both thresholds are met**.
+The regime check passes throughout: every decision row in the window carries
+`selectedRoot` and comes from the single leader instance. 13 dispatches over
+7 h 27 m is a thin sample (the dispatcher is capacity-bound at ≈ 1.7
+attested/h), so this is a **no-breach observation**, complementary to the
+53-dispatch 2026-11-22/23 window rather than a replacement for it.
+
+**Accounting identity — exact across the whole window.** Concatenating the four
+generations yields 13 `outcome:"dispatched"` decision rows whose
+`dispatchingRoot` counts (tce-the-rising 5 / SorraAgents 4 / AI_Hell 3 /
+Tableau-Card-Engine 1) are **identical** to the dispatch-log aggregates, with
+maximum `consecutiveRunLength` 1 equal to the computed longest run (1). The
+window's 1,576 decision rows are 1,563 `no-dispatch` and 13 `dispatched` — no
+`spawn-failed` / `marker-write-failed` consumed outcome occurred, so no row
+needed ledger-only reconciliation. Four rows again show `selectedRoot` ≠
+`dispatchingRoot` (all pinned to AI_Hell while the charge rotated); the
+dispatch row's `cwd` matches `dispatchingRoot` in every case, confirming
+`dispatchingRoot` is the accounting key and the pinned-offer fall-through is
+benign.
+
+```bash
+PROJECTS=/home/rgardler/projects
+LEADER=$PROJECTS/games_curator   # the leader at measurement time
+SINCE=2026-11-27T09:32:44Z; UNTIL=2026-11-27T17:00:00Z
+
+# Decision side: all four retained generations, one chronological pass.
+ls "$LEADER"/.worklog/downtime-coordination.log* | sort -V \
+  | while read -r f; do cat "$f"; done \
+  | jq -r --arg since "$SINCE" --arg until "$UNTIL" \
+    'select(.kind=="decision" and .at>=$since and .at<$until and .outcome=="dispatched")
+     | [(.dispatchingRoot|split("/")|last), (.consecutiveRunLength|tostring)] | @tsv' \
+  | sort | uniq -c
+
+# Dispatch side: every project's own log.
+for p in "$PROJECTS"/*/; do
+  f=$p.worklog/downtime-dispatches.log
+  [ -f "$f" ] || continue
+  jq -r --arg since "$SINCE" --arg until "$UNTIL" \
+    'select(.paneId!=null and .dispatchedAt>=$since and .dispatchedAt<$until)
+     | [(.cwd|split("/")|last), .kind] | @tsv' "$f"
+done | sort | uniq -c
+```
 
 *Attribution of the two length-3 runs (WL-0MWT3Z9M9002Z9BF AC5).* The two runs
 are attributed to the **leadership-hand-off defect now fixed**, not to a
