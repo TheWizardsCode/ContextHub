@@ -164,6 +164,8 @@ wl sync
 # e.g. "Foreign-prefix filter: dropped N remote item(s) not matching project prefix 'SA'"
 # and, for a fully-foreign edge:
 # "Foreign-prefix filter: dropped 1 edge(s) with both endpoints foreign (WL-200->SA-300)"
+# and, for a foreign→local edge the persist step cannot store (fromId FK):
+# "Foreign-edge persist: dropped 1 edge(s) that cannot be stored locally (WL-200->GUA-100)"
 ```
 
 ## Daemon / long-running process restart procedure

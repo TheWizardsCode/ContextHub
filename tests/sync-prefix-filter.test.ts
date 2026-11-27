@@ -231,8 +231,14 @@ describe('sync prefix filter — polluted remote ref (SA-0MSC0BM1V0032UYT)', () 
       }),
       jsonlLine('workitem', {
         ...makeItem('WL-200', { title: 'Foreign item' }),
-        // Fully-foreign edge — must be dropped and reported.
-        dependencies: [{ from: 'WL-200', to: 'SA-300' }],
+        // Fully-foreign edge — must be dropped and reported by the filter.
+        // The foreign→local edge survives the filter (either endpoint rule)
+        // but is unstorable at persist (`fromId` FK) — it must be reported
+        // there, never dropped silently (WL-0MWXIT6H3006TY2I AC5).
+        dependencies: [
+          { from: 'WL-200', to: 'SA-300' },
+          { from: 'WL-200', to: 'GUA-100' },
+        ],
       }),
       jsonlLine('workitem', makeItem('SA-300', { title: 'Another foreign item' })),
       jsonlLine('workitem', makeItem('SA-0MWFFD9N0050SP5', { title: 'Sibling blocker' })),
@@ -324,7 +330,7 @@ describe('sync prefix filter — polluted remote ref (SA-0MSC0BM1V0032UYT)', () 
     }
   }, 120000);
 
-  it('reports both-foreign edges it drops (never silent)', async () => {
+  it('reports both-foreign edges the filter drops (never silent)', async () => {
     const sync = await execWithInput(
       `tsx ${cliPath} --worklog-dir ${repoA}/.worklog sync --no-push`,
       '',
@@ -334,5 +340,32 @@ describe('sync prefix filter — polluted remote ref (SA-0MSC0BM1V0032UYT)', () 
     const output = `${sync.stdout}\n${sync.stderr}`;
     expect(output).toMatch(/dropped \d+ edge\(s\)/i);
     expect(output).toContain('WL-200->SA-300');
+  }, 90000);
+
+  it('reports foreign→local edges the persist step cannot store (never silent)', async () => {
+    // `WL-200 → GUA-100` survives the prefix filter (either endpoint is a
+    // local item) but cannot be written: `dependency_edges` has a foreign key
+    // on `fromId`, and WL-200 is not a local item. The persist diagnostics
+    // must name it so the loss is not silent (WL-0MWXIT6H3006TY2I AC5).
+    const sync = await execWithInput(
+      `tsx ${cliPath} --worklog-dir ${repoA}/.worklog sync --no-push`,
+      '',
+      { cwd: repoA, timeout: 60000 }
+    );
+    expect(sync.exitCode, `${sync.stdout}\n${sync.stderr}`).toBe(0);
+    const output = `${sync.stdout}\n${sync.stderr}`;
+    expect(output).toMatch(/Foreign-edge persist: dropped 1 edge\(s\)/);
+    expect(output).toContain('WL-200->GUA-100');
+  }, 90000);
+
+  it('carries persist-dropped edges in the --json sync summary (never silent)', async () => {
+    const sync = await execWithInput(
+      `tsx ${cliPath} --worklog-dir ${repoA}/.worklog sync --no-push --json`,
+      '',
+      { cwd: repoA, timeout: 60000 }
+    );
+    expect(sync.exitCode, `${sync.stdout}\n${sync.stderr}`).toBe(0);
+    const payload = JSON.parse(sync.stdout);
+    expect(payload.sync.summary.droppedEdges).toContain('WL-200->GUA-100');
   }, 90000);
 });

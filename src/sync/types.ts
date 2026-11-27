@@ -41,6 +41,14 @@ export interface SyncResult {
    */
   claimHolds?: ClaimHoldDecision[];
   /**
+   * Dependency edges the persist step could not store locally, formatted
+   * `fromId->toId` (WL-0MWXIT6H3006TY2I AC5). Typically a `foreign → local`
+   * edge, whose owner is not a local item and which the `dependency_edges`
+   * `fromId` foreign key rejects. Present for the sync log / `--json` so edge
+   * loss is never silent; absent/empty when nothing was dropped.
+   */
+  droppedEdges?: string[];
+  /**
    * Wall-clock milliseconds per sync phase (`pull`, `persist-items`,
    * `persist-comments`, `export`, `push` — {@link SyncPhaseTimings}).
    * Populated by `performSync` so the `--json` summary and the sync log can

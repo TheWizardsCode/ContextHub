@@ -447,12 +447,18 @@ export async function performSync(
     console.log(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
   }
   logLine(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
+  // Dependency edges the persist could not store (e.g. a `foreign → local`
+  // edge whose owner is not a local item — the schema's `fromId` foreign key
+  // rejects it). Collected from the persist path so the loss is reported
+  // alongside the pre-merge filter's dropped-edge line rather than silently
+  // discarded (WL-0MWXIT6H3006TY2I AC5).
+  let persistDroppedEdges: string[] = [];
   if (remoteSyncKind === 'delta') {
     // Delta persist: items + edges, comments, audits. The audit window folds
     // into persist-items (item-derived records) so the phase set stays the
     // documented five; the timer accumulates both item windows.
     phaseTimer.start('persist-items');
-    db.upsertItems(itemsToPersist, edgeMergeResult.merged);
+    persistDroppedEdges = db.upsertItems(itemsToPersist, edgeMergeResult.merged).droppedEdges;
     phaseTimer.end('persist-items');
     phaseTimer.start('persist-comments');
     db.upsertComments(commentMergeResult.merged);
@@ -462,11 +468,21 @@ export async function performSync(
     phaseTimer.end('persist-items');
   } else {
     phaseTimer.start('persist-items');
-    db.import(itemsToPersist, edgeMergeResult.merged, auditMergeResult.merged);
+    persistDroppedEdges = db.import(itemsToPersist, edgeMergeResult.merged, auditMergeResult.merged).droppedEdges;
     phaseTimer.end('persist-items');
     phaseTimer.start('persist-comments');
     db.importComments(commentMergeResult.merged);
     phaseTimer.end('persist-comments');
+  }
+  result.droppedEdges = persistDroppedEdges;
+  if (persistDroppedEdges.length > 0) {
+    const preview = persistDroppedEdges.slice(0, 5).join(', ');
+    const ellipsis = persistDroppedEdges.length > 5 ? ', …' : '';
+    const line = `Foreign-edge persist: dropped ${persistDroppedEdges.length} edge(s) that cannot be stored locally (${preview}${ellipsis})`;
+    logLine(line);
+    if (!isJsonMode && !isSilent) {
+      console.log(`\n${line}`);
+    }
   }
   if (autoSyncEnabled) {
     db.setAutoSync(true, () => Promise.resolve());

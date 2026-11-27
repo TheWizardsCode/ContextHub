@@ -422,22 +422,25 @@ describe('WorklogDatabase', () => {
       const local = makeItem('TEST-001', 'Local owner');
       const edge = { fromId: 'TEST-001', toId: FOREIGN, createdAt: '2024-01-02T00:00:00.000Z' };
 
-      db.import([local], [edge]);
+      const report = db.import([local], [edge]);
 
       const edges = db.getAllDependencyEdges();
       expect(edges).toHaveLength(1);
       expect(edges[0].fromId).toBe('TEST-001');
       expect(edges[0].toId).toBe(FOREIGN);
       expect(db.listDependencyEdgesFrom('TEST-001')).toHaveLength(1);
+      expect(report.droppedEdges).toEqual([]);
     });
 
     it('drops an edge whose both endpoints are foreign on import', () => {
       const local = makeItem('TEST-001', 'Local owner');
       const edge = { fromId: FOREIGN, toId: 'SA-OTHER0000000000', createdAt: '2024-01-02T00:00:00.000Z' };
 
-      db.import([local], [edge]);
+      const report = db.import([local], [edge]);
 
       expect(db.getAllDependencyEdges()).toHaveLength(0);
+      // Loss is never silent (AC5): the fully-foreign edge is reported.
+      expect(report.droppedEdges).toEqual([`${FOREIGN}->SA-OTHER0000000000`]);
     });
 
     it('skips a foreign→local edge without aborting the import transaction', () => {
@@ -446,8 +449,11 @@ describe('WorklogDatabase', () => {
       const local = makeItem('TEST-001', 'Local target');
       const edge = { fromId: FOREIGN, toId: 'TEST-001', createdAt: '2024-01-02T00:00:00.000Z' };
 
-      expect(() => db.import([local], [edge])).not.toThrow();
+      const report = db.import([local], [edge]);
+
       expect(db.getAllDependencyEdges()).toHaveLength(0);
+      // The skipped edge is reported so the drop is observable (AC5).
+      expect(report.droppedEdges).toEqual([`${FOREIGN}->TEST-001`]);
     });
 
     it('does not resurrect a foreign edge after the local owner is removed (stale snapshot)', () => {
@@ -460,28 +466,33 @@ describe('WorklogDatabase', () => {
       // A stale snapshot carrying the edge but not its owner: the owner is
       // hard-deleted by the destructive replace, so the edge has no local
       // endpoint and must be dropped (never resurrected).
-      db.import([], [edge]);
+      const report = db.import([], [edge]);
       expect(db.getAllDependencyEdges()).toHaveLength(0);
+      expect(report.droppedEdges).toEqual([`TEST-001->${FOREIGN}`]);
     });
 
     it('keeps a local→foreign edge through a non-destructive upsert', () => {
       const local = db.create({ title: 'Local owner' });
       const edge = { fromId: local.id, toId: FOREIGN, createdAt: '2024-01-02T00:00:00.000Z' };
 
-      db.upsertItems([local], [edge]);
+      const report = db.upsertItems([local], [edge]);
 
       const edges = db.listDependencyEdgesFrom(local.id);
       expect(edges).toHaveLength(1);
       expect(edges[0].toId).toBe(FOREIGN);
+      expect(report.droppedEdges).toEqual([]);
     });
 
-    it('drops a both-foreign edge on upsert', () => {
+    it('leaves a both-foreign edge outside the upserted batch untouched (nothing dropped, nothing reported)', () => {
       const local = db.create({ title: 'Local owner' });
       const edge = { fromId: FOREIGN, toId: 'SA-OTHER0000000000', createdAt: '2024-01-02T00:00:00.000Z' };
 
-      db.upsertItems([local], [edge]);
+      const report = db.upsertItems([local], [edge]);
 
+      // Neither endpoint is in the upserted batch, so the non-destructive
+      // path never touches the edge — no store row, and no loss to report.
       expect(db.getAllDependencyEdges()).toHaveLength(0);
+      expect(report.droppedEdges).toEqual([]);
     });
 
     it('skips a foreign→local edge on upsert without throwing', () => {
@@ -489,8 +500,10 @@ describe('WorklogDatabase', () => {
       const local = db.create({ title: 'Local target' });
       const edge = { fromId: FOREIGN, toId: local.id, createdAt: '2024-01-02T00:00:00.000Z' };
 
-      expect(() => db.upsertItems([local], [edge])).not.toThrow();
+      const report = db.upsertItems([local], [edge]);
+
       expect(db.getAllDependencyEdges()).toHaveLength(0);
+      expect(report.droppedEdges).toEqual([`${FOREIGN}->${local.id}`]);
     });
   });
 
