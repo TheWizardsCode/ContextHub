@@ -12,6 +12,9 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 
 import {
@@ -289,5 +292,39 @@ describe('clock advance (AC4)', () => {
     });
     expect(capAfter.effectiveCap).toBe(2);
     expect(capAfter.relief).toBeNull();
+  });
+});
+
+describe('relief consults no proxy model-availability signal (AC9)', () => {
+  it('source pin: the relief module imports no proxy availability/lease module', () => {
+    const src = readFileSync(
+      join(process.cwd(), 'packages/herdr/src/host-budget-relief.ts'),
+      'utf8',
+    );
+    const imports = src.split('\n').filter((line) => line.trimStart().startsWith('import '));
+    // Only the cooldown contract, the budget types, the pane-label decoder and
+    // the evidence leaf may be imported: no proxy availability/lease seam.
+    for (const line of imports) {
+      expect(line).not.toMatch(/availability|lease|proxy/i);
+    }
+  });
+
+  it('a proxy availability seam cannot change the relief verdict', () => {
+    // The resolver has no availability input: an extra proxy-shaped field
+    // (disabled/loading/switching) is ignored, so it can neither grant nor
+    // suppress relief. Only the machine-wide cooldown file is consulted.
+    const withoutSeam = resolveModelBlockedPanes({
+      cooldowns: [cooldown()],
+      panes: [pane()],
+      now: NOW,
+    });
+    const withSeam = resolveModelBlockedPanes({
+      cooldowns: [cooldown()],
+      panes: [pane()],
+      now: NOW,
+      // @ts-expect-error the proxy availability seam is NOT part of the contract
+      availability: { cap: 1, available: false, state: 'loading' },
+    });
+    expect(withSeam).toEqual(withoutSeam);
   });
 });

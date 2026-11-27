@@ -78,6 +78,7 @@ interface AdmitOverrides {
   modelCooldowns?: readonly ModelCooldownEntry[] | null;
   now?: number;
   env?: Readonly<Record<string, string | undefined>>;
+  budgetReliefEnabled?: boolean;
 }
 
 /**
@@ -100,6 +101,9 @@ function admit(
       env: overrides.env ?? CLEAN_ENV,
       ...(overrides.modelCooldowns !== undefined
         ? { modelCooldowns: overrides.modelCooldowns }
+        : {}),
+      ...(overrides.budgetReliefEnabled !== undefined
+        ? { budgetReliefEnabled: overrides.budgetReliefEnabled }
         : {}),
     },
   );
@@ -165,6 +169,27 @@ describe('admitHostDispatch — effective cap (AC2/AC3)', () => {
         livePanes: panes,
         modelCooldowns: [],
       });
+      expect(verdict.admitted).toBe(false);
+      expect(verdict.reason).toBe(HOST_BUDGET_IMPLEMENT_REFUSAL);
+      expect(verdict.max).toBe(2);
+      expect(verdict.budgetRelief).toBeUndefined();
+    });
+  });
+
+  it('uses the configured cap when the kill switch is off (AC10)', async () => {
+    await withMachineDir(async (dir) => {
+      writeCaps(dir, { implement: 2 });
+      const panes = [
+        livePane('w1:p1', 'WL-A'),
+        livePane('w1:p2', 'WL-B'),
+      ];
+      const verdict = admit(dir, 'implement', 'WL-NEW', {
+        livePanes: panes,
+        modelCooldowns: [cooldown('w1:p1')],
+        budgetReliefEnabled: false,
+      });
+      // Relief is off: the configured cap 2 refuses at 2 live, and no relief
+      // evidence is recorded (the decision log shows no relief either).
       expect(verdict.admitted).toBe(false);
       expect(verdict.reason).toBe(HOST_BUDGET_IMPLEMENT_REFUSAL);
       expect(verdict.max).toBe(2);

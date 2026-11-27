@@ -30,6 +30,7 @@ import { isAuditFresh } from '@worklog/shared/icons';
 
 import { isCpuGateActive } from './host-cpu.js';
 import { countAttempts } from './downtime-log-markers.js';
+import { selectCriticalFirstCandidates } from './downtime-worker.dispatch-filter.js';
 import {
   classifyItemForDispatchDetail,
   isAttemptBudgetExhausted,
@@ -118,7 +119,35 @@ const GATE_ROWS: readonly GateRow[] = [
   {
     name: 'code-freeze split-by-skill',
     module: 'downtime-worker.dispatch-filter.ts',
-    verdict: () => 'audit/implement skip while frozen',
+    // A REAL freeze gate: a critical implement AND a critical plan candidate,
+    // evaluated frozen. The split-by-skill rule excludes the implement while
+    // the plan still passes — a real verdict, not a literal. The gate API
+    // never takes the cooldown list, so the two runs below must match.
+    verdict: () =>
+      selectCriticalFirstCandidates(
+        [
+          {
+            id: 'C-IMPL',
+            title: 'Crit implement',
+            status: 'open',
+            stage: 'plan_complete',
+            priority: 'critical',
+            sortIndex: 1,
+            risk: 'High',
+            effort: 'S',
+          },
+          {
+            id: 'C-PLAN',
+            title: 'Crit plan',
+            status: 'open',
+            stage: 'idea',
+            priority: 'critical',
+            sortIndex: 2,
+          },
+        ],
+        NOW,
+        true, // frozen
+      ).map((candidate) => candidate.kind),
   },
   {
     name: 'audit freshness',
@@ -204,7 +233,7 @@ describe('relief never bypasses the claim, marker or release lifecycle (AC8)', (
     status: 'open',
   };
 
-  it('an admitted relief dispatch still CAS-claims and records the dispatch marker', async () => {
+  it('an admitted relief dispatch still CAS-claims, records the marker and confirms the pane', async () => {
     const admitHostDispatch = vi.fn().mockResolvedValue({
       admitted: true,
       live: 2,
@@ -218,9 +247,17 @@ describe('relief never bypasses the claim, marker or release lifecycle (AC8)', (
         until: NOW + HOUR,
       },
     });
+    const confirmHostDispatch = vi.fn().mockResolvedValue(undefined);
     const deps = makeDeps({
       getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
       admitHostDispatch,
+      recordDispatchEnrichment: vi.fn().mockResolvedValue(undefined),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 1,
+        records: [{ paneId: 'w1:pane', label: 'Downtime triggered implement - WL-IMP' }],
+      }),
+      confirmHostDispatch,
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -228,6 +265,9 @@ describe('relief never bypasses the claim, marker or release lifecycle (AC8)', (
     expect(outcome.dispatched).toBe(true);
     expect(deps.claimItem).toHaveBeenCalledTimes(1);
     expect(deps.recordDispatch).toHaveBeenCalledTimes(1);
+    // The pane-close release lifecycle is intact: the resolved pane id is
+    // confirmed on the ledger so the entry frees when that pane closes.
+    expect(confirmHostDispatch).toHaveBeenCalledWith('WL-IMP', 'implement', 'w1:pane', '/repo');
     // The relief evidence rides on the outcome (AC9), not as a gate bypass.
     expect(outcome.budgetRelief?.effectiveCap).toBe(4);
   });

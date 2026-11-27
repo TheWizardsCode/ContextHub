@@ -92,13 +92,24 @@ import {
   type HostBudgetEvidence,
 } from './downtime-log.js';
 import {
+  BUDGET_RELIEF_DECISION_TOKEN,
   HOST_BUDGET_INTAKE_REASON,
   HOST_BUDGET_PLAN_REASON,
   HOST_BUDGET_RISK_EFFORT_REASON,
 } from './downtime-log-budget.js';
 
-/** One tier's observed in-flight count and configured cap. */
-export type HostBudgetTierStatus = HostBudgetEvidence;
+/**
+ * One tier's observed in-flight count and cap.
+ *
+ * `max` is the EFFECTIVE cap: the configured cap, or 2x it while a
+ * model-blocked pane of that kind exists (WL-0MWTAD9NV000IVK5 AC9). `relief`
+ * marks a kind whose cap was relief-raised so the header can name the
+ * `budget-relief` token rather than silently showing a larger number.
+ */
+export type HostBudgetTierStatus = HostBudgetEvidence & {
+  /** True when `max` is a relief-raised cap (2x the configured cap). */
+  relief?: true;
+};
 
 /**
  * One entry per CONFIGURED (capped) kind, as every observability surface
@@ -142,6 +153,8 @@ export interface HostBudgetStatusOptions extends HostBudgetOptions {
 export function summariseHostBudget(
   counts: HostBudgetCounts | null | undefined,
   config: HostBudgetConfig | null | undefined,
+  /** Kinds whose `max` is a relief-raised (2x) cap (WL-0MWTAD9NV000IVK5 AC9). */
+  relieved?: ReadonlySet<HostBudgetKind>,
 ): HostBudgetStatus | null {
   if (counts === null || counts === undefined) return null;
   if (config === null || config === undefined) return null;
@@ -152,7 +165,11 @@ export function summariseHostBudget(
   for (const kind of HOST_BUDGET_KINDS) {
     const max = config[kind];
     if (max === undefined) continue;
-    status[kind] = { live: counts[kind] ?? 0, max };
+    status[kind] = {
+      live: counts[kind] ?? 0,
+      max,
+      ...(relieved?.has(kind) === true ? { relief: true as const } : {}),
+    };
   }
   return status;
 }
@@ -175,7 +192,11 @@ export function hostBudgetStatusText(
   for (const kind of HOST_BUDGET_KINDS) {
     const tier = status[kind];
     if (tier === undefined) continue;
-    segments.push(`${kind} ${tier.live}/${tier.max}`);
+    // A relief-raised cap is marked with the `budget-relief` vocabulary token
+    // so `implement 1/4 (budget-relief)` cannot be mistaken for a configured
+    // cap of 4 (WL-0MWTAD9NV000IVK5 AC9).
+    const marker = tier.relief === true ? ` (${BUDGET_RELIEF_DECISION_TOKEN})` : '';
+    segments.push(`${kind} ${tier.live}/${tier.max}${marker}`);
   }
   if (segments.length === 0) return null;
   return `[budget: ${segments.join(' · ')}]`;
@@ -287,7 +308,16 @@ export function readHostBudgetStatus(
         ? auditDisplayCount(read.ledger.entries, livePaneIds, now, windowMs)
         : countLiveWork(read.ledger.entries, opts.livePanes, kind, now, windowMs).live;
   }
-  return summariseHostBudget(counts, effectiveConfig(config, opts, now));
+  const effective = effectiveConfig(config, opts, now);
+  // Mark the kinds whose cap relief raised, so the header names the
+  // `budget-relief` token explicitly (WL-0MWTAD9NV000IVK5 AC9).
+  const relieved = new Set<HostBudgetKind>();
+  for (const kind of HOST_BUDGET_KINDS) {
+    if (effective[kind] !== undefined && effective[kind] !== config[kind]) {
+      relieved.add(kind);
+    }
+  }
+  return summariseHostBudget(counts, effective, relieved);
 }
 
 /**

@@ -20,6 +20,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
+import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
+
 import {
   HOST_BUDGET_CONFIG_FILE,
   HOST_BUDGET_STALE_WINDOW_MS,
@@ -214,6 +216,143 @@ describe('summariseHostBudget / hostBudgetStatusText (AC4)', () => {
     expect(hostBudgetStatusText({ plan: { live: 1, max: 2 } })).toBe('[budget: plan 1/2]');
     // No configured kind ⇒ no segment at all.
     expect(hostBudgetStatusText({})).toBeNull();
+  });
+});
+
+// ── AC9 relief: the counter shows n/effectiveCap and marks relief ──────
+
+describe('host-budget relief in the counter (AC9)', () => {
+  const account = { implement: 0, audit: 0, plan: 0, intake: 0, 'risk-effort': 0 } as const;
+
+  it('summariseHostBudget marks a relief-raised kind', () => {
+    expect(
+      summariseHostBudget(
+        { ...account, implement: 1 },
+        { implement: 4 },
+        new Set(['implement']),
+      ),
+    ).toEqual({ implement: { live: 1, max: 4, relief: true } });
+  });
+
+  it('hostBudgetStatusText names the budget-relief token on a relieved segment', () => {
+    expect(
+      hostBudgetStatusText({
+        implement: { live: 1, max: 4, relief: true },
+        audit: { live: 0, max: 1 },
+      }),
+    ).toBe('[budget: implement 1/4 (budget-relief) · audit 0/1]');
+    // No relief flag ⇒ the historical `n/max` shape is unchanged.
+    expect(
+      hostBudgetStatusText({ implement: { live: 1, max: 4 } }),
+    ).toBe('[budget: implement 1/4]');
+  });
+
+  /** An active implement cooldown for `paneId`. */
+  function cooldown(paneId: string): ModelCooldownEntry {
+    return {
+      paneId,
+      sessionId: null,
+      itemId: 'WL-LIVE',
+      kind: 'implement',
+      reason: 'provider exhaustion',
+      createdAt: NOW - HOUR,
+      cooldownUntil: NOW + HOUR,
+    };
+  }
+
+  it('shows n/effectiveCap and marks relief while an implement pane is model-blocked', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { implement: 2 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-LIVE',
+          paneId: 'pane-1',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      const status = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-LIVE' }]),
+        now: NOW,
+        env: cleanEnv,
+        modelCooldowns: [cooldown('pane-1')],
+      });
+      expect(status).toEqual({ implement: { live: 1, max: 4, relief: true } });
+      expect(hostBudgetStatusText(status)).toBe('[budget: implement 1/4 (budget-relief)]');
+    });
+  });
+
+  it('keeps the configured cap when the kill switch is off', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { implement: 2 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-LIVE',
+          paneId: 'pane-1',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      const status = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-LIVE' }]),
+        now: NOW,
+        env: cleanEnv,
+        modelCooldowns: [cooldown('pane-1')],
+        budgetReliefEnabled: false,
+      });
+      expect(status).toEqual({ implement: { live: 1, max: 2 } });
+      expect(hostBudgetStatusText(status)).toBe('[budget: implement 1/2]');
+    });
+  });
+
+  it('grants no relief when the cooldown signal is unreadable (null)', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { implement: 2 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-LIVE',
+          paneId: 'pane-1',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      const status = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-LIVE' }]),
+        now: NOW,
+        env: cleanEnv,
+        modelCooldowns: null,
+      });
+      expect(status).toEqual({ implement: { live: 1, max: 2 } });
+    });
+  });
+
+  it('leaves the other kind at its configured cap (per-kind relief)', async () => {
+    await withMachineDir((dir) => {
+      writeCaps(dir, { implement: 2, audit: 1 });
+      writeBudgetLedger(dir, [
+        makeBudgetEntry({
+          kind: 'implement',
+          itemId: 'WL-LIVE',
+          paneId: 'pane-1',
+          heartbeatAt: new Date(NOW).toISOString(),
+        }),
+      ]);
+      const status = readHostBudgetStatus({
+        dir,
+        livePanes: makeLivePaneList([{ paneId: 'pane-1', itemId: 'WL-LIVE' }]),
+        now: NOW,
+        env: cleanEnv,
+        modelCooldowns: [cooldown('pane-1')],
+      });
+      expect(status).toEqual({
+        implement: { live: 1, max: 4, relief: true },
+        // The audit cap has no blocked audit pane: unchanged, unmarked.
+        audit: { live: 0, max: 1 },
+      });
+    });
   });
 });
 

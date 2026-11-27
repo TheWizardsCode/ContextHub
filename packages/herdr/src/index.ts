@@ -2192,11 +2192,19 @@ export async function main(): Promise<void> {
           defaultRunningDowntimePanesResolver,
           targetCwd,
         );
+        // Budget relief (WL-0MWTAD9NV000IVK5 AC9): read the SAME machine-wide
+        // cooldown signal admission uses plus the live kill switch, so the
+        // header counter renders `n/effectiveCap (budget-relief)` while a pane
+        // of that kind is model-blocked instead of the configured cap.
+        const modelCooldowns = readActiveModelCooldowns();
+        const budgetReliefEnabled = loadSettings().downtimeBudgetReliefEnabled !== false;
         // Tri-state threaded through (WL-0MW9VQX5T001GCUP): on a failed read
         // the display gets NO pane list (UNKNOWN) and both figures fall back
         // to the freshness rule instead of folding unknown into an empty set.
         return readHostBudgetStatus(
-          livePanes.ok ? { livePanes: livePanes.panes } : {},
+          livePanes.ok
+            ? { livePanes: livePanes.panes, modelCooldowns, budgetReliefEnabled }
+            : { modelCooldowns, budgetReliefEnabled },
         );
       },
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
@@ -2319,6 +2327,11 @@ export async function main(): Promise<void> {
             readLivePanes: () => hostBudgetLivePanes(defaultRunningDowntimePanesResolver, targetCwd),
             claim: (agentCommand) => claimItemForAgentCommand(agentCommand),
             root: targetCwd,
+            // Budget relief (WL-0MWTAD9NV000IVK5 AC9): the hand-fired
+            // over-quota threshold uses the SAME effective cap admission uses,
+            // so the header `n/effectiveCap` and the dialog cannot disagree.
+            modelCooldowns: readActiveModelCooldowns(),
+            budgetReliefEnabled: loadSettings().downtimeBudgetReliefEnabled !== false,
           }).catch((error: unknown) => {
             process.stderr.write(
               `[worklog-plugin] Host budget gate failed (proceeding): ${
