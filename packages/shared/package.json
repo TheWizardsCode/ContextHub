@@ -41,6 +41,10 @@
     "./persistent-store": {
       "types": "./dist/persistent-store.d.ts",
       "import": "./dist/persistent-store.js"
+    },
+    "./acceptance-criteria": {
+      "types": "./dist/acceptance-criteria.d.ts",
+      "import": "./dist/acceptance-criteria.js"
     }
   },
   "files": [

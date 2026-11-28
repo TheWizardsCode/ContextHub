@@ -1,0 +1,18 @@
+{
+  "name": "checkbox",
+  "shape": "checkbox",
+  "sourceWorkItemId": "WL-0MKXK36KJ1L2ADCN",
+  "description": "## Acceptance Criteria\n\n- [ ] Response pane header shows current activity (thinking, using tool: X, writing, etc.)\n- [x] Activity updates on state change only, not on every text chunk (smooth performance)\n- [x] Prompt label shows animated Braille dots spinner during processing\n- [x] Spinner stops when operation completes or errors\n- [x] File operations (write, edit, delete) show inline messages with file names\n- [x] Questions/input requests display with consistent inline formatting\n- [ ] No UI flickering or performance degradation during high-frequency SSE events\n- [x] Progress indicators clear properly when operation completes\n- [ ] No regressions to existing features (autocomplete, input requests, streaming, etc.)\n- [ ] Code follows existing TUI patterns and blessed.js conventions\n\n## Testing\n\nManual testing:\n",
+  "expected": [
+    "[ ] Response pane header shows current activity (thinking, using tool: X, writing, etc.)",
+    "[x] Activity updates on state change only, not on every text chunk (smooth performance)",
+    "[x] Prompt label shows animated Braille dots spinner during processing",
+    "[x] Spinner stops when operation completes or errors",
+    "[x] File operations (write, edit, delete) show inline messages with file names",
+    "[x] Questions/input requests display with consistent inline formatting",
+    "[ ] No UI flickering or performance degradation during high-frequency SSE events",
+    "[x] Progress indicators clear properly when operation completes",
+    "[ ] No regressions to existing features (autocomplete, input requests, streaming, etc.)",
+    "[ ] Code follows existing TUI patterns and blessed.js conventions"
+  ]
+}

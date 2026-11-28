@@ -1,0 +1,12 @@
+{
+  "name": "paren-numbered",
+  "shape": "numbered",
+  "sourceWorkItemId": "WL-0MLE6WJUY0C5RRVX",
+  "description": "## Acceptance Criteria\n1) Findings are produced for invalid status/stage pairs per docs/validation/status-stage-inventory.md.\n2) Each finding references the offending item and violated rule (no severity).\n3) Tests cover at least 3 valid and 3 invalid combinations.\n4) JSON output uses required fields only.\n\n## Minimal Implementation\n- Implement validation against canonical rules (reuse helpers if available).\n",
+  "expected": [
+    "Findings are produced for invalid status/stage pairs per docs/validation/status-stage-inventory.md.",
+    "Each finding references the offending item and violated rule (no severity).",
+    "Tests cover at least 3 valid and 3 invalid combinations.",
+    "JSON output uses required fields only."
+  ]
+}

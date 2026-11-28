@@ -1,0 +1,13 @@
+{
+  "name": "nested",
+  "shape": "nested",
+  "sourceWorkItemId": "WL-0MM34576E1WOBCZ8",
+  "description": "## Acceptance Criteria\n\n- Dedicated test case for each prior fix scenario:\n  - Deleted items filtered (WL-0MLDIFLCR1REKNGA)\n  - Orphan promotion under completed/deleted parents (WL-0MM1CD2IJ1R2ZI5J)\n  - Childless epic eligibility (WL-0MM1CD3SP1CO6NK9)\n  - Batch dedup / unique results (WL-0MLFU4PQA1EJ1OQK)\n  - In-review exclusion (WL-0ML2TS8I409ALBU6)\n  - Blocker-vs-priority ordering (WL-0MLYHCZCS1FY5I6H)\n  - Blocked item filtering (WL-0MLZWO96O1RS086V)\n  - Priority inheritance / scoring boost (WL-0MM0B4FNW0ZLOTV8)\n  - Flaky test timing pattern (WL-0MM17NRAY0FJ1AK5)\n  - Blocked/in-review flag behavior (WL-0MLC3SUXI0QI9I3L)\n- Tests written in terms of input scenarios and expected outputs (not implementation-coupled)\n- Tests use async+delay pattern to avoid flaky timing (per WL-0MM17NRAY0FJ1AK5)\n- Existing fixture data in tests/fixtures/next-ranking-fixture.jsonl adapted as regression cases\n- All regression tests pass against the current algorithm before rewrite begins\n\n## Minimal Implementation\n\n- Review each completed related work item for the scenario it fixed\n",
+  "expected": [
+    "Dedicated test case for each prior fix scenario:",
+    "Tests written in terms of input scenarios and expected outputs (not implementation-coupled)",
+    "Tests use async+delay pattern to avoid flaky timing (per WL-0MM17NRAY0FJ1AK5)",
+    "Existing fixture data in tests/fixtures/next-ranking-fixture.jsonl adapted as regression cases",
+    "All regression tests pass against the current algorithm before rewrite begins"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "bold-led",
+  "shape": "bold-led",
+  "sourceWorkItemId": "WL-0MQQHSMTG003GW0V",
+  "description": "## Acceptance Criteria\n\n1. **The `@earendil-works/pi-coding-agent` import in `settings-config.ts` no longer causes test failures when the package is absent.** The preferred approach is to install the package as a dev dependency (the simplest, least-invasive option). Mocking or lazy-import approaches may be used only if installing as a dev dependency proves infeasible.\n2. **Legacy `skill/` path references are updated.** Update `skill/scripts/failure_notice.py` to `./scripts/failure_notice.py` in the `audit` skill's `SKILL.md`. Update any legacy `skill/` paths in the `implementall` skill's `SKILL.md`. Both legacy references must be resolved (2 tests currently fail).\n3. **Integration tests in `runWl-init-detection.test.ts` no longer time out.** Provide a mock `chooseWorkItem` function or add `ui.select`/`ui.custom` mocks to the test context so `runBrowseFlow` does not hang.\n4. **All currently failing tests pass.** The 16–17 test failures (across `tests/e2e/agent-flow.test.ts`, `tests/e2e/headless-tui.test.ts`, `tests/skill-path-conventions.test.ts`, and `packages/tui/tests/runWl-init-detection.test.ts`) must all pass.\n5. **No regressions in existing passing tests.**\n6. **Full project test suite must pass with the new changes.**\n7. **All related documentation is updated to reflect the changes**, including code comments, README, and any relevant wiki or docs site entries.\n\n## Constraints\n\n- Must not alter the production behavior of any code unrelated to fixing the test failures.\n",
+  "expected": [
+    "**The `@earendil-works/pi-coding-agent` import in `settings-config.ts` no longer causes test failures when the package is absent.** The preferred approach is to install the package as a dev dependency (the simplest, least-invasive option). Mocking or lazy-import approaches may be used only if installing as a dev dependency proves infeasible.",
+    "**Legacy `skill/` path references are updated.** Update `skill/scripts/failure_notice.py` to `./scripts/failure_notice.py` in the `audit` skill's `SKILL.md`. Update any legacy `skill/` paths in the `implementall` skill's `SKILL.md`. Both legacy references must be resolved (2 tests currently fail).",
+    "**Integration tests in `runWl-init-detection.test.ts` no longer time out.** Provide a mock `chooseWorkItem` function or add `ui.select`/`ui.custom` mocks to the test context so `runBrowseFlow` does not hang.",
+    "**All currently failing tests pass.** The 16–17 test failures (across `tests/e2e/agent-flow.test.ts`, `tests/e2e/headless-tui.test.ts`, `tests/skill-path-conventions.test.ts`, and `packages/tui/tests/runWl-init-detection.test.ts`) must all pass.",
+    "**No regressions in existing passing tests.**",
+    "**Full project test suite must pass with the new changes.**",
+    "**All related documentation is updated to reflect the changes**, including code comments, README, and any relevant wiki or docs site entries."
+  ]
+}

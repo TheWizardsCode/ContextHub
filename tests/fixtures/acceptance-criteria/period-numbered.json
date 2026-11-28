@@ -1,0 +1,15 @@
+{
+  "name": "period-numbered",
+  "shape": "numbered",
+  "sourceWorkItemId": "WL-0ML1LBF6H0NE40RX",
+  "description": "## Acceptance Criteria\n\n1. Work items with 'in-progress' status appear cyan/blue in the TUI tree view\n2. Work items with 'completed' status appear gray in the TUI tree view\n3. Work items with 'blocked' status appear red in the TUI tree view\n4. Work items with 'open' status appear green in the TUI tree view (or other default color)\n5. WL-0ML16W7000D2M8J3 now appears blue in the tree\n6. All existing tests pass\n7. No changes to console output formatting (chalk usage outside TUI remains unchanged)\n",
+  "expected": [
+    "Work items with 'in-progress' status appear cyan/blue in the TUI tree view",
+    "Work items with 'completed' status appear gray in the TUI tree view",
+    "Work items with 'blocked' status appear red in the TUI tree view",
+    "Work items with 'open' status appear green in the TUI tree view (or other default color)",
+    "WL-0ML16W7000D2M8J3 now appears blue in the tree",
+    "All existing tests pass",
+    "No changes to console output formatting (chalk usage outside TUI remains unchanged)"
+  ]
+}
