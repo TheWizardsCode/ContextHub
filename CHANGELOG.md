@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.2.0 (2026-11-28)
+> **Release focus:** This release focuses on improving the reliability and fairness of the automated work system, with idle workers now taking on extra jobs, machine time shared fairly across projects, and more consistent audit dispatch and sync behaviour. It also hardens the tooling itself, fixing flaky benchmarks, time-zone handling, and test selection so builds stay green and real breakage is easier to spot.
+### Features
+- Idle AI workers now pick up extra jobs while waiting for a model to return, up to double the normal limit. (WL-0MWTAD9NV000IVK5)
+- Worklog sync now blocks pushes from placeholder identities, preventing broken syncs for everyone. (WL-0MWGO58KL00187CO)
+- Audit dispatch is now more reliable and consistent across your whole fleet. (WL-0MWJ7QYX0001KAQX)
+- Worklist headers now label scheduled items as "Future items" so the count is clear. (WL-0MWW2F1SZ005E92B)
+- Set or clear work item assignees directly from the worklist with new o p, o a, and o n shortcuts. (WL-0MW51P7FO003AC74)
+### Bug Fixes
+- The "no project twice in a row" fairness rule now holds even when leadership changes hands. (WL-0MWT3Z9M9002Z9BF)
+- Running the upgrade no longer overwrites your newer custom hooks, so your setup stays intact. (WL-0MWWS66JM0090RQ5)
+- Idle machine time is now shared fairly across all projects, so no single project hogs the night. (WL-0MWKE9VF800101V9)
+- Benchmark tests no longer fail randomly, so unrelated updates won't get blocked. (WL-0MWW355UL0038DDI)
+- Code quality checks are now more reliable, so fixes reach you faster. (WL-0MWVP9IP1003BZ28)
+- Tests now pass regardless of your local git settings, so builds stay green for everyone. (WL-0MWWSCXEC001BQ3I)
+- The downtime worker no longer wastes sessions on blocked items, so critical bugs stop appearing stuck in progress. (WL-0MWWLLGD2001QKAL)
+- Changed-scope test runs now find local tools, so a red result means real breakage. (WL-0MWWJWSFS0039ACF)
+- Epic drives now survive brief provider hiccups instead of stopping with a false accusation. (WL-0MWW96TNJ007EQ9F)
+- Cross-repo blockers now stay in place after syncing instead of silently disappearing. (WL-0MWXIT6H3006TY2I)
+- Tests that exercise your edited code are now reliably selected and run cleanly in fresh worktrees. (WL-0MW3EDP6D002U6V4)
+### Other
+- Work is now spread fairly across projects, with no single project hogging the queue. (WL-0MWNN84HO004DXQU)
+- Herdr tests are now properly tracked and documented, so coverage stays reliable. (WL-0MVP7TT08006816Z)
+- Job console timing now uses explicit UTC timestamps, keeping elapsed times accurate. (WL-0MWQYC2ZQ002NGZP)
+- Job timers now handle time zones consistently, so elapsed times stay accurate. (WL-0MWQYC3MZ0013YLS)
+
 ## v1.1.0 (2026-11-23)
 > **Release focus:** This release focuses on reliability and workflow stability, fixing crashes and false test failures while ensuring work items can't vanish or block sessions. It also adds practical improvements like restoring deleted items with full history, scheduled unlocks, fairer dispatch across projects, and automatic standup podcasts.
 ### Features
