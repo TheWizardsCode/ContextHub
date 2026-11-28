@@ -7,9 +7,13 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getDefaultDataPath } from '../jsonl.js';
+import {
+  ACCEPTANCE_CRITERIA_DDL,
+  ACCEPTANCE_CRITERIA_INDEXES_DDL,
+} from '@worklog/shared/persistent-store';
 
 /** The schema version this build writes once every migration is applied. */
-export const CURRENT_SCHEMA_VERSION = '10';
+export const CURRENT_SCHEMA_VERSION = '11';
 
 /**
  * The preservation store for legacy `workitems.audit` text that cannot be
@@ -405,6 +409,21 @@ export const MIGRATION_CATALOG: MigrationEntry[] = [
       const mark = db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)');
       mark.run('startOn_added', '1');
       mark.run('startOn_backfilled', '1');
+    }
+  },
+  {
+    id: '20261128-add-acceptance-criteria',
+    description:
+      'Add the acceptance_criteria table for first-class acceptance criteria rows (WL-0MWXJGVOQ0068QWK)',
+    safe: true,
+    // Keyed on the table itself, like `20260821-add-last-export-timestamps`: a
+    // store opened by the current build already self-heals the missing table
+    // (it is in REQUIRED_TABLES), and the doctor path creates exactly the same
+    // table from the shared DDL, so the two can never drift.
+    requiredColumn: '__table:acceptance_criteria',
+    apply: (db: Database.Database) => {
+      db.exec(ACCEPTANCE_CRITERIA_DDL);
+      db.exec(ACCEPTANCE_CRITERIA_INDEXES_DDL);
     }
   }
 ];

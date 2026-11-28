@@ -42,6 +42,45 @@ export interface AuditWaiver {
 }
 
 /**
+ * The status vocabulary for a stored acceptance criterion (WL-0MWXJGVOQ0068QWK).
+ *
+ * Declared once, as a runtime list, so the SQLite CHECK constraint, the type
+ * union and every consumer (database, JSONL, CLI) share one source. `modified`
+ * means the criterion was re-worded: the row then keeps the original wording
+ * in `originalText` and the reason for the change in
+ * `modificationJustification`.
+ */
+export const ACCEPTANCE_CRITERION_STATUSES = ['met', 'unmet', 'partial', 'modified'] as const;
+
+export type AcceptanceCriterionStatus = (typeof ACCEPTANCE_CRITERION_STATUSES)[number];
+
+/**
+ * One acceptance criterion, stored as a row in the `acceptance_criteria`
+ * table rather than parsed out of a work item's description
+ * (WL-0MWXJGVOQ0068QWK).
+ *
+ * `position` is the criterion's stated order within its owning item (0-based,
+ * explicit rather than derived from the id) so a criterion can be inserted or
+ * reordered without renumbering the rest; it is unique per work item. The
+ * `original*` fields are populated only for `modified` rows.
+ */
+export interface AcceptanceCriterion {
+  /** Stable AC id, in the `<prefix>-A<unique>` namespace. */
+  id: string;
+  /** Owning work item (FK to `workitems(id)`, `ON DELETE CASCADE`). */
+  workItemId: string;
+  /** Stated order within the owning item (0-based). */
+  position: number;
+  /** The criterion text as it currently stands. */
+  text: string;
+  status: AcceptanceCriterionStatus;
+  /** Original wording, preserved when `status === 'modified'`; else `null`. */
+  originalText: string | null;
+  /** Why the criterion changed, when `status === 'modified'`; else `null`. */
+  modificationJustification: string | null;
+}
+
+/**
  * JSONL dependency edge representation
  */
 export interface WorkItemDependency {

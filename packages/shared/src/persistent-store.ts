@@ -5,7 +5,14 @@
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, Comment, DependencyEdge, AuditResult, AuditWaiver } from './types.js';
+import {
+  WorkItem,
+  Comment,
+  DependencyEdge,
+  AuditResult,
+  AuditWaiver,
+  ACCEPTANCE_CRITERION_STATUSES,
+} from './types.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 import { normalizeStartOn } from './start-on.js';
 import { assessAuditInvalidate, type AuditInvalidationVerdict } from '@worklog/shared/icons';
@@ -99,7 +106,11 @@ export interface LastExportTimestamps {
 // Version 10 adds `workitems.startOn` (WL-0MWMGEPY2004EDZ8) and MUST stay in
 // step with `CURRENT_SCHEMA_VERSION` in `src/migrations/index.ts`; the two are
 // asserted equal by the `startOn` migration tests.
-const SCHEMA_VERSION = 10;
+//
+// Version 11 adds the `acceptance_criteria` table (WL-0MWXJGVOQ0068QWK): first-
+// class acceptance-criteria rows with a stable id, status and ordering, instead
+// of criteria living only as prose in `workitems.description`.
+const SCHEMA_VERSION = 11;
 
 /**
  * Tables the current code queries without a guard. A store whose `schemaVersion`
@@ -114,7 +125,41 @@ const REQUIRED_TABLES = Object.freeze([
   'dependency_edges',
   'audit_results',
   'last_export_timestamps',
+  'acceptance_criteria',
 ] as const);
+
+/**
+ * DDL for the `acceptance_criteria` table (WL-0MWXJGVOQ0068QWK).
+ *
+ * Exported so the `wl doctor upgrade` migration entry
+ * (`20261128-add-acceptance-criteria` in `src/migrations/index.ts`) creates
+ * exactly the table a fresh `wl init` gets — the store and the migration
+ * cannot drift. `position` is `NOT NULL` and the status CHECK is generated
+ * from {@link ACCEPTANCE_CRITERION_STATUSES}, so the vocabulary is declared
+ * once.
+ */
+export const ACCEPTANCE_CRITERIA_DDL = `
+  CREATE TABLE IF NOT EXISTS acceptance_criteria (
+    id TEXT PRIMARY KEY NOT NULL,
+    work_item_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unmet'
+      CHECK (status IN (${ACCEPTANCE_CRITERION_STATUSES.map((s) => `'${s}'`).join(', ')})),
+    original_text TEXT,
+    modification_justification TEXT,
+    FOREIGN KEY (work_item_id) REFERENCES workitems(id) ON DELETE CASCADE
+  )
+`;
+
+/**
+ * Indexes for `acceptance_criteria` — a criterion's stated order is unique
+ * within its owning item, and `(work_item_id, position)` is the read order.
+ */
+export const ACCEPTANCE_CRITERIA_INDEXES_DDL = `
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_acceptance_criteria_work_item_position
+    ON acceptance_criteria(work_item_id, position)
+`;
 
 /**
  * A column required by the current code that may be absent from databases
@@ -649,6 +694,16 @@ export class SqlitePersistentStore {
         FOREIGN KEY (work_item_id) REFERENCES workitems(id) ON DELETE CASCADE
       )
     `);
+
+    // Create acceptance_criteria table: one row per acceptance criterion, with
+    // its own stable id, status, stated order and (for `modified` rows) the
+    // original wording plus the justification for the change
+    // (WL-0MWXJGVOQ0068QWK). `ON DELETE CASCADE` ties a criterion's lifetime to
+    // its owning work item; `(work_item_id, position)` is unique so the stated
+    // order can never hold duplicates. DDL lives in
+    // {@link ACCEPTANCE_CRITERIA_DDL} so the doctor migration reuses it.
+    this.db.exec(ACCEPTANCE_CRITERIA_DDL);
+    this.db.exec(ACCEPTANCE_CRITERIA_INDEXES_DDL);
 
     // Create last_export_timestamps table for tracking per-record-type
     // last-export watermarks used by delta (incremental) sync
