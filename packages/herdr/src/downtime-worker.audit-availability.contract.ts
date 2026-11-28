@@ -108,6 +108,28 @@ export interface AuditAvailability {
   reason?: string;
 }
 
+/**
+ * The outcome of one audit-availability read. Every arm is usable by the
+ * dispatcher without further parsing:
+ *
+ *   - `ok` — the proxy answered 2xx with a payload the pinned parser accepts;
+ *   - `endpoint-absent` — the proxy predates the endpoint (`404`), i.e. the
+ *     sibling proxy item has not shipped;
+ *   - `unreachable` — the proxy could not be reached (`timeout` / `network`)
+ *     or answered an unusable status (`http-<status>`);
+ *   - `unparsable` — 2xx with a body the pinned parser rejects (`bad-body`).
+ *
+ * Lives in this leaf contract module (WL-0MWJE9IEH001R3P1) so it can be
+ * referenced by the data-type surface without forming an import cycle; the
+ * client re-exports it, so every `downtime-worker.audit-availability.js`
+ * import keeps resolving unchanged.
+ */
+export type AuditAvailabilityOutcome =
+  | { status: 'ok'; availability: AuditAvailability }
+  | { status: 'endpoint-absent'; reason: 'http-404' }
+  | { status: 'unreachable'; reason: 'timeout' | 'network' | `http-${number}` }
+  | { status: 'unparsable'; reason: 'bad-body' };
+
 // ── Alias sets (names the proxy has not fixed yet) ────────────────────
 
 /** Audit-cap aliases: `cap` (preferred), `max`, `max_audit`. */

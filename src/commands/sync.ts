@@ -7,6 +7,7 @@ import type { SyncOptions, SyncDebugOptions } from '../cli-types.js';
 import type { WorkItem, Comment, DependencyEdge } from '../types.js';
 import type { GitTarget, SyncResult } from '../sync.js';
 import { getRemoteDataFileContent, getRemoteDataFileContentWithRef, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, assertDataFileInCwdRepo, filterRemoteDataByPrefix, enforceAuthorIdentityGate, getConfiguredUserEmail, getRemoteTrackingRefSha, writeLastSyncedRef, replayRemoteDeltaChain } from '../sync.js';
+import { enforcePushAuthorIdentity } from '../sync/author-identity.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
@@ -75,6 +76,8 @@ export async function performSync(
     allowForeignAuthor?: boolean;
     allowedAuthors?: string[] | null | boolean;
     acceptRegressions?: boolean;
+    /** Incident-only: allow a one-off sentinel-author push (never bypasses empty-email). */
+    allowSentinelAuthor?: boolean;
   }
 ): Promise<SyncResult> {
   const isJsonMode = options.isJsonMode ?? false;
@@ -266,6 +269,14 @@ export async function performSync(
           console.log(`\nForeign-prefix filter: dropped ${filtered.droppedItems.length} remote item(s) not matching project prefix '${projectPrefix}' (${preview}${ellipsis})`);
         }
       }
+      if (filtered.droppedEdges.length > 0) {
+        const preview = filtered.droppedEdges.slice(0, 5).join(', ');
+        const ellipsis = filtered.droppedEdges.length > 5 ? ', …' : '';
+        logLine(`Foreign-prefix filter: dropped ${filtered.droppedEdges.length} edge(s) with both endpoints foreign (${preview}${ellipsis})`);
+        if (!isJsonMode && !isSilent) {
+          console.log(`\nForeign-prefix filter: dropped ${filtered.droppedEdges.length} edge(s) with both endpoints foreign (${preview}${ellipsis})`);
+        }
+      }
       remoteItems = filtered.items;
       remoteComments = filtered.comments;
       remoteEdges = filtered.edges;
@@ -436,12 +447,18 @@ export async function performSync(
     console.log(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
   }
   logLine(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
+  // Dependency edges the persist could not store (e.g. a `foreign → local`
+  // edge whose owner is not a local item — the schema's `fromId` foreign key
+  // rejects it). Collected from the persist path so the loss is reported
+  // alongside the pre-merge filter's dropped-edge line rather than silently
+  // discarded (WL-0MWXIT6H3006TY2I AC5).
+  let persistDroppedEdges: string[] = [];
   if (remoteSyncKind === 'delta') {
     // Delta persist: items + edges, comments, audits. The audit window folds
     // into persist-items (item-derived records) so the phase set stays the
     // documented five; the timer accumulates both item windows.
     phaseTimer.start('persist-items');
-    db.upsertItems(itemsToPersist, edgeMergeResult.merged);
+    persistDroppedEdges = db.upsertItems(itemsToPersist, edgeMergeResult.merged).droppedEdges;
     phaseTimer.end('persist-items');
     phaseTimer.start('persist-comments');
     db.upsertComments(commentMergeResult.merged);
@@ -451,11 +468,21 @@ export async function performSync(
     phaseTimer.end('persist-items');
   } else {
     phaseTimer.start('persist-items');
-    db.import(itemsToPersist, edgeMergeResult.merged, auditMergeResult.merged);
+    persistDroppedEdges = db.import(itemsToPersist, edgeMergeResult.merged, auditMergeResult.merged).droppedEdges;
     phaseTimer.end('persist-items');
     phaseTimer.start('persist-comments');
     db.importComments(commentMergeResult.merged);
     phaseTimer.end('persist-comments');
+  }
+  result.droppedEdges = persistDroppedEdges;
+  if (persistDroppedEdges.length > 0) {
+    const preview = persistDroppedEdges.slice(0, 5).join(', ');
+    const ellipsis = persistDroppedEdges.length > 5 ? ', …' : '';
+    const line = `Foreign-edge persist: dropped ${persistDroppedEdges.length} edge(s) that cannot be stored locally (${preview}${ellipsis})`;
+    logLine(line);
+    if (!isJsonMode && !isSilent) {
+      console.log(`\n${line}`);
+    }
   }
   if (autoSyncEnabled) {
     db.setAutoSync(true, () => Promise.resolve());
@@ -589,13 +616,37 @@ export async function performSync(
         console.log('\nNo changes to sync — skipping export and push');
       }
     } else {
+      // Push-side identity guard (WL-0MWGO58KL00187CO AC1–AC3): refuse when a
+      // push would actually run and the effective user.email is empty or an
+      // exact incident-era sentinel. This mirrors the check made inside
+      // gitPushDataFileToBranch (defence in depth); running it here lets us
+      // audit-log a deliberate --allow-sentinel-author bypass in the sync
+      // output and the sync log. `--no-push` and the zero-change fast path
+      // never reach this branch, so the guard never fires for them.
+      const authority = await enforcePushAuthorIdentity({
+        allowSentinelAuthor: options.allowSentinelAuthor,
+        allowedAuthors: options.allowedAuthors,
+      });
+      if (authority.bypassed) {
+        const bypassLine =
+          `Sentinel-author guard BYPASSED via --allow-sentinel-author: the effective ` +
+          `git user.email '${authority.identity}' is an incident-era sentinel identity; ` +
+          `pushing worklog data under it for this run only (incident remediation — audit).`;
+        logLine(bypassLine);
+        if (!isJsonMode && !isSilent) {
+          console.log(`\n⚠  ${bypassLine}`);
+        }
+      }
       if (!isJsonMode && !isSilent) {
         console.log('\nPushing changes to git...');
       }
       
       try {
         await phaseTimer.measureAsync('push', () =>
-          gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget)
+          gitPushDataFileToBranch(jsonlPath, 'Sync work items and comments', gitTarget, {
+            allowSentinelAuthor: options.allowSentinelAuthor,
+            allowedAuthors: options.allowedAuthors,
+          })
         );
         if (!isJsonMode && !isSilent) {
           console.log('Changes pushed successfully');
@@ -760,6 +811,7 @@ export default function register(ctx: PluginContext): void {
     .option('--no-push', 'Skip pushing changes back to git')
     .option('--dry-run', 'Show what would be synced without making changes')
     .option('--allow-foreign-author', 'Allow any author (allow-all override for sync author gate; syncAllowedAuthors: [] default, list, null/true allow-all). Never bypasses empty-email gate; overrides syncAllowedAuthors/syncAllowForeignAuthor config')
+    .option('--allow-sentinel-author', 'Incident remediation only: allow a one-off push even when git user.email is an incident-era sentinel identity (e.g. t@t.com). Never bypasses the empty-email refusal; does not modify syncAllowedAuthors; the bypass is audit-logged')
     .option('--accept-regressions', 'Accept regressions: allow remote defaults to overwrite local non-default values (regression guard bypass)')
     .option('--if-idle', 'Skip (exit 0) if another sync is already in progress — lock-aware guard for auto-sync spawners; prevents process pile-up under lock contention')
     .option('--no-re-sort', 'Skip automatic re-sort after sync')
@@ -777,6 +829,8 @@ export default function register(ctx: PluginContext): void {
       const cliAllowForeign = options.allowForeignAuthor === true;
       const allowForeignAuthor = cliAllowForeign ? true : defaults.allowForeignAuthor;
       const allowedAuthors = cliAllowForeign ? null : defaults.allowedAuthors;
+      // Push-side sentinel guard escape hatch (incident remediation only).
+      const allowSentinelAuthor = options.allowSentinelAuthor === true;
       // Regression guard override: CLI flag wins over default (default false).
       const acceptRegressions = options.acceptRegressions ?? false;
       
@@ -802,7 +856,8 @@ export default function register(ctx: PluginContext): void {
               isVerbose,
               allowForeignAuthor,
               allowedAuthors,
-              acceptRegressions
+              acceptRegressions,
+              allowSentinelAuthor
             }),
           options.ifIdle ? { skipIfLocked: true } : undefined
         );

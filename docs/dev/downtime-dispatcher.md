@@ -34,6 +34,10 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.selection.ts` | Per-tier candidate selection, rotation, critical-first, dependency frontier | `selectNextCandidate`, `selectAuditCandidate`, `selectWithRotation`, `resolveDependencyFrontier` |
 | `downtime-worker.pane.ts` | Pane identity, in-flight resolution, spawn invocation, pane-lifecycle monitor | `buildDowntimePaneArgs`, `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` |
 | `downtime-worker.gates.ts` | Every "may the worker dispatch X?" decision (holds, depth, attempt budget, classification) | `classifyItemForDispatch`, `evaluateCriticalFirstGuard`, `readReviewQueueGate`, `isAttemptBudgetExhausted` |
+| `downtime-worker.prep-supply.ts` | The READ-ONLY per-root prep-supply bucket classification (measurement vocabulary only — no I/O, no dispatch decision) | `PREP_SUPPLY_BUCKETS`, `classifyPrepSupplyItem`, `classifyPrepSupplyWindow` |
+| `downtime-worker.prep-supply-report.ts` | The READ-ONLY per-root prep-supply report: merges the worklist read with the full per-root fallback, assembles the stable payload and renders the table (no I/O — reads arrive through an injected seam) | `buildPrepSupplyReport`, `collectPrepSupplyReport`, `renderPrepSupplyReportJson`, `renderPrepSupplyReportTable` |
+| `downtime-worker.prep-supply-source.ts` | The report's ONLY I/O half: `wl worklist`/`wl list` reads, batched dependency edges (in-process, `wl dep list` fallback), rolling dispatch log | `createPrepSupplyReportDeps`, `parseWorklistItems`, `parseListItems`, `PREP_SUPPLY_FALLBACK_STATUSES` |
+| `prep-supply-report-cli.ts` | The `worklog-prep-supply` operator CLI (`--root`, `--now`, `--json`) over the report core | `main`, `parsePrepSupplyArgs`, `PREP_SUPPLY_USAGE` |
 | `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
 | `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
 | `downtime-worker.dispatch-cpu-gate.ts` | Host-CPU dispatch gate (host-utilisation seam) | `CPU_SATURATED_REASON` |
@@ -48,7 +52,8 @@ below; each one carries a doc comment stating its single responsibility.
 | `downtime-worker.coordination.ts` | The coordination OFFER computation (the single most-important offer + the per-bucket nominees of the same window) | `computeMostImportantItem`, `coordinationTierRank`, `toCoordinationCandidate` |
 | `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch (per-offer iteration), own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
 | `downtime-worker.offer-selection.ts` | The leader's drain-aware tie-break over one entry's ADMISSIBLE offers (pure ordering arithmetic — never a gate, never a cross-root ranking) | `entryOffers`, `drainAwareRank`, `orderAdmissibleOffers` |
-| `downtime-worker.fairness.ts` | Per-project fairness accounting: whole-set candidate ordering, the twice-in-succession run-length bound (decision-log-sourced, fail-open) and the fairness decision evidence | `orderCoordinationEntriesForDispatch`, `deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING`, `selectedRootForTick`, `dispatchDecisionFairness` |
+| `downtime-worker.fairness.ts` | Per-project fairness accounting: whole-set candidate ordering, the twice-in-succession run-length bound (machine-run-ledger-sourced with a decision-log fallback, fail-open) and the fairness decision evidence | `orderCoordinationEntriesForDispatch`, `deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING`, `selectedRootForTick`, `readPreviousDispatchRun`, `dispatchDecisionFairness` |
+| `downtime-run-ledger.ts` | Machine-scoped consecutive-run ledger (`~/.herdr/downtime/downtime-run-by-root.json`, one `{ root, runLength, at }` record written INSIDE the round-robin charge critical section on every consumed outcome) — the leadership-independent run-length source that replaced the per-leader decision-log tail (WL-0MWT3Z9M9002Z9BF, WL-0MWT54AR8005LMKN) | `writeDispatchRunLocked`, `readCurrentDispatchRun`, `loadDispatchRun`, `RUN_LEDGER_FILE_NAME` |
 | `downtime-worker.terminal-reason.ts` | The neutral terminal-reason precedence chain for a tick that dispatched nothing | `resolveTerminalOutcome` |
 | `downtime-worker.head-scan.ts` | Bounded head/extension candidate scan over ONE root, plus the registered-root sweep that applies it per root in round-robin order | `dispatchFromOwnHead`, `dispatchFromRegisteredRoots` |
 | `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
@@ -182,6 +187,1131 @@ Contract:
 The check-in writes the nominees as the v2 `offers` array (canonical bucket
 order `implement` → `audit` → `prep`) with `workItemId` mirroring the first
 offer, so a v1-era leader keeps reading exactly one offer.
+
+### Prep-supply buckets (WL-0MWTBJ5N1005BNXZ, child of WL-0MWTAD1KM0081UUD)
+
+Why the dispatcher's plan/intake fallback can be empty is measured, not
+sampled. `packages/herdr/src/downtime-worker.prep-supply.ts` classifies one
+root's prep-stage items into exactly ONE bucket each — the **primary cause**,
+first match wins — so a past window (a frozen `now`, the root's rolling
+dispatch log and its items) can be replayed deterministically and diffed.
+
+**Scope.** Prep supply is `idea` and `intake_complete` only. These items are
+never prep supply and appear in no bucket:
+
+| exclusion | predicate |
+|---|---|
+| `soft-deleted` | non-empty `deletedBy` |
+| `terminal-status` | status `completed` or `deleted` |
+| `not-prep-stage` | any other stage (`plan_complete` is an implement candidate) |
+
+**Buckets, in primary-cause precedence order** (bucket names are the
+exported `PREP_SUPPLY_BUCKETS` constant, and this table is asserted against it
+by `downtime-worker.prep-supply.test.ts` — drift fails the suite; one source
+of truth in two places):
+
+| # | bucket | the item was refused because | predicate reused |
+|---|---|---|---|
+| 1 | `producer-review` | `needsProducerReview` is set (the only persistent hold) | `classifyItemForDispatchDetail` → `producer-review` |
+| 2 | `dispatch-marker` | a fresh `plan`/`intake` success marker exists at the item's CURRENT stage | `dispatchedItemMarkers` + `markerStillExcludes` (`stage-guard`) |
+| 3 | `assignee-hold` | a non-empty assignee holds it (the producer sentinel included; the dispatcher's own claim is not a hold) | `classifyItemForDispatchDetail` → `assignee-hold` |
+| 4 | `dependency` | a dependency edge points at a non-terminal blocker (an unresolvable blocker counts as unmet) | `wl` dependency edges |
+| 5 | `startOn` | the effective start instant (`startOn ?? createdAt`) is still in the future | `classifyItemForDispatchDetail` → `startOnNotReached` |
+| 6 | `other-gated` | the classifier refuses for a reason with no dedicated bucket (e.g. an `in-progress` claim at a prep stage) | any other classifier gate |
+| 7 | `attempt-budget` | the per-item, per-kind attempt cap is exhausted at the current stage | `isAttemptBudgetExhausted` |
+| 8 | `cooldown` | a non-terminal pane close is still inside the cooldown | `isNonTerminalCooldownActive` |
+| 9 | `offerable` | nothing above applies — this is real prep supply | — |
+
+**Precedence is a reporting label, never a gate.** The report orders the
+predicates (`producer-review` → `dispatch-marker` → holds → worker-side gates →
+`offerable`) so a fixture with several simultaneous causes still reports one
+primary cause. The dispatcher's own filter chain (classify → marker → attempt
+budget → cooldown) is untouched and no predicate is restated here — every
+bucket quotes the module that owns it.
+
+**Read-only.** The classifier takes plain data only: no `wl` call, no
+subprocess, no file write, and it never mutates its input. A regression test
+asserts the classified dispatch decisions are identical with and without the
+module loaded, so the measurement can never licence a behaviour change.
+
+### Prep-supply report command (WL-0MWTBJ7G1004Y29B, child of WL-0MWTAD1KM0081UUD)
+
+The classifier above answers *why* one item is refused; this command answers
+*how much prep work a root could actually offer, and why not* — repeatably,
+from data instead of a hand-classified sample. It is the AC1/AC2 measurement
+the parent investigation (WL-0MWTAD1KM0081UUD) and its evidence children
+(WL-0MWTBJ9AM003MLLL, WL-0MWTBJAV7002ZZQI, WL-0MWTBJGBS0085DG1) are built on:
+`docs/dev/downtime-dispatcher.md` section *Prep-supply buckets* defines the
+nine buckets, and that table is the single source of truth for their meaning.
+
+```bash
+# Every registered active root, frozen at the overnight window's evaluation
+# instant, machine payload only:
+npx tsx packages/herdr/src/prep-supply-report-cli.ts --json \
+  --now 2026-11-23T10:15:00Z
+
+# Explicit roots (repeatable) — the replay the recorded table must cite:
+npx tsx packages/herdr/src/prep-supply-report-cli.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/SorraAgents \
+  --now 2026-11-23T10:15:00Z
+```
+
+`worklog-prep-supply` is the built (`packages/herdr/package.json` `bin`) form of
+the same entry point.
+
+**Inputs — the worklist gap and its fallback.** `wl worklist --json` (the
+consolidated read the Herdr worklist already issues) is read first, and wins on
+item fields when an item is present in it. That payload has **no prep-stage
+subset**: it covers the browse feed (default 20 items) plus the critical /
+review-queue / in-progress-root / blocked-root subsets, so a prep item outside
+that coverage is invisible to it. The gap is closed by a full per-root fallback
+read, one `wl list --json` per prep stage, which also carries the dependency
+edges the worklist payload lacks (read in one batched in-process pass, falling
+back to `wl dep list <id> --json` per item):
+
+```bash
+wl list --json --status open,blocked,in-progress,input-needed,completed \
+  --stage idea|intake_complete --include-not-started
+```
+
+`--include-not-started` is required — the CLI's default search hides future
+`startOn` items, and hiding them would silently empty the `startOn` bucket. The
+report merges the two sources by item id and emits the per-root coverage
+(`worklistItems`, `fullItems`, `mergedItems`, `worklistOnly`, `fullOnly`) so the
+gap is measured rather than assumed. The rolling dispatch log
+(`<root>/.worklog/downtime-dispatches.log`) supplies the marker, attempt-budget
+and cooldown evidence.
+
+**Buckets and output.** Every root reports a count per bucket (all nine, zero
+when empty), the item ids per bucket, and the `offerable` ids spelled out —
+plus the excluded items (`soft-deleted` / `terminal-status` /
+`not-prep-stage`) so nothing silently disappears. Default output is the human
+table followed by the JSON payload; `--json` emits the payload alone. Both are
+**stable and diffable**: roots sorted by path, buckets alphabetical (the
+primary-cause precedence lives in the classifier's documented table, not in this
+output's key order), item ids lexicographic within a bucket. Two runs with the
+same `--now` are byte-identical, which is what makes a window comparable in
+review.
+
+**Replay.** `--now <iso>` freezes the evaluation instant; omitted, it defaults
+to the wall clock. `--root <path>` is repeatable; omitted, the roots come from
+the `downtimeWorklogRoots` active-root registry in
+`~/.config/herdr/worklog-plugin.json`. The command resolves that path without
+`getDefaultSettingsPath()` (which would create the config directory), so even a
+missing config is a pure read.
+
+**Strictly read-only.** No `wl` write, no marker/flag/assignee mutation, no
+dispatch decision: `downtime-worker.prep-supply-report.ts` performs no I/O at
+all (reads arrive through an injected seam), and a regression test asserts the
+dispatcher's `classifyItemForDispatchDetail` set over the fixture is
+byte-identical before and after a report run. The report quotes the
+classifier's own gate token per item (`verdicts[].classifierGate`) instead of
+paraphrasing it.
+
+**Exit codes.** `0` success; `1` one or more roots failed to read (the other
+roots are still reported, and the failure is named in the payload and on
+stderr); `2` usage error or no roots available. An unreadable source is never
+rendered as an empty, healthy-looking bucket set.
+
+### Recorded prep-supply window (2026-11-23 10:15Z, WL-0MWTBJ9AM003MLLL)
+
+Child 3 of WL-0MWTAD1KM0081UUD records the AC1 evidence: the per-root
+prep-supply table produced by the command above — not a hand sample — for the
+six active roots, pinned to the overnight window's evaluation instant and
+reconciled against the intake snapshot in the parent item.
+
+**Recorded command (the raw-JSON reference).**
+
+```bash
+npx tsx packages/herdr/src/prep-supply-report-cli.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/Tableau-Card-Engine \
+  --root /home/rgardler/projects/tce-the-rising \
+  --root /home/rgardler/projects/games_curator \
+  --now 2026-11-23T10:15:00Z --json
+```
+
+`--now 2026-11-23T10:15:00Z` is the intake snapshot's evaluation instant. The
+payload is schema v1 and two consecutive runs were byte-identical
+(`sha256 d176cc3e5387f2da1c5ca47760e5d4dc68705ea5e358176f019a47f137f450c0`),
+which is what makes the window reproducible. The command, the `--now` and the
+payload hash are recorded on WL-0MWTAD1KM0081UUD; re-running the command
+regenerates the raw JSON.
+
+**Per-root buckets (command output, `--now 2026-11-23T10:15:00Z`).**
+
+| Root | producer-review | dispatch-marker | assignee-hold | dependency | startOn | other-gated | attempt-budget | cooldown | offerable | prep total |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ContextHub | 3 | 1 | 0 | 19 | 3 | 0 | 0 | 0 | 10 | 36 |
+| AI_Hell | 5 | 0 | 0 | 64 | 1 | 0 | 0 | 0 | 13 | 83 |
+| SorraAgents | 9 | 1 | 0 | 147 | 1 | 0 | 0 | 0 | 83 | 241 |
+| Tableau-Card-Engine | 0 | 0 | 0 | 0 | 11 | 0 | 0 | 0 | 1 | 12 |
+| tce-the-rising | 1 | 0 | 0 | 26 | 1 | 0 | 0 | 0 | 15 | 43 |
+| games_curator | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
+| **total** | 18 | 2 | 0 | 256 | 17 | 0 | 0 | 0 | 123 | 416 |
+
+`prep total` is the sum of the nine buckets — the arithmetic invariant, not a
+claim: every in-scope prep item gets exactly one bucket, so `prep total`
+reconciles with no silent drops. Non-prep items appear in no bucket; the
+per-root excluded `terminal-status` / `not-prep-stage` counts are ContextHub
+174/14, AI_Hell 14/9, SorraAgents 66/3, Tableau-Card-Engine 134/2,
+tce-the-rising 23/2 and games_curator 4/0, so `prep total + excluded == merged
+items` for every root.
+
+**Snapshot vs command: the historical-vs-current divergence.**
+
+The parent item's 10:15Z snapshot was a hand reading of the dispatch window;
+the command's full per-root read measures the whole root. Every row corrects,
+so every row carries a note saying why:
+
+| Root | 10:15Z snapshot (prep / admissible) | Command prep total | Existed at 10:15Z (`createdAt` filter) | Offerable | Correction note |
+|---|---|---|---|---|---|
+| ContextHub | 3 / 0 | 36 | 27 | 10 | Snapshot was a windowed reading, not the root's prep set: 27 prep items existed at 10:15Z, 10 of them offerable. |
+| AI_Hell | 4 / 0 | 83 | 78 | 13 | Same windowed undercount; 78 prep items existed, 13 offerable. |
+| SorraAgents | 1 / 0 | 241 | 238 | 83 | Same; 238 existed (93 `open`, 145 `blocked`), 83 offerable. |
+| Tableau-Card-Engine | 0 / 0 | 12 | 11 | 1 | Snapshot's "no prep items" was a windowed miss; 11 existed, 1 offerable. |
+| tce-the-rising | 0 / 0 | 43 | 42 | 15 | Snapshot's "no prep items" was a windowed miss; 42 existed, 15 offerable. |
+| games_curator | 0 / 0 | 1 | 1 | 1 | Snapshot's "no prep items" was a windowed miss; 1 existed and was offerable. |
+
+The re-derived counts filter the command's full read by `createdAt <=
+2026-11-23T10:15:00Z`; every `offerable` id was created at or before the
+snapshot instant, so the offerable column is not an artefact of later-created
+items. The correction's direction is unambiguous: the snapshot under-counted
+prep supply by roughly an order of magnitude on the large roots, so the "empty
+prep bucket" was a **window/visibility** finding, not an absence of prep work.
+Reconciled with the evidence logs, the leader's 10:14–10:16Z check-ins
+(ContextHub `10:14:51Z`, AI_Hell `10:15:10Z`, SorraAgents `10:14:33Z`,
+tce-the-rising `10:11:08Z`/`10:16:13Z`, games_curator `10:14:52Z`) each offered
+exactly ONE candidate and it was never a prep item — a `plan_complete` item on
+ContextHub and `in_review`/`completed` audit candidates on the others — which
+confirms the prep *offer* starved while prep *supply* existed. The full
+root-cause statement (counts and remediation) is child 5
+(WL-0MWTBJCIV006BEGE) and child 6 (WL-0MWTBJEI2008UGUR); this section records
+only the measurement.
+
+**What `--now` pins — and what it cannot.** `--now` freezes the time-derived
+gates (`startOn`, dispatch-marker staleness, non-terminal cooldown). It does
+NOT version item state: `wl` has no historical item snapshots, so status,
+dependency, assignee and `needsProducerReview` are read live. The table is
+therefore "live item state, 10:15Z clock". That is why the re-derivation uses
+`createdAt` (the one field that pins an item to the window) rather than claiming
+an exact replay of 10:15Z state; a true historical replay would need a
+versioned item store.
+
+### Producer-review provenance (WL-0MWTBJAV7002ZZQI, child of WL-0MWTAD1KM0081UUD)
+
+`needsProducerReview === true` is the dispatcher's only persistent hold, and
+nothing records where it came from: the intake/plan/interview question loop, an
+audit rejection, attempt-budget exhaustion, a release escalation and a
+hand-written `wl reviewed` all write the same boolean. A stale flag is therefore
+indistinguishable from a live producer question, which is what starved the prep
+fallback in the 2026-11-22/23 run. This rule makes the flag auditable per item:
+**which evidence set it, how old that evidence is, whether a question is still
+unanswered, and therefore whether it can be cleared now.**
+
+`packages/herdr/src/downtime-worker.producer-review-provenance.ts` implements
+the rule (`classifyProducerReviewProvenance`);
+`downtime-worker.producer-review-provenance.test.ts` pins it, including this
+table. The source names are the exported `PRODUCER_REVIEW_SOURCES` constant and
+are asserted against this table — drift in either fails the suite.
+
+**The rule.** A flag source is claimed only from durable evidence; the
+**newest** such evidence wins, and ties break by authority order (audit >
+attempt budget > question > escalation > manual). The flag age is measured from
+**that evidence's own timestamp** — never from the item's `updatedAt`, which
+bulk worklog operations move without touching the flag.
+
+| # | source | evidence fields it keys on | fail-closed behaviour |
+|---|---|---|---|
+| 1 | `audit-reject` | stored audit record `readyToClose === false` (`wl audit-show`), timestamped by `generatedAt` then `auditedAt`; `auditResult` is the item-level mirror | a **passing** audit (`readyToClose === true`) is never a flag source; a reject with no timestamp is `ambiguous` |
+| 2 | `attempt-budget-exhaustion` | dispatch markers at the item's CURRENT stage: non-enrichment, non-`spawn-failed` entries for the item, counted per kind (`isAttemptBudgetExhausted` / `countAttempts`), aged from the marker that exhausted the cap (`attempts >= downtimeMaxAttempts`, default 3) | markers rotated out of the rolling log, or fewer than the cap, claim nothing; the source is never inferred from the flag alone |
+| 3 | `question-loop` | newest question comment: author + body markers (`question:`, `OPEN QUESTIONS`, `Questions for producer`, `Producer decision required`, `awaiting producer`, `remains open for the producer`, `please confirm/approve/answer/reject`), or the description's `OPEN QUESTION` appendix when no question comment survives | a description-only question carries no timestamp ⇒ `flagAgeMs: null`; it is open unless a later comment records an answer (`Answer:` / `producer answer:` / `answered by`) |
+| 4 | `ship-escalation` | newest comment that both mentions an escalation and the producer (the ship skill's child-to-ancestor escalation), aged from its `createdAt` | an escalation for another item, or an untimeable comment, claims nothing |
+| 5 | `manual` | an explicit `wl reviewed <id> true` / `needs-producer-review: true` comment, aged from its `createdAt`; with no such comment the flag has no recorded cause | no evidence at all ⇒ `source: manual`, `flagAgeMs: null`, grouped `needs-producer-input` (clearing is not provably safe) unless an independent hold proves no dispatch can follow |
+
+**Ambiguity is never silently resolved.** `ambiguous` is returned when the only
+flag-causing evidence has no timestamp, when the newest evidence postdates the
+evaluation instant (it cannot have set the flag in a replay), or when a passing
+audit is the only audit on record. An ambiguous or evidence-less row is grouped
+`needs-producer-input` — the audit never overrides history to make a row
+clearable.
+
+**Groups (parent AC2).** Rows are grouped `can-clear-now` (no unanswered
+question AND the provenance is provable) and `needs-producer-input` (an
+unanswered question is recorded, or the provenance cannot be proved). A
+recorded, **later** answer to the question closes it and makes the stale flag
+clearable. The one fail-closed exception: when an independent dispatcher hold
+(`dependency`, `assignee-hold`, `startOn`, `attempt-budget`, `cooldown`) already
+blocks the item, clearing the flag cannot cause a dispatch, so an
+ambiguously-sourced row may be listed `can-clear-now` **with the hold named** —
+the hold is reported, never relaxed.
+
+**Read-only.** The classifier is pure: plain data in, a verdict out — no `wl`
+call, no subprocess, no file write, no input mutation, and it never clears a
+flag, reassigns an item or changes a dispatch decision. Clearing flags and
+batching producer interviews are separate follow-ups; the audit only records
+what the evidence proves.
+
+### Recorded producer-review provenance audit (2026-11-23 22:15Z, WL-0MWTBJAV7002ZZQI)
+
+Child 4 of WL-0MWTAD1KM0081UUD applies the rule above to every prep item that
+carried `needsProducerReview=true` in the 2026-11-23 audit window, on each
+active root. Rows are read-only findings: **no flag was cleared and no item was
+reassigned** by this audit.
+
+**Evidence read (read-only).** Per root:
+
+```bash
+wl --worklog-dir <root>/.worklog list --json --needs-producer-review --include-not-started
+wl --worklog-dir <root>/.worklog comment list <id> --json
+wl --worklog-dir <root>/.worklog audit-show <id> --json
+wl --worklog-dir <root>/.worklog dep list <id> --json
+```
+
+plus the root's rolling `<root>/.worklog/downtime-dispatches.log` and the
+durable `Auto-dispatched by the herdr downtime worker …` comments (the
+attempt-budget evidence survives log rotation only in the comments). `--now`
+was frozen at `2026-11-23T22:15:00Z`. Classification and grouping are produced
+by `classifyProducerReviewProvenance` + `assembleProducerReviewProvenance` over
+that evidence — the same rule this section documents.
+
+| root | id | flag source | deciding evidence | flag age | open question | group |
+|---|---|---|---|---|---|---|
+| ContextHub | WL-0MWAJ3RPX000HQIG | `question-loop` | `comment:WL-C0MWHP2X210072E21` | 8d 11h | yes | needs-producer-input |
+| ContextHub | WL-0MWQYC2ZQ002NGZP | `question-loop` | `comment:WL-C0MWQZ1GPM007357K` | 1d 23h | yes | needs-producer-input |
+| ContextHub | WL-0MWQYC3MZ0013YLS | `question-loop` | `comment:WL-C0MWQZKYJ8008OAE9` | 1d 23h | yes | needs-producer-input |
+| AI_Hell | AH-0MWEUSVJ1007EXJY | `question-loop` | `comment:AH-C0MWGX0EL7000ZLLB` | 9d 0h | yes | needs-producer-input |
+| AI_Hell | AH-0MWFDQ9EY004NO4X | `question-loop` | `comment:AH-C0MWI5L6HD004KW3P` | 8d 4h | yes | needs-producer-input |
+| AI_Hell | AH-0MWL7OWPF003E4TP | `question-loop` | `comment:AH-C0MWLANMGN004OL0L` | 5d 23h | yes | needs-producer-input |
+| AI_Hell | AH-0MWL7P1AO003LKXT | `question-loop` | `comment:AH-C0MWLBFLER000V8GL` | 5d 22h | yes | needs-producer-input |
+| AI_Hell | AH-0MWLLPA1Q0006U2P | `manual` | none (claimed dependency-held †) | unknown | no | can-clear-now † |
+| SorraAgents | SA-0MSN9UXKJ002JK42 | `question-loop` | `comment:SA-C0MWMTG2ZX001R5A9` | 4d 21h | yes | needs-producer-input |
+| SorraAgents | SA-0MU9VU8GB009P523 | `question-loop` | `comment:SA-C0MUJNHTF4007Q22T` | 57d 12h | yes | needs-producer-input |
+| SorraAgents | SA-0MVNPSBEJ006Z59T | `question-loop` | `comment:SA-C0MWG935ZP003GX87` | 9d 11h | yes | needs-producer-input |
+| SorraAgents | SA-0MVQKMGGN0091NAR | `question-loop` | `comment:SA-C0MWG8SP9K000Q2EW` | 9d 12h | yes | needs-producer-input |
+| SorraAgents | SA-0MVSCS0M80007X23 | `manual` | none (no question/audit/budget evidence survives) | unknown | no | needs-producer-input |
+| SorraAgents | SA-0MVXVC9FM003ZJKJ | `question-loop` | `comment:SA-C0MWINOVMJ0081RHI` | 7d 19h | yes | needs-producer-input |
+| SorraAgents | SA-0MW5KKEHL005BR0L | `question-loop` | `comment:SA-C0MWL5PUW4007DAYU` | 6d 1h | yes | needs-producer-input |
+| SorraAgents | SA-0MWAXZHOU000UBG1 | `question-loop` | `comment:SA-C0MWJ3PXQC008QPZY` | 7d 12h | yes | needs-producer-input |
+| SorraAgents | SA-0MWROFAG800719G4 | `question-loop` | `comment:SA-C0MWROFKMI003FIDJ` | 1d 12h | yes | needs-producer-input |
+| tce-the-rising | RISE-0MWMS0TAN008G2SY | `question-loop` | `comment:RISE-C0MWMSPLPT002T2L6` | 4d 22h | yes | needs-producer-input |
+
+**Group counts** (18 flagged prep items; Tableau-Card-Engine and games_curator
+had none): ContextHub 0 clear / 3 need input, AI_Hell 1 / 4, SorraAgents 0 / 9,
+tce-the-rising 0 / 1 — **1 can clear now, 17 need producer input**. The single
+clearable row is the dependency-held item; every other row has an unanswered
+producer question on record.
+
+**Snapshot caveat.** The two ContextHub `ruff DTZ007` items
+(WL-0MWQYC2ZQ002NGZP, WL-0MWQYC3MZ0013YLS) were flagged when the audit
+started (21:53Z read) and were cleared externally at `2026-11-23T22:00:04Z` /
+`22:00:05Z` **without a comment and by no action of this audit**; they are
+recorded above because they were in scope at the snapshot instant. Conversely
+`SA-0MVSCS0M8` has no surviving evidence for its flag and is therefore
+`needs-producer-input` (fail-closed) — a question for the producer, not a
+silent clear.
+
+**Correction (†) — 2026-11-23T23:37Z, WL-0MWTVPJAN003GLAV.** The
+`AH-0MWLLPA1Q0006U2P` row's "dependency-held" deciding evidence was a
+**direction misread**: its six unmet edges are inbound `depended-on-by` edges —
+items that depend on it (AH-0MWLLPAQL003IEXE, AH-0MWSSU092006M4M8,
+AH-0MWSTFHRK000IX0J, AH-0MWSTG4YA001PVW5, AH-0MWSTGHL20014OVQ,
+AH-0MWSTGTSD0034HD1) — not outbound `depends-on` dependencies. Its only
+outbound dependency, AH-0MWLLP9CS00994RD, is `completed`, so the dispatcher's
+dependency gate does not hold it and the independent-hold exception does not
+apply. The live re-run groups the row `needs-producer-input`; its flag was
+**not** cleared.
+
+### Stale-flag clearing run (2026-11-23T23:37Z, WL-0MWTVPJAN003GLAV)
+
+Child 4a of WL-0MWTAD1KM0081UUD re-ran the rule above over the live prep-stage
+`needsProducerReview` set on the six active roots, cleared only rows grouped
+`can-clear-now`, and re-read the set afterwards. **Nothing was cleared: the
+live `can-clear-now` set was empty.**
+
+| root | before | can clear now | needs producer input | after |
+|---|---|---|---|---|
+| ContextHub | 1 | 0 | 1 | 1 |
+| AI_Hell | 5 | 0 | 5 | 5 |
+| SorraAgents | 9 | 0 | 9 | 9 |
+| Tableau-Card-Engine | 0 | 0 | 0 | 0 |
+| games_curator | 0 | 0 | 0 | 0 |
+| tce-the-rising | 1 | 0 | 1 | 1 |
+| **total** | **16** | **0** | **16** | **16** |
+
+**Read.** The live flagged prep set is the recorded audit set minus the two
+externally cleared ContextHub `ruff DTZ007` items, with `AH-0MWLLPA1Q0006U2P`
+regraded `needs-producer-input` (correction above). The other 15 rows are
+unchanged from the recorded audit: 14 remain `question-loop` with an unanswered
+producer question on record (no later answer comment exists) and
+`SA-0MVSCS0M80007X23` remains `manual` fail-closed (no surviving evidence).
+Inputs were `wl list --needs-producer-review`, `wl comment list`, `wl
+audit-show`, `wl dep list` and the root's rolling `downtime-dispatches.log`;
+holds were derived from the dispatcher predicates (outbound `depends-on` edges
+to non-terminal blockers, `assignee`, `startOn`). The run applied
+`classifyProducerReviewProvenance` / `assembleProducerReviewProvenance` at
+`--now 2026-11-23T23:37:23Z`.
+
+**No mutation.** With an empty `can-clear-now` group, no `wl update
+--needs-producer-review false` ran, no clear-evidence comment was needed and no
+item was reassigned. The flagged set was byte-identical before and after (16
+ids), the `needs-producer-input` set is unchanged and no dispatch marker was
+written. `AH-0MWLLPA1Q0006U2P` joins the 4b producer-interview batch
+(WL-0MWTVPK65009NTER) instead of being cleared.
+
+**Runner gap.** Unlike the prep-supply read, the provenance rule has no
+packaged read-only command, so this run used a one-off script; a follow-up
+(WL-0MWTWQSN8005FK5P) tracks a reproducible read that derives holds from the
+dispatcher predicates rather than hand-collected edges.
+
+**Sanity check against documented history** (parent AC: at least three items,
+mismatches recorded as open questions):
+
+- `AH-0MWEUSVJ1007EXJY` — intake dispatched 2026-11-14T21:19Z, Q1–Q3 posted
+  `21:25Z` and marked `OPEN QUESTION` in the brief → rule says `question-loop`,
+  needs producer input. **Matches.**
+- `WL-0MWAJ3RPX000HQIG` — the intake agent recorded its own recommendation
+  ("Intake decision recorded … Option (c)") and then asked "please confirm or
+  reject option (c)". The recommendation is NOT an answer (pinned by a test) →
+  `question-loop`, needs producer input. **Matches.**
+- `AH-0MWFDQ9EY004NO4X` — intake auto-completed, then the producer-delegated
+  re-ruling states "this ruling remains open for the producer and is not
+  closed" → `question-loop`, needs producer input. **Matches.**
+- `AH-0MWLLPA1Q0006U2P` — implementation aborted 2026-11-23T05:01Z with a new
+  blocker item; no question is recorded and six unmet dependencies were
+  recorded as holding it → `manual`/unknown age, recorded `can-clear-now` via
+  the independent-hold exception. **Partially mismatched:** the six edges are
+  inbound dependents, not unmet dependencies (see *Correction (†)* above), so
+  the live re-run groups it `needs-producer-input`. The flag source (`manual`)
+  still matches the history; the exception does not apply.
+- `SA-0MVSCS0M80007X23` — a plan was recorded on 2026-11-17 with no question,
+  no audit and no attempt-budget evidence. The rule cannot prove why it is
+  flagged, so it is grouped `needs-producer-input` rather than cleared.
+  **Deliberate fail-closed mismatch, recorded as an open question** (does this
+  item still need producer attention?).
+
+### Producer-interview snapshot (WL-0MWVMRVOV0026OWM, child 1 of WL-0MWTVPK65009NTER)
+
+The 2026-11-23 provenance audit grouped 17 prep items `needs-producer-input`
+from a **snapshot** of the flag set. By the time the batched interview is
+written, rows can be cleared externally and new rows can appear, so inviting
+the frozen list would interview the wrong items. The snapshot command re-reads
+the **live** flagged prep set on every active root and classifies it through the
+ONE provenance rule (`classifyProducerReviewProvenance` +
+`assembleProducerReviewProvenance`, *Producer-review provenance* above) — never
+a second, hand-rolled rule.
+
+```bash
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  [--root …] [--now <iso>] [--json|--markdown]
+```
+
+`--now <iso>` freezes the evaluation instant; `--root` is repeatable and falls
+back to the `downtimeWorklogRoots` registry when omitted, so no root is
+hard-coded. JSON goes to stdout (the machine path for the next child) and the
+markdown table to stderr by default; `--markdown` moves the table to stdout and
+`--json` suppresses it.
+
+**What it emits.** For every row grouped `needs-producer-input`: item id, root,
+title, the open question text (or the fail-closed question *does it still need
+producer attention?* when no question survives), the deciding evidence comment
+id and the flag age (`formatProducerReviewAge`). Flagged items in a non-prep
+stage are counted as `skippedNotPrep` so the exclusion is measured, never
+silent.
+
+**Read-only.** The only commands issued are the four documented evidence reads
+(*Evidence commands (read-only)* below):
+
+```bash
+wl --worklog-dir <root>/.worklog list --json --needs-producer-review --include-not-started
+wl --worklog-dir <root>/.worklog comment list <id> --json
+wl --worklog-dir <root>/.worklog audit-show <id> --json
+wl --worklog-dir <root>/.worklog dep list <id> --json
+```
+
+Every argument vector passes through a read-only guard that refuses `update`,
+`comment add`, `reviewed`, `audit-set`, `create`, `close`, `delete` and `sync`.
+No flag is cleared, no item is reassigned and no dispatch marker is written.
+
+#### Recorded live run (2026-11-25T15:20:02Z)
+
+Read-only snapshot at `2026-11-25T15:20:02.717Z`: **15** flagged prep items,
+all grouped `needs-producer-input` (**0** `can-clear-now`); 165 flagged
+non-prep items skipped. Tableau-Card-Engine and games_curator had no flagged
+prep items.
+
+| root | ids (grouped `needs-producer-input`) |
+|---|---|
+| AI_Hell | `AH-0MWEUSVJ1007EXJY` (10d 17h), `AH-0MWLLPA1Q0006U2P` (unknown), `AH-0MWW6PNA5008NC91` (unknown) |
+| ContextHub | `WL-0MWAJ3RPX000HQIG` (10d 4h) |
+| SorraAgents | `SA-0MSN9UXKJ002JK42` (6d 14h), `SA-0MU9VU8GB009P523` (59d 5h), `SA-0MVNPSBEJ006Z59T` (11d 5h), `SA-0MVQKMGGN0091NAR` (11d 5h), `SA-0MVSCS0M80007X23` (unknown), `SA-0MVXVC9FM003ZJKJ` (9d 12h), `SA-0MW5KKEHL005BR0L` (7d 18h), `SA-0MWAXZHOU000UBG1` (9d 5h), `SA-0MWROFAG800719G4` (3d 5h) |
+| tce-the-rising | `RISE-0MWMS0TAN008G2SY` (6d 15h), `RISE-0MWTXTO86004BKXJ` (unknown) |
+
+Compared with the 2026-11-23 seed (17 rows): **5 rows are now absent** —
+`AH-0MWFDQ9EY004NO4X`, `AH-0MWL7OWPF003E4TP` and `AH-0MWL7P1AO003LKXT` are
+`completed`/`in_review` with the flag cleared; `WL-0MWQYC2ZQ002NGZP` and
+`WL-0MWQYC3MZ0013YLS` are `plan_complete` with the flag cleared (the two
+`ruff DTZ007` rows cleared externally at `22:00Z` on 2026-11-23). **3 rows are
+new since the seed** — `AH-0MWLLPA1Q0006U2P` (the audit's sole `can-clear-now`
+row, regraded `needs-producer-input` by the *Correction (†)* above),
+`AH-0MWW6PNA5008NC91` and `RISE-0MWTXTO86004BKXJ`. The other 12 seed rows are
+unchanged.
+
+`AH-0MWLLPA1Q0006U2P`, `AH-0MWW6PNA5008NC91`, `SA-0MVSCS0M80007X23` and
+`RISE-0MWTXTO86004BKXJ` carry no surviving evidence: they are grouped
+`needs-producer-input` fail-closed and their interview question is the
+canonical *does it still need producer attention?*.
+
+### Producer-interview batch document (WL-0MWVMRWEU005LDYP, child 2 of WL-0MWTVPK65009NTER)
+
+The snapshot above is the machine input to the producer's **single-pass answer
+sheet**. The renderer turns every `needs-producer-input` row into one numbered
+row grouped by root, so the producer answers the whole batch once instead of
+being asked one item at a time.
+
+```bash
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  --json \
+  | npx tsx scripts/producer-interview-batch-doc.ts [--out <path>] [--stdout|--json]
+```
+
+With no `--out`, the document is written to
+`docs/dev/producer-interview-batch-<UTC date>.md`, where the date comes from the
+snapshot's `generatedAt`. `--stdout` prints the markdown without writing;
+`--json` writes the file and prints `{ documentPath, rows, roots }`.
+
+**What the document contains.** The header carries the batch id (the snapshot
+timestamp), the row count and the per-root counts, followed by *How to answer*:
+reply once per row number, a row you do not answer **stays flagged**, and
+answering a row **is the authorisation** for that row's flag clear. Every row
+carries its id, root, title, deciding evidence reference (`comment:<id>`, a
+`description:<id>:OPEN_QUESTION` appendix reference, or `none (no surviving
+evidence)`), flag age, the question text verbatim, and exactly one
+`**Recommended:** <option> — <one-line rationale>` line marked advisory only.
+A row with no surviving evidence renders the fail-closed question *does it
+still need producer attention?* rather than being dropped or silently cleared.
+
+**Deterministic and pure.** `renderProducerInterviewBatchDoc` takes the
+snapshot payload and returns a string — no I/O, no clock, no locale-dependent
+collation. Root groups are ordered by codepoint and the snapshot order is
+preserved within a root, so identical input yields byte-identical output. An
+empty interview renders an explicit *No rows to interview* document, never an
+empty file.
+
+**Advisory recommendations.** A recommendation is derived from the row's own
+evidence and never decides the row's fate:
+
+| row evidence | recommended option (advisory) |
+|---|---|
+| a recorded independent `dependency` hold | clear the flag — an outbound dependency already gates dispatch |
+| an unanswered question (comment or description appendix) | answer the question, then clear the flag |
+| no surviving evidence (fail-closed) | confirm whether it still needs producer attention |
+
+#### Recorded batch document (2026-11-25T16:37:25.000Z)
+
+Rendered from the live snapshot at `2026-11-25T16:37:25.000Z` (refreshed from
+the earlier `2026-11-25T16:01:53.100Z` render when the batch was delivered —
+see *Producer-interview delivery* below; the invited row set is identical, 17
+items):
+[`docs/dev/producer-interview-batch-2026-11-25.md`](./producer-interview-batch-2026-11-25.md)
+— **17** rows grouped by root (AI_Hell 5, ContextHub 1, SorraAgents 9,
+tce-the-rising 2), **0** `can-clear-now`. Every row carries exactly one
+advisory `**Recommended:**` line; four rows carry no surviving evidence and
+render the fail-closed question.
+
+### Producer-interview delivery (WL-0MWVMRX4X003DKCT, child 3 of WL-0MWTVPK65009NTER)
+
+Delivery is the single moment the batch reaches the producer. The command
+posts **one** comment on the originating remediation item (`WL-0MWTAD1KM0081UUD`)
+and **one** on the batch item (`WL-0MWTVPK65009NTER`), both quoting the batch id
+(the snapshot timestamp), the document path, the row count, the per-root counts
+and every invited item id, plus how to answer:
+
+```bash
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  --json > /tmp/producer-interview-snapshot.json
+
+npx tsx scripts/producer-interview-batch-doc.ts \
+  --snapshot /tmp/producer-interview-snapshot.json
+
+npx tsx scripts/producer-interview-deliver.ts \
+  --snapshot /tmp/producer-interview-snapshot.json \
+  --root /home/rgardler/projects/ContextHub [--dry-run|--json]
+```
+
+`--dry-run` prints the composed comment and posts nothing (useful before a real
+run); `--json` prints the machine result (`comments[].commentId`, counts). Both
+recipients default to the two documented items and can be overridden with
+`--remediation` / `--batch-item`; the default document path is the
+`docs/dev/producer-interview-batch-<UTC date>.md` file for the batch id.
+
+**Idempotent — nobody is asked twice.** Every delivery comment carries the
+stable marker `[producer-interview-batch:<batchId>]`. Before posting to a
+recipient the module reads that recipient's comments; when the marker is
+already there it reuses the existing comment id instead of posting. A second run
+for the same batch id therefore posts nothing and reports *already delivered*,
+and a run interrupted between the two posts is completed by posting only the
+missing comment. The marker is keyed on the batch id, so a marker for an earlier
+snapshot never suppresses a later batch.
+
+**Order.** The remediation item is posted first, then the batch item, so the
+batch item's reference always finds the remediation reference already recorded.
+Both comment ids are returned in the result and recorded on the batch item's
+completion comment.
+
+**The document must be this snapshot's artefact.** Delivery is refused — loudly,
+before anything is posted — when the document is missing on disk, declares a
+different batch id, declares a different row count than the snapshot payload, or
+was written **before** the snapshot instant it claims (stale: the live flagged
+set moved on after the render). A `wl` rejection is reported with the recipient
+item and the comments already recorded, so a re-run completes idempotently.
+
+**No lifecycle change.** Delivery adds two comments and nothing else: no status,
+stage, flag or assignee is written, so the `completed` / `in_review` remediation
+item keeps its state (verified live below). Unanswered rows stay flagged and
+remain grouped `needs-producer-input`; answering a row is the authorisation for
+that row's clear.
+
+#### Recorded live delivery (2026-11-25T16:37:25.000Z)
+
+- **Batch id:** `2026-11-25T16:37:25.000Z` · **Rows:** 17 · **Document:**
+  [`docs/dev/producer-interview-batch-2026-11-25.md`](./producer-interview-batch-2026-11-25.md)
+- **Per-root counts:** AI_Hell 5 · ContextHub 1 · SorraAgents 9 · tce-the-rising 2
+- **Reference comment on `WL-0MWTAD1KM0081UUD`:** `WL-C0MWWCP6EV000EUKE`
+  (posted first; the item stayed `completed` / `in_review` with
+  `needsProducerReview=true` and no assignee)
+- **Delivery comment on `WL-0MWTVPK65009NTER`:** `WL-C0MWWCP730009671T`
+- **Re-run:** reported *already delivered* and posted nothing.
+
+### Producer-interview answers (WL-0MWVMRXUZ0031P1S, child 4 of WL-0MWTVPK65009NTER)
+
+The producer answers the batch once. That single reply is transcribed into a
+**batch answer file** (row number → answer) and applied deterministically: each
+answer is recorded in that row's own worklog Appendix, and an answered row's
+hold is released with an audit comment that names the answer.
+
+```bash
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  --json > /tmp/producer-interview-snapshot.json
+
+npx tsx scripts/producer-interview-apply-answers.ts \
+  --snapshot /tmp/producer-interview-snapshot.json \
+  --answers /tmp/producer-answers.json [--dry-run|--json]
+```
+
+The batch answer file:
+
+```json
+{
+  "batchId": "2026-11-25T16:37:25.000Z",
+  "documentPath": "docs/dev/producer-interview-batch-2026-11-25.md",
+  "answeringParty": "Map",
+  "clearingAgent": "Map",
+  "author": "implement",
+  "answers": {
+    "1": "clear it — option (a)",
+    "3": "keep waiting because the design question is unresolved",
+    "7": { "answer": "clear it", "answerCommentId": "AH-C0MW..." }
+  }
+}
+```
+
+Row numbers are the batch document's: roots in codepoint order and the snapshot
+order within a root. An unanswered row number is simply absent and stays
+flagged. An out-of-range row number is refused (exit 2) rather than silently
+dropped, because it means the document is stale. `--dry-run` prints the
+composed Appendix entry and the clear/left-flagged decision for every answered
+row and writes nothing.
+
+**No answer, no clear.** Clearing is refused — before any write — when the
+answer entry is not on the row or is not this batch's recorded answer. A row
+with no recorded answer is never cleared, and a test asserts the refusal posts
+nothing and flips no flag.
+
+**The answer entry** (marker `[producer-answer:<item>:<batch>]`) records the
+question as asked, the answer verbatim, the answering party, the batch id, the
+document path and the evidence link (the producer's answer comment id when the
+reply arrived as a comment). Re-running for the same row and batch id **updates**
+the existing entry — never a duplicate.
+
+**The clear** runs answer-first, then `wl reviewed <id> false` on the row's own
+root, then posts the audit comment (marker
+`[producer-answer-clear:<item>:<batch>]`) naming the answer entry, the document
+path and the clearing agent. It is reversible (`wl reviewed <id> true`). A
+re-run never clears or posts twice; a clear comment already on the row is final,
+so a producer who re-raises the hold later is respected.
+
+**Keep waiting / do not proceed** is recorded as an answer and the row is
+**left flagged**; the Appendix entry states the producer's reason and that the
+hold was left in place. No clear comment is posted.
+
+**Cross-root.** Every row write carries the row's own root
+(`--worklog-dir <root>/.worklog`), so an answer lands only in the originating
+root's store. Nothing about the row is re-created in ContextHub's worklog. The
+applied-answers summary (below) is the one intentional write to the batch item's
+own store.
+
+**Applied-answers summary.** After applying, the command posts one idempotent
+summary comment (marker `[producer-answer-summary:<batch>]`) on
+`WL-0MWTVPK65009NTER` with one row per answered item: row id → answer comment
+id → clear comment id, and the clear/left-flagged outcome. With **no answers on
+record** it records that explicitly and clears nothing.
+
+The Appendix-recording convention follows the routine-versus-genuine-handoff
+rule in the SorraAgents skill tree
+(`SorraAgents/docs/dev/routine-vs-producer-handoff.md`): only a genuine producer
+decision raises the flag, and the answer is recorded where the flag is released.
+
+### Producer-interview reconciliation and no-change assertion (WL-0MWVMRYL60019FD1, child 5 of WL-0MWTVPK65009NTER)
+
+The batch must be **provable** after it runs: the operator sees exactly what
+changed per root, and cannot mistake a silent clear for a reconciled row. This
+child re-runs the snapshot command LIVE at the end of the batch and diffs the
+two grouped sets, then asserts the batch's change set never touched dispatcher
+gating, audit budget or dispatcher-selection code paths.
+
+```bash
+# The frozen BEFORE input (the batch document's snapshot).
+npx tsx scripts/producer-interview-snapshot.ts \
+  --root … --json > /tmp/producer-interview-snapshot-before.json
+
+# … deliver the batch, collect answers, apply them (--json output kept) …
+npx tsx scripts/producer-interview-apply-answers.ts \
+  --snapshot /tmp/producer-interview-snapshot-before.json \
+  --answers /tmp/producer-answers.json --json > /tmp/producer-applied-answers.json
+
+# The reconciliation (re-runs the snapshot LIVE as the AFTER state).
+npx tsx scripts/producer-interview-reconcile.ts \
+  --before /tmp/producer-interview-snapshot-before.json \
+  --applied /tmp/producer-applied-answers.json \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/tce-the-rising \
+  --changed-range <before-batch>..HEAD [--post] [--json|--dry-run]
+```
+
+Omit `--applied` to assert a no-answer run (it legitimately reports **0
+cleared, N still flagged**). `--post` records the table on
+`WL-0MWTVPK65009NTER`; the comment carries the stable marker
+`[producer-interview-reconciliation:<batch>]`, so a re-run updates the table
+instead of posting a second one.
+
+**What the table records — one row per root:** flagged before, cleared against
+an answer, still flagged and the total invited. The "before" side is the frozen
+batch snapshot; the "after" side is the fresh re-run of the same snapshot
+command. Every cleared row links to its answer entry (`comment:<id>`) and its
+clear comment (`comment:<id>`).
+
+**Fail-closed rows.** A row that left `needs-producer-input` with no recorded
+answer (`cleared_without_answer`), an answer with no clear-comment link
+(`cleared_without_clear_comment`), a "keep waiting" row cleared anyway
+(`deferral_row_cleared`), an answered row whose clear did not take
+(`answer_clear_did_not_take`), or an unanswered/deferred row that is still
+flagged but regrouped away from `needs-producer-input`
+(`unanswered_row_regrouped` / `deferral_row_regrouped`) is a **failure**, never
+a reconciliation. The failed table is still recorded (marked
+`**Validity:** FAILED`) so the operator sees it, but the command exits 1.
+
+**The unanswered-row assertion.** Every unanswered row is asserted — by the
+check, not by eyeball — to still carry `needsProducerReview=true` and to still
+group `needs-producer-input` in the fresh re-run; the rendered table shows both
+columns. An unanswered row therefore never dispatches: the producer-review gate
+refuses it.
+
+**The no-change assertion.** The CLI runs `git diff --name-only <range>` over
+the batch's diff range and asserts no changed path matches
+`packages/herdr/src/downtime-worker.ts` (gating),
+`packages/herdr/src/downtime-log-budget.ts` (audit budget) or
+`packages/herdr/src/downtime-round-robin*.ts` (dispatcher selection). The
+command and its output are recorded with the table.
+
+#### Recorded live run (2026-11-25T17:46:29Z, batch `2026-11-25T16:37:25.000Z`)
+
+BEFORE = the batch document's snapshot (17 invited rows). AFTER = the fresh
+re-run at `17:46:29.294Z`. No producer answers had been applied: **0 cleared**,
+**16 still flagged**.
+
+| root | flagged before | cleared against an answer | still flagged | total invited |
+|---|---|---|---|---|
+| `/home/rgardler/projects/AI_Hell` | 5 | 0 | 4 | 5 |
+| `/home/rgardler/projects/ContextHub` | 1 | 0 | 1 | 1 |
+| `/home/rgardler/projects/SorraAgents` | 9 | 0 | 9 | 9 |
+| `/home/rgardler/projects/tce-the-rising` | 2 | 0 | 2 | 2 |
+| **all roots** | 17 | 0 | 16 | 17 |
+
+The check did **not** silently reconcile a cleared row: `AH-0MWW5BI5C006WOI3`
+left `needs-producer-input` with no recorded producer answer (its flag was
+cleared when `/skill:plan` ran at `17:16Z` after an intake that had paused for a
+producer decision). It is recorded as `cleared_without_answer` and the run is
+marked FAILED — the operator sees exactly which row changed without an answer.
+One row appeared after the batch (`AH-0MWW5FW4Y009GNBN`) and is reported as
+newly flagged, not as a failure. The no-change assertion over the batch's diff
+range found no protected dispatcher path change.
+
+### Root cause: the 2026-11-22/23 empty prep bucket (WL-0MWTBJCIV006BEGE)
+
+Child 5 of WL-0MWTAD1KM0081UUD states the AC3 root cause from the AC1
+measurement (*Recorded prep-supply window*) and the AC2 provenance audit
+(*Recorded producer-review provenance audit*). It corrects the intake evidence
+where re-derivation disagrees, and labels every claim historical or current.
+
+**Verdict: the bucket was empty at the OFFER layer, not the SUPPLY layer.**
+Prep supply existed on every root at the snapshot instant — **397** prep-stage
+items existed at `2026-11-23T10:15:00Z` and **123** of them were offerable by
+re-derivation — yet **no prep item was the head offer on any of the 964
+check-ins the surviving logs cover in that window** (0 of 22 distinct head
+offers). On the two
+roots that logged a gate classification on every tick, **100 % of the scanned
+candidate window was gated on every tick** (ContextHub 4,165/4,165 candidate
+slots; games_curator 768/768). The one bucket that could drain that gated queue
+— audit — was itself refused by the machine-wide audit budget on **588 of 873**
+refusal decisions. Producer review is a real but **minority** contributor:
+**18 of 416** prep items carried the flag (4.3 %), and 17 of those 18 carry an
+unanswered producer question.
+
+#### Evidence commands (read-only)
+
+```bash
+# Refusal / no-dispatch decisions (per root, rolling 500-line logs)
+python3 - <<'EOF'
+import json,glob,collections
+start,end='2026-11-22T18:00:00','2026-11-23T10:00:00'
+c=collections.Counter()
+for p in glob.glob('/home/rgardler/projects/*/.worklog/downtime-coordination.log*'):
+    for line in open(p,errors='replace'):
+        e=json.loads(line) if line.startswith('{') else None
+        if not e or not (start<=e.get('at','')<=end): continue
+        if e.get('kind')!='decision' or e.get('operation')!='no-dispatch': continue
+        if e.get('reason')!='idle-age-qualified': c[e['reason']]+=1
+print(sum(c.values()), c.most_common())
+EOF
+
+# Check-in head offers + gate classifications per root (same window)
+python3 - <<'EOF'
+import json,glob,collections
+start,end='2026-11-22T18:00:00','2026-11-23T10:15:00'
+b=collections.defaultdict(lambda: collections.Counter())
+for p in glob.glob('/home/rgardler/projects/*/.worklog/downtime-coordination.log*'):
+    root=p.split('/')[4]
+    for line in open(p,errors='replace'):
+        e=json.loads(line) if line.startswith('{') else None
+        if not e or e.get('operation')!='checkin': continue
+        if not (start<=e.get('at','')<=end): continue
+        x=b[root]
+        x['checkins']+=1
+        x['head' if e.get('workItemId') else 'empty']+=1
+        for k,v in (e.get('gateCounts') or {}).items(): x['gate:'+k]+=v
+        x['window']=e.get('windowSize') or x['window']
+for r,c in sorted(b.items()): print(r, dict(c))
+EOF
+
+# A cited source cannot answer refusal questions (see corrected evidence 1)
+grep -c 'audit-budget-saturated' ~/.herdr/downtime/dispatch-budget.log*   # 0
+
+# Prep-supply read (schema v1; live item state, 10:15Z clock)
+npx tsx packages/herdr/src/prep-supply-report-cli.ts \
+  --root /home/rgardler/projects/ContextHub --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents --root /home/rgardler/projects/Tableau-Card-Engine \
+  --root /home/rgardler/projects/tce-the-rising --root /home/rgardler/projects/games_curator \
+  --now 2026-11-23T10:15:00Z --json
+```
+
+#### Corrected evidence (was → now, because)
+
+| # | Intake claim | Corrected evidence | Why |
+|---|---|---|---|
+| 1 | "`dispatch-budget.log` refusal counts: 873 refusals / 588 (67 %) `audit-budget-saturated`" | The totals stand, but the **source is wrong**: they come from `<root>/.worklog/downtime-coordination.log*` entries with `kind=decision, operation=no-dispatch`. `~/.herdr/downtime/dispatch-budget.log*` holds **1,029 reserve/confirm/sweep entries and no refusal record at all** (`grep -c audit-budget-saturated` = 0). | The budget log records ledger operations; the refusal verdict is recorded by the coordinator. |
+| 2 | The 873 figure is reproducible from the logs | **It is not reproducible now**: re-running the intake command at `2026-11-23T22:36Z` returns **0** for its own window. The per-root coordination logs are rolling 500-line caps (4 files); the window's decision entries have rotated out (Tableau-Card-Engine rotates ~500 lines per 2 h). The number is the **recorded reading at 2026-11-23T10:12Z** (intake session log, tool call `call_314d4ffdeefe4c7488f70060`). | No durable refusal log exists. Durable refusal evidence is a gap (open question 2). |
+| 3 | "Prep supply at 10:15Z: 3/4/1/0/0/0 items, 0 admissible on every root" | **397 prep items existed at 10:15Z** (`createdAt <= 10:15Z` filter) and **123 were offerable**: ContextHub 27/10, AI_Hell 78/13, SorraAgents 238/83, Tableau-Card-Engine 11/1, tce-the-rising 42/15, games_curator 1/1. | The snapshot was a *windowed* reading of the dispatch window, not the root's prep set (child 3's correction); the intake under-counted by ~10× on the large roots. |
+| 4 | "The prep backlog is almost entirely producer-review flagged" | **18 of 416** prep items (4.3 %) were flagged. Dependency holds dominate the backlog (256, 61.5 %), then startOn 17, dispatch-marker 2, producer-review 18, offerable 123. Producer review **is** material in the *scanned window*: 22.7 % of ContextHub's and 75 % of games_curator's gated candidate slots. | The intake conflated the prep backlog with the bounded scan window; both readings are true of different populations. |
+| 5 | "The leader therefore offered almost exclusively implement/audit candidates" | It offered **only** implement/audit heads: 0 of 22 distinct head offers were prep-stage; games_curator offered no head at all (192/192 empty), and Tableau-Card-Engine's window entries have rotated out (retention now starts `2026-11-23T12:01Z`). | "Almost exclusively" understates a 100 % observation on the roots whose logs survive. |
+
+#### Per-root supply vs gating (window `2026-11-22T18:00Z`–`2026-11-23T10:15Z`)
+
+Held-by-gate columns are the AC1 prep-supply buckets (live item state at the
+10:15Z clock, per child 3's `--now` caveat), not a state replay.
+
+| Root | Check-ins | Head offers | Empty offers (logged reason) | Distinct heads | Prep heads | Prep existed at 10:15Z | Offerable | producer-review | dependency | startOn | marker | Gate-classified ticks |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ContextHub | 194 | 109 | 85 (81 `review-queue-hold`, 4 `all-window-items-gated`) | 6 | 0 | 27 | 10 | 3 | 19 | 3 | 1 | 85/85, window 49, **100 % gated** |
+| AI_Hell | 191 | 191 | 0 | 5 | 0 | 78 | 13 | 5 | 64 | 1 | 0 | none logged |
+| SorraAgents | 195 | 195 | 0 | 7 | 0 | 238 | 83 | 9 | 147 | 1 | 1 | none logged |
+| Tableau-Card-Engine | — | — | — | — | — | 11 | 1 | 0 | 0 | 11 | 0 | window not covered (log retention starts `12:01Z`) |
+| tce-the-rising | 192 | 192 | 0 | 4 | 0 | 42 | 15 | 1 | 26 | 1 | 0 | none logged |
+| games_curator | 192 | 0 | 192 (`all-window-items-gated`) | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 0 | 192/192, window 4, **100 % gated** |
+| **total** | **964** | **687** | **277** | **22** | **0** | **397** | **123** | **18** | **256** | **17** | **2** | — |
+
+Reconciliation: head offers 687 + empty offers 277 = 964 check-ins **on the five
+roots whose logs cover the window**; Tableau-Card-Engine's window entries have
+rotated out and are therefore not claimed either way. Held
+18 + 256 + 17 + 2 + offerable 123 = 416 = the prep total (single bucket per
+item, no silent drops).
+
+Gate-classification reconciliation (`gateCounts × windowSize` = candidate
+slots, every slot accounted for):
+
+| Root | Slots | review-queue-hold | audit-fresh | producer-review | code-freeze | dispatched-marker | other |
+|---|---|---|---|---|---|---|---|
+| ContextHub (85 × 49) | 4,165 | 1,782 (42.8 %) | 1,259 (30.2 %) | 944 (22.7 %) | 88 (2.1 %) | 86 (2.1 %) | 6 (0.1 %) |
+| games_curator (192 × 4) | 768 | 0 | 192 (25 %) | 576 (75 %) | 0 | 0 | 0 |
+
+Only 34 of the 964 check-ins carried `filledBeyondWindow` (AI_Hell 3,
+ContextHub 4, tce-the-rising 27; games_curator 0), so the per-bucket widening
+(WL-0MWFJ8R1P005G1H1) did not reach the prep items outside these windows.
+
+#### The offer layer in detail
+
+The 22 distinct head offers — every one a `plan_complete` (implement) or
+`in_review`/`completed`/`done` (audit) candidate — are the log's evidence that
+the head of each entry was never prep. ContextHub's 81 `review-queue-hold`
+empties and games_curator's 192 `all-window-items-gated` empties are the
+"prep bucket empty" the run reported: the *offer* was empty, not the *backlog*.
+Tableau-Card-Engine's window is not covered by the surviving logs, so the claim
+is scoped to the five roots whose entries survive.
+
+#### The decision layer (refusal reasons)
+
+| Window | `no-dispatch` decisions | Refusals (excl. `idle-age-qualified`) | `audit-budget-saturated` | Share | Both LLM slots free |
+|---|---|---|---|---|---|
+| Recorded intake window `2026-11-22T18:00Z`–`2026-11-23T10:00Z` (primary logs rotated since) | not recorded | 873 | 588 | 67 % | 738 (84.5 %) |
+| Surviving window `2026-11-23T12:01Z`–`22:30Z` (re-runnable today) | 1,428 | 1,013 | 280 | 27.6 % | 637 (62.9 %) |
+
+Recorded intake distribution (873): `audit-budget-saturated` 588 (67 %),
+`idle-age-pending` 100, `capacity-saturated` 47, `prefill-cap` 45,
+`slots-unavailable` 45, `cpu-saturated` 21, `reservation-refused` 12,
+`prefill-eta` 7, `audit-tier-budget-skipped` 7, `host-budget-implement` 1.
+`freeSlots` at refusal: `{2: 738, 1: 87, 0: 48}`.
+
+#### Root-cause statement (named causes, with counts)
+
+1. **No prep supply — refuted.** 397 prep items existed at the window instant,
+   123 offerable, on all six roots (games_curator 1, Tableau-Card-Engine 11).
+2. **Bounded, fully-gated offer window.** The leader scans a bounded ranked
+   window (`browseItemCount`: 49 on ContextHub, 4 on games_curator). On the
+   roots that logged a classification, **100 % of those slots were gated on
+   every tick** (4,165/4,165; 768/768). Prep items beyond or behind the window
+   were invisible to the offer; widening did not fire (34/964 check-ins).
+3. **The gate that dominated was review-queue/audit-fresh, not producer
+   review.** ContextHub: `review-queue-hold` 42.8 % + `audit-fresh` 30.2 % +
+   `producer-review` 22.7 %. games_curator: `producer-review` 75 % +
+   `audit-fresh` 25 %. It was a completed/in_review-queue hold, not a prep hold.
+4. **The drain bucket was budget-capped.** `audit` was the bucket that could
+   have drained that queue, and the machine-wide audit lease refused it:
+   588/873 (67 %) of refusal decisions were `audit-budget-saturated`, 85 % of
+   them with both LLM slots free. Per-offer attribution over the surviving
+   decisions agrees: `audit-budget` is the largest `offerRejections` gate
+   (1,473).
+5. **Producer-review is real but minority.** 18/416 prep items flagged
+   (4.3 %); 17 have an unanswered producer question (`needs-producer-input`),
+   the single clearable row is independently held by six unmet dependencies,
+   so clearing the flag could not dispatch it. Prep was **held by gates** in
+   this narrow sense (18 items), but that cannot explain an empty bucket while
+   123 prep items were offerable.
+
+#### Time dependence (historical window vs current state)
+
+- **Historical, cannot be replayed.** The 873 distribution and the per-root
+  check-in offers were read from rolling logs at `2026-11-23T10:12Z`; the
+  window's decision entries have since rotated out (evidence 2). `--now`
+  freezes time-derived gates only — `wl` has no item-state history, so status,
+  dependency, assignee and `needsProducerReview` are always live.
+- **Current state is materially different.** At `2026-11-23T22:32Z` the same
+  prep-supply read gives **413** prep items, **128 offerable**, 16
+  producer-review-held. The recorded `--now 10:15Z` read (child 3) was 416 /
+  123 / 18; the delta is explained: two ContextHub `ruff DTZ007` items were
+  cleared externally at `22:00:04Z`/`22:00:05Z` (producer-review → offerable),
+  and one Tableau-Card-Engine `startOn` matured. SorraAgents alone holds 238
+  prep items at the window clock (93 `open`, 145 `blocked`) versus the `1` in
+  the intake snapshot.
+- **What the finding does and does not support.** It supports "the prep offer
+  starved while prep supply existed" for this window. It does not support
+  "the prep backlog is almost entirely producer-review flagged" (evidence 4)
+  nor a claim that producer review was the dominant gate.
+
+#### Open questions
+
+1. **Head vs offers is not provable from the log.** A check-in logs only
+   `workItemId`, which mirrors `offers[0]` under the v2 protocol; the per-entry
+   `offers` payload is not persisted. No prep nominee is *excluded* by this
+   evidence — only proven absent from the head. The v2 per-bucket nominees
+   were live before the window (WL-0MWDDHQON0015T3P completed
+   `2026-11-17T10:06Z`). Persisting `offers` on the check-in line would close
+   this.
+2. **No durable refusal log.** The AC's named source cannot answer refusal
+   questions and the coordinator logs rotate within hours, so an overnight
+   root-cause read cannot be re-derived after the fact. A durable (or longer
+   retention) refusal log is needed before the next overnight post-mortem.
+
+### Remediation plan and follow-up items (WL-0MWTBJEI2008UGUR, child of WL-0MWTAD1KM0081UUD)
+
+The provenance audit (above) and the prep-supply window are the evidence base
+for parent AC4. The remediation is **planned only** in this item: no
+`needsProducerReview` flag was cleared, no skill file was edited and no
+dispatcher behaviour changed. Four follow-up work items, one per bucket, were
+created under WL-0MWTAD1KM0081UUD:
+
+| Bucket | Follow-up | Owner / queue | Evidence rows | Depends on |
+|---|---|---|---|---|
+| 4a stale-flag clearing | WL-0MWTVPJAN003GLAV | dispatcher maintainer / operator | AC2 row 5 (`AH-0MWLLPA1Q0006U2P`, `can-clear-now`); group counts 1 / 17 | WL-0MWTBJAV7002ZZQI (`can-clear-now` grouping) |
+| 4b producer interview batching | WL-0MWTVPK65009NTER | producer | AC2 rows 1–4, 6–18 (`needs-producer-input`, 17 rows) | WL-0MWTBJAV7002ZZQI (`needs-producer-input` grouping) |
+| 4c skill changes | WL-0MWTVPL1A005KB4D | skill maintenance (SorraAgents `skill/`) | 16/18 flagged rows `question-loop`; `interview/SKILL.md` §4, `plan/SKILL.md`, `intake/SKILL.md` handoff text | none |
+| 4d prep seeding | WL-0MWTVPM0D009FMG3 | dispatcher maintainer / operator | AC1 per-root table (all six roots >=1 offerable; 123/416); root cause item 1 ("no prep supply" refuted) | none |
+
+**Why each bucket.** 4a clears only the single row the rule proves clearable
+(`AH-0MWLLPA1Q0006U2P`, recorded as dependency-held, no recorded question); the
+17 rows with an unanswered question are 4b's batch. **Execution outcome
+(2026-11-23T23:37Z, WL-0MWTVPJAN003GLAV):** the dependency hold did not survive
+re-read (see *Correction (†)* above), so 4a cleared **nothing** and that row
+joined 4b's batch — live set 16 flagged prep rows, all
+`needs-producer-input` (*Stale-flag clearing run* above). 4c prevents
+recurrence: 16 of the 18 flagged rows are `question-loop` sourced, so routine
+clarifying questions must
+not set the persistent hold. 4d is a guard, not a correction: the six active
+roots all had at least one offerable prep item at the recorded 10:15Z clock, so
+it seeds only a root a live read finds empty.
+
+**Dependency edges.** 4a and 4b depend on the provenance audit's two groupings
+(WL-0MWTBJAV7002ZZQI); 4c and 4d have no blocking prerequisite. The edges are
+satisfied because the audit is completed.
+
+**Duplicate check.** Each follow-up records the `wl search` terms and results
+it was checked against. No item duplicates the clearing run, the producer
+interview batch, the routine-question skill rule or the prep-seeding run; the
+nearest matches are the completed flag-mechanism items
+(WL-0MV82CHGQ000HAZZ, WL-0MTIAL65N004T22F, WL-0MVAMS4RO000H3B0,
+WL-0MUH765F1003FKRK, WL-0MUH7ACKJ0024VGF) and the offer-mechanism items
+(WL-0MWDDHQON0015T3P, WL-0MWFJ8R1P005G1H1).
+
+**No-behaviour-change evidence (planning-only gate).** Immediately before and
+after creating the follow-ups and updating the parent description, the
+`--needs-producer-review` set and the `status=in-progress` set were captured for
+all six active roots (`wl --worklog-dir <root>/.worklog list --json …`). Both
+sets were byte-identical before and after: no flag was cleared, no assignee was
+written, no dispatch marker was created. The four new items are `open` /
+`intake_complete` and do not enter either set.
+
+### Verification and findings handoff (2026-11-24 00:32Z, WL-0MWTBJGBS0085DG1, child of WL-0MWTAD1KM0081UUD)
+
+Child 7 records parent AC5 (the per-root prep nominee, or the classification
+reason none exists) and parent AC6 (findings and follow-ups recorded, with no
+dispatcher behaviour change). It is a **verification record only**: no gate,
+cap, budget, selection or skill code was touched, so the dispatched-item set and
+the offer computation are unchanged (evidence below).
+
+**How the nominee is read.** A live leader check-in persists only the single
+head offer (`workItemId`), not the v2 per-bucket `offers` payload, so a prep
+nominee behind a non-prep head is invisible to it. The parent plan therefore
+uses the AC-approved equivalent read — the prep-supply report command above —
+and records its `offerable` set per root with the read timestamp. The nominee
+quoted per root is the canonical **first** id of that root's `offerable`
+bucket (the report emits bucket ids id-sorted), i.e. a measured "this root has
+an admissible prep item", not a claim about which item the dispatcher would
+head-offer.
+
+**Read.**
+
+```bash
+npx tsx packages/herdr/src/prep-supply-report-cli.ts \
+  --root /home/rgardler/projects/ContextHub \
+  --root /home/rgardler/projects/AI_Hell \
+  --root /home/rgardler/projects/SorraAgents \
+  --root /home/rgardler/projects/Tableau-Card-Engine \
+  --root /home/rgardler/projects/tce-the-rising \
+  --root /home/rgardler/projects/games_curator \
+  --now 2026-11-24T00:32:00Z --json
+```
+
+- **Evaluation instant:** `--now 2026-11-24T00:32:00Z`; payload captured
+  `2026-11-24T00:32:20Z`. Item state is read live at that instant (`wl` has no
+  historical snapshots), so the hash identifies the exact payload recorded
+  here, not a replayable past window.
+- **Payload:** schema v1, `sha256
+  29454f6f8e590c94b60a822830a27e9a8923edde91dfefae80247c5cf69e0054`; a
+  back-to-back re-run with the same `--now` was byte-identical.
+- **Reconciliation:** prep total **409** + excluded **445** = merged **854**
+  across the six roots, and the cross-root totals sum to the per-root counts
+  (`409`).
+
+**Per-root prep nominee and the AC5 target.** The target is "at least one
+admissible prep item on every active root, or a documented, justified
+exception".
+
+| Root | Offerable | Prep nominee (first offerable id) | producer-review | dependency | other held | AC5 outcome | Follow-up needed |
+|---|---|---|---|---|---|---|---|
+| ContextHub | 15 | `WL-0MVRN37Y1000WP6Q` | 1 | 16 | dispatch-marker 1, other 1 | **met** — admissible prep exists | none needed |
+| AI_Hell | 17 | `AH-0MVMH2OPY001X6M3` | 2 | 59 | other 1 | **met** — admissible prep exists | none needed |
+| SorraAgents | 84 | `SA-0MVB70WW30070JUO` | 9 | 147 | dispatch-marker 1 | **met** — admissible prep exists | none needed |
+| Tableau-Card-Engine | 2 | `CG-0MS98IBEC009GEO7` | 0 | 0 | startOn 10 | **met** — admissible prep exists | none needed |
+| tce-the-rising | 15 | `RISE-0MWKP0W3I009TD02` | 2 | 25 | assignee-hold 1 | **met** — admissible prep exists | none needed |
+| games_curator | 1 | `CUR-0MWJ4GDXQ002T2H5` | 0 | 0 | — | **met** — admissible prep exists | none needed |
+| **total** | **134** | — | **14** | **247** | dispatch-marker 2, startOn 10, other 2 | — | — |
+
+Every root satisfies the target at the read instant, so **no root needs an
+exception and no root maps to a remediation follow-up** (4a WL-0MWTVPJAN003GLAV,
+4b WL-0MWTVPK65009NTER, 4c WL-0MWTVPL1A005KB4D, 4d WL-0MWTVPM0D009FMG3 are "none
+needed" for the AC5 target). This is the state at verification time only: the
+producer-review and dependency buckets still hold the bulk of prep supply, so
+the remediation follow-ups remain the mechanism that turns *supply* into
+*offers*, but they are not needed to *create* a nominee on any root.
+
+**Check-in evidence (where a live check-in exists).** The most recent check-in
+lines at/around the read confirm the head offer is never a prep item — the
+root-cause finding — and that the prefix `prep` nominee is not persisted:
+ContextHub `2026-11-24T00:30:50Z` head `WL-0MVP7TT08006816Z`; games_curator
+`2026-11-24T00:30:49Z` `all-window-items-gated` (window 4, producer-review 3,
+audit-fresh 1); tce-the-rising `2026-11-24T00:26:22Z` head
+`RISE-0MWRZNCMQ004V5C8`. This is exactly why the AC-approved prep-supply read,
+not the check-in payload, is the AC5 evidence source.
+
+**No-behaviour-change evidence (AC6).** This child performs no code change, so
+the dispatched-item set and the offer computation are unchanged. Two independent
+witnesses:
+
+1. **Live, immediately before → after the report run.** For all six roots the
+   full `wl worklist --json` payload (the consolidated read the dispatcher and
+   Herdr worklist consume) was hashed at `2026-11-24T00:31:48Z`, the report was
+   run, and it was hashed again at `2026-11-24T00:31:57Z`: all six hashes are
+   byte-identical (no worklist, dispatch marker, flag or assignee changed).
+2. **Regression tests pinning the invariant.**
+   `packages/herdr/src/downtime-worker.prep-supply.test.ts` → *"leaves the
+   dispatcher classification byte-identical"* asserts the dispatcher's
+   `classifyItemForDispatchDetail` decisions are unchanged by the
+   prep-supply read and that the report quotes the classifier's own gate;
+   `packages/herdr/src/downtime-worker.prep-supply-report.test.ts` → *"leaves
+   the dispatcher decision set byte-identical"* asserts the same for the report
+   builder, with sibling tests pinning the import boundary (pure siblings only)
+   and input immutability.
+
+**Parent evidence pointer table.** Where each parent AC is evidenced:
+
+| Parent AC | Evidence | Location |
+|---|---|---|
+| AC1 — per-root prep-supply table | WL-0MWTBJ9AM003MLLL (comment `WL-C0MWTQO4WW006YDIC`) | this section's command + *Recorded prep-supply window (2026-11-23 10:15Z)* |
+| AC2 — producer-review provenance audit | WL-0MWTBJAV7002ZZQI (comment `WL-C0MWTTIOEN000M9LN`) | *Producer-review provenance* / *Recorded producer-review provenance audit (2026-11-23 22:15Z)* |
+| AC3 — root-cause statement | WL-0MWTBJCIV006BEGE (comment `WL-C0MWTUHK5H004OL7E`) | *Root cause: the 2026-11-22/23 empty prep bucket* |
+| AC4 — remediation plan + follow-ups | WL-0MWTBJEI2008UGUR (comments `WL-C0MWTVR7SQ004VR8C`, `WL-C0MWTWDXSC008898M`) | *Remediation plan and follow-up items* |
+| AC5 — per-root prep nominee / exception | WL-0MWTBJGBS0085DG1 (**this child**) | this section: *Per-root prep nominee and the AC5 target* |
+| AC6 — findings recorded, no behaviour change | WL-0MWTBJGBS0085DG1 (**this child**) | this section: *No-behaviour-change evidence (AC6)* + the two regression tests above |
 
 ### Leader: iterating an entry's offers (parent WL-0MWDDHQON0015T3P AC4–AC8)
 
@@ -793,6 +1923,7 @@ bucket (`implement` / `audit` / `prep`), so at most three offers per entry;
 {"version":2,"entries":[
   {"instanceId":"<uuid>","workItemId":"<wl-id>","directory":"<worklog-root>","worklogRoot":"<worklog-root>",
    "assignedAt":"<iso>","lastUpdated":"<iso>",
+   "capabilities":["audit-lease"],
    "offers":[
      {"kind":"implement","workItemId":"<wl-id>"},
      {"kind":"audit",     "workItemId":"<wl-id>"},
@@ -817,6 +1948,22 @@ bucket (`implement` / `audit` / `prep`), so at most three offers per entry;
 - **No schema-level change elsewhere.** The file still holds ONE entry per
   instance, one lock and one atomic tmp+rename write (the v2 payload is
   nested, so `instanceId`-keyed lease/liveness logic is untouched).
+- **Capability advertisement (fleet version skew, WL-0MWJE9MIR005SBQK).** Each
+  check-in also advertises an additive `capabilities` array; a modern pane
+  advertises `["audit-lease"]` so the leader knows it can acquire the proxy
+  audit lease (WL-0MWFJH3NW006F5GN). The field is OPTIONAL: a legacy entry (or
+  an old writer) omits it and an old reader ignores it, so both directions
+  interoperate. The leader **refuses audit dispatch to a peer that does not
+  advertise `audit-lease`** (fail-closed): such a pane predates the lease
+  wiring and would run availability-only admission — the cross-host race the
+  lease gate removes. The refusal is a neutral hold — the offer is kept (the
+  peer advertises the capability on its next check-in once upgraded), no
+  strike or no-candidate cooldown is armed, the peer's implement/prep offers
+  flow unchanged, and the tick reports the distinct
+  `lease-capability-absent` token (also the per-offer rejection gate token).
+  The gate's rationale, the lease-acquire/`retryAfterS` wiring and the release
+  discipline are described in *Audit-lease acquisition and release discipline*
+  (below).
 
 **The leader block (WL-0MW1VINII003IL7R).** The `entries` array is an OFFER list,
 and a check-in removes the instance's own entry whenever its window is empty
@@ -1289,11 +2436,13 @@ lease protocol — `POST /llama/local/audit/lease` (`200` acquired/ renewed,
 `429 audit-budget-saturated` with a bounded `retry_after_s` when a *different
 session* holds the budget, `503 audit-budget-unavailable` on registry failure),
 plus `POST /llama/local/audit/lease/renew` and
-`DELETE /llama/local/audit/lease/{session_id}`. Herdr does **not** call it yet:
-lease acquisition is deferred to **WL-0MWFJH3NW006F5GN**. Single-machine
-concurrency is already serialised by the machine-wide downtime leader plus the
-host-budget ledger, but the audit budget is **cross-machine**, so only the
-proxy can arbitrate it atomically.
+`DELETE /llama/local/audit/lease/{session_id}`. Herdr **calls it**
+(WL-0MWFJH3NW006F5GN): the availability read gates *candidate selection* and
+the atomic lease acquisition is the admission decision — see *Audit-lease
+acquisition and release discipline* below. Single-machine concurrency is also
+serialised by the machine-wide downtime leader plus the host-budget ledger, but
+the audit budget is **cross-machine**, so only the proxy can arbitrate it
+atomically.
 
 **The client** (`packages/herdr/src/downtime-worker.audit-availability.ts`,
 child `WL-0MWAMSCOP003R837`) is the counterpart of `createLocalReserver` and
@@ -1349,7 +2498,7 @@ admission agree and quote the SAME token. The proxy always wins:
 | Availability read | Audit decision | Decision-log reason | Header token |
 |---|---|---|---|
 | proxy `available: true` | admit (reserve locally for observability only) | — | — |
-| proxy `available: false` | skip that audit candidate and keep scanning (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) | `budget-audit` |
+| proxy `available: false` | skip that audit candidate and keep scanning (neutral — no claim, no pane, no `no-candidate` cooldown) | `audit-budget-saturated` (the proxy's own token) + `retryAfterS` derived from the held lease's `leases[].expiresAt` (epoch ms → seconds, earliest expiry, rounded up, clamped `>= 0`) | `budget-audit` |
 | `endpoint-absent` (`404`, the proxy predates the endpoint) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'http-404'` | `budget-unknown` |
 | `unreachable` (`timeout` / `network` / `http-<status>`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + the failing exchange as `detail` | `budget-unknown` |
 | `unparsable` (`bad-body`) | **fail closed** — skip that audit candidate and keep scanning | `audit-budget-unknown` + `detail: 'bad-body'` | `budget-unknown` |
@@ -1357,7 +2506,14 @@ admission agree and quote the SAME token. The proxy always wins:
 
 The two fail-closed tokens are the proxy's own vocabulary, so a dispatcher
 admission and a proxy refusal cannot disagree about *why* an audit was
-refused (AC2). Every non-`ok` outcome stops audit dispatch with a named
+refused (AC2). A `saturated` refusal names its cooldown WITHOUT a second
+proxy call: `deriveAuditRetryAfterS` reads the availability payload's held
+lease(s), so the pre-check refusal carries the same `retryAfterS` the
+admission `429` arm does (WL-0MWJE9N7L001V6XI). The derivation is
+`available:false`-only (a refused read never churns a lease — the acquire is
+still attempted only when the pre-check admits), and a proxy that serves
+`leases: []` while saturated degrades to "no cooldown named" rather than an
+invented value. Every non-`ok` outcome stops audit dispatch with a named
 reason (AC3) rather than silently reverting to the per-host cap; a missing
 seam fails closed too, never open, because the audit tier cannot prove
 availability without it.
@@ -1420,6 +2576,147 @@ rejection and a synchronous throw → `unreachable`/`network`, an expired timeou
 → `unreachable`/`timeout` with the signal **asserted aborted**, non-JSON and
 parser-rejected bodies → `unparsable`/`bad-body`, and the abort timer cleared
 (`vi.getTimerCount() === 0`) on both the success and failure paths.
+
+### Audit-lease acquisition and release discipline (WL-0MWFJH3NW006F5GN;
+### single read, close-path ownership, cooldown and capability from WL-0MWJ7QYX0001KAQX AC2–AC4)
+
+**The gate in one sentence.** The audit tier's pre-check (`getActiveAudit`) is
+a *candidate filter*; the admission decision is the proxy's atomic
+`POST /llama/local/audit/lease`, so two hosts reading the same
+`available: 1` can never both be admitted.
+
+**Acquisition.** `admitHostDispatch` attempts the lease **only when the
+pre-check admits** (it gates on `decideAuditAvailability` — the SAME helper
+the pre-check maps its observation through, so the caller and admission can
+never disagree). A refused availability therefore never acquires, churns or
+leaks a lease; the acquire is skipped when the seam is unwired or the
+one-release legacy flag (`HERDR_AUDIT_LOCAL_BUDGET=1`) is set. The session id
+is derived from the item (`auditLeaseSessionId(itemId)`), so a re-dispatch of
+the same item renews rather than competes:
+
+| `POST /llama/local/audit/lease` outcome | Decision |
+|---|---|
+| `200` (acquired or renewed) | admit — the host-budget and local-ledger bookkeeping then run as observability only |
+| `429` `audit-budget-saturated` | refuse that audit candidate (neutral, keep scanning); the decision carries the proxy's bounded `retry_after_s` |
+| `503` `audit-budget-unavailable` | fail closed — refuse that audit candidate |
+| `unreachable` / `unparsable` | fail closed — refuse that audit candidate |
+
+**One availability read per attempt (parent AC2).** The typed observation the
+pre-check already made is threaded into the dispatch attempt
+(`auditAvailability` on the dispatch options → `DowntimeHostBudgetAdmissionInput`),
+so admission answers from the SAME observation instead of issuing a second
+`GET` that could race the first, and it never re-maps the same candidate. Only
+a path that has no pre-check keeps admission's single fail-closed fallback
+read. `downtime-worker.audit-availability-single-read.test.ts` pins exactly
+one read per audit candidate dispatch attempt.
+
+**The pre-check refusal names its cooldown (parent AC3).** A saturated
+pre-check refuses *before* admission's `429` arm can run, so
+`deriveAuditRetryAfterS` reads the held lease(s) out of the same availability
+payload: the earliest `leases[].expiresAt` (epoch ms) minus now, rounded **up**
+to seconds and clamped `>= 0`. Rules: `available:false`-only (a granted read
+names no cooldown); an already-past expiry reports `0` ("re-check now"); a
+missing/empty `leases` array — the shipped proxy serves `leases: []` while
+idle — degrades to *no cooldown named* rather than an invented deferral; the
+pre-check never throws. The cooldown rides the decision and the terminal
+reason as `retryAfterS`, exactly like the admission arm.
+
+**Release discipline — every terminal path releases.** An audit admitted with
+a held lease releases it at every terminal outcome, and the release is
+idempotent and best-effort (an unwired client, an unheld session or a throwing
+release is a non-event; a leaked lease is bounded by the proxy's own expiry,
+which the next availability read reports as `reclaimed`):
+
+- **dispatch abort paths** — claim rollback, host-budget refusal, local
+  reservation refusal, marker-write failure and spawn failure
+  (`releaseAuditLease` next to `releaseHostDispatch` in
+  `downtime-worker.dispatch-claims.ts`);
+- **pane close — the REAPER owns it (parent AC1).** The scheduled
+  pane-closure reaper is the only ACTIVE close path, so its single per-pane
+  close block performs all three side effects together: the host-budget
+  release (`ReaperDeps.releasePaneBudget`), the proxy audit-lease release
+  (`ReaperDeps.releaseAuditLease`) and the rolling-log
+  `entryType:'pane-close'` record (`ReaperDeps.recordPaneCloseEntry`) that
+  `isNonTerminalCooldownActive` and the recent-dispatch view read. The
+  disabled pane-lifecycle monitor's `recordPaneClose` writer never runs in
+  production; it is retained only for a future monitor redesign, which must
+  fold onto the reaper instead. The per-run `pane-close-ledger.jsonl` is
+  retained as the *diagnostic* snapshot (it also records failed closes and dry
+  runs, which deliberately write no close record), and `alreadyClosedPaneIds`
+  is fed by the reaper's own record — so the one rolling-log record is both
+  the cooldown/recent-dispatch input and the cross-run idempotency key. The
+  reaper records an `unknown`-kind pane in the ledger only (it belongs to no
+  dispatch tier); a marker close of a terminal-capable tier records its
+  terminal outcome, `audit` records `requires-attention` (the reaper must not
+  invent an audit verdict), and an idle-threshold reap is an abandonment.
+
+**Coordination capability gate (parent AC4).** A modern check-in advertises
+`capabilities: ["audit-lease"]` (see *Shared coordination file* above); the
+leader refuses an **audit** offer from a peer that does not advertise it
+(fail-closed — such a pane predates the lease wiring and would run
+availability-only admission, the cross-host race the lease removes). The
+refusal is a neutral hold: the offer is kept (the peer advertises on its next
+check-in once upgraded), no strike or `no-candidate` cooldown is armed, the
+peer's implement/prep offers flow unchanged, and the tick reports the distinct
+`lease-capability-absent` token. A missing `capabilities` array and a
+malformed value both resolve *not capable*; unknown values are dropped on
+read and write.
+
+**Tests.** `coordination.test.ts` and `coordination-dispatch.test.ts` pin the
+capability advertisement/parse/bounding and the fail-closed audit-offer
+refusal (offer kept, no strike, unchanged implement/prep offers, the
+`lease-capability-absent` token);
+`downtime-worker.audit-availability-single-read.test.ts` pins the one-read
+rule; `downtime-worker.audit-precheck-cooldown.test.ts` pins the derived
+cooldown; `pane-close-reaper.test.ts` drives the reaper (not
+`recordPaneClose`) and asserts the rolling-log record it writes matches the
+monitor's field set.
+
+### Host-budget relief while a pane waits for a model (WL-0MWTAD9NV000IVK5)
+
+A pane parked in a machine-wide **model cooldown** is not using the model: it
+is waiting for a throttled provider to return. The host-budget dispatcher used
+to count it as productive capacity and refuse new work at the configured cap,
+which idled the local LLM during the 2026-11-22/23 overnight run.
+
+**Detection.** A pane is *model-blocked* when the machine-wide cooldown signal
+(`~/.herdr/downtime/model-cooldowns.json`, contract
+`packages/shared/src/model-cooldown.ts`) has an entry that matches its
+`paneId` (first) or `sessionId`, is still active (`cooldownUntil > now`), and
+resolves to the `implement` or `audit` kind (entry kind when present, else the
+pane label). The predicate is pure and unit-tested in
+`packages/herdr/src/host-budget-relief.ts`; no proxy
+`disabled`/`loading`/`switching` signal is consumed.
+
+**Relief rule.** While at least one model-blocked pane of a capped kind exists,
+that kind's admission cap is **exactly 2x** its configured cap
+(`min(baseCap * 2, 2 * baseCap)`). Relief is per kind, is a *total live* cap
+(the blocked panes stay counted), never revives a disabled tier
+(`baseCap === 0`), and never relaxes any other gate (free slots, prefill
+pacing, CPU, review-queue hold, producer review, attempt budget, code-freeze,
+audit freshness). It ends the instant the last matching cooldown expires or is
+cleared — the next admission read recomputes the base cap with no restart.
+
+**Fail closed.** `readModelCooldowns` returns `null` for an
+unreadable/corrupt file; relief grants **no** relief in that case and records
+`budgetRelief.reason = 'model-cooldown-unreadable'`. This is deliberately the
+opposite of the reader's own "assume active" convention: a corrupt file must
+never inflate the host budget.
+
+**Kill switch.** `downtimeBudgetReliefEnabled` (default `true`) restores the
+configured cap. The multiplier is a fixed module constant and **cannot** be
+raised by a setting or env var.
+
+**Audit arm.** The proxy audit lease remains authoritative. Relief is scoped
+to the one-release legacy local-budget path (`HERDR_AUDIT_LOCAL_BUDGET=1`)
+for the audit tier; with the proxy still granting `cap: 1`, an audit relief
+dispatch remains `audit-budget-saturated` because herdr never invents a second
+lease. The implement arm is not blocked on this dependency. (AUDIT RELIEF SCOPING — the code marker lives in `admitAuditDispatch`; a future proxy contract that grants a relief cap is the only thing that may lift it.)
+
+**Surfaces.** The decision entry carries
+`budgetRelief: { kind, baseCap, effectiveCap, blockedPaneIds, reason, until }`
+and the worklist counter renders `n/effectiveCap` while relief is active
+(`budget-relief` is the header/decision vocabulary token).
 
 ### One launch per idle window (parent WL-0MVIKRFP0005JDL8 AC3, slice C3)
 
@@ -1669,6 +2966,56 @@ Double dispatch is still impossible: the claim flips the item to
 `in_progress` (or, on the audit tier, is CAS-guarded on `--if-assignee ""`) and
 the tier's dispatched marker excludes it for the marker lifetime.
 
+### Running-code freshness — which commit is the dispatcher actually running? (WL-0MWWMPDVM009LTQR)
+
+The plugin runs from the live checkout (`npx tsx src/start.ts`), so a
+long-lived worklist pane keeps executing the module graph it loaded at process
+start. Checkout advances (commits, `git pull`, a rebased `dev`) are invisible
+to the running dispatcher until the pane is restarted — the 2026-11-25
+dependency-blocked dispatch investigation could not tell "the fix is wrong"
+from "the fix is not loaded".
+
+At dispatcher start (`main()` in `packages/herdr/src/index.ts`) the plugin
+resolves:
+
+- the checkout `HEAD` commit hash and its committer timestamp
+  (`git log -1 --format=%H%n%cI`), and
+- the process start time derived from `process.uptime()`.
+
+It then writes ONE `kind: 'dispatcher-start'` record to
+`<worklog-root>/.worklog/downtime-coordination.log`:
+
+```json
+{"kind":"dispatcher-start","operation":"start","instanceId":"…",
+ "sourceCommit":"a1b2c3d4e5f6…","sourceStartedAt":"2026-11-24T12:00:00.000Z",
+ "sourceStale":false,"at":"2026-11-24T13:00:00.000Z"}
+```
+
+While the identity is configured, **every** coordination-log entry — every
+`kind: 'decision'` dispatch or refusal record included — carries the same
+`sourceCommit` / `sourceStartedAt` / `sourceStale` fields, so a dispatch can be
+tied to the commit that produced it without `ps` archaeology. To check whether
+a record's runtime is still current, compare its `sourceCommit` with
+`git rev-parse HEAD`; a mismatch means the pane must be restarted.
+
+**Staleness warning.** When the process started BEFORE the checkout `HEAD`
+commit was committed (the checkout advanced after this process loaded its
+modules), the plugin emits exactly ONE actionable stderr warning:
+
+```
+[worklog-plugin] Downtime dispatcher is running stale code: this process started
+<startedAt>, before checkout HEAD <shortCommit> was committed (<committedAt>).
+Restart the Worklog plugin pane to load the current checkout.
+```
+
+A runtime that is current at start emits no warning. The signal is deliberately
+observability-only: it never gates, delays or refuses a dispatch.
+
+Fail-open: an unavailable/foreign git checkout, a malformed `git log` payload
+or a git timeout resolves no identity — the start record is still written
+(without source fields) and no warning is emitted. A log-write failure is
+swallowed, so freshness observability can never crash the dispatcher.
+
 ### Producer-hold sentinel (WL-0MV85WDOM007BKF8)
 
 The **scheduling-hold convention**: a non-empty `assignee` means the item is
@@ -1738,7 +3085,7 @@ parity-complete with the CLI's default filter (WL-0MWMGET8N009KG33):
 - **Visible read-only.** The worklist display opts in to not-yet-started items
   so a scheduled item is surfaced rather than silently hidden. It carries the
   per-row marker `[not started until <date>]`, the header count
-  `[not started: N]`, and — when **zero** window items have started — the
+  `[Future items: N]`, and — when **zero** window items have started — the
   banner ``Not started — all N of M dispatch-window item(s) start after
   <earliest>; no downtime dispatch possible``. The surface mirrors the
   assignee-hold convention (`dispatch-window-start.ts`): derived from the
@@ -1827,10 +3174,16 @@ agent exits, the pane is closed by the reaper, or the audit ends with no
 recorded result. Those closes are recorded in the rolling dispatch log as
 `entryType: 'pane-close'` entries carrying a `reasonCode`
 (`agent-ended-no-terminal`, `audit-ended-no-result`, `producer-review`,
-`risk-effort-incomplete`, …). Before this control, such an item became
-re-eligible as soon as the dispatched success-marker was released, so a
-repeatedly failing session could be re-selected on the very next idle cycle
-and burn local-LLM slots in a tight loop.
+`risk-effort-incomplete`, …). The scheduled pane-closure reaper is the ONLY
+production writer of that record (WL-0MWJ7QYX0001KAQX AC1): it writes it in
+the same close block as its budget/lease releases, and its own
+decision codes (`marker`, `idle-threshold`) follow the same terminal/non-
+terminal rule. Previously the record came from the now-DISABLED pane-lifecycle
+monitor, so in production the cooldown had no input at all. Without this
+control, such an item became re-eligible as soon as the dispatched
+success-marker was released, so a repeatedly failing session could be
+re-selected on the very next idle cycle and burn local-LLM slots in a tight
+loop.
 
 `isNonTerminalCooldownActive` (`packages/herdr/src/downtime-log.ts`) is a
 **neutral, sequential filter** that excludes an item from re-dispatch of the
@@ -3060,6 +4413,7 @@ entered and the next idle tick re-checks (as with `audit-budget-saturated`).
 | any capped kind except `audit` (`implement`, `plan`, `intake`, `risk-effort`) | entries whose pane is in the live pane list **<** the kind's cap (a confirmed dispatch with a live pane counts regardless of heartbeat age — pane-derived freshness, WL-0MW9VQ08W000SN63) | admit + reserve | — | — |
 | any capped kind except `audit` | pane list UNKNOWN (failed/unparseable `hostBudgetLivePanes` read, WL-0MW9VQX5T001GCUP) | count fresh entries by the **freshness rule** (no pane requirement) — never reaps, never deletes, still decides (fail-open: a broken herdr read does not refuse a tick on its own) | — | — |
 | any capped kind except `audit` | at/over the kind's cap (including a `0` kill switch) | skip that candidate and keep scanning — no claim, no pane | `host-budget-<kind>` | `budget-<kind>` |
+| implement / audit (relief, WL-0MWTAD9NV000IVK5) | at least one pane of that kind is **model-blocked** (an active `model-cooldowns.json` entry matched by `paneId`/`sessionId`) and `downtimeBudgetReliefEnabled` is on (default) | the kind's cap is **doubled** (`min(2 × cap, 2 × cap)`); admission compares the **total live** count (blocked panes included) with the effective cap — admits below it, refuses at/above it with the normal `host-budget-<kind>` token; an unreadable cooldown file grants no relief (fail closed) | `budget-relief` evidence (`budgetRelief`) rides the decision entry; a refusal above the effective cap keeps `host-budget-<kind>` | worklist counter shows `n/effectiveCap (budget-relief)` |
 | audit | proxy availability read `available: true` | admit + reserve (the local entry is observability only) | — | — |
 | audit | proxy availability read `available: false` | skip that audit candidate and keep scanning (neutral) | `audit-budget-saturated` | `budget-audit` |
 | audit | proxy read not `ok` — `endpoint-absent` / `unreachable` / `unparsable`, or the seam is absent | **fail closed** — skip that audit candidate and keep scanning, recording the failing exchange as `detail` | `audit-budget-unknown` | `budget-unknown` |
@@ -3193,7 +4547,12 @@ ends:
   `downtime-worker.dispatch-claims.ts`);
 - **pane close** — the reaper releases the item's entry right after it closes
   that pane (`ReaperDeps.releasePaneBudget`), for both `implement` and
-  `audit`;
+  `audit`. The same per-pane close block also releases the proxy audit lease
+  (`ReaperDeps.releaseAuditLease`) and writes the rolling-log
+  `entryType:'pane-close'` record (`ReaperDeps.recordPaneCloseEntry`): the
+  only ACTIVE close path owns all three side effects, so a release and the
+  record it explains cannot drift apart (WL-0MWJ7QYX0001KAQX AC1 — see
+  *Audit-lease acquisition and release discipline*);
 - **session finished (WL-0MWJVY6NR001E0FS)** — the reaper releases the
   finished session's entry on its own cadence, **independently of any close**
   (`ReaperDeps.releaseFinishedSessionBudget`). "Finished" is the shared
@@ -3364,6 +4723,38 @@ project's implement/audit dispatch; that is tracked separately
 (WL-0MWAM5N75004ROSW). Full rationale, the tier table and the subprocess
 inventory: [release-dispatch-budget-evaluation.md](release-dispatch-budget-evaluation.md).
 
+### Tick budget reconciliation pass — isolation contract for tick harnesses
+(WL-0MWUON2T9003Q0MU)
+
+The worker tick runs the host-budget reconciliation pass (sweep → reap →
+adopt) at a bounded cadence — 60 s (`HOST_BUDGET_RECONCILE_INTERVAL_MS`), so
+it always fires on a worker's **first** tick. It is deliberately
+**fire-and-forget** (a pre-dispatch `await` would let a second tick win the
+single-flight dispatch race), it never gates a dispatch, and every failure is
+surfaced as a NON-BLOCKING `host-budget-reconcile-failed` observation recorded
+through the same `deps.recordDecision` sink the refusal paths use.
+
+Two consequences are load-bearing for tests:
+
+- **The ledger dir comes from `cfg.cwd`** (`resolveEffectiveDir`): a tmp-root
+  cwd reconciles its own root ledger, while any other path resolves to the
+  live machine dir `~/.herdr/downtime`. Every harness that calls
+  `worker.tick()` therefore MUST use a tmp-root cwd — never a literal
+  `'/repo'`. Otherwise a unit test reads/writes the live ledger, and because
+  the coordination lock is a single non-blocking attempt
+  (`withCoordLock` → `lock-contention`), a concurrent real dispatcher or a
+  corrupt live ledger makes the pass fail and inject an unrelated
+  `host-budget-reconcile-failed` decision into that tick. A decision
+  assertion must therefore name the decision it requires
+  (`toHaveBeenCalledWith(expect.objectContaining({ reason: … }))`), not index
+  `mock.calls[0]`.
+- **Teardown races the pass.** Because the pass is not awaited, it can still
+  be creating its `<root>/downtime-coordination.lock` / `dispatch-budget.json`
+  while a test's `afterEach` removes the root. Shared temp-dir trackers
+  (`createTempDirTracker` in `downtime-worker.fixtures.ts`) retry `rmSync`
+  (`maxRetries`/`retryDelay`) and concede after that, so a transient
+  `ENOTEMPTY`/`EBUSY` is debris rather than a failing test.
+
 ### Unified budget observability (F5 WL-0MVXY0ZYW009NEJD)
 
 The budget's numbers are surfaced through the existing observability tools —
@@ -3372,10 +4763,10 @@ disagree:
 
 | Surface | What it shows | Source |
 |---|---|---|
-| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-<kind>` for every capped kind — `host-budget-implement`, `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier, `host-budget-audit` / `host-budget-unknown` under `HERDR_AUDIT_LOCAL_BUDGET=1`, and `host-budget-plan` / `host-budget-intake` / `host-budget-risk-effort` when those kinds are capped) plus a `budget` evidence figure (`live`/`max` for the kind) and, on a fail-closed audit read, the failing exchange as `detail` (`http-404` / `timeout` / `network` / `bad-body` / `seam-absent`) — the decision entry names the broken proxy contract without reading code (WL-0MWDDHVF2004PTYX AC3); plus the `audit-budget-divergence` / `audit-budget-legacy` evidence entries | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
+| Decision log (`.worklog/downtime-coordination.log`) | the refusal token (`host-budget-<kind>` for every capped kind — `host-budget-implement`, `audit-budget-saturated` / `audit-budget-unknown` for the proxy-derived audit tier, `host-budget-audit` / `host-budget-unknown` under `HERDR_AUDIT_LOCAL_BUDGET=1`, and `host-budget-plan` / `host-budget-intake` / `host-budget-risk-effort` when those kinds are capped) plus a `budget` evidence figure (`live`/`max` for the kind) and, on a fail-closed audit read, the failing exchange as `detail` (`http-404` / `timeout` / `network` / `bad-body` / `seam-absent`) — the decision entry names the broken proxy contract without reading code (WL-0MWDDHVF2004PTYX AC3); plus the `audit-budget-divergence` / `audit-budget-legacy` evidence entries; plus `budgetRelief` evidence (`kind`, `baseCap`, `effectiveCap`, `blockedPaneIds`, `reason`, `until`) on any admission or refusal that touched a model-blocked pane (WL-0MWTAD9NV000IVK5 AC9) | `downtime-log.ts` + `downtime-log-budget.ts` vocabulary, written by the tick |
 | Herdr header token | `budget-<kind>` per capped kind (`budget-implement`, `budget-audit`, `budget-plan`, `budget-intake`, `budget-risk-effort`) plus `budget-unknown`, from the shared `decisionHeaderToken` mapping, so the header says *why* the tick stopped — consistent with `contention` / `slot-owner` / `saturated` | `downtime-worker.constants.ts` |
 | stderr skip line | `[worklog-plugin] Downtime <kind> tier skipped: <reason> (live=n, max=m)` (`kind` is `budget` for `audit-budget-unknown` / `host-budget-unknown`); an uncapped kind can never produce this line | `hostBudgetSkipLine` (`host-budget-status.ts`) |
-| Worklist header counter | read-only `[budget: implement n/max · audit n/max]`, extended with one segment per further configured kind (`[budget: implement 1/2 · audit 0/1 · plan 0/3]`, canonical `HOST_BUDGET_KINDS` order); rendered from already-available state, it never spawns `wl`, never mutates and never changes a dispatch decision, lists **no segment for an uncapped kind**, and renders nothing when the budget is unavailable (no chrome in the common case) | `readHostBudgetStatus` (`host-budget-status.ts`) |
+| Worklist header counter | read-only `[budget: implement n/max · audit n/max]`, extended with one segment per further configured kind (`[budget: implement 1/2 · audit 0/1 · plan 0/3]`, canonical `HOST_BUDGET_KINDS` order); rendered from already-available state, it never spawns `wl`, never mutates and never changes a dispatch decision, lists **no segment for an uncapped kind**, and renders nothing when the budget is unavailable (no chrome in the common case). While a model-blocked pane raises a kind's cap (WL-0MWTAD9NV000IVK5 AC9) the segment shows the **effective** cap with the `budget-relief` token — `[budget: implement 1/4 (budget-relief) · audit 0/1]` — so a doubled cap cannot be mistaken for a configured one | `readHostBudgetStatus` (`host-budget-status.ts`) |
 
 `readHostBudgetStatus` counts with the **same pure reductions admission
 uses** (`countLiveWork`/`reduceLedgerCounts` for every non-audit kind's
@@ -4208,6 +5599,76 @@ computation already applied the marker-TTL fallback).
 > [downtime-dispatcher-post-fix-verification.md](downtime-dispatcher-post-fix-verification.md)
 > (WL-0MUBVL5770009DO9 / F7).
 
+#### Dependency-frontier guard — display includes blocked items, dispatch never targets one (WL-0MWWMPBL8003X59M)
+
+The worklist **deliberately shows** dependency-blocked items
+(WL-0MV6TFX0600145M2): an operator must see that an item is waiting on a
+blocker. Dispatch is the opposite: a critical item with a live outbound
+`depends-on` edge to a non-terminal blocker must **never be the dispatch
+target or an offer at itself**. At `plan_complete` with in-cap risk/effort it
+would otherwise classify as `implement` and burn a whole agent session on work
+it cannot legally do (parent WL-0MWWLLGD2001QKAL; observed on
+`AH-0MWWARFUK009KQM7`).
+
+**The invariant: display includes dependency-blocked items, dispatch never
+targets one — on every path.**
+
+`resolveHeadDependencyFrontier` (`downtime-worker.dispatch-filter.ts`) is the
+ONE place the head/coordination paths consult `depends-on`. It reuses the
+legacy frontier walk (`resolveDependencyFrontier`) so the
+nearest-open-dispatchable-blocker semantics, the implement caps, the
+producer-review exclusion and the cycle/depth bounds are defined once. Every
+caller resolves through that helper — they cannot drift:
+
+| Path | Where | Behaviour |
+| --- | --- | --- |
+| Direct dispatch — critical-first scan | `dispatchFromHerdrList` | redirects to the nearest open blocker (with ITS stage-appropriate skill), or dispatches nothing; a blocked item is never the target |
+| Direct dispatch — normal scan | `dispatchFromHerdrList` | skips a dependency-blocked critical item (the critical-first scan owns the redirect) |
+| Offer computation — critical-first scan | `computeMostImportantItem` | offers the nearest open blocker, or nothing |
+| Offer computation — normal pass | `computeMostImportantItem` | rejects a dependency-blocked critical item with the `dependency-blocked` gate token |
+| Own-backlog fallback / audit-batch continuation / registered-root sweep | `dispatchFromOwnHead` (`downtime-worker.head-scan.ts`) | skips a dependency-blocked critical item; the blocker is dispatched from its own root's head |
+
+**Fail closed.** A `wl dep list` failure (thrown lookup or the legacy `null`
+signal) produces **no dispatch** and is recorded with the stable
+`dependency-lookup-failed` reason — the dispatcher never falls through to a
+silent wrong target. The offer path surfaces the same token as its
+`EmptyOfferAttribution.reason`. A chain that legitimately bottoms in closed /
+non-dispatchable items simply dispatches nothing at that candidate.
+
+**Display is untouched.** No candidate is removed from the Herdr head or the
+worklist: the guard only decides whether a *dispatch/offer* happens, so the
+operator still sees every blocked item (and can clear its blocker).
+
+#### Claim-boundary dependency re-check (WL-0MWWMPCD2008HSSP)
+
+The selection guards above cannot cover an offer computed by a **peer
+instance**: the leader claims and spawns an offer it did not compute, and the
+item re-fetch seam (`fetchItem` → `classifyItemForDispatchDetail`) carries no
+dependency-edge information. So the LAST gate before the CAS claim — inside
+`dispatchClaimedTier` (`downtime-worker.dispatch-claims.ts`) — re-checks the
+candidate's outbound `depends-on` edges through the new
+`recheckDependenciesForClaim` (`downtime-worker.claim-dependency-guard.ts`):
+
+| Situation | Verdict | Decision-log reason |
+| --- | --- | --- |
+| No live outbound `depends-on` edge | claim/spawn proceed | — |
+| A live edge (target not `completed`/`deleted`, stage not `in_review`/`done`) | refused BEFORE the claim | `dependency-blocked` |
+| `wl dep list`/`wl show` throws, or the legacy `null` signal | refused (fail closed) | `dependency-lookup-failed` |
+| AUDIT kind | exempt — it re-checks freshness (`hasFreshAudit`) and audits terminal items | — |
+
+Both refusals are **neutral**: no CAS claim, no marker, no pane, no
+try-strike and no non-terminal cooldown. The leader's offer loop returns the
+token instead of falling through to `no-candidate` (which would arm the
+no-candidate cooldown), so the next idle tick simply re-checks.
+
+**One read per candidate per tick.** Each dispatch entry point creates ONE
+`DependencyRecheckMemo` and passes it to `dispatchClaimedTier`; the F2
+selection guard (`resolveHeadDependencyFrontier`) and the claim guard share it
+through `memoizeBlockerFetcher`. A candidate a tick inspects twice (e.g. a
+critical item walked by the frontier guard and then claimed, or an offer the
+leader refuses and later sees again in its own-backlog fallback) therefore
+costs exactly one `wl dep list`.
+
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open
 **critical** item at ANY stage via `wl list --priority critical --status open
@@ -4284,12 +5745,19 @@ dispatched **twice in succession** is deferred behind its peers
 (`deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING = 2`). This is an **ordering**
 rule, never a gate: it moves a ceiling root to the end of the candidate order so
 the next genuinely admissible peer dispatches first. If every peer is held (or
-capacity has fallen to a single free slot), the order is returned unchanged and
-the ceiling root still dispatches — the bound only bites when a peer can
-actually take the slot. Fail-open: a missing/unreadable/corrupt decision log
-means "no previous dispatch", so no deferral happens and dispatch proceeds. The
-registered-root sweep uses the same ordered candidate list and the same
-deferral helper, so the two paths cannot drift.
+capacity has fallen to a single free slot, `requiredFreeSlots = 1` ⇒
+`surplusCapacity = false`), the order is returned unchanged and the ceiling root
+still dispatches — the bound only bites when a peer can actually take the slot.
+The run length is read from the **machine-scoped run ledger**
+(`~/.herdr/downtime/downtime-run-by-root.json`), not from the leader's own
+decision log, so a leadership hand-off between roots cannot reset it
+(WL-0MWT3Z9M9002Z9BF; see [Run-length source](#run-length-source-the-machine-run-ledger)).
+Fail-open: a missing/unreadable/corrupt ledger falls back to the tail of the
+leader's own ROTATED decision log (`readCoordinationLogAllEntries`), then to
+`1`, so no deferral happens and dispatch proceeds. That fallback covers only
+the upgrade / ledger-loss boundary — the next consumed charge recreates the
+ledger (WL-0MWT54AR8005LMKN). The registered-root sweep uses the same ordered
+candidate list and the same deferral helper, so the two paths cannot drift.
 
 **A selected-but-held root is never charged.** Selection
 (`selectLeastRecentlyServed` / `orderRootsLeastRecentlyServed`) is a **pure
@@ -4305,11 +5773,14 @@ nothing to dispatch, and would make the cursor disagree with the dispatch log.
 Fairness for a held root comes from the held offer itself (the log names the
 gate), not from the cursor.
 
-**Accounting identity:** the cursor file and `.worklog/downtime-dispatches.log`
-agree about who was served — every dispatch row in the log corresponds to
-exactly one charge of that root's cursor entry, and a charge never happens
-without a consumed offer (`dispatched` / `spawn-failed` /
-`marker-write-failed`), while a selected-but-held root is charged nothing.
+**Accounting identity:** the cursor file, the machine run ledger and
+`.worklog/downtime-dispatches.log` agree about who was served — every dispatch
+row in the log corresponds to exactly one charge of that root's cursor entry,
+and a charge never happens without a consumed offer (`dispatched` /
+`spawn-failed` / `marker-write-failed`), while a selected-but-held root is
+charged nothing. The run ledger is advanced in the SAME `advanceRoot`
+critical section as the cursor, so the two files cannot drift
+(WL-0MWT54AR8005LMKN).
 
 **Per-project fairness metric (WL-0MWKY141H002LULI, parent
 WL-0MWKE9VF800101V9 AC3).** Every coordination decision entry — a successful
@@ -4402,13 +5873,30 @@ state them with any result so it can be reproduced.
   Threshold: **no project above twice its even share**.
 - **Consecutive run.** Merge every project's rows chronologically and take the
   longest maximal same-project sequence. Threshold: **no run longer than 2**
-  (`RUN_LENGTH_CEILING`).
+  (`RUN_LENGTH_CEILING`) — the bound the code enforces while **two or more roots
+  have an *admissible* offer and surplus capacity exists** (parent
+  WL-0MWKE9VF800101V9 AC1). A longer run is therefore a breach only after the
+  precondition is checked: a run of 3 or more on ticks where every peer offer
+  was refused by a gate is the documented fall-through, so attribute the breach
+  against the peer check-ins / `no-dispatch` rows before calling it a defect.
+  The code enforces the run length from the machine run ledger
+  (`downtime-run-by-root.json`), which survives a leadership hand-off and log
+  rotation and is advanced on every **consumed** outcome
+  (`dispatched` / `spawn-failed` / `marker-write-failed`); the decision-log
+  `consecutiveRunLength` is the **cross-check**, not the source.
 - **Kind mix.** Dispatches per project per `kind` (`intake` / `plan` /
   `risk-effort` / `implement` / `audit`).
 - **Accounting identity.** Count `dispatchingRoot` over the window's
   `outcome: "dispatched"` decision entries and compare per project with the
   dispatch-log counts; take the maximum `consecutiveRunLength` and compare with
-  the computed runs. The two must agree exactly.
+  the computed runs. The two must agree wherever the decision rows are retained
+  — but the leader's decision log rotates in hours (see [Retention &
+  rotation](#rolling-log-trimming-retention--rotation)), so treat a missing
+  decision counterpart as an evidence limit, not a mismatch, and treat the
+  machine run ledger as the authoritative run source. Because the run counts
+  CONSUMED offers, a `spawn-failed` / `marker-write-failed` refusal advances it
+  without a `dispatched` row; read such a row as an advance when reconciling
+  (`isConsumedDispatchOutcome` is the shared predicate).
 
 *Recorded measurement — 2026-11-19T12:22:49Z onward (NOT a pass).* The window
 held 4 active projects and 8 dispatches (12:37:40Z → 14:09:22Z): AI_Hell 4
@@ -4425,15 +5913,216 @@ still shows the signature — SorraAgents 6 (2.31× even share) — which confir
 the method detects the defect when the fixed code is not running. Re-measurement
 after a dispatcher restart is tracked by **WL-0MWNN84HO004DXQU**.
 
-**Run-length source: the decision-log tail.** `consecutiveRunLength` is derived
-from the tail of the same decision log (a bounded, fail-open read) rather than a
-second durable cursor. That keeps the on-disk round-robin cursor format
-`{ "<worklogRoot>": "<ISO-8601>" }` unchanged, adds no file or lock, and gives
-restart-safe history that an auditor can reproduce. A missing/unreadable log
-degrades to `1` and never blocks a dispatch. Rejected alternative: a durable
-per-root run cursor (extra file, extra lock acquisition, and a second source of
-truth that can drift from the entry it describes). Legacy (non-coordination)
-direct-mode entries keep their existing shape.
+*Recorded measurement — 2026-11-22T15:30:00Z → 2026-11-23T10:10:00Z
+(WL-0MWNN84HO004DXQU; concentration PASS, run-length FAIL).* The post-restart
+window held 5 active projects and 53 dispatches, even share 10.6: SorraAgents 16
+(**1.51×**; `audit` 7 / `implement` 5 / `plan` 3 / `risk-effort` 1), AI_Hell 13
+(1.23×), ContextHub 9 (0.85×), Tableau-Card-Engine 8 (0.75×), tce-the-rising 7
+(0.66×). No project exceeded twice its even share, but the longest consecutive
+run was **3**, twice (SorraAgents 2026-11-22T21:02Z→21:35Z; Tableau-Card-Engine
+2026-11-23T00:46Z→00:58Z) against a ceiling of 2. The accounting identity agrees
+**exactly** on the decision-covered sub-window (03:17Z→10:07Z, 13 dispatches,
+max `consecutiveRunLength` 2): every dispatch has exactly one matching
+`dispatched` decision row. Two measured evidence limits qualify the result: the
+leader's decision log rotates ≈ every 2.2 h at the observed tick rate (466
+decision rows per 2 h 15 m; four 500-line generations ≈ 6.5 h), so the first 40
+dispatches have no decision-log counterpart and the two runs' precondition
+cannot be re-derived; and the run-length read is per-leader (its own log's
+current file), so a leadership hand-off resets it to the fail-open `1`. In the
+retained rows `selectedRoot` is pinned to `tce-the-rising` (uncharged because
+its offer was never consumed) while `dispatchingRoot` rotates across all five
+served roots — the whole-set rotation and its fall-through working as designed,
+with `dispatchingRoot` as the accounting key. Follow-up:
+**WL-0MWT3Z9M9002Z9BF**. The sub-window evidence limit is inherent to *this*
+window (its earlier generations had rotated); the later 2026-11-27 window below
+re-verifies the identity across every dispatch because its whole window fits in
+the retained history.
+
+*Recorded measurement — 2026-11-24T12:19:00Z → 2026-11-25T11:09:00Z (PASS on
+both thresholds).* The window starts at the live-worker restart of
+2026-11-24T12:19:53Z, which loaded both runtime fix commits — `4df6fc24f` (the
+machine run ledger, WL-0MWT3Z9M9002Z9BF) and `862339848` (ledger written inside
+the round-robin charge critical section plus the decision-log fallback,
+WL-0MWT54AR8005LMKN). The only later fix commits are test-isolation and comment
+refresh, so the window exercises the complete runtime fix. The **regime check
+passes**: the leader's `downtime-coordination.log` carries `selectedRoot` rows
+throughout (leader instance `c8d80de3-…`, latest decision row
+2026-11-25T11:10Z), so the running worker includes the fairness accounting and
+the whole-set rotation.
+
+Counts (rows with a `paneId`, deduped; project key = `cwd` basename): **27
+dispatches, 4 active projects, even share 6.75**:
+
+| Project | Dispatches | × even share | Longest run | Kind mix |
+|---|---|---|---|---|
+| ContextHub | 12 | **1.78×** | 2 | `plan` 5, `implement` 3, `audit` 3, `intake` 1 |
+| AI_Hell | 9 | 1.33× | 2 | `implement` 6, `plan` 2, `intake` 1 |
+| Tableau-Card-Engine | 4 | 0.59× | 1 | `audit` 2, `plan` 1, `implement` 1 |
+| tce-the-rising | 2 | 0.30× | 1 | `plan` 2 |
+
+No project exceeded twice its even share (max **1.78×**) and the longest
+consecutive run was **2**, against a ceiling of 2 — **both thresholds are met**.
+The only multi-dispatch runs were ContextHub at 2026-11-24T14:27Z→14:32Z and
+AI_Hell at 2026-11-25T05:25Z→05:32Z, each length 2.
+
+**Accounting identity** (decision-covered sub-window 2026-11-25T08:43Z→11:09Z,
+3 dispatches): every `outcome:"dispatched"` decision row carries
+`dispatchingRoot` + `consecutiveRunLength`, all length 1, matching the
+dispatch-log rows one-for-one; no `spawn-failed`/`marker-write-failed` consumed
+outcome occurred in the retained window, and the machine run ledger
+(`downtime-run-by-root.json` = tce-the-rising, `runLength` 1 at 11:01:05Z)
+agrees.
+
+**Sample-size caveat.** 27 dispatches over 22 h 50 m is smaller than the
+pre-fix 53-dispatch window, but it comfortably exceeds the ≥3-active-projects
+precondition, and both the concentration ratio (1.78×) and the hard run-length
+pass (max 2) sit well inside their thresholds. This window supersedes the
+2026-11-22/23 result, whose run-length failure was the leadership-hand-off
+defect fixed by WL-0MWT3Z9M9002Z9BF and re-audited via WL-0MWT54AR8005LMKN.
+
+*Recorded measurement — 2026-11-27T09:32:44Z → 2026-11-27T17:00:00Z (full
+coordination-log retention; both thresholds met).* This window closes the
+WL-0MWNN84HO004DXQU AC4 evidence limit on the 2026-11-22/23 record: it is read
+from **all four retained coordination-log generations** (`.log.3` → `.log`, one
+leader instance `8aed93da-…`, contiguous 09:32Z→17:00Z), so the accounting
+identity is checked across **every** dispatch in the window rather than a
+decision-covered sub-window. The older window could verify only its last 13
+dispatches because its earlier generations had already rotated past the window
+start; at ≈ 6.5–9.7 h of retention (see [Retention &
+rotation](#rolling-log-trimming-retention--rotation)) a window chosen inside
+the retained history verifies completely.
+
+Counts (rows with a `paneId`, deduped; project key = `cwd` basename): **13
+dispatches, 4 active projects, even share 3.25**:
+
+| Project | Dispatches | × even share | Longest run | Kind mix |
+|---|---|---|---|---|
+| tce-the-rising | 5 | **1.54×** | 1 | `audit` 3, `implement` 1, `intake` 1 |
+| SorraAgents | 4 | 1.23× | 1 | `audit` 2, `implement` 1, `intake` 1 |
+| AI_Hell | 3 | 0.92× | 1 | `implement` 2, `audit` 1 |
+| Tableau-Card-Engine | 1 | 0.31× | 1 | `intake` 1 |
+
+No project exceeded twice its even share (max **1.54×**) and the longest
+consecutive run was **1**, against a ceiling of 2 — **both thresholds are met**.
+The regime check passes throughout: every decision row in the window carries
+`selectedRoot` and comes from the single leader instance. 13 dispatches over
+7 h 27 m is a thin sample (the dispatcher is capacity-bound at ≈ 1.7
+attested/h), so this is a **no-breach observation**, complementary to the
+53-dispatch 2026-11-22/23 window rather than a replacement for it.
+
+**Accounting identity — exact across the whole window.** Concatenating the four
+generations yields 13 `outcome:"dispatched"` decision rows whose
+`dispatchingRoot` counts (tce-the-rising 5 / SorraAgents 4 / AI_Hell 3 /
+Tableau-Card-Engine 1) are **identical** to the dispatch-log aggregates, with
+maximum `consecutiveRunLength` 1 equal to the computed longest run (1). The
+window's 1,576 decision rows are 1,563 `no-dispatch` and 13 `dispatched` — no
+`spawn-failed` / `marker-write-failed` consumed outcome occurred, so no row
+needed ledger-only reconciliation. Four rows again show `selectedRoot` ≠
+`dispatchingRoot` (all pinned to AI_Hell while the charge rotated); the
+dispatch row's `cwd` matches `dispatchingRoot` in every case, confirming
+`dispatchingRoot` is the accounting key and the pinned-offer fall-through is
+benign.
+
+```bash
+PROJECTS=/home/rgardler/projects
+LEADER=$PROJECTS/games_curator   # the leader at measurement time
+SINCE=2026-11-27T09:32:44Z; UNTIL=2026-11-27T17:00:00Z
+
+# Decision side: all four retained generations, one chronological pass.
+ls "$LEADER"/.worklog/downtime-coordination.log* | sort -V \
+  | while read -r f; do cat "$f"; done \
+  | jq -r --arg since "$SINCE" --arg until "$UNTIL" \
+    'select(.kind=="decision" and .at>=$since and .at<$until and .outcome=="dispatched")
+     | [(.dispatchingRoot|split("/")|last), (.consecutiveRunLength|tostring)] | @tsv' \
+  | sort | uniq -c
+
+# Dispatch side: every project's own log.
+for p in "$PROJECTS"/*/; do
+  f=$p.worklog/downtime-dispatches.log
+  [ -f "$f" ] || continue
+  jq -r --arg since "$SINCE" --arg until "$UNTIL" \
+    'select(.paneId!=null and .dispatchedAt>=$since and .dispatchedAt<$until)
+     | [(.cwd|split("/")|last), .kind] | @tsv' "$f"
+done | sort | uniq -c
+```
+
+*Attribution of the two length-3 runs (WL-0MWT3Z9M9002Z9BF AC5).* The two runs
+are attributed to the **leadership-hand-off defect now fixed**, not to a
+dispatching defect in the peers:
+
+- **Mechanism.** The bound read the run from the **leader's own**
+  `downtime-coordination.log`. Decision rows are appended with the leader's
+  `cwd`, so a hand-off to a different root left the new leader's log empty of
+  the previous leader's dispatches: `previousDispatchRun` returned `null`, the
+  bound failed **open** and the new leadership could dispatch the same root to a
+  run of 3 before its own log reached length 2. Both breaches fall inside a
+  window in which the leader's log rotates in ≈ 2.2 h, so the exact hand-off
+  instant cannot be re-derived — but the structural cause fully explains a
+  policy of 2 producing runs of 3, and the fix removes it (the run now comes
+  from the machine ledger, which survives the hand-off).
+- **Peer admissibility could not be re-derived.** At both moments at least two
+  peer roots had published offers (run 1: AI_Hell, tce-the-rising; run 2:
+  AI_Hell, tce-the-rising, SorraAgents), but their decision rows were rotated
+  away, so whether each offer was *admissible* (past every gate) is unknown.
+  The gate that **could** have held each peer offer, in the order the filter
+  chain consults them, is: producer-review / assignee hold / effort cap →
+  code-freeze → slot minimum → review-queue depth (`implement` only) → in-flight
+  critical guard → host/audit budget. A peer offer held by any of these is the
+  documented fall-through; a peer offer that was admissible and still lost the
+  slot is the defect. Because the run ledger (not the log) now feeds the bound
+  and it retained the live run, a future re-measurement classifies the breach
+  directly from network-retained evidence rather than failing open.
+
+*Evidence retention for a three-day audit (WL-0MWT3Z9M9002Z9BF AC4).* The
+leader's decision log is **not** a three-day store: re-measured at the observed
+tick rate (466 decision rows in 2 h 15 m ⇒ ≈ 207 decisions/h; 500-line cap ×
+4 files ≈ 2,000 rows) it retains only ≈ **6.5–9.7 h**, not the ≥ 24 h the
+retention policy previously claimed. Claims that therefore **cannot** be
+re-derived after rotation: (a) the per-tick peer-admissibility check at the
+moment of a run (used for attribution), and (b) the precise dispatch time of
+any dispatch older than the retained window. The **aggregates an operator MUST
+capture while the evidence is live** (append to the work item, not the log):
+per-project dispatch counts, per-project kind mix, the chronological root
+sequence (for the longest run), and — for every length-3 run — the peer
+check-in rows and `no-dispatch` rows in the same hour. See [Retention &
+rotation](#rolling-log-trimming-retention--rotation) for the capture recipe.
+
+**Run-length source: the machine run ledger.** `consecutiveRunLength` is
+recorded to, and the ceiling reads from, a **machine-scoped run ledger**
+(`~/.herdr/downtime/downtime-run-by-root.json`, one `{ root, runLength, at }`
+record) in the coordination directory every leader already trusts
+(WL-0MWT3Z9M9002Z9BF, revised by WL-0MWT54AR8005LMKN). Decision + trade-off:
+
+- **Leadership-independent.** One record any leader on the host reads/writes, so
+  a hand-off between roots cannot reset a live run to the fail-open `1` — the
+  defect that produced the two length-3 runs above.
+- **Keyed on the round-robin cursor's `worklogRoot` identity,** so a future
+  remote-host ledger (WL-0MWNYIL3Y0093GY0) can key it the same way.
+- **Cost: ZERO extra lock acquisitions.** The record is a read-modify-write
+  inside the **existing round-robin charge critical section** (`advanceRoot`'s
+  `tryAcquireCoordLock` hold, the same one that updates
+  `downtime-round-robin-by-root.json`). It is not a second acquisition and
+  never nests, so the "one lock, one critical section" property holds and the
+  two files cannot drift. It advances on every **consumed** outcome
+  (`dispatched` / `spawn-failed` / `marker-write-failed`), exactly the
+  `isConsumedDispatchOutcome` charge points. Selection remains a pure read.
+- **One record, not a per-root map:** a map cannot express dispatch ORDER, so it
+  could not answer "what was the last dispatch?", which the current run's
+  identity depends on.
+- **Fail-open end-to-end:** a missing/unreadable/corrupt ledger falls back to
+  the tail of the leader's own ROTATED decision log, then to `1`; lock
+  contention or a failed write leave the record unchanged. Never a block,
+  failure or delay. The fallback covers only the upgrade / ledger-loss
+  boundary — the next consumed charge recreates the ledger.
+
+Rejected alternatives: a cross-generation read of the leader's own log (still
+per-leader-root — it widens the window within one leadership but cannot survive
+hand-off) and a second durable per-root cursor (the round-robin cursor already
+stores last-dispatch time; a run duplicate would add a source of truth that can
+drift). The on-disk round-robin cursor format
+`{ "<worklogRoot>": "<ISO-8601>" }` is **unchanged**; the run state lives in a
+separate single record. Legacy (non-coordination) direct-mode entries keep their
+existing shape.
 
 **Which outcomes charge (WL-0MWFIZ8H5005FVNN).** The charge point is the
 **consumed offer**, decided by one shared predicate
@@ -4688,6 +6377,26 @@ dead agent is **not** closed — the operator may still need to read the final
 output. A close failure for one pane is recorded and the run continues; a
 reaper throw is caught and logged so it can never crash the worker.
 
+**One close path owns the close record (WL-0MWJ7QYX0001KAQX AC1).** A
+successful close (never a dry run, never a failed close) writes all three
+side effects in ONE per-pane block: the host-budget release
+(`ReaperDeps.releasePaneBudget`), the proxy audit-lease release
+(`ReaperDeps.releaseAuditLease`, for an `audit` pane) and the rolling-log
+`entryType:'pane-close'` record (`ReaperDeps.recordPaneCloseEntry`) that
+`isNonTerminalCooldownActive` and the recent-dispatch view read. That record
+is written by the reaper alone — the disabled dispatch monitor's
+`recordPaneClose` never runs in production, so before this the cooldown had no
+input in production. The outcome is derived from what the reaper can observe:
+a `</end_session>` marker close of an `intake` pane is
+`closed-as-intake-complete`, of a `plan`/`risk-effort` pane
+`closed-as-plan-complete`; `audit` stays `requires-attention` (the reaper must
+never invent an audit verdict); an idle-threshold reap is an abandonment. An
+`unknown`-kind pane belongs to no dispatch tier and is recorded in the
+per-run ledger only. The per-run `.worklog/pane-close-ledger.jsonl` is
+retained as the DIAGNOSTIC snapshot (one row per evaluated pane, including
+failed closes and dry runs), and `alreadyClosedPaneIds` — scraped from the
+same rolling-log record — is the cross-run idempotency key.
+
 **Free the budget, keep the pane (WL-0MWJVY6NR001E0FS).** The same pass also
 releases the host dispatch-budget slot of every pane whose session is
 **finished** (`isSessionFinished`: the `</end_session>` marker or a terminal
@@ -4709,9 +6418,11 @@ per pane (`getItemInfo`) and recorded in every
 `CloseReasonSnapshot`/reaper-ledger row (parent AC6).
 
 **Coexistence.** With Mechanism B disabled there is a single active closer,
-so the previous non-atomic double-close race is gone. The reaper still skips
-pane ids already recorded as handled in the rolling dispatch log, so any
-historical monitor entries remain honoured.
+so the previous non-atomic double-close race is gone and the close record has
+one writer. The reaper still skips pane ids already recorded as handled in the
+rolling dispatch log, so any historical monitor entries remain honoured — and,
+since the reaper now writes that log itself, the same skip is its real
+cross-run idempotency guard.
 Session-scoped child processes are torn down on close
 (`packages/herdr/src/process-group.ts`), so spawned audit/plan runners are
 not reparented to PID 1.
@@ -4792,6 +6503,8 @@ likewise re-read live every tick and clamped on load
 |---|---|
 | `packages/herdr/src/dispatcher-anchor*.ts` | The dispatcher-anchor module family: the barrel (`dispatcher-anchor.ts`, re-exports only) over the sibling modules — constants/types (`contract.ts`), `herdr` output parsers (`cli-parsers.ts`), subprocess helpers + deps factory (`herdr-cli.ts`), anchor/tab-anchor persistence (`persistence.ts`), Dispatcher provisioning and per-prefix tab anchors (`tab-anchors.ts`), project workspace + item-ID placement (`placement.ts`) (full layout: [dispatcher-anchor module layout](#dispatcher-anchor-module-layout-wl-0mvghcp9005sjpz)) |
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
+| `packages/herdr/src/source-identity.ts` | Running-code freshness (`resolveSourceIdentity`, `processStartMs`, `formatStaleSourceWarning`, ambient dispatcher identity) — the loaded commit + process start time attached to coordination-log entries (WL-0MWWMPDVM009LTQR) |
+| `packages/herdr/src/dispatcher-start-log.ts` | Writes the once-per-start `kind: 'dispatcher-start'` record and the one-off stale-runtime warning (WL-0MWWMPDVM009LTQR) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
 | `packages/herdr/src/downtime-worker*.ts` | The downtime-worker module family: the barrel (`downtime-worker.ts`, re-exports only) over the sibling modules — worker tick orchestration (`downtime-worker.orchestrator*.ts`, `worker-contract.ts`, `launch-fence.ts`), dispatch (`dispatch.ts`, `dispatch-filter.ts`, `dispatch-claims.ts`, `dispatch-cpu-gate.ts`, `dispatch-contract.ts`), coordination (`coordination.ts`, `coordination-leader.ts`), the bounded head scan + registered-root sweep (`head-scan.ts`), gates/prompts/stalled-resume, pane, idle/poller, parsers/selection, constants/types/clamps (full layout: [Module layout](#module-layout)) |
@@ -4801,7 +6514,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/downtime-log*.ts` | The downtime-log module family: the barrel (`downtime-log.ts`, re-exports only) over the sibling modules — storage/rotation policy and atomic append (`downtime-log-storage.ts`), host-budget refusal vocabulary (`downtime-log-budget.ts`), coordination/decision log (`downtime-log-coordination.ts`), dispatch log and pane-close entries (`downtime-log-entries.ts`), dispatched-marker readers and suppression decisions (`downtime-log-markers.ts`), recent-dispatches projection and time blocks (`downtime-log-recent.ts`) (full layout: [downtime-log module layout](#downtime-log-module-layout-wl-0mvgkhft4003x6jw)) |
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) and the shared finished-session predicate (`isSessionFinished`, `hasEndSessionMarker`) consumed by the reaper, the finished-session budget release and `pane-triage` (WL-0MUJL1NAH0042GOS, WL-0MWJVY6NR001E0FS) |
 | `packages/herdr/src/host-dispatch-budget.live-panes.ts` | The budget's LIVE-pane projection (`liveBudgetPanesFromRecords`): trims `done`/`exited` agents from the full pane-record set so a finished session whose pane stays open no longer counts against its tier (WL-0MWJVY6NR001E0FS) |
-| `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`, `finishedSessionReleaseIdentity`) — close decisions plus the finished-session budget release |
+| `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`, `finishedSessionReleaseIdentity`) — close decisions, the finished-session budget release, and the single close block that owns the rolling-log `entryType:'pane-close'` record + audit-lease release (WL-0MWJ7QYX0001KAQX AC1) |
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
 | `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + `herdr pane process-info` + pi session logs (activity probes: agent status, recent file modifications, spawned child processes) |
 | `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |
@@ -4814,14 +6527,15 @@ likewise re-read live every tick and clamped on load
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) plus the `leader` block naming the elected leader and its latest decision token (WL-0MW1VINII003IL7R) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
 | `~/.herdr/downtime/downtime-round-robin-by-root.json` | Global per-`worklogRoot` round-robin cursor `{ "<root>": "<ISO-8601>" }` — records each root's LAST DISPATCH; the least-recently-dispatched root starts the offer ordering and the registered-root sweep. Selection is a pure read; only a consumed offer charges the cursor (WL-0MTJDX4M4007YH5U, WL-0MWFIZ8H5005FVNN; fail-open) |
+| `~/.herdr/downtime/downtime-run-by-root.json` | Machine-scoped consecutive-run ledger — a single `{ "root": "<worklogRoot>", "runLength": N, "at": "<ISO-8601>" }` record of the last **consumed** dispatch run, extended/reset on each consumed dispatch (`dispatched` / `spawn-failed` / `marker-write-failed`) INSIDE the existing round-robin charge critical section (one lock acquisition for both files). The leadership-independent run-length source the twice-in-succession bound reads, with the leader's own rotated decision log as its fail-open fallback (WL-0MWT3Z9M9002Z9BF, WL-0MWT54AR8005LMKN; fail-open) |
 | `~/.herdr/downtime/dispatch-budget.json` | Machine-scoped dispatch-budget ledger `{ version: 1, entries: [{ kind, itemId, instanceId, paneId?, root, startedAt, heartbeatAt, override? }] }` — one entry per in-flight capped dispatch of any kind (WL-0MVXY0WQF0069YDJ; uncapped kinds are never recorded, WL-0MW50EHZ6007QBPB); audit entries stale-release after 2 h. **Audit entries are observability-only for admission** (WL-0MW95GBEG005ERHS): the header/dialog/sweep read them, but they can never refuse an audit — the proxy owns that decision |
 | `~/.herdr/downtime/budget.json` | Optional per-kind caps as a map over kinds, e.g. `{ "implement": 2, "audit": 1, "plan": 3 }` (absent → the `implement: 2` / `audit: 1` defaults, every other kind uncapped; `0` disables a kind; `HERDR_HOST_MAX_<KIND>` overrides — the single env vocabulary). **Implement-tier only for admission**: `maxAudit` is **not** the audit-admission authority — it is the one-release legacy cap (`HERDR_AUDIT_LOCAL_BUDGET=1`) and the local figure the divergence log compares against |
 | `~/.herdr/downtime/active-audit` | ~~Host-wide audit serialisation marker~~ **Retired and deleted** (WL-0MVXY0XPF006YUHA F2, WL-0MWF34IEP00221NU): no reader, writer or remover remains; a leftover file is ignored entirely |
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
-| `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning + every dispatch decision — successful dispatches and `no-dispatch` refusals alike, carrying the per-project fairness fields `selectedRoot` / `dispatchingRoot` / `consecutiveRunLength` / `outcome` (per worklog; rotating, 500 entries/file × 4 files ≈ ≥ 24 h — see [Retention & rotation](#rolling-log-trimming-retention--rotation)) |
+| `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning + every dispatch decision — successful dispatches and `no-dispatch` refusals alike, carrying the per-project fairness fields `selectedRoot` / `dispatchingRoot` / `consecutiveRunLength` / `outcome` (per worklog; rotating, 500 entries/file × 4 files — a **measured** ≈ 6.5–9.7 h at the observed tick rate, NOT ≥ 24 h — see [Retention & rotation](#rolling-log-trimming-retention--rotation)) |
 | `<worklog-root>/.worklog/downtime-dispatches.log` | Dispatched items (per worklog, retained; includes `anchor-unavailable` neutral no-dispatch) |
 | `<worklog-root>/.worklog/local-route.log` | Per-response local-preference route evidence written by the Worklog pi extension (bounded at 2000 lines; `at`/`sessionId`/`preference`/`route`/`fallbackReason`/`model`/`ticket`, WL-0MVLJTV03000KIQZ) |
-| `<worklog-root>/.worklog/pane-close-ledger.jsonl` | Pane-closure reaper ledger (one JSONL row per evaluated pane, per worklog, WL-0MUJL1NAH0042GOS) |
+| `<worklog-root>/.worklog/pane-close-ledger.jsonl` | Pane-closure reaper per-run diagnostic ledger (one JSONL row per evaluated pane, per worklog, WL-0MUJL1NAH0042GOS) — retained alongside, and NOT a substitute for, the rolling-log `entryType:'pane-close'` record the reaper owns (WL-0MWJ7QYX0001KAQX AC1) |
 
 ## Troubleshooting / operations
 
@@ -5141,9 +6855,20 @@ siblings are kept; the oldest is dropped. The retained window is therefore
 **bounded** by `maxEntries × (1 + maxRotatedFiles)` entries and never falls
 below `maxEntries × maxRotatedFiles + 1` — with the shipped default
 (500/file × 3 rotated) the coordination log always holds between 1,501 and
-2,000 entries, i.e. **≥ 25 h and up to ~33 h** at the observed ≥ 60 decision
-entries/hour (a full overnight post-mortem window), with disk bounded to
-~2,000 JSONL lines. The policy is configurable via the worker config
+2,000 entries, with disk bounded to ~2,000 JSONL lines.
+
+**Retained TIME depends on the tick rate — the ≥ 24 h claim was wrong
+(WL-0MWT3Z9M9002Z9BF AC4).** The bound above is in ENTRIES, not hours. It was
+previously documented as "≥ 25 h" at an assumed ≥ 60 decisions/hour; the
+**measured** post-fix rate is ≈ 466 decision rows per 2 h 15 m (≈ 207/h), so the
+retained window is only **≈ 6.5–9.7 h** (500-line generations rotate ≈ every
+2.2 h; 1,501–2,000 rows ÷ ≈ 207/h). It is **not** a three-day store and it is
+**not** reliably ≥ 24 h. To make a multi-day audit possible without raising the
+caps, capture the aggregates while the evidence is live (see the recipe below);
+the machine run ledger (`downtime-run-by-root.json`) and the round-robin cursor
+retain the *current* run and last-dispatch time indefinitely for the run-length
+bound itself, so only the *historical per-tick attribution* is lost to rotation.
+The policy is configurable via the worker config
 (`coordinationLogMaxEntries` / `coordinationLogMaxRotatedFiles` on
 `DowntimeWorkerConfig.config()`) and clamped by `resolveCoordinationLogPolicy`
 (10–10,000 entries; 0–20 siblings; 0 siblings = no rotation, single-file
@@ -5194,6 +6919,41 @@ ls .worklog/downtime-coordination.log* 2>/dev/null \
 
 The same tally is available programmatically via
 `readCoordinationLogAllEntries(cwd)` + `hourlyReasonTally(entries, { from, to })`.
+
+**Fairness-audit capture recipe (WL-0MWT3Z9M9002Z9BF AC4) — capture before
+rotation.** Because the decision log retains only ≈ 6.5–9.7 h at the measured
+rate, an operator auditing a multi-day window must capture these aggregates
+**while the rows are live** and paste them into the work item (rotation destroys
+the underlying rows, not the captured summary):
+
+```bash
+# (1) Per-project dispatch counts + kind mix (dispatch log carries paneId rows).
+for f in .worklog/downtime-dispatches.log; do
+  jq -r 'select(.paneId != null) | [.cwd, .kind] | @tsv' "$f"
+done | sort | uniq -c | sort -k2,2 -k3,3
+
+# (2) Chronological root sequence (for the longest maximum same-root run).
+for f in .worklog/downtime-dispatches.log; do
+  jq -r 'select(.paneId != null) | [.dispatchedAt, .cwd] | @tsv' "$f"
+done | sort | awk '{print $2}' \
+  | awk 'NR==1{p=$1;c=1;next} $1==p{c++;next} {print c" "p; p=$1;c=1} END{print c" "p}' \
+  | sort -nr | head
+
+# (3) For every length-3 run, the peer check-ins and no-dispatch rows in the
+#     same hour (the attribution evidence — copy the concrete rows, they rotate).
+ls .worklog/downtime-coordination.log* 2>/dev/null | sort -V \
+  | while read -r f; do cat "$f"; done \
+  | jq -c 'select((.kind=="coordination" and .operation=="checkin") or .outcome=="no-dispatch")' \
+  | sort
+```
+
+What **cannot** be re-derived after rotation (state it explicitly in the report):
+the per-tick peer-admissibility verdict at the moment of a run, and any dispatch
+timestamp older than the retained window. What **is** durable: the current run
+(`~/.herdr/downtime/downtime-run-by-root.json`) and each root's last-dispatch
+time (`downtime-round-robin-by-root.json`) — both machine-scoped, updated
+inside the SAME round-robin charge lock hold, unaffected by rotation or
+leadership hand-off.
 
 ### Backward compatibility
 

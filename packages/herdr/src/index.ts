@@ -56,6 +56,7 @@ import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import {
   getMachineCoordinationDir,
   readStoredModelCooldowns,
+  readActiveModelCooldowns,
   clearStoredModelCooldown,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
@@ -68,6 +69,7 @@ import {
   admitHostDispatch as admitHostBudgetDispatch,
   confirmHostDispatch as confirmHostBudgetDispatch,
   decideAuditAvailability,
+  deriveAuditRetryAfterS,
   detectAuditDivergence,
   readAuditBudgetState,
   readAuditLocalEvidence,
@@ -164,6 +166,7 @@ import {
 } from './downtime-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import type { AuditCandidateScopeResult } from './downtime-worker.gates.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
 import {
   appendCoordinationLogEntry,
   appendDowntimeLogEntry,
@@ -176,6 +179,11 @@ import {
   readDowntimeLogEntries,
   recentAuditDispatchedItemIds,
 } from './downtime-log.js';
+import { logDispatcherStart } from './dispatcher-start-log.js';
+import {
+  configureDispatcherSourceIdentity,
+  resolveSourceIdentity,
+} from './source-identity.js';
 import {
   resumeStalledPane,
   scanStalledPanes,
@@ -783,6 +791,11 @@ export function createDowntimeDeps(
         // ONE-RELEASE legacy escape hatch (parent AC3): `HERDR_AUDIT_LOCAL_BUDGET=1`
         // restores the pre-change `budget.json` + local-ledger decision for the
         // audit tier and never consults the proxy.
+        //
+        // The proxy observation (when taken) is carried out of this block on
+        // every return (WL-0MWJE9IEH001R3P1): the dispatch attempt threads it
+        // into admission so ONE read answers the whole attempt.
+        let proxyAvailability: AuditAvailabilityOutcome | undefined;
         if (isLegacyAuditBudgetEnabled()) {
           const coordinationDir = getMachineCoordinationDir();
           if (coordinationDir !== null) {
@@ -821,6 +834,11 @@ export function createDowntimeDeps(
             this.readAuditAvailability === undefined
               ? undefined
               : await this.readAuditAvailability();
+          // ONE observation per gate evaluation (WL-0MWJE9IEH001R3P1 AC1):
+          // the SAME typed outcome is reported on every proxy return, so the
+          // dispatch attempt can thread it into admission instead of paying a
+          // second proxy GET that could race this one.
+          proxyAvailability = outcome;
           const decision = decideAuditAvailability(outcome);
           if (decision.active) {
             // AC2 inverse divergence: the proxy REFUSES while the local ledger
@@ -841,6 +859,15 @@ export function createDowntimeDeps(
                 divergence,
               });
             }
+            // The pre-check refusal names its cooldown (WL-0MWJE9N7L001V6XI):
+            // derived from the held lease's `expiresAt` in the SAME availability
+            // observation admission would have seen. A refused availability
+            // still never acquires a lease, so nothing is churned; a payload
+            // without a usable lease leaves the field absent rather than
+            // inventing a deferral.
+            const retryAfterS = deriveAuditRetryAfterS(
+              outcome !== undefined && outcome.status === 'ok' ? outcome.availability : undefined,
+            );
             return {
               ok: true,
               active: true,
@@ -848,6 +875,8 @@ export function createDowntimeDeps(
               ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
               ...(decision.budget !== undefined ? { budget: decision.budget } : {}),
               ...(decision.detail !== undefined ? { detail: decision.detail } : {}),
+              ...(retryAfterS !== undefined ? { retryAfterS } : {}),
+              ...(proxyAvailability !== undefined ? { availability: proxyAvailability } : {}),
             };
           }
         }
@@ -869,7 +898,12 @@ export function createDowntimeDeps(
         );
         if (auditCandidateIds.size === 0) {
           // Cheap fast-path: no non-stale audit markers → no active audit.
-          return { ok: true, active: false, source: 'proxy' };
+          return {
+            ok: true,
+            active: false,
+            source: 'proxy',
+            ...(proxyAvailability !== undefined ? { availability: proxyAvailability } : {}),
+          };
         }
         // Intersect with the worklog's in_progress items: a marker only
         // counts as an ACTIVE audit while its item is still in_progress
@@ -887,7 +921,12 @@ export function createDowntimeDeps(
           return { ok: false, error: 'in_progress parse error' } as const;
         }
         const active = [...auditCandidateIds].some((id) => inProgress.has(id));
-        return { ok: true, active, source: 'per-worklog' };
+        return {
+          ok: true,
+          active,
+          source: 'per-worklog',
+          ...(proxyAvailability !== undefined ? { availability: proxyAvailability } : {}),
+        };
       } catch (err) {
         // Fail-open: a wl failure yields {ok:false} — the dispatcher skips
         // the audit tier and falls through to the next tier; dispatch is
@@ -1048,6 +1087,12 @@ export function createDowntimeDeps(
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
+    // Dependency-frontier blocker lookup for the Herdr-head dispatch/offer
+    // paths (F2, WL-0MWWMPBL8003X59M): the SAME `wl dep list` seam the legacy
+    // critical tier uses, so the head paths can resolve a dependency-blocked
+    // critical item to its nearest open blocker (or nothing) without a second
+    // worklog query surface.
+    fetchCriticalBlockers,
     // Leader-coordination item fetch (parent WL-0MST3OJ8S0001ROL AC4):
     // resolve ONE item by id for the leader's per-entry tier
     // classification. `wl show` does not serve the audit timestamp, so for
@@ -1320,6 +1365,16 @@ export function createDowntimeDeps(
     // Record a pane-close lifecycle entry in the rolling dispatch log
     // (WL-0MU308WSF0002JWN). Fail-closed: `appendPaneCloseLogEntry` never
     // throws.
+    //
+    // INTENTIONALLY RETAINED FOR REDESIGN (WL-0MWJ7QYX0001KAQX AC1, following
+    // the WL-0MWHWH6XL0025YX2 AC2 precedent): this writer is reachable only
+    // from the DISABLED pane-lifecycle monitor (`PANE_LIFECYCLE_MONITOR_ENABLED
+    // === false`), so it never runs in production. The reaper — the only ACTIVE
+    // close path — now owns the single rolling-log pane-close record
+    // (`recordPaneCloseEntry` in `runPaneCloseReaper`), together with the
+    // host-budget and proxy audit-lease releases, so the record and the
+    // releases cannot drift apart. Do NOT re-enable the monitor to use this
+    // path; fold any future monitor redesign onto the reaper instead.
     async recordPaneClose(entry, cwd: string): Promise<void> {
       // Host-wide audit serialisation is RETIRED (WL-0MVXY0XPF006YUHA F2
       // AC2) and its marker surface is DELETED (WL-0MWF34IEP00221NU AC5): the
@@ -1417,11 +1472,14 @@ export function createDowntimeDeps(
             { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, cwd },
           );
           const parsed = extractJson(stdout) as {
-            workItem?: { needsProducerReview?: boolean; stage?: string };
+            workItem?: { needsProducerReview?: boolean; stage?: string; title?: string };
           };
           return {
             needsProducerReview: parsed?.workItem?.needsProducerReview === true,
             stage: parsed?.workItem?.stage,
+            // Recorded as the pane-close record's `itemTitle`
+            // (WL-0MWJ7QYX0001KAQX AC1). Tolerant: absent → pane title.
+            title: parsed?.workItem?.title,
           };
         },
         // Live-child probe (parent AC1/AC3): count foreground processes in
@@ -1496,6 +1554,16 @@ export function createDowntimeDeps(
             actor: `herdr:${process.pid}`,
           });
         },
+        // Single close record (WL-0MWJ7QYX0001KAQX AC1): the reaper is the
+        // only ACTIVE auto-close path, so it — not the disabled monitor's
+        // `recordPaneClose` — writes the rolling-log `entryType:'pane-close'`
+        // record that `isNonTerminalCooldownActive` and the recent-dispatch
+        // view read. The reaper writes it in the same block as the host-budget
+        // and proxy audit-lease releases. Idempotent across runs: the same
+        // record is what `readClosedPaneIds` feeds back as
+        // `alreadyClosedPaneIds` below. Fail-closed inside
+        // `appendPaneCloseLogEntry`; the reaper also wraps it fail-open.
+        recordPaneCloseEntry: (entry) => appendPaneCloseLogEntry(cwd, entry),
         // Finished-session budget release (WL-0MWJVY6NR001E0FS): a pane whose
         // Pi session is FINISHED gives its tier slot back even when the close
         // policy leaves the pane OPEN (an `implement` pane is never
@@ -1525,10 +1593,11 @@ export function createDowntimeDeps(
         },
         {
           ledgerPath: opts.ledgerPath ?? join(cwd, '.worklog', 'pane-close-ledger.jsonl'),
-          // Coexistence with the dispatch monitor (WL-0MU308WSF0002JWN): a
-          // pane the monitor already closed (recorded in the rolling log with
-          // `closed:true`) is never handled a second time. `readDowntimeLogEntries`
-          // is fail-safe (returns [] on any error).
+          // Idempotency across runs (WL-0MWJ7QYX0001KAQX AC1): the reaper
+          // itself now writes the rolling-log pane-close record, so this read
+          // of the SAME single record is a real cross-run guard (it also
+          // still carries any historical disabled-monitor entries).
+          // `readDowntimeLogEntries` is fail-safe (returns [] on any error).
           alreadyClosedPaneIds: await readClosedPaneIds(cwd),
         },
       );
@@ -1580,14 +1649,27 @@ export function createDowntimeDeps(
         return { admitted: true, live: 0, max: 0, capped: false };
       }
       const livePanes = await hostBudgetLivePanes(runningPanesResolver, input.cwd);
+      // Budget relief (WL-0MWTAD9NV000IVK5): ONE active-cooldown read per
+      // admission attempt. `null` (unreadable/corrupt) grants no relief and is
+      // named in the evidence; the relay kill switch restores the configured
+      // cap without a restart.
+      const modelCooldowns = readActiveModelCooldowns();
+      const budgetReliefEnabled = loadSettings().downtimeBudgetReliefEnabled !== false;
       const audit = input.kind === 'audit';
       // Proxy-derived audit admission (WL-0MWAMSK9H005BOHD, WL-0MWFJH3NW006F5GN):
-      // read the SAME availability the dispatcher's pre-check read and hand
-      // the typed outcome to admission, so both reach the SAME decision. The
-      // one-release legacy flag skips the proxy entirely.
+      // answer from the SAME availability observation the dispatcher's
+      // pre-check made for THIS attempt (WL-0MWJE9IEH001R3P1 AC1/AC2). The
+      // caller threads `input.auditAvailability`, so no second proxy GET is
+      // issued (the two racing reads this item removes). Only when no
+      // pre-check ran (a path without one) does admission take its single
+      // fail-closed fallback read. The one-release legacy flag skips the
+      // proxy entirely, threaded outcome or not.
       const auditAvailability =
-        audit && !isLegacyAuditBudgetEnabled() && this.readAuditAvailability !== undefined
-          ? await this.readAuditAvailability()
+        audit && !isLegacyAuditBudgetEnabled()
+          ? (input.auditAvailability ??
+            (this.readAuditAvailability === undefined
+              ? undefined
+              : await this.readAuditAvailability()))
           : undefined;
       // Audit-lease ACQUIRE (WL-0MWFJH3NW006F5GN AC2): the availability read
       // is a PRE-CHECK that can never admit on its own — the admission
@@ -1621,6 +1703,8 @@ export function createDowntimeDeps(
           // admission sees `undefined` (UNKNOWN) — freshness counting, never
           // reap, never repair (WL-0MW9VQX5T001GCUP).
           livePanes: livePanes.ok ? livePanes.panes : undefined,
+          modelCooldowns,
+          budgetReliefEnabled,
           ...(audit
             ? {
                 onAuditBudgetEvent: (event: AuditBudgetLogEvent) =>
@@ -2043,6 +2127,19 @@ export async function main(): Promise<void> {
     },
   });
 
+  // Running-code freshness (WL-0MWWMPDVM009LTQR): resolve the checkout commit
+  // this process is actually running and record it ONCE per dispatcher start
+  // (`.worklog/downtime-coordination.log` → `kind: 'dispatcher-start'`).
+  // Configuring the ambient identity also attaches `sourceCommit` /
+  // `sourceStartedAt` / `sourceStale` to every subsequent decision entry, so a
+  // dispatch record can be tied to a source commit without `ps` archaeology.
+  // Fail-open: an unresolvable checkout writes the start record without source
+  // fields and emits no warning. A runtime that predates checkout HEAD gets
+  // one actionable stderr warning naming the restart remedy.
+  const sourceIdentity = resolveSourceIdentity();
+  configureDispatcherSourceIdentity(sourceIdentity);
+  await logDispatcherStart(downtimeWorker.instanceId, targetCwd, sourceIdentity);
+
   const selectedItem = await runWorklistTui(
     fetcher,
     undefined,
@@ -2095,11 +2192,19 @@ export async function main(): Promise<void> {
           defaultRunningDowntimePanesResolver,
           targetCwd,
         );
+        // Budget relief (WL-0MWTAD9NV000IVK5 AC9): read the SAME machine-wide
+        // cooldown signal admission uses plus the live kill switch, so the
+        // header counter renders `n/effectiveCap (budget-relief)` while a pane
+        // of that kind is model-blocked instead of the configured cap.
+        const modelCooldowns = readActiveModelCooldowns();
+        const budgetReliefEnabled = loadSettings().downtimeBudgetReliefEnabled !== false;
         // Tri-state threaded through (WL-0MW9VQX5T001GCUP): on a failed read
         // the display gets NO pane list (UNKNOWN) and both figures fall back
         // to the freshness rule instead of folding unknown into an empty set.
         return readHostBudgetStatus(
-          livePanes.ok ? { livePanes: livePanes.panes } : {},
+          livePanes.ok
+            ? { livePanes: livePanes.panes, modelCooldowns, budgetReliefEnabled }
+            : { modelCooldowns, budgetReliefEnabled },
         );
       },
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
@@ -2222,6 +2327,11 @@ export async function main(): Promise<void> {
             readLivePanes: () => hostBudgetLivePanes(defaultRunningDowntimePanesResolver, targetCwd),
             claim: (agentCommand) => claimItemForAgentCommand(agentCommand),
             root: targetCwd,
+            // Budget relief (WL-0MWTAD9NV000IVK5 AC9): the hand-fired
+            // over-quota threshold uses the SAME effective cap admission uses,
+            // so the header `n/effectiveCap` and the dialog cannot disagree.
+            modelCooldowns: readActiveModelCooldowns(),
+            budgetReliefEnabled: loadSettings().downtimeBudgetReliefEnabled !== false,
           }).catch((error: unknown) => {
             process.stderr.write(
               `[worklog-plugin] Host budget gate failed (proceeding): ${

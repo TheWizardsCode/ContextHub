@@ -56,6 +56,20 @@ const HEAD_SCAN_SRC = path.join(
   'src',
   'downtime-worker.head-scan.ts',
 );
+const STORAGE_SRC = path.join(
+  REPO_ROOT,
+  'packages',
+  'herdr',
+  'src',
+  'downtime-log-storage.ts',
+);
+const COORD_LOG_SRC = path.join(
+  REPO_ROOT,
+  'packages',
+  'herdr',
+  'src',
+  'downtime-log-coordination.ts',
+);
 
 function read(file: string): string {
   return fs.readFileSync(file, 'utf8');
@@ -182,5 +196,40 @@ describe('herdr README repeats the enforced bound', () => {
     );
     expect(flatReadme).toContain('selected-but-held root is never charged');
     expect(flatReadme).toContain('RUN_LENGTH_CEILING = 2');
+  });
+});
+
+describe('docs and source record the leadership-independent run-length source', () => {
+  it('names the machine-scoped run ledger rather than the leader decision-log tail', () => {
+    const leader = read(LEADER_SRC).replace(/\s+/g, ' ');
+    const coord = read(COORD_LOG_SRC).replace(/\s+/g, ' ');
+    // The module docblocks name the ledger as the ONE source and keep the
+    // decision-log tail explicitly as the fail-open fallback only.
+    expect(leader).toContain('machine-scoped run ledger');
+    expect(leader).toContain('decision-log tail: fail-open fallback');
+    expect(coord).toContain('the machine-scoped run ledger');
+    expect(coord).toContain('whose fail-open fallback');
+    expect(coord).toContain('is the tail of this decision log');
+    // The docblock does not claim the decision log is the single source.
+    expect(leader).not.toContain("decision log (the fairness metric's SINGLE run-length source)");
+    expect(coord).not.toContain('derived from the tail of this decision log');
+    // The operator-facing page describes the ledger too.
+    expect(flatDoc).toContain('Run-length source: the machine run ledger');
+  });
+
+  it('states the measured retention window, not the retracted ≥ 24 h claim', () => {
+    const storage = read(STORAGE_SRC).replace(/\s+/g, ' ');
+    const coord = read(COORD_LOG_SRC).replace(/\s+/g, ' ');
+    // The source constants document the measured window and the non-claim.
+    expect(storage).toContain('Retained TIME is NOT bounded');
+    expect(storage).toContain('≈ 6.5–9.7 h');
+    expect(coord).toContain('it retains ≈ 6.5–9.7 h, NOT ≥ 24 h');
+    // No stale assumption-driven claim survives in these docblocks.
+    expect(storage).not.toContain('carries the 24 h retention');
+    expect(storage).not.toContain('≥ 25 h at the observed ≥ 60');
+    expect(coord).not.toContain('≈ ≥ 24 h at the');
+    // The page states the measurement and points at the capture recipe.
+    expect(flatDoc).toContain('the ≥ 24 h claim was wrong');
+    expect(flatDoc).toContain('capture the aggregates while the evidence is live');
   });
 });

@@ -392,6 +392,121 @@ describe('WorklogDatabase', () => {
     });
   });
 
+  describe('foreign-endpoint dependency edge persistence (WL-0MWXIT6H3006TY2I)', () => {
+    const FOREIGN = 'SA-0MWFFD9N0050SP5';
+
+    function makeItem(id: string, title: string): WorkItem {
+      return {
+        id,
+        title,
+        description: '',
+        status: 'open' as const,
+        priority: 'medium' as const,
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z',
+        tags: [],
+        assignee: '',
+        stage: '',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+      };
+    }
+
+    it('keeps a local→foreign edge through a destructive import', () => {
+      const local = makeItem('TEST-001', 'Local owner');
+      const edge = { fromId: 'TEST-001', toId: FOREIGN, createdAt: '2024-01-02T00:00:00.000Z' };
+
+      const report = db.import([local], [edge]);
+
+      const edges = db.getAllDependencyEdges();
+      expect(edges).toHaveLength(1);
+      expect(edges[0].fromId).toBe('TEST-001');
+      expect(edges[0].toId).toBe(FOREIGN);
+      expect(db.listDependencyEdgesFrom('TEST-001')).toHaveLength(1);
+      expect(report.droppedEdges).toEqual([]);
+    });
+
+    it('drops an edge whose both endpoints are foreign on import', () => {
+      const local = makeItem('TEST-001', 'Local owner');
+      const edge = { fromId: FOREIGN, toId: 'SA-OTHER0000000000', createdAt: '2024-01-02T00:00:00.000Z' };
+
+      const report = db.import([local], [edge]);
+
+      expect(db.getAllDependencyEdges()).toHaveLength(0);
+      // Loss is never silent (AC5): the fully-foreign edge is reported.
+      expect(report.droppedEdges).toEqual([`${FOREIGN}->SA-OTHER0000000000`]);
+    });
+
+    it('skips a foreign→local edge without aborting the import transaction', () => {
+      // `dependency_edges` has a foreign key on `fromId`, so an edge whose
+      // owner is foreign is unstorable. A corrupt remote must not crash sync.
+      const local = makeItem('TEST-001', 'Local target');
+      const edge = { fromId: FOREIGN, toId: 'TEST-001', createdAt: '2024-01-02T00:00:00.000Z' };
+
+      const report = db.import([local], [edge]);
+
+      expect(db.getAllDependencyEdges()).toHaveLength(0);
+      // The skipped edge is reported so the drop is observable (AC5).
+      expect(report.droppedEdges).toEqual([`${FOREIGN}->TEST-001`]);
+    });
+
+    it('does not resurrect a foreign edge after the local owner is removed (stale snapshot)', () => {
+      const local = makeItem('TEST-001', 'Local owner');
+      const edge = { fromId: 'TEST-001', toId: FOREIGN, createdAt: '2024-01-02T00:00:00.000Z' };
+
+      db.import([local], [edge]);
+      expect(db.getAllDependencyEdges()).toHaveLength(1);
+
+      // A stale snapshot carrying the edge but not its owner: the owner is
+      // hard-deleted by the destructive replace, so the edge has no local
+      // endpoint and must be dropped (never resurrected).
+      const report = db.import([], [edge]);
+      expect(db.getAllDependencyEdges()).toHaveLength(0);
+      expect(report.droppedEdges).toEqual([`TEST-001->${FOREIGN}`]);
+    });
+
+    it('keeps a local→foreign edge through a non-destructive upsert', () => {
+      const local = db.create({ title: 'Local owner' });
+      const edge = { fromId: local.id, toId: FOREIGN, createdAt: '2024-01-02T00:00:00.000Z' };
+
+      const report = db.upsertItems([local], [edge]);
+
+      const edges = db.listDependencyEdgesFrom(local.id);
+      expect(edges).toHaveLength(1);
+      expect(edges[0].toId).toBe(FOREIGN);
+      expect(report.droppedEdges).toEqual([]);
+    });
+
+    it('leaves a both-foreign edge outside the upserted batch untouched (nothing dropped, nothing reported)', () => {
+      const local = db.create({ title: 'Local owner' });
+      const edge = { fromId: FOREIGN, toId: 'SA-OTHER0000000000', createdAt: '2024-01-02T00:00:00.000Z' };
+
+      const report = db.upsertItems([local], [edge]);
+
+      // Neither endpoint is in the upserted batch, so the non-destructive
+      // path never touches the edge — no store row, and no loss to report.
+      expect(db.getAllDependencyEdges()).toHaveLength(0);
+      expect(report.droppedEdges).toEqual([]);
+    });
+
+    it('skips a foreign→local edge on upsert without throwing', () => {
+      // FK on `fromId`: a foreign owner cannot be stored. Must not crash sync.
+      const local = db.create({ title: 'Local target' });
+      const edge = { fromId: FOREIGN, toId: local.id, createdAt: '2024-01-02T00:00:00.000Z' };
+
+      const report = db.upsertItems([local], [edge]);
+
+      expect(db.getAllDependencyEdges()).toHaveLength(0);
+      expect(report.droppedEdges).toEqual([`${FOREIGN}->${local.id}`]);
+    });
+  });
+
   describe('import and export', () => {
     it('should import work items', () => {
       const items = [

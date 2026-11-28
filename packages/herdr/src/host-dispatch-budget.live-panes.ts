@@ -40,6 +40,7 @@
 
 import type { HostBudgetLivePane } from './host-dispatch-budget.js';
 import { isTerminalAgentStatus, type HerdrPaneRecord } from './pane-discovery.js';
+import { sessionIdFromSessionPath } from './downtime-worker.route-outcome.js';
 
 /**
  * Project the full pane-record set onto the budget's LIVE-pane list.
@@ -61,7 +62,17 @@ export function liveBudgetPanesFromRecords(
     panes.push({
       paneId: record.paneId,
       ...(typeof record.label === 'string' ? { title: record.label } : {}),
+      // Session id (WL-0MWTAD9NV000IVK5): a session-only model-cooldown entry
+      // has no paneId, so the relief predicate needs this to match its pane.
+      ...(typeof record.agentSession?.value === 'string'
+        ? sessionIdOption(sessionIdFromSessionPath(record.agentSession.value))
+        : {}),
     });
   }
   return panes;
+}
+
+/** Shape a known session id into the optional-field spread. */
+function sessionIdOption(sessionId: string | undefined): { sessionId?: string } {
+  return sessionId !== undefined ? { sessionId } : {};
 }

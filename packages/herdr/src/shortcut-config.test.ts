@@ -277,13 +277,17 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
   it('marks the quiet state-change shortcuts with open_pane false (WL-0MSJLD1I70045ZUL)', () => {
     const registry = loadShortcutConfig();
     // Chords deliberately configured to run in the background (no pane):
-    // audit approve/reject, producer approve/reject, priority updates,
-    // close/delete, and quick create (WL-0MV6J5JXL002D8C4). Every other
-    // bundled shortcut omits the flag (default opens a pane).
+    // audit approve/reject, assignee/owner updates, producer approve/reject,
+    // priority updates, close/delete, and quick create
+    // (WL-0MV6J5JXL002D8C4, WL-0MWHV7Y5J0043AIH). Every other bundled
+    // shortcut omits the flag (default opens a pane).
     const expectedNoPane = new Set([
       'a,y', // audit approve
       'a,r', // audit reject
       'c,q', // create quick
+      'o,a', // assignee agent
+      'o,n', // assignee clear
+      'o,p', // assignee producer
       'r,p,a', // producer approve (LGTM)
       'r,p,r', // producer reject
       'u,p,l', // update priority low

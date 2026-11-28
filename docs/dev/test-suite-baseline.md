@@ -78,12 +78,50 @@ shared-basename unit-vs-CLI variants — e.g. `tests/audit.test.ts` +
 > `ship` release gate re-runs the suite on the merged `dev`→`main` tree — do
 > not treat a bypassed push as full-suite evidence.
 
+### Changed-scope selection (implement finish)
+
+`implement.py finish` validates the *changed* code before a push. The test
+skill's `run_tests.py --scope changed` maps the changed files to the smallest
+sufficient test set, in this order:
+
+1. A named **group** from `.pi/test-config.json` whose `paths` match the
+   change (preferred), unioned with file-level selection for any changed file
+   the group's `paths` does not cover.
+2. **Convention mapping** — `src/foo.py` → `tests/test_foo.py`, and the node /
+   vitest forms (`*.test.mjs`, `*.test.ts`, `*.spec.ts`, `.tsx`, …) by stem.
+3. **Import-graph expansion** — Python via its AST, and **TypeScript via a
+   static import-graph scan** (SA-0MWHUVI5J005RQHZ, framework half of
+   WL-0MW3EDP6D002U6V4). Editing a `.ts`/`.tsx` module selects the tests that
+   import it, directly or transitively: static `import` / `export … from`
+   statements are followed (barrel re-exports count as edges) and the
+   TypeScript ESM `x.js` specifier resolves to the `x.ts`/`x.tsx` source.
+   Over-matching is preferred to under-matching — an extra test runs, never
+   fewer; dynamic `import()`/`require()` and path aliases are out of scope.
+   A change set with no `.ts`/`.tsx` files never walks the TS graph, so a
+   TypeScript-less change pays nothing.
+
+For the WL-0MW0JF5YE008LV1R layout, an edit to `src/github-sync.ts` (a barrel)
+now selects `tests/github-sync-comments.test.ts`,
+`tests/github-sync-output.test.ts`,
+`tests/github-import-label-resolution.test.ts` and
+`tests/integration/github-throttler-concurrency.test.ts` — the tests that
+import `'../src/github-sync.js'` — instead of selecting nothing and falling
+back to the full suite.
+
+A **fresh implement worktree** is importable before the gate runs:
+`implement.py start` builds the worktree's `packages/shared/dist` when it is
+missing or stale (freshness-based, unconditional on the change set), with one
+`npm run build:shared` diagnostic on failure instead of N import errors — see
+[fresh-worktree shared build](./pre-push-hook.md#fresh-worktree-shared-build-at-implementpy-start-wl-0mw3edp6d002u6v4)
+and [wl-shared-dist-diagnostic.md](./wl-shared-dist-diagnostic.md).
+
 ### The herdr package suite is a separate, opt-in gate
 
-The `packages/herdr/src` suite (107 files / ~3,500 tests) is **not** part of
-the canonical full suite — a producer decision recorded on
-**WL-0MVFZVIA50062TJ8** ("the herdr tests will not be run as part of the
-canonical full suite"). It is a sanctioned, cache-recorded profile instead:
+The `packages/herdr/src` suite (211 files / 5,878 tests, re-verified
+2026-11-25 by WL-0MVP7TT08006816Z) is **not** part of the canonical full
+suite — a producer decision recorded on **WL-0MVFZVIA50062TJ8** ("the herdr
+tests will not be run as part of the canonical full suite"). It is a
+sanctioned, cache-recorded profile instead:
 
 ```bash
 # by type — types.herdr in .pi/skills_extensions/test/extension.json
@@ -104,6 +142,9 @@ the audit.
 - **Runtime (re-measured 2026-10-21):** ~67 s cold on a 16-core shared host
   at load average 4.8–12.2 (load-dominated). WL-0MVFE1IRB0004X1U measured
   ~130 s on an idle host. Budget a couple of minutes, not tens of minutes.
+  The 2026-11-25 re-verification (211 files / 5,878 tests) ran in 42 s on a
+  similarly loaded host; the file count and runtime both grow, so re-measure
+  rather than trusting this figure.
 
 ### Type-map contract
 
@@ -1062,6 +1103,21 @@ with the measured per-call wall time. The remainder is reported explicitly as
 **unattributed harness overhead** (timers, promise scheduling, GC, clock
 calls) — see the `residual` column. Reconciliation target: **≥ 90 %** of the
 call attributed; the profiler exits non-zero when a scenario misses it.
+
+**Test-side convention for live samples (WL-0MWW355UL0038DDI).** A live
+in-process call is a few milliseconds, so on a contended host the untimed gaps
+(GC, preemption, event-loop stalls) can push the residual share past 10 % on a
+single run — the measured suites are serialised for exactly this reason
+(`vitest.config.ts` `MEASURED_SUITES`). Assertions over **live** samples in the
+parallel `suite` project (e.g. `tests/bench/inproc-harness-profile.test.ts`)
+therefore assert the host-independent contract — the `reconciled` flag agrees
+with the reported residual share (no silently dropped residual), the attributed
+total equals the phase-mark sum, and the residual stays under a loose ≤ 50 %
+coverage bound — rather than a forced ≥ 90 % outcome. The ≥ 90 % rule itself is
+pinned deterministically on synthetic records (`inproc-harness-profile.test.ts`
+attribution tests) and on the checked-in baseline artefact in the serialised
+measured project (`tests/cli/inproc-harness-budget.test.ts`). Do not reintroduce
+a live quiet-host share assertion into the parallel project.
 
 ### Attribution — fresh temporary store (the regime the suite uses)
 

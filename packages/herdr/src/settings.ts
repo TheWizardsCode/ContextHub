@@ -197,6 +197,14 @@ export interface PluginSettings {
    */
   downtimeStallScanEnabled: boolean;
   /**
+   * Machine-wide budget relief (WL-0MWTAD9NV000IVK5). When `true` (default),
+   * a capped kind whose panes are parked in a machine-wide model cooldown is
+   * admitted up to exactly 2x its configured cap; when `false` the configured
+   * cap always applies. The 2x multiplier is a fixed module constant and can
+   * NOT be raised by settings or environment.
+   */
+  downtimeBudgetReliefEnabled: boolean;
+  /**
    * Minimum continuous not-`working` duration before a pane is considered
    * stalled (WL-0MUYMBK6H005PY16). Default 5 min (300000 ms); clamped to
    * [60 s, 60 min]; invalid/missing values fall back to the default.
@@ -341,6 +349,7 @@ export const defaultSettings: PluginSettings = {
   // Dead-coordination-entry staleness window (WL-0MWFJTULD005DTQI).
   downtimeCoordinationEntryStaleMs: DEFAULT_DOWNTIME_COORDINATION_ENTRY_STALE_MS,
   downtimeStallScanEnabled: DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
+  downtimeBudgetReliefEnabled: true,
   downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   downtimeCapacityStarvationAlertMs: DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
   downtimeLongRunningThresholdMs: DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
@@ -533,6 +542,10 @@ export function loadSettings(settingsPath?: string): PluginSettings {
           : defaultSettings.downtimeCoordinationEntryStaleMs,
       downtimeStallScanEnabled: typeof parsed.downtimeStallScanEnabled === 'boolean'
         ? parsed.downtimeStallScanEnabled : defaultSettings.downtimeStallScanEnabled,
+      downtimeBudgetReliefEnabled:
+        typeof parsed.downtimeBudgetReliefEnabled === 'boolean'
+          ? parsed.downtimeBudgetReliefEnabled
+          : defaultSettings.downtimeBudgetReliefEnabled,
       downtimeStallThresholdMs: typeof parsed.downtimeStallThresholdMs === 'number'
         ? clampDowntimeStallThresholdMs(parsed.downtimeStallThresholdMs)
         : defaultSettings.downtimeStallThresholdMs,

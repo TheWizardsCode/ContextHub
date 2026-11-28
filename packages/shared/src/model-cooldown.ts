@@ -76,6 +76,19 @@
  * The module mirrors the existing `@worklog/shared/lease-release` cross-package
  * pattern; herdr's `getMachineCoordinationDir()` delegates to
  * {@link resolveMachineCoordinationDir} so there is a single resolver.
+ *
+ * ## Consumers
+ *
+ *  - The cheap-switch / mode gate reads active entries to avoid switching.
+ *  - The stalled-work scan treats an active entry as "never wake early" and a
+ *    due entry as a wake trigger (WL-0MV5639GG00085Q7).
+ *  - The host dispatch-budget **relief** path
+ *    (`packages/herdr/src/host-budget-relief.ts`, WL-0MWTAD9NV000IVK5) treats
+ *    an active entry for an `implement`/`audit` pane as "this pane is not using
+ *    the model" and raises that kind's admission cap to exactly 2x while the
+ *    cooldown lasts. It deliberately INVERTS this module's fail-closed
+ *    convention: an unreadable/corrupt read (`null`) grants NO relief, because
+ *    a corrupt file must never inflate the host budget.
  */
 
 import * as fs from 'node:fs';

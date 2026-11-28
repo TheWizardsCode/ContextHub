@@ -105,6 +105,22 @@ export function clearStoredModelCooldown(paneId: string): boolean {
 }
 
 /**
+ * Read the machine-wide model cooldowns ACTIVE at `now` for budget relief
+ * (WL-0MWTAD9NV000IVK5). The dispatch budget reads this once per dispatch
+ * attempt and threads the result into admission, so a tick cannot observe two
+ * different relief caps.
+ *
+ * Delegates to {@link readModelCooldowns}: returns only active entries
+ * (`cooldownUntil > now`), `[]` when nothing is recorded, and `null` when the
+ * coordination dir is unresolvable or the file is unreadable/corrupt. Relief
+ * treats `null` as fail-closed (no relief) — the deliberate opposite of the
+ * reader's own "assume active" convention. Never throws.
+ */
+export function readActiveModelCooldowns(now: number = Date.now()): ModelCooldownEntry[] | null {
+  return readModelCooldowns(getMachineCoordinationDir(), now);
+}
+
+/**
  * Ensure the machine coordination directory exists on disk.
  *
  * Creates the directory (and parents) idempotently via `mkdir -p`.

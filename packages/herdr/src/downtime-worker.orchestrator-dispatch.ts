@@ -736,12 +736,12 @@ export async function performDispatch(
     }
     if (outcome.dispatched) {
       // Per-project fairness (WL-0MWKY141H002LULI AC3): a successful dispatch
-      // is a decision too — selected root, dispatching root, tick outcome and
-      // run length. An OBSERVATION (`blocking: false`), never rate-limited.
+      // is a decision too — selected/dispatching root, run length. Observation.
       const fairness =
         ctx.opts.coordinationDir !== undefined
           ? await dispatchDecisionFairness({
-              cwd: cfg.cwd,
+              coordinationDir: ctx.opts.coordinationDir,
+              countingCwd: cfg.cwd,
               tickSelectedRoot,
               selectedRootOverride: outcome.selectedRoot,
               dispatchingRoot: outcome.attemptedRoot,

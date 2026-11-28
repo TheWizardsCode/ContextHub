@@ -9,12 +9,25 @@
  *      `command_action` — so the buckets sum to the top-level attribution and
  *      never double count,
  *   2. the residual is what is left over and the >= 90 % reconciliation rule
- *      actually fails when the residual is large,
+ *      actually fails when the residual is large (pinned on *synthetic* data,
+ *      see the convention note below),
  *   3. the dominant-phase classification names a millisecond and percentage
  *      share per bucket and answers harness-side vs production startup,
  *   4. the harness instrumentation is **off by default** (no records, unchanged
  *      output) and records the expected phases when switched on,
  *   5. a full profiler run measures the four AC scenarios and reports medians.
+ *
+ * Convention — live samples vs the >= 90 % outcome. A live in-process call is
+ * a few milliseconds, so the untimed gaps (GC, preemption, event-loop stalls)
+ * on a contended host can push the residual share past 10 % on any given run.
+ * Assertions over *live* samples therefore check flag/share agreement (the
+ * `reconciled` flag matches the reported residual share — the residual is
+ * never silently dropped) and a loose coverage bound, never the >= 90 %
+ * outcome. The >= 90 % rule itself is pinned deterministically on synthetic
+ * records (the attribution tests above) and on the checked-in baseline
+ * artefact in the serialised measured project
+ * (`tests/cli/inproc-harness-budget.test.ts`). Do not reintroduce a live
+ * quiet-host share assertion into this parallel `suite` project.
  */
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import * as fs from 'fs';
@@ -29,7 +42,9 @@ import {
   median,
   runInprocHarnessProfile,
   selectScenarios,
+  TOP_LEVEL_PHASES,
   type AttributionBucket,
+  type InprocAttribution,
 } from '../../bench/inproc-harness-profile.js';
 import {
   clearInprocProfileRecords,
@@ -167,16 +182,15 @@ describe('harness phase instrumentation', () => {
   });
 
   /**
-   * Reconciliation is a *share* rule (>= 90 % attributed), so a single ~2 ms
-   * call can miss it purely from timer granularity and scheduling noise on a
-   * loaded host. The AC standard is the per-scenario median, so a one-call
-   * assertion aggregates a small sample of identical calls and compares the
-   * summed attributed time with the summed wall time — the same statistic the
-   * published tables report, without depending on a single noisy sample.
+   * Run a small sample of identical live calls and aggregate their attribution
+   * (see `aggregateResidual`). A live ~2 ms call can miss the >= 90 % outcome
+   * purely from timer granularity and scheduling noise on a loaded host, so the
+   * sample is asserted on the host-independent contract instead (see
+   * `sampledResidualViolations`). The >= 90 % outcome stays pinned on synthetic
+   * data and the serialised baseline.
    */
-  async function sampledResidualSharePct(commandLine: string, runs = 5): Promise<number> {
-    let totalMs = 0;
-    let attributedMs = 0;
+  async function sampleResidual(commandLine: string, runs = 5): Promise<SampledResidual> {
+    const attributions: InprocAttribution[] = [];
     for (let run = 0; run < runs; run += 1) {
       clearInprocProfileRecords();
       const result = await runInProcess(commandLine, 15_000);
@@ -185,10 +199,41 @@ describe('harness phase instrumentation', () => {
       expect(records).toHaveLength(1);
       const attribution = attributeRecord(records[0]);
       expect(attribution.attributedMs).toBeGreaterThan(0);
-      totalMs += attribution.totalMs;
-      attributedMs += attribution.attributedMs;
+      attributions.push(attribution);
     }
-    return ((totalMs - attributedMs) / totalMs) * 100;
+    return aggregateResidual(attributions);
+  }
+
+  /**
+   * Live samples must clear this loose, load-independent bound: the phase marks
+   * demonstrably account for the bulk of the call, but the strict >= 90 %
+   * outcome is deliberately not required here (see the file header).
+   */
+  const MAX_LIVE_RESIDUAL_SHARE_PCT = 50;
+
+  /**
+   * The contract a live sample must satisfy. Returns the violated checks (empty
+   * when the sample is healthy). Extracted so the deliberate-fault test can
+   * prove the check actually detects a silently dropped residual.
+   */
+  function sampledResidualViolations(sample: SampledResidual): string[] {
+    const violations: string[] = [];
+    if (Math.abs(sample.attributedMs - sample.phaseSumMs) > 1e-6) {
+      violations.push(
+        `attributedMs ${sample.attributedMs.toFixed(3)} does not equal the phase-mark sum ` +
+          `${sample.phaseSumMs.toFixed(3)} — residual silently dropped`,
+      );
+    }
+    if (!sample.flagAgrees) {
+      violations.push('reconciled flag disagrees with the reported residual share');
+    }
+    if (sample.residualSharePct < 0 || sample.residualSharePct > MAX_LIVE_RESIDUAL_SHARE_PCT) {
+      violations.push(
+        `residual share ${sample.residualSharePct.toFixed(2)} % outside the loose 0–` +
+          `${MAX_LIVE_RESIDUAL_SHARE_PCT} % coverage bound`,
+      );
+    }
+    return violations;
   }
 
   it('records nothing when the switch is off, leaving output unchanged', async () => {
@@ -234,9 +279,14 @@ describe('harness phase instrumentation', () => {
 
     const attribution = attributeRecord(record);
     expect(attribution.attributedMs).toBeGreaterThan(0);
-    expect(await sampledResidualSharePct('node src/cli.ts --help')).toBeLessThanOrEqual(
-      MAX_RESIDUAL_SHARE_PCT,
-    );
+
+    const sample = await sampleResidual('node src/cli.ts --help');
+    // The reconciled flag must agree with the reported share on every sample, the
+    // attributed total must equal the phase-mark sum (no silently dropped
+    // residual), and the marks must account for the bulk of the wall time. The
+    // strict >= 90 % rule is pinned on synthetic data and the serialised
+    // baseline, not on a live quiet host.
+    expect(sampledResidualViolations(sample)).toEqual([]);
   });
 
   it('attributes a data-access command to a nested DB open', async () => {
@@ -263,12 +313,36 @@ describe('harness phase instrumentation', () => {
       // to both, so the attribution still reconciles with the measured total.
       expect(attribution.buckets.dbOpen).toBeGreaterThan(0);
       expect(attribution.buckets.commandAction).toBeGreaterThanOrEqual(0);
-      expect(await sampledResidualSharePct(commandLine)).toBeLessThanOrEqual(
-        MAX_RESIDUAL_SHARE_PCT,
-      );
+
+      const sample = await sampleResidual(commandLine);
+      expect(sampledResidualViolations(sample)).toEqual([]);
     } finally {
       cleanupTempDir(tempDir);
     }
+  });
+
+  it('detects a silently dropped residual — deliberate-fault check', () => {
+    // A healthy synthetic attribution (16.0 ms wall, 15.2 ms attributed, so a
+    // 0.8 ms residual) clears the live-sample contract.
+    const healthy = attributeRecord(syntheticRecord(16.0, SYNTHETIC_MARKS));
+    expect(sampledResidualViolations(aggregateResidual([healthy]))).toEqual([]);
+
+    // Fault injection: attribute `totalMs` as fully attributed, silently
+    // dropping the residual. The reworked contract must catch it rather than
+    // reporting a comfortable 0 % residual.
+    const droppedResidual: InprocAttribution = { ...healthy, attributedMs: healthy.totalMs };
+    expect(sampledResidualViolations(aggregateResidual([droppedResidual]))).toEqual(
+      expect.arrayContaining([expect.stringContaining('residual silently dropped')]),
+    );
+
+    // A second fault: the reconciled flag disagrees with the reported share
+    // (a record that claims reconciliation while exceeding the threshold).
+    const unreconciled = attributeRecord(syntheticRecord(20.0, SYNTHETIC_MARKS));
+    expect(unreconciled.reconciled).toBe(false);
+    const mislabelled: InprocAttribution = { ...unreconciled, reconciled: true };
+    expect(sampledResidualViolations(aggregateResidual([mislabelled]))).toEqual(
+      expect.arrayContaining([expect.stringContaining('reconciled flag disagrees')]),
+    );
   });
 });
 
@@ -344,4 +418,46 @@ function emptyBuckets(partial: Partial<Record<AttributionBucket, number>>): Reco
   const buckets = {} as Record<AttributionBucket, number>;
   for (const bucket of ATTRIBUTION_BUCKETS) buckets[bucket] = partial[bucket] ?? 0;
   return buckets;
+}
+
+/**
+ * Aggregated attribution over a sample of live calls, plus the derived facts the
+ * live-sample contract checks. `phaseSumMs` is the sum of the top-level phase
+ * marks, kept separate from `attributedMs` so a fault that inflates the
+ * attributed total (silently dropping the residual) is detectable.
+ */
+interface SampledResidual {
+  totalMs: number;
+  attributedMs: number;
+  phaseSumMs: number;
+  residualSharePct: number;
+  /** Every record's `reconciled === (residualSharePct <= MAX_RESIDUAL_SHARE_PCT)`. */
+  flagAgrees: boolean;
+}
+
+/**
+ * Pure aggregation over per-call attributions. Kept free of live I/O so the
+ * deliberate-fault test can drive it with synthetic records.
+ */
+function aggregateResidual(attributions: InprocAttribution[]): SampledResidual {
+  let totalMs = 0;
+  let attributedMs = 0;
+  let phaseSumMs = 0;
+  let flagAgrees = true;
+  for (const attribution of attributions) {
+    const phaseSum = TOP_LEVEL_PHASES.reduce((sum, phase) => sum + attribution.phases[phase].ms, 0);
+    flagAgrees =
+      flagAgrees &&
+      attribution.reconciled === (attribution.residualSharePct <= MAX_RESIDUAL_SHARE_PCT);
+    totalMs += attribution.totalMs;
+    attributedMs += attribution.attributedMs;
+    phaseSumMs += phaseSum;
+  }
+  return {
+    totalMs,
+    attributedMs,
+    phaseSumMs,
+    residualSharePct: ((totalMs - attributedMs) / totalMs) * 100,
+    flagAgrees,
+  };
 }

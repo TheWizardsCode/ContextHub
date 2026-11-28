@@ -55,6 +55,7 @@ import {
   ROUND_ROBIN_BY_ROOT_FILE_NAME,
   type RoundRobinByRootData,
 } from './downtime-round-robin-by-root.js';
+import { RUN_LEDGER_FILE_NAME } from './downtime-run-ledger.js';
 import { type CoordinationEntry } from './coordination.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────
@@ -166,30 +167,17 @@ function maxConsecutiveRun(sequence: readonly string[]): number {
 }
 
 /**
- * Seed the leader's decision log with `length` consecutive dispatches to
+ * Seed the machine-scoped run ledger with `length` consecutive dispatches to
  * `root` — the SINGLE run-length accounting source the ordering reads
- * (WL-0MWKY141H002LULI). `dispatchFromCoordination` never appends here, so the
- * seeded run persists for the tick under test.
+ * (WL-0MWT3Z9M9002Z9BF; `downtime-run-by-root.json` inside the coordination
+ * directory). The dispatch tick never appends here, so the seeded run persists
+ * for the tick under test.
  */
-function seedDecisionLog(cwd: string, root: string, length: number): void {
-  mkdirSync(join(cwd, '.worklog'), { recursive: true });
-  const lines: string[] = [];
-  for (let i = 1; i <= length; i += 1) {
-    lines.push(
-      JSON.stringify({
-        kind: 'decision',
-        operation: 'dispatch',
-        reason: 'dispatched',
-        outcome: 'dispatched',
-        dispatchingRoot: root,
-        consecutiveRunLength: i,
-        at: `2026-01-0${i}T00:00:00.000Z`,
-      }),
-    );
-  }
+function seedRunLedger(cwd: string, root: string, length: number): void {
+  mkdirSync(cwd, { recursive: true });
   writeFileSync(
-    join(cwd, '.worklog', 'downtime-coordination.log'),
-    `${lines.join('\n')}\n`,
+    join(cwd, RUN_LEDGER_FILE_NAME),
+    JSON.stringify({ root, runLength: length, at: '2026-01-01T00:00:00.000Z' }),
     'utf-8',
   );
 }
@@ -446,7 +434,7 @@ describe('mechanism (b): prep offers are never held by the implement/audit gates
       '/repo/prep': '2026-01-01T00:00:00.000Z',
       '/repo/impl': '2026-01-02T00:00:00.000Z',
     });
-    seedDecisionLog(testDir, '/repo/prep', 2);
+    seedRunLedger(testDir, '/repo/prep', 2);
 
     const deps = makeDeps({
       getReviewQueueCount: vi.fn().mockResolvedValue(0),

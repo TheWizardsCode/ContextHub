@@ -77,6 +77,27 @@ export const COORDINATION_FILE_VERSION = 2;
 export const LEADER_LEASE_FILE = 'downtime-leader-lease.json';
 
 /**
+ * The audit-lease capability a modern instance advertises through its
+ * coordination check-in (WL-0MWJE9MIR005SBQK, parent WL-0MWJ7QYX0001KAQX AC4).
+ *
+ * A pane predating the proxy audit-lease wiring (WL-0MWFJH3NW006F5GN) runs
+ * availability-only admission, which cannot arbitrate the cross-host race the
+ * lease gate removes. Advertising this capability lets the leader tell an old
+ * peer from a new one BEFORE dispatching an audit to it — the leader refuses
+ * audit offers from a peer that does not advertise it (fail-closed), while its
+ * implement/prep offers flow unchanged.
+ */
+export const AUDIT_LEASE_CAPABILITY = 'audit-lease' as const;
+
+/**
+ * Additive capability flags a coordination entry may advertise. The field is
+ * OPTIONAL on {@link CoordinationEntry}: a legacy entry (or an old writer)
+ * omits it and an old reader ignores it, so both directions interoperate.
+ * Additions only — never rename a value once published.
+ */
+export type CoordinationCapability = typeof AUDIT_LEASE_CAPABILITY;
+
+/**
  * How long a leader block stays believable (WL-0MW1VINII003IL7R).
  *
  * Two lease generations (the lease TTL is 300 s and the leader refreshes its
@@ -118,6 +139,26 @@ export interface CoordinationEntry {
   lastUpdated: string;
   /** v2 tier-aware offer payload (optional for legacy v1-shape entries). */
   offers?: CoordinationOffer[];
+  /**
+   * Additive capability flags this instance advertised at check-in
+   * (WL-0MWJE9MIR005SBQK). ABSENT on a legacy/old entry — the leader treats
+   * an absent (or non-audit-lease) capability as "cannot arbitrate a proxy
+   * audit lease" and refuses its AUDIT offers (fail-closed). An old reader
+   * ignores the key entirely.
+   */
+  capabilities?: CoordinationCapability[];
+}
+
+/**
+ * True when an entry advertises the audit-lease capability
+ * (WL-0MWJE9MIR005SBQK). Fail-closed: a legacy entry (no `capabilities`) or a
+ * malformed value is NOT capable, so the leader refuses its audit offers.
+ */
+export function hasAuditLeaseCapability(entry: CoordinationEntry): boolean {
+  return (
+    Array.isArray(entry.capabilities) &&
+    entry.capabilities.includes(AUDIT_LEASE_CAPABILITY)
+  );
 }
 
 /**
@@ -301,6 +342,7 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
         ? entry.worklogRoot
         : typeof entry.directory === 'string' ? entry.directory : '';
       const rawWorkItemId = typeof entry.workItemId === 'string' ? entry.workItemId : '';
+      const capabilities = parseCapabilities(entry.capabilities);
       const base = {
         instanceId: entry.instanceId,
         workItemId: rawWorkItemId,
@@ -308,6 +350,7 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
         worklogRoot: rawRoot,
         assignedAt: typeof entry.assignedAt === 'string' ? entry.assignedAt : new Date(0).toISOString(),
         lastUpdated: typeof entry.lastUpdated === 'string' ? entry.lastUpdated : new Date(0).toISOString(),
+        ...(capabilities !== undefined ? { capabilities } : {}),
       } as CoordinationEntry;
       if (Array.isArray(entry.offers) && entry.offers.length > 0) {
         // v2: parse the bounded offer payload (re-bounded fail-safe) and
@@ -405,12 +448,40 @@ function parseLeader(raw: unknown): { leader?: CoordinationLeader } {
   };
 }
 
-/** Normalize an entry so `directory`/`worklogRoot` and the v2 offer payload are consistent (compat). */
+/**
+ * Parse an advertised capability payload (WL-0MWJE9MIR005SBQK). Unknown or
+ * malformed values are dropped fail-safe; an empty/absent payload resolves
+ * `undefined` so a legacy entry never gains a spurious capability. Used on
+ * both the read seam (fail-safe) and the write seam (so an over-broad array is
+ * never persisted).
+ */
+function parseCapabilities(raw: unknown): CoordinationCapability[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: CoordinationCapability[] = [];
+  for (const value of raw) {
+    if (value === AUDIT_LEASE_CAPABILITY && !out.includes(AUDIT_LEASE_CAPABILITY)) {
+      out.push(AUDIT_LEASE_CAPABILITY);
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** Normalize an entry so `directory`/`worklogRoot`, the capability payload and the v2 offer payload are consistent (compat). */
 function normalizeEntry(entry: CoordinationEntry): CoordinationEntry {
   const root = typeof entry.worklogRoot === 'string' && entry.worklogRoot.length > 0
     ? entry.worklogRoot
     : entry.directory;
-  const base = { ...entry, directory: root, worklogRoot: root };
+  // Capabilities are additive and bound fail-safe: drop unknown values (and
+  // the key entirely when nothing survives), so an old/foreign writer can
+  // never inject a capability this build does not understand.
+  const { capabilities: rawCapabilities, ...rest } = entry;
+  const capabilities = parseCapabilities(rawCapabilities);
+  const base = {
+    ...rest,
+    directory: root,
+    worklogRoot: root,
+    ...(capabilities !== undefined ? { capabilities } : {}),
+  };
   if (!Array.isArray(entry.offers) || entry.offers.length === 0) {
     // Legacy v1-shape entry — keep the single `workItemId` as-is; there is
     // no offers payload to bound (old writers/readers interoperate, AC9).

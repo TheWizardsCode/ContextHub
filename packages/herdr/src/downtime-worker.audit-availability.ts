@@ -44,32 +44,17 @@
 import {
   parseAuditAvailabilityResponse,
   type AuditAvailability,
+  type AuditAvailabilityOutcome,
 } from './downtime-worker.audit-availability.contract.js';
 import { resolveAuditAvailabilityPath } from './downtime-worker.constants.js';
 import { DEFAULT_DOWNTIME_POLL_TIMEOUT_MS } from './downtime-worker.poller.js';
 
 // ── Client surface (types) ────────────────────────────────────────────
 
-/**
- * The outcome of one audit-availability read. Every arm is usable by the
- * dispatcher without further parsing:
- *
- *   - `ok` — the proxy answered 2xx with a payload the pinned parser accepts;
- *   - `endpoint-absent` — the proxy predates the endpoint (`404`), i.e. the
- *     sibling proxy item has not shipped;
- *   - `unreachable` — the proxy could not be reached (`timeout` / `network`)
- *     or answered an unusable status (`http-<status>`);
- *   - `unparsable` — 2xx with a body the pinned parser rejects (`bad-body`).
- *
- * `endpoint-absent`, `unreachable` and `unparsable` all fail CLOSED in the
- * audit gate (parent AC3) with a named reason — the arm and its `reason` are
- * the evidence.
- */
-export type AuditAvailabilityOutcome =
-  | { status: 'ok'; availability: AuditAvailability }
-  | { status: 'endpoint-absent'; reason: 'http-404' }
-  | { status: 'unreachable'; reason: 'timeout' | 'network' | `http-${number}` }
-  | { status: 'unparsable'; reason: 'bad-body' };
+// The typed outcome union is declared in the leaf contract module so the
+// data-type surface can reference it without an import cycle; re-exported here
+// so every existing `audit-availability.js` import keeps resolving.
+export type { AuditAvailabilityOutcome };
 
 /**
  * Injectable GET boundary for the audit-availability read (mirrors the

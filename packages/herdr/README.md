@@ -166,7 +166,28 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `a`, `y` — Approve the selected item (mark ready to close)
    - Press `a`, `r` — Reject the selected item (mark not ready to close)
 
-10. Quit:
+   The `a` leader is reserved for the audit command family (`a a` / `a y` / `a r`).
+
+10. Assignee chords (owner axis — press `o` then a key):
+   - Press `o`, `p` — Set the selected item's assignee to `producer` (a **persistent
+     scheduling hold** that the downtime dispatcher respects and never clears on its
+     own)
+   - Press `o`, `a` — Set the selected item's assignee to `agent` (a **session claim**
+     tagging ownership without a full worklog session; released at session end)
+   - Press `o`, `n` — **Clear** the selected item's assignee (`wl update <id>
+     --assignee ""`), making it dispatchable again without hand-editing via the CLI
+
+   All three run in the background (`open_pane: false`) and the worklist refreshes
+   when the update completes, mirroring `c q` quick create. The leader key is `o`
+   (owner), keeping `a` reserved for audit. **Hold semantics:** a non-empty assignee is
+   a scheduling hold — `producer` is the persistent hold, `agent` is a session claim,
+   and an empty assignee is dispatchable.
+
+   A dispatcher chord (`o d`) is **deferred**: the dispatcher identity's non-hold
+   semantics are not yet established (WL-0MW51OB1Y0073TLG), so no dispatcher chord
+   ships.
+
+11. Quit:
    - Press `q` to close the worklist pane
 
 ### Recent dispatches view
@@ -278,6 +299,7 @@ The plugin respects the following environment variables:
 - `HERDR_COORDINATION_DIR` — Machine coordination directory override (default `~/.herdr/downtime`); the host dispatch-budget ledger and its `budget.json` live here.
 - `HERDR_HOST_MAX_<KIND>` — Per-kind machine-wide dispatch caps, overriding `~/.herdr/downtime/budget.json`. One key per dispatch kind: `HERDR_HOST_MAX_IMPLEMENT`, `HERDR_HOST_MAX_AUDIT`, `HERDR_HOST_MAX_PLAN`, `HERDR_HOST_MAX_INTAKE`, `HERDR_HOST_MAX_RISK_EFFORT`. Values clamp to `0`–`32`; `0` disables that kind host-wide (a per-kind kill switch). Unset/empty/invalid values keep the file/default figure (defaults: implement `2`, audit `1`; every other kind is uncapped unless configured). `HERDR_HOST_MAX_IMPLEMENT` governs the implement tier; **`audit` / `HERDR_HOST_MAX_AUDIT` are implement-tier-only for audit admission** — the audit budget is owned by the proxy (below), and `audit` is only the one-release legacy cap and the local observability figure. See *Host-wide dispatch budget* under the downtime worker.
 - `HERDR_AUDIT_LOCAL_BUDGET` — **one-release** escape hatch (`=1`) restoring the pre-proxy audit decision (`budget.json` `maxAudit` + the local ledger, never consulting the proxy). It is removed in the release after the proxy side (`LP-0MW95FYMH006XYNK`) ships. Unset → the proxy-owned audit budget is authoritative. The proxy URL is `downtimeProxyUrl` in `~/.config/herdr/worklog-plugin.json` (default `http://192.168.0.199:8000`), the same URL the status poller and reserve client use.
+- **Budget relief while a pane waits for a model** (WL-0MWTAD9NV000IVK5) — while a capped kind has a pane parked in a machine-wide model cooldown (`~/.herdr/downtime/model-cooldowns.json`), admission raises that kind's cap to **exactly 2x** the configured cap; the blocked panes stay counted (total live cap), relief is per kind, and it ends the moment the last matching cooldown expires or is cleared. The multiplier is a fixed constant. `downtimeBudgetReliefEnabled` (default `true`) in `~/.config/herdr/worklog-plugin.json` is the relay kill switch, and an unreadable/corrupt cooldown file grants no relief (fail closed). Audit relief is scoped to `HERDR_AUDIT_LOCAL_BUDGET=1`; the proxy lease remains authoritative. The worklist counter shows `n/effectiveCap` while relief is active. See [docs/dev/downtime-dispatcher.md → Budget relief](../../docs/dev/downtime-dispatcher.md#host-budget-relief-while-a-pane-waits-for-a-model-wl-0mwtad9nv000ivk5).
 
 #### Plugin Settings (config file)
 
@@ -415,6 +437,15 @@ dispatches; the other herdr instances coordinate instead of polling:
   (single `workItemId`, no `offers`) is read as a one-offer entry (kind derived
   by the classifier) and rewritten as v2 on the next check-in — no v1 file is
   dropped by the upgrade.
+  **Capability advertisement (WL-0MWJE9MIR005SBQK):** an entry may also carry
+  an additive `capabilities` array (a modern pane advertises `["audit-lease"]`).
+  The field is optional and ignored by old readers; the leader uses it
+  **fail-closed** — an audit offer from a peer that does not advertise
+  `audit-lease` is refused as a neutral hold (the offer is kept, no strike, no
+  `no-candidate` cooldown; the tick reports `lease-capability-absent`), because
+  such a pane predates the audit-lease wiring and would fall back to the
+  availability-only race. Its implement/prep offers still dispatch. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#audit-lease-acquisition-and-release-discipline).
 - **Leader dispatch** — only the leader polls the proxy; once idle for the
   threshold it walks the single canonical candidate universe, in the one order
   stated in
@@ -440,9 +471,12 @@ dispatches; the other herdr instances coordinate instead of polling:
   (WL-0MWFIZ8H5005FVNN). While **a peer root has an admissible offer and
   surplus capacity exists** (`freeSlots > 1`), a root that has already
   dispatched **twice in succession** is deferred behind its peers
-  (`deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING = 2`, decision-log-sourced
-  and fail-open) — an ordering rule only, never a gate; a selected-but-held
-  root is never charged. The v2 bucket
+  (`deferRunLengthCeilingRoot`, `RUN_LENGTH_CEILING = 2`, machine
+  run-ledger-sourced and fail-open) — an ordering rule only, never a gate; a
+  selected-but-held root is never charged. The run length is read from the
+  **machine-scoped run ledger** (`~/.herdr/downtime/downtime-run-by-root.json`),
+  not the leader's own decision log, so a leadership hand-off between roots
+  cannot reset a live run to `1` (WL-0MWT3Z9M9002Z9BF). The v2 bucket
   offers are a scoped reversal of that item's single-offer *contract* (what is
   offered, and how the leader walks it), never of that retirement —
   `COORDINATION_TIER_ORDER` stays retired and the classifier remains the single
@@ -613,6 +647,26 @@ dispatches; the other herdr instances coordinate instead of polling:
     implement-tier-only for admission. The one-release
     `HERDR_AUDIT_LOCAL_BUDGET=1` flag restores the pre-proxy local audit
     decision for a single release.
+  - **Audit-lease admission gate (WL-0MWFJH3NW006F5GN).** The availability
+    read is only a PRE-CHECK: it observes leases and never reserves one, so two
+    hosts reading the same `available: 1` could both dispatch. The admission
+    decision is the proxy's atomic
+    `POST /llama/local/audit/lease` (session id derived from the item, so a
+    re-dispatch renews instead of competing): `200` admits, `429` /
+    `503` / unreachable / unparsable refuse that audit candidate (the `429`
+    names the proxy's bounded `retry_after_s`). The acquire is attempted only
+    when the pre-check admits, so a refused read never churns a lease. One
+    availability observation answers the whole attempt — the pre-check threads
+    it into admission, which never issues a second `GET` — and a saturated
+    pre-check derives the same cooldown from the held lease's `expiresAt`
+    instead of going unnamed. The lease is released on **every** terminal
+    path: the dispatch abort paths, and — for a closed pane — the
+    pane-closure reaper, which is the only ACTIVE close path and performs the
+    host-budget release, the lease release and the rolling-log pane-close
+    record in one block (the disabled dispatch monitor never runs). Releases
+    are idempotent and best-effort; a leaked lease is bounded by the proxy's
+    own expiry. See
+    [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#audit-lease-acquisition-and-release-discipline).
   - **A finished session frees its slot without closing its pane
     (WL-0MWJVY6NR001E0FS).** The pane-close reaper releases a dispatch's
     ledger entry when its Pi session is **finished** — the final assistant
@@ -1385,6 +1439,19 @@ skill (intake/plan/implement). The chain bottoms (blocker closed,
 non-dispatchable stage, above-caps, or a cycle — bounded) → no frontier
 candidate → the tier falls through to the non-critical order.
 
+The same dependency-frontier rule is enforced on the production **Herdr-head**
+paths, so a blocked critical item is never dispatched or offered at itself
+there either (WL-0MWWMPBL8003X59M): the direct dispatcher
+(`dispatchFromHerdrList`) and the coordination offer computation
+(`computeMostImportantItem`) both resolve every critical candidate through the
+shared `resolveHeadDependencyFrontier` guard, and the own-backlog fallback /
+audit-batch continuation / registered-root sweep (`dispatchFromOwnHead`) skip
+a dependency-blocked critical item. **The invariant: the worklist display
+still includes dependency-blocked items (the operator must see why an item is
+waiting), but dispatch never targets one — on every path.** A `wl dep list`
+failure fails closed (no dispatch this tick) with the stable
+`dependency-lookup-failed` reason, never a silent wrong target.
+
 The critical dispatch flows through the same `dispatchClaimedTier` pipeline
 as every other tier — CAS claim (with the stage-appropriate `TIER_EXPECTED`
 entry, stale-claim aborts), dispatched-marker write before spawn, then the
@@ -1542,10 +1609,19 @@ mechanisms cannot diverge:
 
 **Reaper orchestration (`pane-close-reaper.ts`).** `runReaper(deps, options)`
 scans panes, classifies each, closes eligible panes, and appends one JSONL
-row per pane to the ledger (default `.worklog/pane-close-ledger.jsonl`); each
-row carries the decision's `reasonSnapshot` alongside the decision and
-timestamp. I/O is injected via `ReaperDeps` (`listPanes`, `closePane`,
-`terminateProcessGroup`) so the orchestration is fully testable.
+row per evaluated pane to the per-run diagnostic ledger (default
+`.worklog/pane-close-ledger.jsonl`); each row carries the decision's
+`reasonSnapshot` alongside the decision and timestamp. A **successful** close
+additionally performs its three side effects in one per-pane block — the
+host-budget release, the proxy audit-lease release (for an `audit` pane) and
+the rolling-log `entryType:'pane-close'` record (WL-0MWJ7QYX0001KAQX AC1). The
+reaper is the only ACTIVE close path, so that record — the input to the
+non-terminal cooldown and the recent-dispatch view, and (via
+the pane ids it carries) the cross-run idempotency key — has exactly one
+production writer; the disabled dispatch monitor's writer never runs. A dry
+run or a failed close writes no close record and releases nothing. I/O is
+injected via `ReaperDeps` (`listPanes`, `closePane`, `terminateProcessGroup`)
+so the orchestration is fully testable.
 `runReaperCli(deps, argv)` is the CLI entrypoint and accepts `--dry-run`,
 `--threshold-minutes <n>` and `--ledger <path>`.
 
@@ -1574,10 +1650,13 @@ already excluded `implement` panes. It was observed to close panes prematurely
 and to race with the reaper — the two share only a non-atomic idempotency key,
 so a pane could be closed twice — so it is switched off
 (`PANE_LIFECYCLE_MONITOR_ENABLED` is `false`) and the scheduled reaper is the
-only active auto-close path. The classifier and its unit tests are retained
-for a future redesign; do not re-enable it without first reworking the
-double-close race. The reaper still skips pane ids already recorded as handled
-in the dispatch log, so any historical monitor entries remain honoured.
+only active auto-close path. Its `recordPaneClose` writer is therefore also
+dead code in production: the reaper owns the rolling-log pane-close record and
+the releases, and a future monitor redesign must fold onto the reaper rather
+than re-enable this path. The classifier and its unit tests are retained for
+that redesign; do not re-enable it without first reworking the double-close
+race. The reaper still skips pane ids already recorded as handled in the
+dispatch log (its own close records plus any historical monitor entries).
 Headless (JSON/RPC) modes are unaffected — closure is only performed by the
 scheduled reaper over Herdr panes.
 
@@ -2964,7 +3043,7 @@ packages/herdr/
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
 - **Selection-list dispatch keeps focus** — Every pane spawned from the worklist selection list (pi agent panes via `send-to-pi.sh`, and command-output panes via `run-in-pane.sh`) opens **without moving focus** by default (WL-0MSHIA53D009DJOT): the dispatch passes `--no-focus` to both launchers, so the final zoom/focus step is skipped and the selection list keeps the keyboard focus. The user can read dispatch feedback via toasts and inspect the opened pane with herdr pane navigation (`prefix+o`, `prefix+x` to close). The `P n` and `r i` shortcuts opt in to **focus the new pane immediately** (see **Focused shortcuts via `focus: true`** below). Out of scope and unchanged: the downtime worker (already `--no-focus`), the `open-pi-agent` unbound plugin action, and `open.sh`/`toggle.sh`.
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right (or, when the command carries a work-item ID, the item-ID tab's anchor pane — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs)), creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". The dispatch passes `--no-focus` (selection-list dispatch keeps focus, see above) unless the shortcut opts in to **focus the new pane** (`focus: true`, see **Focused shortcuts via `focus: true`** above), in which case `--focus` is passed and the new pane is zoomed. Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
-- **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled quiet state-change shortcuts use it: `a-y` audit approve, `a-r` audit reject (whose `<reason>` placeholder is collected by the form dialog before the background dispatch — WL-0MV6J4HQ0009OJPQ), `c-q` quick create (whose `<title>`/`<description>`/`<priority>` placeholders are collected by the form dialog first, then `wl create` runs in the background and the list refreshes on completion — WL-0MV6J5JXL002D8C4), `r-p-r` producer reject (whose `<producer_comment>`/`<author>` placeholders are collected by the form dialog first — WL-0MW6GG2ID006ESFS), `r-p-a` producer approve, `u-p-*` priority updates, and `x-c`/`x-d` close/delete — they complete silently and the worklist refresh shows the updated state. If a background command exits non-zero, a **failure toast** is shown with the command, its exit code (or termination signal) and a short excerpt of its output (WL-0MUEBQLRD00288VV); the full output remains in the per-run log file. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
+- **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled quiet state-change shortcuts use it: `a-y` audit approve, `a-r` audit reject (whose `<reason>` placeholder is collected by the form dialog before the background dispatch — WL-0MV6J4HQ0009OJPQ), `c-q` quick create (whose `<title>`/`<description>`/`<priority>` placeholders are collected by the form dialog first, then `wl create` runs in the background and the list refreshes on completion — WL-0MV6J5JXL002D8C4), `r-p-r` producer reject (whose `<producer_comment>`/`<author>` placeholders are collected by the form dialog first — WL-0MW6GG2ID006ESFS), `r-p-a` producer approve, `o-p`/`o-a`/`o-n` assignee (owner-axis) updates, `u-p-*` priority updates, and `x-c`/`x-d` close/delete — they complete silently and the worklist refresh shows the updated state. If a background command exits non-zero, a **failure toast** is shown with the command, its exit code (or termination signal) and a short excerpt of its output (WL-0MUEBQLRD00288VV); the full output remains in the per-run log file. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
 - **Focused shortcuts via `focus: true`** — A shortcut entry may carry an optional `focus: true` flag (WL-0MT70LC6B009TL3Q) to **focus the newly opened pane** immediately after it spawns. When absent or `false` (the default) the selection list keeps focus (the behaviour above). The flag is orthogonal to `open_pane: false` (no pane → focus is moot) and invalid values are logged and treated as absent (no-focus). Focus is applied to the pane's **tab** as well as the pane itself (`run-in-pane.sh` resolves the new pane's tab via `herdr pane get` and runs `herdr tab focus` before the pane zoom, WL-0MURJ0LFH002O95I): a focused ID-carrying dispatch is anchored to the work-item-ID tab (see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs)), and `pane zoom` alone cannot switch tabs — without the tab focus the new pane would open in a background tab and the selection list would keep focus. The bundled entries with the flag are `P n` (new Pi session — blank `/prompt:`) and `r i` (producer interview — `wl interview`): `P n` puts the cursor straight in the new Pi pane for immediate typing, and `r i` puts the cursor straight in the interview pane so the producer can answer outstanding questions without an extra `prefix+o` step. Any future shortcut can opt in with the same field without a schema change.
 - **Model lease release on pane close** — Pi agent panes launched by `send-to-pi.sh` or `open-pi-agent.sh` run pi via `shared/run-pi-agent.sh`, which gives the session a deterministic id (`pi --session-id herdr-<timestamp>-<pid>-<rand>`) and registers EXIT/TERM/HUP/INT traps. When the pi session ends — normal exit or pane close (`prefix+x`) — the wrapper runs `shared/release-lease-on-exit.mjs`, which posts to the Local Proxy's `POST {baseUrl}/leases/release` using the **same shared implementation** as the Pi extension (`@worklog/shared/lease-release`), so the proxy's dispatch lease is reclaimed promptly instead of lingering until timeout. The release is strictly best-effort: failures (unreachable proxy, missing `~/.pi/agent/models.json`, unconfigured provider) are silently discarded, a 5s request timeout bounds the pane-close path, and the wrapper always propagates pi's exit status (WL-0MSGI7UIH008USVB).
 - **Worklog tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-worklog-tab` action wraps the same pane-open command and renames the created tab to "Worklog" via `herdr tab rename` (socket API, not session-state editing), so the worklog pane is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.

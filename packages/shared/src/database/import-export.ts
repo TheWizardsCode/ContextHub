@@ -38,6 +38,21 @@ import { WorklogDatabaseContext, laterTimestamp } from './context.js';
 import { hasWorkItemChanged } from './work-items.js';
 
 /**
+ * Diagnostics returned by the dependency-edge persist paths.
+ *
+ * An incoming edge can be **unstorable** locally in two ways: it has no local
+ * endpoint at all (a fully foreign edge) or its owner (`fromId`) is foreign,
+ * which the `dependency_edges` schema rejects (`FOREIGN KEY (fromId) REFERENCES
+ * workitems(id)`). Both are skipped rather than aborting the sync transaction,
+ * and both are reported here — as `fromId->toId` — so the caller can surface
+ * the loss instead of dropping the edge silently (WL-0MWXIT6H3006TY2I AC5).
+ */
+export interface DependencyEdgePersistReport {
+  /** Edges the persist could not store locally, formatted `fromId->toId`. */
+  droppedEdges: string[];
+}
+
+/**
  * Clear all work items (useful for import)
  */
 export function clear(ctx: WorklogDatabaseContext): void {
@@ -156,13 +171,15 @@ export function mergeAuditsNewestWins(
  *   existing audit results are replaced with these — but never with an
  *   OLDER row than a stored one for the same item (monotonic,
  *   SA-0MUJNFF3K009BF03).
+ * @returns The ids of incoming edges that could not be stored locally.
  */
 export function importWorkItems(
   ctx: WorklogDatabaseContext,
   items: WorkItem[],
   dependencyEdges?: DependencyEdge[],
   auditResults?: AuditResult[],
-): void {
+): DependencyEdgePersistReport {
+  const droppedEdges: string[] = [];
   // Snapshot the current state up front: it is the diff base for every
   // record type, so unchanged rows are never re-written.
   const existingItems = new Map<string, WorkItem>();
@@ -221,11 +238,18 @@ export function importWorkItems(
 
     if (dependencyEdges) {
       // Replace the edge set differentially: drop edges absent from the
-      // incoming set, write only new/changed edges whose endpoints exist.
+      // incoming set, write only new/changed edges whose **either** endpoint
+      // exists locally — so a `local → foreign` cross-repo edge survives
+      // the destructive replace (WL-0MWXIT6H3006TY2I).
       const desiredEdges = new Map<string, DependencyEdge>();
       for (const edge of dependencyEdges) {
-        if (ctx.store.getWorkItem(edge.fromId) && ctx.store.getWorkItem(edge.toId)) {
+        if (ctx.store.getWorkItem(edge.fromId) || ctx.store.getWorkItem(edge.toId)) {
           desiredEdges.set(`${edge.fromId}\u0000${edge.toId}`, edge);
+        } else {
+          // No local anchor for either endpoint — the edge cannot be stored
+          // and has no local owner to cascade from. Report it rather than
+          // dropping it silently (WL-0MWXIT6H3006TY2I AC5).
+          droppedEdges.push(`${edge.fromId}->${edge.toId}`);
         }
       }
       const storedEdgeKey = new Map<string, DependencyEdge>();
@@ -240,7 +264,15 @@ export function importWorkItems(
       for (const [key, edge] of desiredEdges) {
         const stored = storedEdgeKey.get(key);
         if (!stored || stored.createdAt !== edge.createdAt) {
-          ctx.store.saveDependencyEdge(edge);
+          // `dependency_edges` has a foreign key on `fromId`, so an edge whose
+          // owner is not a local item cannot be stored. Skip it rather than
+          // abort the whole sync transaction, but report it so the skip is
+          // never silent (WL-0MWXIT6H3006TY2I AC5).
+          if (ctx.store.getWorkItem(edge.fromId)) {
+            ctx.store.saveDependencyEdge(edge);
+          } else {
+            droppedEdges.push(`${edge.fromId}->${edge.toId}`);
+          }
         }
       }
     }
@@ -273,6 +305,7 @@ export function importWorkItems(
   });
 
   ctx.writeHooks.triggerAutoSync();
+  return { droppedEdges };
 }
 
 /**
@@ -292,17 +325,24 @@ export function importWorkItems(
  *
  * When `dependencyEdges` is provided, only edges whose `fromId` or `toId`
  * belongs to the provided items are upserted; all other edges are untouched.
+ * An upserted edge is persisted when **either** endpoint resolves to a stored
+ * item, so a `local → foreign` cross-repo blocker is retained
+ * (WL-0MWXIT6H3006TY2I); only an edge whose both endpoints are unresolvable
+ * is skipped, and every skip is reported in the returned diagnostics.
  *
  * If `items` is empty the method is a no-op (no export/sync triggered).
+ *
+ * @returns The ids of affected edges that could not be stored locally.
  */
 export function upsertItems(
   ctx: WorklogDatabaseContext,
   items: WorkItem[],
   dependencyEdges?: DependencyEdge[],
-): void {
+): DependencyEdgePersistReport {
   if (items.length === 0) {
-    return;
+    return { droppedEdges: [] };
   }
+  const droppedEdges: string[] = [];
 
   for (const item of items) {
     const existing = ctx.store.getWorkItem(item.id);
@@ -325,15 +365,23 @@ export function upsertItems(
   if (dependencyEdges) {
     const affectedIds = new Set(items.map(i => i.id));
     for (const edge of dependencyEdges) {
-      if (
-        (affectedIds.has(edge.fromId) || affectedIds.has(edge.toId)) &&
-        ctx.store.getWorkItem(edge.fromId) &&
-        ctx.store.getWorkItem(edge.toId)
-      ) {
+      if (!affectedIds.has(edge.fromId) && !affectedIds.has(edge.toId)) {
+        // Untouched by this upsert — not a loss, so not reported.
+        continue;
+      }
+      // Keep when either endpoint resolves (a `local → foreign` cross-repo
+      // edge has a foreign target), but the owner must exist locally: the
+      // `dependency_edges` schema has a foreign key on `fromId`, so a
+      // `foreign → local` edge is unstorable and is skipped. Report the skip
+      // so the loss is never silent (WL-0MWXIT6H3006TY2I AC5).
+      if (ctx.store.getWorkItem(edge.fromId)) {
         ctx.store.saveDependencyEdge(edge);
+      } else {
+        droppedEdges.push(`${edge.fromId}->${edge.toId}`);
       }
     }
   }
 
   ctx.writeHooks.triggerAutoSync();
+  return { droppedEdges };
 }

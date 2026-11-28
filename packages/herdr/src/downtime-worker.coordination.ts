@@ -38,7 +38,7 @@ import {
   type CoordinationTierKind,
 } from './downtime-worker.constants.js';
 import { resolveCpuGate, type HostCpuGateDeps } from './downtime-worker.dispatch-cpu-gate.js';
-import { selectCriticalFirstCandidates } from './downtime-worker.dispatch-filter.js';
+import { resolveHeadDependencyFrontier, selectCriticalFirstCandidates } from './downtime-worker.dispatch-filter.js';
 import type { DowntimeDispatchDeps } from './downtime-worker.dispatch-contract.js';
 import {
   REVIEW_QUEUE_HOLD_REASON,
@@ -294,6 +294,10 @@ export async function computeMostImportantItem(
   // once (AC7c).
   let heldByBudget = false;
   const flaggedForBudget = new Set<string>();
+  // Dependency-frontier lookup failure (F2, WL-0MWWMPBL8003X59M): a broken
+  // `wl dep list` on the normal pass fails the OFFER closed (nothing offered)
+  // rather than falling through to a silent wrong target.
+  let dependencyLookupFailed = false;
 
   // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F4
   // WL-0MUBVKYH5009CGBI): resolved for THIS instance's OWN root (`cwd`) —
@@ -315,7 +319,28 @@ export async function computeMostImportantItem(
   // offered — the scan continues to the next critical candidate, then to the
   // normal window, so the instance offers its next dispatchable head item
   // instead of floating an in-flight duplicate (AC2.7).
-  for (const criticalFirst of selectCriticalFirstCandidates(head.items, now, frozen)) {
+  //
+  // Dependency-frontier guard (F2, WL-0MWWMPBL8003X59M): a dependency-blocked
+  // critical item is never offered at itself. The nearest open dispatchable
+  // blocker is offered instead (with ITS stage-appropriate skill) or nothing is
+  // offered; a broken `wl dep list` fails CLOSED with the stable
+  // `dependency-lookup-failed` attribution. Display/worklist behaviour is
+  // untouched — only the offer changes.
+  for (const rawCriticalFirst of selectCriticalFirstCandidates(head.items, now, frozen)) {
+    const guarded = await resolveHeadDependencyFrontier(
+      rawCriticalFirst,
+      deps.fetchCriticalBlockers,
+      cwd,
+    );
+    if (!guarded.ok) {
+      return {
+        ok: true,
+        noCandidate: true,
+        attribution: { reason: 'dependency-lookup-failed', windowSize: head.items.length },
+      };
+    }
+    if (guarded.target === null) continue;
+    const criticalFirst = guarded.target;
     const marker = markerMaps[criticalFirst.kind]?.get(criticalFirst.item.id);
     const guard = evaluateCriticalFirstGuard(
       criticalFirst.item.id,
@@ -422,6 +447,25 @@ export async function computeMostImportantItem(
       }
       const k = classification.kind;
       const bucket = toOfferBucket(k);
+      // Dependency-frontier guard (F2): a critical item with a live `depends-on`
+      // edge is never offered at itself. The critical-first scan above owns the
+      // REDIRECT; here it is rejected so a chain-bottomed/blocked item can never
+      // leak into the normal offer pass. A lookup failure fails the offer closed.
+      if (item.priority === 'critical' && deps.fetchCriticalBlockers !== undefined) {
+        const guarded = await resolveHeadDependencyFrontier(
+          { item, kind: k },
+          deps.fetchCriticalBlockers,
+          cwd,
+        );
+        if (!guarded.ok) {
+          dependencyLookupFailed = true;
+          return;
+        }
+        if (guarded.target === null || guarded.target.item.id !== item.id) {
+          reject(item, 'dependency-blocked');
+          continue;
+        }
+      }
       // An item whose bucket already has a nominee can only become the
       // single offer — skip it entirely (and its filter side effects) once
       // that is found.
@@ -539,6 +583,15 @@ export async function computeMostImportantItem(
   // The WINDOW scan produces the single offer AND the per-bucket nominees
   // (parent AC2/AC3): one partitioned pass over the SAME sprint-view read.
   await scanOfferable(head.items, true, offerState);
+  // A dependency lookup failure on the normal pass fails the offer closed
+  // (never a silent wrong target).
+  if (dependencyLookupFailed) {
+    return {
+      ok: true,
+      noCandidate: true,
+      attribution: { reason: 'dependency-lookup-failed', windowSize: head.items.length },
+    };
+  }
   // Window-only early return (test d of WL-0MWFJ8R1P005G1H1): when the window
   // already fills every bucket no widening read happens at all — the result is
   // byte-identical to the pre-widening entry.
@@ -587,6 +640,13 @@ export async function computeMostImportantItem(
     // the nominee pass enabled so an unfilled bucket is filled from beyond
     // the visible list (no second ranking, no per-bucket read).
     await scanOfferable(extendedItems, true, offerState);
+    if (dependencyLookupFailed) {
+      return {
+        ok: true,
+        noCandidate: true,
+        attribution: { reason: 'dependency-lookup-failed', windowSize: seenItems.length + extendedItems.length },
+      };
+    }
     // Count the widened reads BEFORE the early break so the round that
     // filled the last bucket is included in the observability signal.
     extensionItemsRead += extendedItems.length;

@@ -4,17 +4,15 @@
  *
  * Single responsibility: run ONE already-selected candidate (or one due
  * scheduled prompt) through the fixed, fail-closed pipeline — CAS claim,
- * local-capacity reservation, host-budget admission, placement resolution and
- * item-tab provisioning, marker write before spawn, spawn, claim rollback on
- * failure, placeholder root-pane cleanup on abort, best-effort post-spawn
- * enrichment.
+ * dependency re-check, local-capacity reservation, host-budget admission,
+ * placement/item-tab provisioning, marker write before spawn, spawn, claim
+ * rollback on failure, placeholder root-pane cleanup and best-effort enrichment.
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
- * Moved verbatim out of `downtime-worker.ts` by WL-0MVLII0NO007JJBA (extract
- * the downtime-worker dispatch pipeline). Internal to the dispatch entry: not
- * re-exported by the barrel (only consumer-used symbols are public). No
- * behaviour change: claim CAS semantics, rollback rules, marker fields, spawn
- * call sites and log lines are identical.
+ * Moved verbatim out of `downtime-worker.ts` by WL-0MVLII0NO007JJBA. Internal to
+ * the dispatch entry: not re-exported by the barrel (only consumer-used symbols
+ * are public). Claim CAS semantics, rollback rules, marker fields, spawn call
+ * sites and log lines are unchanged.
  */
 
 import {
@@ -31,12 +29,17 @@ import {
 import { buildDowntimePrompt } from './downtime-worker.prompts.js';
 import { TIER_EXPECTED } from './downtime-worker.gates.js';
 import {
+  recheckDependenciesForClaim,
+  type DependencyRecheckMemo,
+} from './downtime-worker.claim-dependency-guard.js';
+import {
   isDowntimePaneLabel,
   paneItemIdFromLabel,
 } from './pane-label.js';
 import { resolveScheduledPromptPriority } from './scheduled-prompts.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { DispatcherAnchor } from './dispatcher-anchor.js';
+import type { BudgetReliefEvidence } from './host-budget-relief.types.js';
 import {
   closePlaceholderRootPaneBestEffort,
   placementAttribution,
@@ -45,6 +48,7 @@ import {
 import type {
   DowntimeDispatchDeps,
   DowntimeDispatchOutcome,
+  DowntimeHostBudgetAdmissionInput,
   DowntimeReservationEvidence,
   ProjectWorkspaceMismatch,
 } from './downtime-worker.dispatch-contract.js';
@@ -189,27 +193,22 @@ async function abortForAnchorUnavailable(
  * project-workspace/item-tab placement → marker write (before spawn) → spawn.
  *
  *  - Project workspace + item-ID tab (WL-0MU321YK70035AYT): AFTER the CAS
- *    claim and AFTER host-budget admission (WL-0MW5JE0SZ0057K30 — so a gate
- *    that refuses the tick can never leave an orphaned placeholder pane),
- *    resolve the candidate's project workspace from `opts.cwd` via
- *    `deps.resolveProjectWorkspace`, ensure/reuse the tab labelled with the
- *    exact work-item id via `deps.getItemTabAnchor`, and forward that tab's
- *    root pane as `anchorId` so the pane lands in the project workspace under
- *    the item's tab. This is the PRIMARY placement path. When no project
- *    workspace resolves, placement falls back to the per-prefix tab in the
- *    `Dispatcher` workspace (C1, WL-0MTRQT482001SNXC), then to the retained
- *    machine-wide `deps.getDispatcherAnchor` (AC4). A null/failed
- *    project-workspace resolution does not abort when a fallback is wired;
- *    a failed item-tab provision aborts with reason 'anchor-unavailable' —
- *    never the leader's pane and never another project's workspace — and the
- *    claim is rolled back (plus the host-budget entry/ticket released) like
- *    every other pre-spawn abort, so the item is never left stranded.
- *  - Claim (compare-and-swap): exactly one concurrent pane wins; a loser
- *    (or a wl claim failure) ABORTS the dispatch — no pane, no marker, no
- *    success record. A lost race resolves reason 'claim-failed' (neutral,
- *    the winner's pane will busy the proxy); a wl claim failure resolves
- *    'wl-error' (counts toward the three-strike rule). Neither is ever
- *    silently discarded (WL-0MSLWJ310000ND0X absorbed).
+ *    claim and AFTER host-budget admission (WL-0MW5JE0SZ0057K30, so a refused
+ *    tick never leaves an orphaned placeholder pane), resolve the candidate's
+ *    project workspace from `opts.cwd` via `deps.resolveProjectWorkspace`,
+ *    ensure/reuse the tab labelled with the exact work-item id via
+ *    `deps.getItemTabAnchor`, and forward that tab's root pane as `anchorId`.
+ *    This is the PRIMARY placement path; when no project workspace resolves it
+ *    falls back to the per-prefix `Dispatcher` tab (C1, WL-0MTRQT482001SNXC),
+ *    then to the retained machine-wide `deps.getDispatcherAnchor` (AC4). A
+ *    failed item-tab provision aborts with reason 'anchor-unavailable' — never
+ *    the leader's pane, never another project's workspace — rolling the claim
+ *    back (plus host-budget entry/ticket) like every other pre-spawn abort.
+ *  - Claim (compare-and-swap): exactly one concurrent pane wins; a loser (or a
+ *    wl claim failure) ABORTS the dispatch — no pane, no marker, no success
+ *    record. A lost race resolves 'claim-failed' (neutral); a wl claim failure
+ *    resolves 'wl-error' (three-strike). Neither is silently discarded
+ *    (WL-0MSLWJ310000ND0X absorbed).
  *  - Marker write BEFORE the pane spawns: if the marker cannot be written
  *    the dispatch aborts BEFORE spawning (fail-closed — an unmarked item is
  *    never dispatched). The claim is then rolled back to its pre-claim
@@ -217,14 +216,11 @@ async function abortForAnchorUnavailable(
  *    the next idle period instead of being stranded in `in_progress` with no
  *    marker and no pane.
  *  - Spawn: a handled spawn `error` or non-zero script exit resolves reason
- *    'spawn-failed' — the outcome is NOT success, and a failure trace
- *    (`outcome: 'spawn-failed'` entry with the error/exit details) is
- *    appended to the rolling audit log so the log never claims success for
- *    a pane that never appeared (WL-0MSLWJ3I70031Z8U absorbed). Spawn-failed
- *    entries are excluded from the dispatched-marker readers (AC2,
- *    WL-0MT32F908002YFFA) AND the claim is rolled back, so the item is
- *    re-eligible for selection on the next idle period (AC2/AC4) rather
- *    than permanently removed from the queue.
+ *    'spawn-failed' — NOT success: a failure trace is appended to the rolling
+ *    audit log (which therefore never claims success for a pane that never
+ *    appeared, WL-0MSLWJ3I70031Z8U absorbed), spawn-failed entries are excluded
+ *    from the dispatched-marker readers (AC2, WL-0MT32F908002YFFA) AND the
+ *    claim is rolled back so the item is re-eligible next idle period.
  */
 export async function dispatchClaimedTier(
   deps: DowntimeDispatchDeps,
@@ -245,8 +241,20 @@ export async function dispatchClaimedTier(
      * `localPreference` verbatim and add no marker fields.
      */
     localPreferenceMode?: LocalPreferenceMode;
+    /** The attempt's proxy observation, threaded into admission (WL-0MWJE9IEH001R3P1). */
+    auditAvailability?: DowntimeHostBudgetAdmissionInput['auditAvailability'];
+    /** One tick's blocker-read memo, shared with the selection guard (F3 WL-0MWWMPCD2008HSSP). */
+    dependencyRecheckMemo?: DependencyRecheckMemo;
   },
 ): Promise<DowntimeDispatchOutcome> {
+  // Claim-boundary dependency re-check (F3, WL-0MWWMPCD2008HSSP): the LAST gate
+  // before the CAS claim, so a peer instance's offer, a resumed/stale selection
+  // or any permissive selection path can never claim a dependency-blocked item.
+  // Neutral refusal (no strike, no cooldown, no pane) with a stable reason token.
+  const dependency = await recheckDependenciesForClaim(
+    deps, kind, candidate.id, opts.cwd, opts.dependencyRecheckMemo,
+  );
+  if (!dependency.ok) return { dispatched: false, reason: dependency.reason };
   const expected = TIER_EXPECTED[kind];
   // Locality preference (WL-0MVNUIW77000VYAX AC4): resolved ONCE at this
   // dispatch boundary — coordination offers, own-backlog fallback, audit-batch
@@ -264,12 +272,10 @@ export async function dispatchClaimedTier(
   // root — the coordination leader passes the OFFER's root so the CAS claim
   // lands in the item's own database (never the leader's module override).
   //
-  // Retired-stage recovery (WL-0MTYL7DX9000MZOH): when the candidate is
-  // stuck on the removed `in_progress` stage, the tier's normalised stage
-  // CAS can never match. Claim it using the item's ACTUAL stage as the CAS
-  // guard (race-safe) while atomically migrating the stored stage to the
-  // tier's target — without this the `wl update` status/stage validator
-  // rejects the claim and the dispatcher records a hard wl-error strike.
+  // Retired-stage recovery (WL-0MTYL7DX9000MZOH): a candidate stuck on the
+  // removed `in_progress` stage never matches the tier's normalised CAS. Claim
+  // with its ACTUAL stage as the race-safe guard while atomically migrating to
+  // the tier's target — else the validator rejects the claim (wl-error strike).
   const retiredStage = (candidate.stage as string) === 'in_progress';
   // Blocked-status claim (operator change: 'blocked' is an allowable dispatch
   // status). The tier's nominal CAS expects `open`, but a blocked item is
@@ -381,30 +387,25 @@ export async function dispatchClaimedTier(
       // no marker field (AC3: older wiring, today's byte-identical launch).
     }
   }
-
   // ── Host-wide dispatch-budget admission (WL-0MVXY0YG7009JMHI F3,
   //    audit tier WL-0MVXY0XPF006YUHA F2) ────────────────────────────────
   //
-  // ONE ledger read per dispatch attempt, placed IMMEDIATELY BEFORE the
-  // dispatch marker is written. Both dispatcher paths
-  // (`dispatchDowntimeWork` and `dispatchFromCoordination`) reach this point
-  // through `dispatchClaimedTier`, so neither can bypass the machine-wide cap
-  // (F3 AC1). EVERY kind is offered to the generic admission
-  // (WL-0MWF34932000SNTX F2): a capped kind is enforced, an uncapped kind is
-  // admitted without a reservation. The reservation is taken AFTER the CAS
-  // claim and BEFORE `recordDispatch` (AC3), the claim is rolled back on
-  // refusal (AC2) and the refusal is a NEUTRAL skip (AC5).
+  // ONE ledger read per dispatch attempt, IMMEDIATELY BEFORE the marker is
+  // written: both dispatcher paths reach it through `dispatchClaimedTier`, so
+  // neither bypasses the machine-wide cap (F3 AC1). EVERY kind is offered to
+  // the generic admission (WL-0MWF34932000SNTX F2), and a refusal is a
+  // NEUTRAL skip (AC5) with the claim rolled back (AC2/AC3).
   let budgetEvidence: { live: number; max: number } | undefined;
+  let budgetReliefEvidence: BudgetReliefEvidence | undefined;
   // The attempt token of THIS dispatch's reservation (WL-0MWFJD5T4003OM91):
   // every later abort path releases with it, never another attempt's entry.
   let budgetAttemptId: string | undefined;
   // Whether this kind RESERVED a slot (WL-0MWF34932000SNTX F2): an uncapped
-  // kind is admitted without one, so confirm and abort release are skipped.
-  // Defaults to the historical budgeted kinds with no admission seam wired.
+  // kind is admitted without one, so confirm/abort release are skipped (the
+  // historical budgeted kinds keep their release when no admission seam is wired).
   let budgetCapped = kind === 'implement' || kind === 'audit';
   // Audit lease (WL-0MWFJH3NW006F5GN AC3): true once admission ADMITS an
-  // AUDIT with a held proxy lease; every terminal path then gives the shared
-  // GPU back through the release helper.
+  // AUDIT with a held proxy lease; every terminal path releases the shared GPU.
   let leaseHeld = false;
   if (typeof deps.admitHostDispatch === 'function') {
     let admission: Awaited<ReturnType<NonNullable<DowntimeDispatchDeps['admitHostDispatch']>>> | null =
@@ -414,16 +415,17 @@ export async function dispatchClaimedTier(
         itemId: candidate.id,
         kind,
         cwd: opts.cwd,
+        auditAvailability: opts.auditAvailability,
       });
     } catch {
-      // Fail closed: an admission reader that throws cannot prove the host is
-      // within budget, so the dispatch is refused (never admitted by default).
+      // Fail closed: an admission reader that throws is refused, never admitted.
       admission = null;
     }
     if (admission === null) {
       admission = { admitted: false, live: 0, max: 0, reason: 'host-budget-unknown' };
     }
     budgetEvidence = { live: admission.live, max: admission.max };
+    budgetReliefEvidence = admission.budgetRelief;
     budgetAttemptId = admission.attemptId;
     budgetCapped = admission.capped !== false;
     if (!admission.admitted) {
@@ -455,6 +457,7 @@ export async function dispatchClaimedTier(
         // implement rungs of the terminal-reason precedence.
         kind,
         budget: budgetEvidence,
+        ...(budgetReliefEvidence !== undefined ? { budgetRelief: budgetReliefEvidence } : {}),
         // The failing exchange on a fail-closed audit read
         // (`audit-budget-unknown`): carried so the hold and the decision entry
         // can name the broken proxy contract (AC3).
@@ -471,7 +474,6 @@ export async function dispatchClaimedTier(
     }
     if (admission.lease !== undefined) leaseHeld = true;
   }
-
   // ── Placement: project workspace + item-ID tab, then the fallbacks ──────
   // Resolved HERE, after the last admission gate and immediately before the
   // marker write (WL-0MW5JE0SZ0057K30): provisioning the item-ID tab earlier
@@ -491,7 +493,6 @@ export async function dispatchClaimedTier(
   }
   const anchorId = placement.anchorId;
   const anchorIsTabRoot = placement.anchorIsTabRoot;
-
   let marked = false;
   // Capture ONE timestamp shared by the success marker and its post-spawn
   // enrichment entry (WL-0MUBVL251006JAQ0 / F6 AC6.2) so the marker readers
@@ -762,7 +763,7 @@ export async function dispatchClaimedTier(
       : {}),
   });
 
-  return { dispatched: true, candidate, kind };
+  return { dispatched: true, candidate, kind, ...(budgetReliefEvidence !== undefined ? { budgetRelief: budgetReliefEvidence } : {}) };
 }
 
 /**

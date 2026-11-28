@@ -28,6 +28,11 @@ beforeEach(async () => {
   // Initialize git in the temp dir so sync operations work
   childProcess.execSync('git init', { cwd: tempDir });
 
+  // Seed a valid identity for the push-side guard (WL-0MWGO58KL00187CO): the
+  // mock git's `config user.email` get form reads .git/user-email and exits 1
+  // when absent, which the guard treats as an empty identity and refuses.
+  fs.writeFileSync(path.join(tempDir, '.git', 'user-email'), 'test@example.com\n', 'utf8');
+
   // Configure mock remote with absolute path
   childProcess.execSync(`git remote add origin ${remoteDir}`, { cwd: tempDir });
 

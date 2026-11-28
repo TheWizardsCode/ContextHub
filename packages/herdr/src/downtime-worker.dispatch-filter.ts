@@ -26,7 +26,10 @@
  * fail-closed audit read, WL-0MWDDHVF2004PTYX AC3) and the scan steps to the
  * next candidate, so prep work ranked
  * behind the refused budgeted candidate still dispatches and the caller can
- * report the neutral terminal reason when nothing else does. Every other
+ * report the neutral terminal reason when nothing else does. A pre-check
+ * refusal derived from a held lease records its cooldown on
+ * `flags.hostBudgetRetryAfterS` (WL-0MWJE9N7L001V6XI), so the terminal
+ * decision names it exactly like an admission `429`. Every other
  * non-dispatched outcome (`wl-error`, `spawn-failed`, `marker-write-failed`,
  * `anchor-unavailable`, …) returns immediately, preserving the strike/skip
  * semantics.
@@ -57,6 +60,12 @@ import {
   type DowntimeDispatchOutcome,
 } from './downtime-worker.dispatch-contract.js';
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
+import {
+  createDependencyRecheckMemo,
+  memoizeBlockerFetcher,
+} from './downtime-worker.claim-dependency-guard.js';
+import { criticalSkillKind, type CriticalCandidate } from './downtime-worker.parsers.js';
+import { resolveDependencyFrontier } from './downtime-worker.selection.js';
 import type {
   DowntimeCandidate,
   DowntimeHerdrItem,
@@ -64,6 +73,7 @@ import type {
   DowntimeStage,
   InFlightPanes,
 } from './downtime-worker.types.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
 
 // ── Herdr list-head filter dispatcher (WL-0MTK1ILM2009QYB2 AC1–2) ────
 
@@ -118,6 +128,142 @@ export function selectCriticalFirstCandidates(
   return out;
 }
 
+// ── Dependency-frontier guard for the Herdr-head paths ────────────────
+//
+// Parent WL-0MWWLLGD2001QKAL (F2 WL-0MWWMPBL8003X59M). The display worklist
+// deliberately includes dependency-blocked items (WL-0MV6TFX0600145M2), so a
+// blocked CRITICAL item is still in the Herdr head and, at `plan_complete` with
+// in-cap risk/effort, would classify as `implement`. Display must keep showing
+// it; dispatch must never target it. This guard is the ONE place the
+// `depends-on` edge is consulted on the head/coordination paths — the direct
+// dispatcher and the offer computation both call it, so they cannot drift.
+
+/** Resolve an item's outbound `depends-on` blockers (`wl dep list` seam). */
+export type BlockerFetcher = (
+  cwd: string,
+  itemId: string,
+) => Promise<CriticalCandidate[] | null>;
+
+/**
+ * The guard's verdict for ONE critical candidate:
+ *
+ *  - `{ok: true, target: candidate}` — the candidate is not dependency-blocked
+ *    (its own `depends-on` frontier is empty), so it is its own dispatch/offer
+ *    target. The ORIGINAL candidate object is returned unchanged.
+ *  - `{ok: true, target: blocker}` — the candidate IS dependency-blocked but
+ *    the chain resolves to the nearest open dispatchable blocker, which is
+ *    returned as a `CriticalFirstCandidate` carrying the BLOCKER's
+ *    stage-appropriate skill.
+ *  - `{ok: true, target: null}` — the candidate is dependency-blocked and the
+ *    chain bottoms in non-dispatchable/closed items: nothing dispatchable this
+ *    tick (never the candidate itself).
+ *  - `{ok: false, reason: 'dependency-lookup-failed'}` — the blocker lookup
+ *    failed (threw or returned the legacy `null` fail-closed signal). The
+ *    caller fails closed: NO critical dispatch this tick, recorded with the
+ *    stable `dependency-lookup-failed` decision-log reason.
+ */
+export type HeadDependencyFrontierResult =
+  | { ok: true; target: CriticalFirstCandidate | null }
+  | { ok: false; reason: 'dependency-lookup-failed'; itemId: string };
+
+/** Project a Herdr head item onto the frontier walk's candidate shape. */
+function toCriticalCandidate(item: DowntimeHerdrItem): CriticalCandidate {
+  return {
+    id: item.id,
+    title: item.title,
+    status: item.status ?? 'open',
+    stage: item.stage ?? 'idea',
+    ...(item.risk !== undefined ? { risk: item.risk } : {}),
+    ...(item.effort !== undefined ? { effort: item.effort } : {}),
+    ...(item.sortIndex !== undefined ? { sortIndex: item.sortIndex } : {}),
+    ...(item.priority !== undefined ? { priority: item.priority } : {}),
+    ...(item.needsProducerReview !== undefined
+      ? { needsProducerReview: item.needsProducerReview }
+      : {}),
+  };
+}
+
+/** Project a resolved frontier blocker back onto a Herdr-head item. */
+function toHerdrItem(candidate: CriticalCandidate): DowntimeHerdrItem {
+  return {
+    id: candidate.id,
+    title: candidate.title,
+    status: candidate.status,
+    stage: candidate.stage,
+    ...(candidate.priority !== undefined ? { priority: candidate.priority } : {}),
+    ...(candidate.risk !== undefined ? { risk: candidate.risk } : {}),
+    ...(candidate.effort !== undefined ? { effort: candidate.effort } : {}),
+    ...(candidate.sortIndex !== undefined ? { sortIndex: candidate.sortIndex } : {}),
+    ...(candidate.needsProducerReview !== undefined
+      ? { needsProducerReview: candidate.needsProducerReview }
+      : {}),
+  };
+}
+
+/**
+ * Resolve the dependency frontier of ONE `selectCriticalFirstCandidates` output.
+ *
+ * Reuses `resolveDependencyFrontier` (the legacy tier chain's walk) so the
+ * nearest-open-blocker semantics, the implement caps, the producer-review
+ * exclusion and the cycle/depth bounds are defined ONCE. The wrapper adds only
+ * the two things the legacy walk leaves implicit for the head paths:
+ *
+ *  1. it converts a Herdr head item into the frontier candidate shape and the
+ *     resolved blocker back into a `{item, kind}` head candidate; and
+ *  2. it distinguishes a lookup FAILURE (`{ok:false}`) from a chain that
+ *     legitimately bottoms (`target:null`), because the head paths must fail
+ *     CLOSED on a broken `wl dep list` (AC3) while a bottomed chain simply
+ *     dispatches nothing at that candidate.
+ *
+ * Optional seam: when `fetchBlockers` is absent the guard is inert and returns
+ * the candidate unchanged (legacy/test callers stay byte-identical).
+ */
+export async function resolveHeadDependencyFrontier(
+  candidate: CriticalFirstCandidate,
+  fetchBlockers: BlockerFetcher | undefined,
+  cwd: string,
+  opts: { maxDepth?: number } = {},
+): Promise<HeadDependencyFrontierResult> {
+  if (fetchBlockers === undefined) return { ok: true, target: candidate };
+  // Track the first failing lookup so a `null` returned by the walk (which is
+  // indistinguishable from a bottomed chain at the call site) still resolves
+  // to a fail-closed verdict.
+  let failedItemId: string | null = null;
+  const fetch = async (itemId: string): Promise<CriticalCandidate[] | null> => {
+    try {
+      const blockers = await fetchBlockers(cwd, itemId);
+      if (blockers === null && failedItemId === null) failedItemId = itemId;
+      return blockers;
+    } catch {
+      if (failedItemId === null) failedItemId = itemId;
+      throw new Error('dependency lookup failed');
+    }
+  };
+  try {
+    const frontier = await resolveDependencyFrontier(
+      toCriticalCandidate(candidate.item),
+      fetch,
+      opts,
+    );
+    if (failedItemId !== null) {
+      return { ok: false, reason: 'dependency-lookup-failed', itemId: failedItemId };
+    }
+    if (frontier === null) return { ok: true, target: null };
+    // Not dependency-blocked: the walk returns the candidate itself. Preserve
+    // the ORIGINAL object (full Herdr item) so callers can detect "no redirect".
+    if (frontier.id === candidate.item.id) return { ok: true, target: candidate };
+    const kind = criticalSkillKind(frontier.stage);
+    if (kind === null) return { ok: true, target: null };
+    return { ok: true, target: { item: toHerdrItem(frontier), kind } };
+  } catch {
+    return {
+      ok: false,
+      reason: 'dependency-lookup-failed',
+      itemId: failedItemId ?? candidate.item.id,
+    };
+  }
+}
+
 export async function dispatchFromHerdrList(
   deps: DowntimeDispatchDeps,
   items: DowntimeHerdrItem[],
@@ -126,9 +272,23 @@ export async function dispatchFromHerdrList(
     auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean;
     cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean;
     auditHostSaturated: boolean; hostBudgetReason?: string;
-    hostBudget?: { live: number; max: number }; hostBudgetDetail?: string },
+    hostBudget?: { live: number; max: number }; hostBudgetDetail?: string;
+    /**
+     * The cooldown the audit pre-check derived from the availability payload's
+     * held lease (WL-0MWJE9N7L001V6XI): carried so the terminal decision names
+     * when the tier re-checks, exactly like the admission `429` arm's
+     * `retryAfterS`. Absent when the payload named no usable lease.
+     */
+    hostBudgetRetryAfterS?: number },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
+  // ONE dependency-read memo for this dispatch tick (F3, WL-0MWWMPCD2008HSSP):
+  // shared by the F2 selection guard and the claim-boundary guard below, so a
+  // candidate costs at most one `wl dep list` even when both inspect it.
+  const dependencyRecheckMemo = createDependencyRecheckMemo();
+  const fetchBlockers = deps.fetchCriticalBlockers === undefined
+    ? undefined
+    : memoizeBlockerFetcher(deps.fetchCriticalBlockers, dependencyRecheckMemo);
   const entries = await _readDowntimeEntries(ctx.cwd);
   // Item ids already flagged this call so the producer-review flag is set at
   // most ONCE per dispatch even when the same critical item is visited by
@@ -165,7 +325,23 @@ export async function dispatchFromHerdrList(
   // live (the confirmed H1+H5 duplicate mechanism) is skipped by the
   // item-scoped guard below — see `evaluateCriticalFirstGuard` for the full
   // decision table. Escalation of a genuinely stuck item is preserved (AC3).
-  for (const { item: candidate, kind } of selectCriticalFirstCandidates(items, Date.now(), ctx.frozen)) {
+  for (const rawCriticalFirst of selectCriticalFirstCandidates(items, Date.now(), ctx.frozen)) {
+    // Dependency-frontier guard (F2): a dependency-blocked critical item is
+    // NEVER dispatched at itself. The nearest open dispatchable blocker is the
+    // target (with ITS stage-appropriate skill) or nothing is dispatched. A
+    // broken `wl dep list` fails CLOSED for the whole tick (AC3) and is
+    // recorded as the stable `dependency-lookup-failed` decision-log reason.
+    const guarded = await resolveHeadDependencyFrontier(
+      rawCriticalFirst,
+      fetchBlockers,
+      ctx.cwd,
+    );
+    if (!guarded.ok) return { dispatched: false, reason: guarded.reason };
+    // Chain bottoms in non-dispatchable/closed blockers → this candidate is
+    // never a dispatch target; try the next critical candidate.
+    if (guarded.target === null) continue;
+    const candidate = guarded.target.item;
+    const kind = guarded.target.kind;
     // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2): while the host is saturated a
     // critical implement is refused too — saturation is exactly when starting
     // new heavy work does harm. Critical plan/intake prep still passes.
@@ -221,6 +397,7 @@ export async function dispatchFromHerdrList(
       localPreferenceMode: ctx.localPreferenceMode,
       selectionPath: 'critical-first',
       selectionReason: guard.reason,
+      dependencyRecheckMemo,
     });
     if (outcome.dispatched) return outcome;
     // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): a host-budget refusal
@@ -268,13 +445,33 @@ export async function dispatchFromHerdrList(
     };
     const k = classifyItemForDispatch(info, now);
     if (k === null) continue;
+    // Dependency-frontier guard (F2) on the normal scan: the critical-first
+    // scan above owns the REDIRECT to the nearest blocker, so a
+    // dependency-blocked critical item is skipped here (never dispatched at
+    // itself). A lookup failure fails closed for the tick. Non-critical items
+    // keep today's unchanged behaviour.
+    if (item.priority === 'critical' && fetchBlockers !== undefined) {
+      const guarded = await resolveHeadDependencyFrontier(
+        { item, kind: k },
+        fetchBlockers,
+        ctx.cwd,
+      );
+      if (!guarded.ok) return { dispatched: false, reason: guarded.reason };
+      if (guarded.target === null || guarded.target.item.id !== item.id) continue;
+    }
     // Active-audit single-flight check (WL-0MT3PHW4I002SNOV): runs BEFORE
     // dispatched-marker exclusion to match legacy tier behavior. While an
     // audit is in-flight the audit tier is skipped entirely, so we must
     // check this before filtering dispatched items (a dispatched item may
     // still be the active-audit item that should cause the skip).
+    // Proxy availability threaded into admission (WL-0MWJE9IEH001R3P1 AC1):
+    // the audit pre-check below reads it ONCE for THIS candidate and the
+    // dispatch attempt hands that same observation to admission, so the two
+    // can never disagree and no second GET is issued.
+    let auditAvailability: AuditAvailabilityOutcome | undefined;
     if (k === 'audit') {
       const active = await deps.getActiveAudit(ctx.cwd);
+      if (active.ok) auditAvailability = active.availability;
       // Audit-budget refusal (WL-0MWAMSDNW000SL0E, proxy-derived; formerly the
       // host-wide ledger, WL-0MVXY0XPF006YUHA F2): the source tells the
       // proxy/host-wide budget refusal from the per-worklog marker check, and
@@ -283,7 +480,7 @@ export async function dispatchFromHerdrList(
       // `host-budget-unknown` for any host-wide source) plus its live/max
       // evidence, so the terminal reason is reported
       // rather than inferred here. `detail` records the failing proxy exchange.
-      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide' || active.source === 'proxy') { flags.auditHostSaturated = true; if (typeof active.reason === 'string') { flags.hostBudgetReason = active.reason; } if (active.budget !== undefined) { flags.hostBudget = active.budget; } if (typeof active.detail === 'string') { flags.hostBudgetDetail = active.detail; } } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide' || active.source === 'proxy') { flags.auditHostSaturated = true; if (typeof active.reason === 'string') { flags.hostBudgetReason = active.reason; } if (active.budget !== undefined) { flags.hostBudget = active.budget; } if (typeof active.detail === 'string') { flags.hostBudgetDetail = active.detail; } if (typeof active.retryAfterS === 'number') { flags.hostBudgetRetryAfterS = active.retryAfterS; } } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
     }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
@@ -389,6 +586,8 @@ export async function dispatchFromHerdrList(
       localPreferenceMode: ctx.localPreferenceMode,
       selectionPath: 'normal-scan',
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
+      ...(auditAvailability !== undefined ? { auditAvailability } : {}),
+      dependencyRecheckMemo,
     });
     if (outcome.dispatched) return outcome;
     // Continuable holds (WL-0MWBT76WY00298AY AC1/AC3): record the first

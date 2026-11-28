@@ -45,6 +45,53 @@ refused, surfaced to the operator, and never re-exported or pushed back.
   successful non-dry-run sync. An absent file makes the gate scan the whole
   remote ref history.
 
+## Push-side guard (what we publish)
+
+The identity gate above protects the **pull** side (what we merge). The
+**push** side is protected by a matching guard: `wl sync` refuses to publish
+worklog-data commits when the checkout's effective `git config user.email` is
+empty or an **exact incident-era sentinel identity** — so a stale/misconfigured
+clone can never poison `refs/worklog/data` in the first place
+(WL-0MWGO58KL00187CO).
+
+- **Sentinel set** (exact-email, trimmed/lowercased — never a wildcard or
+  substring match): `t@t.com`, `t@t`, `test@test.com`, `test@test`,
+  `cache test@test.com`. These are the identities behind the 2026-09-26 /
+  2026-10-22 / 2026-10-23 leaked-`GIT_DIR` incidents. The TypeScript set
+  (`src/sync/author-identity.ts::INCIDENT_ERA_EMAILS`) is a duplicate of the
+  canonical source of truth
+  `scripts/check_git_identity.py::INCIDENT_ERA_EMAILS` — keep both in sync.
+- **Guard order:**
+  1. **Empty `user.email`** → refuse unconditionally. No flag ever bypasses
+     this (symmetry with the pull-side empty-email gate).
+  2. **Exact sentinel** → refuse unless `--allow-sentinel-author`. The refusal
+     is absolute: it fires even if the sentinel email somehow also equalled
+     the configured identity or an allow-list entry (a state project policy
+     forbids).
+  3. **Otherwise** pass — any non-sentinel identity is allowed; foreign-email
+     policy stays with the pull-side gate.
+- **Remedy:**
+  ```bash
+  git config user.email you@example.com
+  git config user.email            # verify
+  ```
+  then re-run `wl sync`.
+- **Escape hatch — `--allow-sentinel-author`** (incident remediation only):
+  permits a deliberate one-off push under a sentinel identity. It mirrors
+  `--allow-foreign-author`: it never bypasses the empty-email refusal, never
+  modifies `syncAllowedAuthors`, and the bypass is audit-logged in the sync
+  output and `.worklog/logs/sync.log` (identity + flag named).
+- **Why sentinels can never be allow-listed:** project policy forbids it and
+  the invariant is pinned by the SorraAgents test
+  `tests/test_author_gate_allowlist.py`.
+  `syncAllowedAuthors` is for *real* collaborator/bot identities only.
+- **Coverage:** the guard lives on the shared commit path
+  (`gitPushDataFileToBranch`), so the `wl sync` push, the auto-sync/`init`
+  callers and the doctor force-rewrite (`rewriteAndForcePushDataFile`, used by
+  `wl doctor foreign-items --apply --push`, with **no** escape hatch) are all
+  covered. It only fires when a push would actually run — `--no-push` and the
+  zero-change fast path never trip it.
+
 ## Manual verification (parent AC7)
 
 Run against a ref that contains a known empty-email commit (e.g. `5fc880a` on

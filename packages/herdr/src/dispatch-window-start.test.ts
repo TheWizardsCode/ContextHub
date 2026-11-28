@@ -130,8 +130,8 @@ describe('notStartedStatusText / notStartedBannerText — copy', () => {
     { windowSize: 2, now: clock.now() },
   );
 
-  it('reports the not-started count in the header status, null when zero', () => {
-    expect(notStartedStatusText(allFuture)).toBe('[not started: 2]');
+  it('reports the future-item count in the header status, null when zero', () => {
+    expect(notStartedStatusText(allFuture)).toBe('[Future items: 2]');
     expect(
       notStartedStatusText(
         summariseDispatchWindowStart([dispatchable('A')], { windowSize: 1, now: clock.now() }),
@@ -154,7 +154,7 @@ describe('notStartedStatusText / notStartedBannerText — copy', () => {
     );
     expect(notStartedBannerText(mixed)).toBeNull();
     // The header still reports the scheduled count.
-    expect(notStartedStatusText(mixed)).toBe('[not started: 1]');
+    expect(notStartedStatusText(mixed)).toBe('[Future items: 1]');
   });
 });
 

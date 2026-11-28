@@ -48,6 +48,14 @@ export const HOST_BUDGET_RISK_EFFORT_REASON = 'host-budget-risk-effort';
 export const HOST_BUDGET_UNKNOWN_REASON = 'host-budget-unknown';
 
 /**
+ * Header/decision token for a relief-raised budget cap (WL-0MWTAD9NV000IVK5
+ * AC9). NOT a refusal token: it marks evidence (`budgetRelief`) that a
+ * model-blocked pane raised a kind's cap to 2x, so a reader can tell a
+ * `n/effectiveCap` header from a `n/configuredCap` one.
+ */
+export const BUDGET_RELIEF_DECISION_TOKEN = 'budget-relief';
+
+/**
  * The per-kind budget refusal tokens (WL-0MWF34932000SNTX F2).
  *
  * One map so admission can name a kind's cap refusal without a two-kind

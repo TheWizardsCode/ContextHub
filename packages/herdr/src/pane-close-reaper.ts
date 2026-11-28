@@ -20,11 +20,27 @@
  * only ACTIVE close path, it is also where a closed audit pane must release
  * its proxy audit lease (the `recordPaneClose` release behind the disabled
  * monitor never runs in production — WL-0MWJ7QONS0052HXX).
+ *
+ * Single close record (WL-0MWJ7QYX0001KAQX AC1): the SAME per-pane close
+ * block writes the rolling-log `entryType:'pane-close'` record — the input to
+ * `isNonTerminalCooldownActive` and the recent-dispatch view — alongside the
+ * host-budget release and the proxy audit-lease release. Before this the
+ * record was written only by the disabled monitor, so the cooldown input was
+ * missing in production. The per-run `pane-close-ledger.jsonl` is retained as
+ * the per-evaluation diagnostic snapshot (it also records failed closes and
+ * dry runs, which deliberately write no close record), and the
+ * `alreadyClosedPaneIds` guard is now fed by the reaper's own records — so the
+ * one rolling-log record is also the cross-run idempotency key.
  */
 
 import { classifySession, extractFinalAssistantText, isSessionFinished } from './pane-close.js';
 import type { CloseDecision, CloseReasonSnapshot, SessionSample } from './pane-close.js';
 import type { TerminateResult } from './process-group.js';
+import type {
+  PaneCloseLogEntry,
+  PaneLifecycleKind,
+  PaneLifecycleOutcome,
+} from './downtime-log-entries.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -82,6 +98,18 @@ export interface ReaperDeps {
    */
   sweepBudgetLedger?(panes: readonly PaneStatus[]): Promise<void>;
   /**
+   * The rolling-log pane-close record (WL-0MWJ7QYX0001KAQX AC1): called once
+   * per successfully closed pane, in the same block as the host-budget and
+   * proxy audit-lease releases, so the rolling dispatch log keeps the input
+   * `isNonTerminalCooldownActive` and the recent-dispatch view read. The
+   * reaper is the only ACTIVE close path, so this seam — not the disabled
+   * monitor's `recordPaneClose` — is the production writer. Idempotent and
+   * best-effort: the caller wraps it fail-open (a log write failure never
+   * blocks, crashes or un-closes a pane). Absent → legacy callers write no
+   * rolling-log record (the per-run ledger is still written).
+   */
+  recordPaneCloseEntry?(entry: PaneCloseLogEntry): Promise<void>;
+  /**
    * Finished-session budget release (WL-0MWJVY6NR001E0FS): called once per
    * pane whose Pi session is authoritatively FINISHED (`</end_session>`
    * marker or a terminal `done`/`exited` agent status), INDEPENDENT of the
@@ -110,6 +138,13 @@ export interface PaneStatus {
   itemId: string;
   /** Work-item stage at decision time, when known (logging snapshot). */
   itemStage?: string;
+  /**
+   * Work item title, when the item lookup supplied it (WL-0MWJ7QYX0001KAQX
+   * AC1): recorded as the pane-close record's `itemTitle`. Optional/tolerant:
+   * absent → the pane title (`title`) is used, exactly like the monitor's
+   * `item.title ?? dispatch.itemTitle` fallback.
+   */
+  itemTitle?: string;
   title: string;
   /**
    * The herdr workspace this pane belongs to, when known. Used by the
@@ -210,16 +245,23 @@ export interface ReaperOptions {
   /** If true, report decisions but do not close any panes. */
   dryRun?: boolean;
   /**
-   * Ledger path (JSONL). When set, one row per pane is appended after each
-   * run. When omitted, no ledger is written (keeps the pure tests honest).
+   * Ledger path (JSONL). When set, one row per evaluated pane is appended after
+   * each run — including panes that were not closed, a failed close and a dry
+   * run. Reconciliation (WL-0MWJ7QYX0001KAQX AC1): this per-run ledger is the
+   * DIAGNOSTIC snapshot retained alongside the rolling-log pane-close record
+   * (the shared record the cooldown and the recent-dispatch view read). When
+   * omitted, no ledger is written (keeps the pure tests honest).
    */
   ledgerPath?: string;
   /**
-   * Pane ids already recorded as closed by the dispatch monitor
-   * (`pane-lifecycle.ts`) — skipped so the two mechanisms never double-handle
-   * the same pane (parent constraint). The monitor is currently disabled
-   * (WL-0MUMEKDK0008LKH8), so this normally stays empty; it remains for
-   * historical entries and a possible future re-enable.
+   * Pane ids already recorded as closed — skipped so the two mechanisms never
+   * double-handle the same pane (parent constraint) and so the reaper stays
+   * idempotent across runs. Reconciliation (WL-0MWJ7QYX0001KAQX AC1): the
+   * reaper is itself the writer of the rolling-log `pane-close` record that
+   * `readClosedPaneIds` scrapes, so the same one record that feeds the
+   * cooldown/recent-dispatch view is also the cross-run idempotency key. The
+   * disabled dispatch monitor (WL-0MUMEKDK0008LKH8) may still contribute
+   * historical entries.
    */
   alreadyClosedPaneIds?: ReadonlySet<string>;
   /**
@@ -301,6 +343,114 @@ export function writeLedgerRow(ledgerPath: string, result: ReaperResult): void {
     // Fail-closed: never crash the worker.
     console.error(
       `reaper: failed to write ledger row for ${result.paneId}: ${err}`,
+    );
+  }
+}
+
+// ── Rolling-log pane-close record ─────────────────────────────────────
+
+/**
+ * The rolling-log dispatch kind for a reaper-closed pane, or `null` when the
+ * pane is not a recognised dispatch tier (`unknown`). The shared record's
+ * `kind` is the dispatch-tier vocabulary, so an unknown pane must not be
+ * folded into a tier it may not belong to — its close is still recorded in
+ * the per-run ledger.
+ */
+function paneCloseKindFor(kind: PaneStatus['kind']): PaneLifecycleKind | null {
+  return kind === 'unknown' ? null : kind;
+}
+
+/**
+ * The pane-close `outcome` for a reaper close, from what the reaper can
+ * actually observe (WL-0MWJ7QYX0001KAQX AC1).
+ *
+ * The disabled monitor derived a verdict from the live item (`auditedAt`,
+ * risk/effort, stage); the reaper only knows WHY it closed the pane. So:
+ *
+ *  - a close backed by the session's own `</end_session>` marker of a
+ *    terminal-capable tier names that tier (`intake` /
+ *    `plan`/`risk-effort`);
+ *  - `audit` deliberately stays `requires-attention`: the reaper must not
+ *    invent an audit verdict (`audit-passed`/`audit-failed` render ✅/❌ in
+ *    the recent-dispatch view and the audit icon);
+ *  - an idle-threshold reap (no end marker) is an abandonment, never a
+ *    completed tier.
+ */
+export function paneCloseOutcomeFor(
+  kind: PaneLifecycleKind,
+  decision: Pick<CloseDecision, 'reasonCode'>,
+): PaneLifecycleOutcome {
+  if (decision.reasonCode !== 'marker') return 'requires-attention';
+  switch (kind) {
+    case 'intake':
+      return 'closed-as-intake-complete';
+    case 'plan':
+    case 'risk-effort':
+      return 'closed-as-plan-complete';
+    default:
+      return 'requires-attention';
+  }
+}
+
+/**
+ * Build the rolling-log `entryType:'pane-close'` record for a successfully
+ * closed pane (WL-0MWJ7QYX0001KAQX AC1). Returns `null` for a pane with no
+ * dispatch tier (`unknown`).
+ *
+ * `reasonCode` is `'none'` for a terminal-capable outcome — matching the
+ * monitor's terminal codes, so `isNonTerminalCooldownActive` does not arm a
+ * cooldown for a clean close — and otherwise the reaper's own stable decision
+ * code (`marker`/`idle-threshold`). Unknown codes are treated as NON-terminal
+ * by the cooldown (fail-closed), which is the safe direction: a close the
+ * reaper could not classify as terminal waits out the minimum cooldown, and a
+ * later stage advance releases it via the recorded `stage`.
+ */
+export function buildPaneCloseLogEntry(
+  pane: PaneStatus,
+  decision: CloseDecision,
+  now: Date = new Date(),
+): PaneCloseLogEntry | null {
+  const kind = paneCloseKindFor(pane.kind);
+  if (kind === null) return null;
+  const outcome = paneCloseOutcomeFor(kind, decision);
+  const reasonCode = outcome === 'requires-attention' ? decision.reasonCode : 'none';
+  return {
+    entryType: 'pane-close',
+    timestamp: now.toISOString(),
+    itemId: pane.itemId,
+    // Same fallback as the monitor: the item title when the lookup supplied
+    // it, otherwise the pane title.
+    itemTitle: pane.itemTitle ?? pane.title,
+    paneId: pane.id,
+    kind,
+    outcome,
+    reason:
+      outcome === 'requires-attention'
+        ? `pane closed by the pane-close reaper without a terminal outcome (${decision.reasonCode})`
+        : `pane closed by the pane-close reaper (${decision.reasonCode})`,
+    reasonCode,
+    // The dispatched-at stage, so the non-terminal cooldown can be released
+    // when the item advances (the monitor's parent AC4 contract).
+    stage: pane.itemStage,
+    closed: true,
+  };
+}
+
+/**
+ * Write the close record through the injected seam, fail-open. The record is
+ * the primary artefact of a close; a sink failure must never block, crash or
+ * un-close the pane (the per-run ledger still records the result).
+ */
+async function recordPaneCloseEntry(
+  deps: ReaperDeps,
+  entry: PaneCloseLogEntry | null,
+): Promise<void> {
+  if (entry === null || typeof deps.recordPaneCloseEntry !== 'function') return;
+  try {
+    await deps.recordPaneCloseEntry(entry);
+  } catch (err) {
+    console.error(
+      `reaper: pane-close record failed for ${entry.paneId}: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }
@@ -387,10 +537,12 @@ export async function runReaper(
       continue;
     }
 
-    // Coexistence with the dispatch monitor (parent constraint): a pane the
-    // `pane-lifecycle.ts` monitor already recorded as closed is never handled
-    // again. The monitor is currently disabled (WL-0MUMEKDK0008LKH8); the
-    // guard is retained for historical entries.
+    // Idempotency across runs (WL-0MWJ7QYX0001KAQX AC1): a pane already
+    // present in `alreadyClosedPaneIds` is never handled again. The reaper is
+    // the writer of the rolling-log record that `readClosedPaneIds` scrapes,
+    // so this is the SAME single record reconciling idempotency with the
+    // cooldown/recent-dispatch input; historical disabled-monitor entries may
+    // still contribute.
     if (options.alreadyClosedPaneIds?.has(pane.id)) {
       continue;
     }
@@ -444,11 +596,20 @@ export async function runReaper(
       }
     }
 
-    // AC10 (WL-0MVWEZF4Z004UNYT): a successfully closed pane's work window
-    // is over — record its observed local/remote split in the dispatch log.
-    // Best-effort and fail-open: the outcome record must never block, crash
-    // or un-close a pane.
+    // The single pane-close block (WL-0MWJ7QYX0001KAQX AC1): a successfully
+    // closed pane's record and releases are written in ONE place.
+    // Only a real close is recorded (`closed:true`); a dry run or a failed
+    // close writes no rolling-log record and releases nothing.
     if (decision.close && !options.dryRun && success) {
+      // The rolling-log `entryType:'pane-close'` record: the input to
+      // `isNonTerminalCooldownActive` and the recent-dispatch view, written
+      // here because the disabled monitor's `recordPaneClose` never runs in
+      // production. Best-effort and fail-open.
+      await recordPaneCloseEntry(deps, buildPaneCloseLogEntry(pane, decision));
+      // AC10 (WL-0MVWEZF4Z004UNYT): a successfully closed pane's work window
+      // is over — record its observed local/remote split in the dispatch log.
+      // Best-effort and fail-open: the outcome record must never block, crash
+      // or un-close a pane.
       try {
         await deps.recordDispatchedPaneOutcome?.(pane);
       } catch (err) {

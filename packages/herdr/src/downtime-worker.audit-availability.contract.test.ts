@@ -344,6 +344,13 @@ describe('barrel wiring and contract pinning (AC1, AC5)', () => {
     // `audit-budget-unknown`) so its answer and the pre-check use one spelling.
     // The barrel would create a cycle (admission <- dispatch <- barrel).
     'host-dispatch-budget.admission.ts',
+    // The data-type surface (WL-0MWJE9IEH001R3P1) types the threaded
+    // `availability` field with the contract's OUTCOME UNION (type-only). It
+    // holds the outcome union because `downtime-worker.types.ts` is a leafward
+    // module: importing it from the client module would create the
+    // `types -> audit-availability -> constants -> poller -> types` cycle the
+    // split guard rejects. Nothing here reads the wire contract at runtime.
+    'downtime-worker.types.ts',
   ]);
 
   function productionSources(): string[] {

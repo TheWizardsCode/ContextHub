@@ -465,6 +465,98 @@ describe('hook-upgrade module', () => {
     });
   });
 
+  describe('repo-evolved hooks — marker-age contract (WL-0MWWS66JM0090RQ5)', () => {
+    // A project hook that advanced past the embedded template: llm's v4
+    // pre-push carries the pushed-commit guard (LP-0MVSJUM3O003C0H9) and its
+    // own `tests/test_git_hooks.py` pins the text. Downgrading it to the v3
+    // template is the regression this block pins shut.
+    const NEWER_PRE_PUSH = `#!/bin/sh
+# worklog:pre-push-hook:v4
+# 3a. Pushed-commit guard: the gate only ever measures the pushed tree.
+echo "ERROR: no test runner found — set TEST_SCOPE_SKIP=1 to bypass" >&2
+"$WL" sync --git-branch refs/worklog/data || exit 0
+exit 0
+`;
+
+    it('self-check mode: a committed hook newer than the template is "newer", not "outdated"', () => {
+      fs.writeFileSync(path.join(dirs.githooks, 'pre-push'), NEWER_PRE_PUSH);
+
+      const result = listOutdatedHooks(dirs.githooks, dirs.githooks);
+      const prePush = result.find(r => r.name === 'pre-push');
+
+      expect(prePush).toBeDefined();
+      expect(prePush!.status).toBe('newer');
+      expect(prePush!.reason).toMatch(/v4/);
+      expect(prePush!.reason).toMatch(/newer/i);
+    });
+
+    it('self-check mode: upgradeHooks leaves a newer hook byte-identical', () => {
+      const hookPath = path.join(dirs.githooks, 'pre-push');
+      fs.writeFileSync(hookPath, NEWER_PRE_PUSH);
+
+      const result = upgradeHooks(dirs.githooks, dirs.githooks);
+
+      expect(result.success).toBe(true);
+      expect(result.upgraded).not.toContain('pre-push');
+      expect(result.skipped).toContain('pre-push');
+      expect(fs.readFileSync(hookPath, 'utf-8')).toBe(NEWER_PRE_PUSH);
+      expect(result.hooks.find(h => h.name === 'pre-push')!.status).toBe('newer');
+    });
+
+    it('self-check mode: dry-run counts newer hooks separately and proposes no upgrade', () => {
+      fs.writeFileSync(path.join(dirs.githooks, 'pre-push'), NEWER_PRE_PUSH);
+
+      const result = dryRunHooks(dirs.githooks, dirs.githooks);
+
+      expect(result.newerCount).toBe(1);
+      expect(result.outdatedCount).toBe(0);
+      expect(result.upgraded).toHaveLength(0);
+      expect(result.hooks.find(h => h.name === 'pre-push')!.status).toBe('newer');
+    });
+
+    it('self-check mode: an older hook is still outdated (v1 vs the template)', () => {
+      fs.writeFileSync(path.join(dirs.githooks, 'pre-push'), OLD_PRE_PUSH);
+
+      const result = dryRunHooks(dirs.githooks, dirs.githooks);
+
+      expect(result.outdatedCount).toBe(1);
+      expect(result.newerCount).toBe(0);
+      expect(result.upgraded).toContain('pre-push');
+    });
+
+    it('self-check mode: equal versions with different content stay outdated (reconciliation unchanged)', () => {
+      const sameVersionDifferentContent = NEWER_PRE_PUSH.replace('v4', 'v3');
+      fs.writeFileSync(path.join(dirs.githooks, 'pre-push'), sameVersionDifferentContent);
+
+      const result = dryRunHooks(dirs.githooks, dirs.githooks);
+
+      expect(result.outdatedCount).toBe(1);
+      expect(result.newerCount).toBe(0);
+    });
+
+    it('installed-hook mode: an installed hook newer than the committed one is never downgraded', () => {
+      fs.writeFileSync(path.join(dirs.githooks, 'pre-push'), FIXED_PRE_PUSH);
+      fs.writeFileSync(path.join(dirs.gitHooks, 'pre-push'), NEWER_PRE_PUSH);
+
+      const result = dryRunHooks(dirs.githooks, dirs.gitHooks);
+
+      expect(result.newerCount).toBe(1);
+      expect(result.outdatedCount).toBe(0);
+      expect(fs.readFileSync(path.join(dirs.gitHooks, 'pre-push'), 'utf-8')).toBe(NEWER_PRE_PUSH);
+    });
+
+    it('hooks without a marker keep the old behaviour (content difference ⇒ outdated)', () => {
+      const unmarked = FIXED_PRE_PUSH.replace('# worklog:pre-push-hook:v1', '# no marker here');
+      fs.writeFileSync(path.join(dirs.githooks, 'pre-push'), FIXED_PRE_PUSH);
+      fs.writeFileSync(path.join(dirs.gitHooks, 'pre-push'), unmarked);
+
+      const result = dryRunHooks(dirs.githooks, dirs.gitHooks);
+
+      // The unmarked hook is not worklog-managed, so it is skipped entirely.
+      expect(result.hooks.find(h => h.name === 'pre-push')).toBeUndefined();
+    });
+  });
+
 
   describe('integration with real repo', () => {
     it('detects outdated hooks in the actual .githooks/.git/hooks setup', () => {

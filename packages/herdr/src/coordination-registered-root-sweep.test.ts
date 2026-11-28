@@ -77,6 +77,7 @@ import {
   loadRoundRobinCursor,
   saveRoundRobinCursor,
 } from './downtime-round-robin-by-root.js';
+import { RUN_LEDGER_FILE_NAME } from './downtime-run-ledger.js';
 import type { CoordinationEntry } from './coordination.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────
@@ -505,30 +506,15 @@ describe('registered-root sweep — round-robin fairness (parent AC4)', () => {
 //
 // Parent AC1's twice-in-succession bound must not drift between the offer path
 // and the registered-root sweep: both order from the SAME candidate list and
-// both defer the ceiling root using the decision log (the fairness metric's
-// single run-length source). Fail-open: a missing/corrupt log keeps today's
-// cursor-first order.
+// both defer the ceiling root using the MACHINE-scoped run ledger (the fairness
+// metric's single run-length source, WL-0MWT3Z9M9002Z9BF). Fail-open: a
+// missing/corrupt ledger keeps today's cursor-first order.
 describe('registered-root sweep — run-length bound ordering (parent AC1)', () => {
-  /** Write a decision log holding `length` consecutive dispatches to `root`. */
-  function seedDecisionRun(cwd: string, root: string, length: number): void {
-    mkdirSync(join(cwd, '.worklog'), { recursive: true });
-    const lines: string[] = [];
-    for (let i = 1; i <= length; i += 1) {
-      lines.push(
-        JSON.stringify({
-          kind: 'decision',
-          operation: 'dispatch',
-          reason: 'dispatched',
-          outcome: 'dispatched',
-          dispatchingRoot: root,
-          consecutiveRunLength: i,
-          at: `2026-01-0${i}T00:00:00.000Z`,
-        }),
-      );
-    }
+  /** Seed the machine run ledger with `length` consecutive dispatches to `root`. */
+  function seedRunLedger(root: string, length: number): void {
     writeFileSync(
-      join(cwd, '.worklog', 'downtime-coordination.log'),
-      `${lines.join('\n')}\n`,
+      join(coordinationDir, RUN_LEDGER_FILE_NAME),
+      JSON.stringify({ root, runLength: length, at: '2026-01-01T00:00:00.000Z' }),
       'utf-8',
     );
   }
@@ -561,7 +547,7 @@ describe('registered-root sweep — run-length bound ordering (parent AC1)', () 
 
   it('defers a sweep starting root that already dispatched twice in succession', async () => {
     const { rootA, rootB, leaderRoot } = twoRootFixture();
-    seedDecisionRun(leaderRoot, rootA, 2);
+    seedRunLedger(rootA, 2);
     const deps = depsFor(leaderRoot, rootA, rootB);
 
     const outcome = await dispatch(deps, [rootA, rootB], [], {
@@ -581,14 +567,9 @@ describe('registered-root sweep — run-length bound ordering (parent AC1)', () 
     );
   });
 
-  it('fails open on a corrupt decision log: the due root starts the sweep as before', async () => {
+  it('fails open on a corrupt run ledger: the due root starts the sweep as before', async () => {
     const { rootA, rootB, leaderRoot } = twoRootFixture();
-    mkdirSync(join(leaderRoot, '.worklog'), { recursive: true });
-    writeFileSync(
-      join(leaderRoot, '.worklog', 'downtime-coordination.log'),
-      'not-json{{{\n',
-      'utf-8',
-    );
+    writeFileSync(join(coordinationDir, RUN_LEDGER_FILE_NAME), 'not-json{{{\n', 'utf-8');
     const deps = depsFor(leaderRoot, rootA, rootB);
 
     const outcome = await dispatch(deps, [rootA, rootB], [], {

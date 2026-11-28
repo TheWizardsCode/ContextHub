@@ -194,6 +194,37 @@ cross-prefix edge cannot stall work. `wl next --json` still reports it with
 `foreign_dependency: "unavailable"`, plus the `unknown_project` remediation
 fields below.
 
+### Cross-repo edges survive sync
+
+A foreign edge recorded on a local item is part of **this** project's data, so
+it is exported and synced just like a same-project edge. `wl sync` keeps any
+dependency edge that has at least one local endpoint: a `local → foreign` edge
+survives both a full snapshot and a delta, and a `foreign → local` edge is
+retained defensively (the JSONL export only emits edges owned by exported local
+items). Only an edge whose **both** endpoints are foreign is dropped — it
+points at data this project never imports.
+
+When such an edge is dropped, the sync reports it rather than discarding it
+silently:
+
+```text
+Foreign-prefix filter: dropped 1 edge(s) with both endpoints foreign (WL-200->SA-300)
+```
+
+The persist step has its own guard: an edge that reaches it with a foreign
+**owner** (`foreign → local`) is unstorable because `dependency_edges` has a
+foreign key on `fromId`. It is skipped and reported with the same
+count-and-ids visibility — never dropped silently:
+
+```text
+Foreign-edge persist: dropped 1 edge(s) that cannot be stored locally (WL-200->GUA-100)
+```
+
+Foreign **items**, their comments and their audit results are still never
+imported — the prefix filter remains defense-in-depth against cross-project
+pollution. Software that resolves a foreign blocker (`wl next`, the audit
+gates, the worklist) therefore keeps seeing the block after every sync.
+
 ### Clone remediation for a missing project
 
 When a dependency id's prefix belongs to no discovered project, `dep add` and

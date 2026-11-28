@@ -208,6 +208,27 @@ and records a warning rather than throwing; an unresolvable coordination
 directory degrades to "no ledger" (dispatch behaves exactly as before the
 budget existed).
 
+### Budget relief while a pane waits for a model (WL-0MWTAD9NV000IVK5)
+
+When a capped kind has at least one pane parked in a machine-wide model
+cooldown (`~/.herdr/downtime/model-cooldowns.json`, an **active** entry for an
+`implement`/`audit` pane), that kind's admission cap is raised to **exactly
+2x** its configured cap for as long as the cooldown is active. Relief is per
+kind, a **total live** cap (blocked panes stay counted), never revives a
+disabled tier, and touches no other gate. It ends immediately when the last
+matching cooldown expires or is cleared, with no restart. The multiplier is a
+fixed constant — no setting or env var can raise it.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `downtimeBudgetReliefEnabled` (`~/.config/herdr/worklog-plugin.json`) | `true` | Relay kill switch: `false` always uses the configured cap. |
+
+An unreadable/corrupt cooldown file grants **no** relief (fail closed) and the
+decision entry records `budgetRelief.reason = 'model-cooldown-unreadable'`.
+The audit tier's relief is scoped to the one-release legacy local-budget path
+(`HERDR_AUDIT_LOCAL_BUDGET=1`); the proxy lease remains authoritative. See
+[docs/dev/downtime-dispatcher.md](docs/dev/downtime-dispatcher.md#host-budget-relief-while-a-pane-waits-for-a-model-wl-0mwtad9nv000ivk5).
+
 The default `implement: 2` is deliberately conservative: it bounds
 **in-flight agent work per machine** (operator intent), not LLM capacity — the
 proxy free-slot and prefill gates remain the inner limiter, and the budget can

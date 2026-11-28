@@ -32,6 +32,7 @@ import type {
   LocalPreferenceReason,
 } from './local-preference.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
+import type { BudgetReliefEvidence } from './host-budget-relief.types.js';
 import type { PaneLifecycleKind } from './downtime-log.js';
 import type {
   DispatcherAnchor,
@@ -41,6 +42,7 @@ import type {
 } from './dispatcher-anchor.js';
 import type { DowntimeSpawnResult } from './downtime-worker.pane.js';
 import type { DowntimeAuditBatchStatus, AuditCandidateScopeResult } from './downtime-worker.gates.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.js';
 
 /**
  * Placement-failure detail vocabulary (WL-0MWHCUZ5C000I7S6): naming the
@@ -104,6 +106,7 @@ export type ProjectWorkspaceFallbackReason =
  */
 export type AnchorFailureReport = (detail: PlacementFailureDetail) => void;
 import type { CoordinationOfferRejection } from './downtime-worker.offer-attribution.js';
+import type { CriticalCandidate } from './downtime-worker.parsers.js';
 import type {
   DowntimeActiveAuditResult,
   DowntimeCandidate,
@@ -149,6 +152,15 @@ export interface DowntimeDispatchDeps {
   getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null>;
   /** Critical-first candidate lookup (see `DowntimeWorkerDeps`). */
   getNextCriticalCandidate(cwd: string): Promise<DowntimeNextResult>;
+  /**
+   * Dependency-frontier blocker lookup (F2, WL-0MWWMPBL8003X59M): resolves an
+   * item's outbound `depends-on` blockers (`wl dep list` + one `wl show` per
+   * blocker) so the Herdr-head dispatch/offer paths never target a
+   * dependency-blocked critical item. Returns the enriched blockers, or `null`
+   * on the legacy fail-closed signal. Optional — absent keeps every existing
+   * caller byte-identical (no dependency guard).
+   */
+  fetchCriticalBlockers?(cwd: string, itemId: string): Promise<CriticalCandidate[] | null>;
   /** Interim audit-freshness re-check (see `DowntimeWorkerDeps`). */
   hasFreshAudit(itemId: string, cwd: string): Promise<boolean>;
   /**
@@ -309,6 +321,15 @@ export interface DowntimeHostBudgetAdmissionInput {
   kind: DowntimeDispatchKind;
   /** Worklog root the dispatch operates on. */
   cwd: string;
+  /**
+   * The proxy audit-availability observation the dispatcher's PRE-CHECK
+   * already made for THIS attempt (WL-0MWJE9IEH001R3P1 AC1). Threaded so
+   * admission answers from the SAME observation instead of issuing a second
+   * `GET` that could race the first. Present only for audit attempts whose
+   * pre-check ran on the proxy path; absent everywhere else, where admission
+   * keeps its fail-closed fallback read.
+   */
+  auditAvailability?: AuditAvailabilityOutcome;
 }
 
 /**
@@ -370,6 +391,13 @@ export interface DowntimeHostBudgetAdmission {
    * when the proxy did not serve one or the refusal was not a 429.
    */
   retryAfterS?: number;
+  /**
+   * Budget-relief evidence (WL-0MWTAD9NV000IVK5 AC9): present when a
+   * model-blocked pane raised this kind's cap (`reason: 'model-blocked'`) or
+   * when the cooldown signal was unreadable (`reason:
+   * 'model-cooldown-unreadable'`). `max` above is the EFFECTIVE cap.
+   */
+  budgetRelief?: BudgetReliefEvidence;
 }
 
 /**
@@ -598,6 +626,22 @@ export interface DowntimeDispatchOutcome {
    * no-candidate pause is armed only when the offer list holds no peer
    * offer (`hasPeerOffer`, AC2). No new outcome flag was introduced for
    * either behaviour, so this contract stays the complete reason surface.
+   *
+   * Fleet version skew (WL-0MWJE9MIR005SBQK AC4): `lease-capability-absent`
+   * is a NEUTRAL refusal — an AUDIT offer came from a peer whose coordination
+   * entry did not advertise audit-lease support, so dispatching it would have
+   * run availability-only admission and reopened the cross-host audit race.
+   * The offer is kept and the peer's implement/prep offers are unaffected;
+   * the same token names the per-offer rejection gate.
+   *
+   * Claim-boundary dependency re-check (WL-0MWWMPCD2008HSSP):
+   * `dependency-blocked` (a live outbound `depends-on` edge to a non-terminal
+   * item was found immediately before the CAS claim) and
+   * `dependency-lookup-failed` (the `wl dep list` lookup threw or returned the
+   * legacy `null` signal — fail closed). Both are NEUTRAL refusals: no claim,
+   * no marker, no spawn, no strike and no non-terminal cooldown. The audit tier
+   * is exempt (it re-checks freshness instead). See
+   * `downtime-worker.claim-dependency-guard.ts`.
    * already running — a non-stale kind=audit dispatch marker maps to an
    * `in_progress` item — so the audit tier was skipped; a skip that leaves
    * an empty remaining backlog reports this reason, NEVER 'no-candidate',
@@ -633,6 +677,13 @@ export interface DowntimeDispatchOutcome {
    * outcome the admission seam annotated); absent everywhere else.
    */
   budget?: { live: number; max: number };
+  /**
+   * Budget-relief evidence (WL-0MWTAD9NV000IVK5 AC9): present when a
+   * model-blocked pane raised this kind's cap (`reason: 'model-blocked'`) or
+   * when the cooldown signal was unreadable (`reason:
+   * 'model-cooldown-unreadable'`). `max` above is the EFFECTIVE cap.
+   */
+  budgetRelief?: BudgetReliefEvidence;
   /**
    * Failing exchange on a fail-closed AUDIT-budget refusal
    * (`audit-budget-unknown`): `http-404` (endpoint-absent), `timeout` /

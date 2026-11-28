@@ -41,6 +41,14 @@ export interface SyncResult {
    */
   claimHolds?: ClaimHoldDecision[];
   /**
+   * Dependency edges the persist step could not store locally, formatted
+   * `fromId->toId` (WL-0MWXIT6H3006TY2I AC5). Typically a `foreign → local`
+   * edge, whose owner is not a local item and which the `dependency_edges`
+   * `fromId` foreign key rejects. Present for the sync log / `--json` so edge
+   * loss is never silent; absent/empty when nothing was dropped.
+   */
+  droppedEdges?: string[];
+  /**
    * Wall-clock milliseconds per sync phase (`pull`, `persist-items`,
    * `persist-comments`, `export`, `push` — {@link SyncPhaseTimings}).
    * Populated by `performSync` so the `--json` summary and the sync log can
@@ -81,6 +89,39 @@ export interface AuthorIdentityResult {
   allowed: boolean;
   violations: AuthorIdentityViolation[];
   message: string;   // refusal message naming the offending commit(s) + remote ref; '' when allowed
+}
+
+/**
+ * Inputs to the push-side identity guard (WL-0MWGO58KL00187CO) — the outbound
+ * mirror of {@link AuthorIdentityOptions}: which identity is about to author a
+ * worklog-data commit, and whether the operator opted into a one-off override.
+ */
+export interface PushAuthorityOptions {
+  /** Effective `git config user.email`; read from git when omitted. */
+  effectiveEmail?: string;
+  /** Configured/expected store identity (informational; sentinels are refused regardless). */
+  configuredEmail?: string;
+  /** `wl sync --allow-sentinel-author` — never bypasses the empty-email refusal. */
+  allowSentinelAuthor?: boolean;
+  /** `syncAllowedAuthors` — non-sentinel allow-listed identities are never refused. */
+  allowedAuthors?: SyncAllowedAuthors;
+}
+
+/**
+ * Verdict of the push-side identity guard (WL-0MWGO58KL00187CO). Pure and
+ * deterministic, so a dry-run and a real sync reach the same decision.
+ */
+export interface PushAuthorityResult {
+  /** True when a worklog-data commit may be authored under this identity. */
+  allowed: boolean;
+  /** Machine-readable refusal reason; '' when allowed. */
+  reason: '' | 'empty-email' | 'sentinel-identity';
+  /** Normalized offending identity; '' when allowed or empty. */
+  identity: string;
+  /** True when a sentinel was deliberately overridden via `allowSentinelAuthor`. */
+  bypassed: boolean;
+  /** Operator-facing refusal naming the identity + remedy; '' when allowed. */
+  message: string;
 }
 
 /**

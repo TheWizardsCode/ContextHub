@@ -19,6 +19,7 @@ import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 // it directly rather than restating the fields (WL-0MWMGEWH7004VUFI).
 import type { StartOnFields } from '@worklog/shared/predicates';
 import type { EmptyOfferAttribution } from './downtime-worker.offer-attribution.js';
+import type { AuditAvailabilityOutcome } from './downtime-worker.audit-availability.contract.js';
 // Canonical homes (WL-0MWHWH6XL0025YX2): the discovery-facing pane record
 // and the raw `agent_session` shape live in `pane-discovery.ts` (one
 // discovery module — parse, predicates, in-flight set, safe-close,
@@ -757,32 +758,24 @@ export type DowntimeClaimResult =
  * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV),
  * generalised to the host-wide dispatch budget by WL-0MVXY0XPF006YUHA F2 and
  * made proxy-derived for the audit tier by WL-0MWAMSDNW000SL0E.
- *
- *  - `{ok:true, active:true}` — the audit tier must be skipped this tick. The
- *    `source` says why: `'proxy'` when the proxy's audit-availability verdict
- *    refuses (saturated, or unknown because the read failed closed), `'host-wide'`
- *    when the machine-scoped dispatch-budget ledger reports the audit tier
- *    at/over `maxAudit` (or cannot be read — the ONE-RELEASE legacy path,
- *    `HERDR_AUDIT_LOCAL_BUDGET=1`, WL-0MWAMSK9H005BOHD), and `'per-worklog'`
- *    when a non-stale `kind=audit` dispatch marker maps to an item still
- *    `in_progress` (dispatched but not yet completed/reviewed).
+ *  - `{ok:true, active:true}` — the audit tier is skipped this tick; `source`
+ *    says why: `'proxy'` (the proxy refuses or the read failed closed),
+ *    `'host-wide'` (the legacy machine ledger is at/over `maxAudit`, or
+ *    unreadable — `HERDR_AUDIT_LOCAL_BUDGET=1`, WL-0MWAMSK9H005BOHD), or
+ *    `'per-worklog'` (a non-stale `kind=audit` marker maps to an
+ *    `in_progress` item).
  *  - `{ok:true, active:false, source:'proxy'}` — the proxy reports capacity and
  *    no per-worklog audit is in flight; the audit tier may proceed.
  *  - `{ok:false}` — the check could not complete (e.g. worklog query
  *    failure): fail-open — the audit tier is skipped and dispatch falls
  *    through to the next tier; all dispatch is never blocked by an
  *    unanswerable check.
- *
- * `reason`/`budget` carry the refusal token and its `live`/`cap` evidence. On
- * the proxy path the token is the proxy's own vocabulary —
- * `audit-budget-saturated` (verdict `available:false`) or
- * `audit-budget-unknown` (absent/unreachable/unparsable read, fail-closed) —
- * never a `host-budget-*` token. On the retained host-wide source the tokens
- * are `host-budget-audit` / `host-budget-unknown` / `host-budget-corrupt`
- * (`host-budget-corrupt` = the ledger exists but is untrustworthy; no read
- * repairs it). `detail`
- * records the failing exchange on a fail-closed proxy read for the decision
- * log. Absent on a per-worklog skip.
+ * `reason`/`budget` carry the refusal token and its `live`/`cap` evidence. The
+ * proxy path uses the proxy's own vocabulary (`audit-budget-saturated` /
+ * `audit-budget-unknown`), never `host-budget-*`; the retained host-wide source
+ * uses `host-budget-audit` / `-unknown` / `-corrupt` (a corrupt ledger is never
+ * repaired by a read). `detail` names the failing exchange on a fail-closed
+ * proxy read; both are absent on a per-worklog skip.
  */
 export type DowntimeActiveAuditResult =
   | {
@@ -801,6 +794,14 @@ export type DowntimeActiveAuditResult =
        * `timeout` / `network` / `http-<status>` / `bad-body` / `seam-absent`.
        */
       detail?: string;
+      /** The pre-check's derived cooldown in seconds (WL-0MWJE9N7L001V6XI); absent when no lease was named. */
+      retryAfterS?: number;
+      /**
+       * The RAW proxy observation the pre-check mapped; the attempt threads it
+       * into admission so ONE read answers it (WL-0MWJE9IEH001R3P1 AC1).
+       * Absent on the legacy host-wide source and when no read happened.
+       */
+      availability?: AuditAvailabilityOutcome;
     }
   | { ok: false; error?: string };
 /**

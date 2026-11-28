@@ -21,6 +21,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { AuditBudgetDivergence, HostBudgetEvidence } from './downtime-log-budget.js';
+import { dispatchSourceFields } from './source-identity.js';
 import {
   COORDINATION_LOG_FILE,
   appendRollingJsonl,
@@ -196,6 +197,18 @@ export interface CoordinationLogEntry {
   /** The wl/CLI error that caused an entry-kept check-in (`reason: 'wl-error'`). */
   error?: string;
   /**
+   * Running-code freshness (WL-0MWWMPDVM009LTQR): the full commit hash of the
+   * source this dispatcher process loaded, its process start time and whether
+   * that runtime predates the checkout `HEAD`. Attached to EVERY entry while
+   * the dispatcher identity is configured (`index.ts`), so a dispatch record
+   * can be tied to a specific source commit without `ps` archaeology. Absent
+   * when no identity is configured (tests and unwired callers) — the log
+   * shape stays backward compatible.
+   */
+  sourceCommit?: string;
+  sourceStartedAt?: string;
+  sourceStale?: boolean;
+  /**
    * Per-bucket widening signal (WL-0MWFJ8R1P005G1H1): recorded on a
    * successful `operation: 'checkin'` entry whose computation filled at
    * least one bucket from beyond the visible window. `buckets` names those
@@ -228,8 +241,10 @@ export interface CoordinationLogEntry {
   /**
    * Per-project fairness accounting (WL-0MWKY141H002LULI, AC3): the
    * dispatching root's consecutive run length INCLUDING this dispatch, derived
-   * from the tail of this decision log (see `downtime-worker.fairness.ts` for
-   * the recorded design rationale). `1` means the previous dispatch went to a
+   * from the machine-scoped run ledger (`downtime-run-ledger.ts` /
+   * `downtime-run-by-root.json`, WL-0MWT3Z9M9002Z9BF), whose fail-open fallback
+   * is the tail of this decision log (see `downtime-worker.fairness.ts` for the
+   * recorded design rationale). `1` means the previous dispatch went to a
    * different root, or there was none. Present only alongside
    * `dispatchingRoot`. Additive/optional.
    */
@@ -266,9 +281,12 @@ export interface CoordinationLogEntry {
  * whole current file rotates to `.1` and a fresh current file starts, so the
  * entry that triggers the rotation is never lost). `policy` is optional and
  * defaults to `COORDINATION_LOG_MAX_ENTRIES` ×
- * `COORDINATION_LOG_MAX_ROTATED_FILES` (documented default ≈ ≥ 24 h at the
- * observed ≥ 60 decisions/hour). Fail-closed: never throws; a write failure
- * is swallowed (audit logging must never crash the worker).
+ * `COORDINATION_LOG_MAX_ROTATED_FILES` (documented default 500/file × 3
+ * rotated). The bound is in ENTRIES; measured at the observed ≈ 207
+ * decisions/hour it retains ≈ 6.5–9.7 h, NOT ≥ 24 h (see
+ * `docs/dev/downtime-dispatcher.md` § Retention & rotation). Fail-closed:
+ * never throws; a write failure is swallowed (audit logging must never crash
+ * the worker).
  */
 export async function appendCoordinationLogEntry(
   cwd: string,
@@ -280,7 +298,9 @@ export async function appendCoordinationLogEntry(
     await appendRollingJsonl(
       cwd,
       COORDINATION_LOG_FILE,
-      JSON.stringify(entry),
+      // Freshness fields go FIRST so an explicit entry value (the
+      // `dispatcher-start` record) wins over the ambient identity.
+      JSON.stringify({ ...dispatchSourceFields(), ...entry }),
       resolveCoordinationLogPolicy(policy),
     );
   } catch {

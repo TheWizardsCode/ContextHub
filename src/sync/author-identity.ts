@@ -23,12 +23,131 @@ import type {
   AuthorIdentityOptions,
   AuthorIdentityViolation,
   AuthorIdentityResult,
+  PushAuthorityOptions,
+  PushAuthorityResult,
 } from './types.js';
 import { readLastSyncedRef } from './refs.js';
 
 /** Normalize email for comparison: trimmed, lowercased. */
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+/**
+ * Incident-era sentinel identities that must NEVER author a worklog-data
+ * commit — the 2026-09-26 / 2026-10-22 / 2026-10-23 leaked-`GIT_DIR`
+ * incidents (host `RossGameDev` pushed `T <t@t.com>`, every other clone then
+ * refused to sync).
+ *
+ * CANONICAL SOURCE OF TRUTH: SorraAgents `scripts/check_git_identity.py`
+ * (`INCIDENT_ERA_EMAILS`). There is no cross-language import, so this set MUST
+ * stay byte-identical to that `frozenset`; keep both in sync and pin the
+ * parity with a unit test. Comparison is exact-email (trimmed, lowercased) —
+ * never a wildcard/substring match.
+ */
+export const INCIDENT_ERA_EMAILS: ReadonlySet<string> = new Set([
+  't@t.com',
+  't@t',
+  'test@test.com',
+  'test@test',
+  'cache test@test.com',
+]);
+
+/** True when `email` is an exact (trimmed, lowercased) incident-era sentinel. */
+export function isIncidentEraEmail(email: string): boolean {
+  return INCIDENT_ERA_EMAILS.has(normalizeEmail(email));
+}
+
+/** Build the operator-facing push-guard refusal message + remedy. */
+function buildPushRefusalMessage(
+  identity: string,
+  reason: 'empty-email' | 'sentinel-identity'
+): string {
+  if (reason === 'empty-email') {
+    return (
+      `Refusing to push worklog data: git user.email is not set, so the worklog ` +
+      `commit would have no author identity. Configure a real identity and re-run ` +
+      `'wl sync':\n` +
+      `  git config user.email you@example.com`
+    );
+  }
+  return (
+    `Refusing to push worklog data: the effective git user.email '${identity}' is ` +
+    `an incident-era sentinel identity and must never author a worklog commit.\n` +
+    `Fix your identity and re-run 'wl sync':\n` +
+    `  git config user.email you@example.com\n` +
+    `Incident remediation only: pass --allow-sentinel-author to override the guard ` +
+    `for a single run (sentinel identities can never be added to syncAllowedAuthors).`
+  );
+}
+
+/**
+ * Pure push-side identity decision (WL-0MWGO58KL00187CO) — the outbound
+ * mirror of {@link checkAuthorIdentity}. Deterministic: identical input yields
+ * an identical verdict on every call (dry-run parity).
+ *
+ * Guard order (parent AC1/AC2, plan Q1):
+ *   1. Empty effective email → refuse unconditionally. `allowSentinelAuthor`
+ *      never bypasses this (symmetry with `--allow-foreign-author`).
+ *   2. Exact incident-era sentinel → refuse unless `allowSentinelAuthor`.
+ *   3. Otherwise pass — non-sentinel configured/allow-listed identities are
+ *      never refused (exact-email rule, no wildcards).
+ *
+ * The sentinel refusal is absolute: it fires even if the sentinel email also
+ * equalled the configured identity or an allow-list entry — a state project
+ * policy forbids (SorraAgents `tests/test_author_gate_allowlist.py`).
+ */
+export function checkPushAuthorIdentity(options: PushAuthorityOptions): PushAuthorityResult {
+  const normalized = normalizeEmail(options.effectiveEmail ?? '');
+
+  if (normalized === '') {
+    return {
+      allowed: false,
+      reason: 'empty-email',
+      identity: '',
+      bypassed: false,
+      message: buildPushRefusalMessage('', 'empty-email'),
+    };
+  }
+
+  if (INCIDENT_ERA_EMAILS.has(normalized)) {
+    if (options.allowSentinelAuthor) {
+      return { allowed: true, reason: '', identity: normalized, bypassed: true, message: '' };
+    }
+    return {
+      allowed: false,
+      reason: 'sentinel-identity',
+      identity: normalized,
+      bypassed: false,
+      message: buildPushRefusalMessage(normalized, 'sentinel-identity'),
+    };
+  }
+
+  // Exact-email rule: any non-sentinel identity (configured, allow-listed or
+  // otherwise) passes the push guard — the pull-side gate owns foreign-email
+  // decisions; the push guard only stops sentinels and empty identities.
+  return { allowed: true, reason: '', identity: normalized, bypassed: false, message: '' };
+}
+
+/**
+ * Read the effective identity and enforce the push guard: throw with the
+ * identity named and the `git config user.email …` remedy when the identity
+ * may not author a worklog commit. Returns the decision so a caller can
+ * audit-log a deliberate `allowSentinelAuthor` bypass (AC3).
+ *
+ * `effectiveEmail` defaults to the repo's `git config user.email` — the same
+ * identity git will commit with (the temp push worktree shares the repo's
+ * config, including local overrides).
+ */
+export async function enforcePushAuthorIdentity(
+  options: PushAuthorityOptions = {}
+): Promise<PushAuthorityResult> {
+  const effectiveEmail = options.effectiveEmail ?? (await getConfiguredUserEmail());
+  const result = checkPushAuthorIdentity({ ...options, effectiveEmail });
+  if (!result.allowed) {
+    throw new Error(result.message);
+  }
+  return result;
 }
 
 /** Resolve whether whitelist allows all authors. */

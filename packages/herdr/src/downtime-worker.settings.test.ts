@@ -865,3 +865,46 @@ describe('downtime CPU gate setting (downtimeCpuGatePercent)', () => {
     }
   });
 });
+
+describe('downtime budget relief kill switch (downtimeBudgetReliefEnabled)', () => {
+  function writeConfig(body: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-budget-relief-settings-'));
+    const path = join(dir, 'worklog-plugin.json');
+    writeFileSync(path, JSON.stringify(body), 'utf8');
+    return path;
+  }
+
+  it('defaults to true', () => {
+    expect(defaultSettings.downtimeBudgetReliefEnabled).toBe(true);
+  });
+
+  it('loadSettings reads an explicit false (relief off)', () => {
+    const path = writeConfig({ downtimeBudgetReliefEnabled: false });
+    try {
+      expect(loadSettings(path).downtimeBudgetReliefEnabled).toBe(false);
+    } finally {
+      rmSync(join(path, '..'), { recursive: true, force: true });
+    }
+  });
+
+  it('loadSettings reads an explicit true (relief on)', () => {
+    const path = writeConfig({ downtimeBudgetReliefEnabled: true });
+    try {
+      expect(loadSettings(path).downtimeBudgetReliefEnabled).toBe(true);
+    } finally {
+      rmSync(join(path, '..'), { recursive: true, force: true });
+    }
+  });
+
+  it('loadSettings falls back to the default (true) when missing or malformed', () => {
+    const missing = writeConfig({ browseItemCount: 12 });
+    const malformed = writeConfig({ downtimeBudgetReliefEnabled: 'off' });
+    try {
+      expect(loadSettings(missing).downtimeBudgetReliefEnabled).toBe(true);
+      expect(loadSettings(malformed).downtimeBudgetReliefEnabled).toBe(true);
+    } finally {
+      rmSync(join(missing, '..'), { recursive: true, force: true });
+      rmSync(join(malformed, '..'), { recursive: true, force: true });
+    }
+  });
+});
