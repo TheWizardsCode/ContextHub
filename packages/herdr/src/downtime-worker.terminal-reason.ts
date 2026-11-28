@@ -10,9 +10,10 @@
  * sibling of the offer-selection module rather than a second gate definition.
  *
  * Precedence (module contract; WL-0MWBT76WY00298AY AC5, extended by
- * WL-0MWDDHVF2004PTYX AC2): `code-freeze` → CPU → review-queue → non-terminal
- * cooldown → attempt budget → in-flight → leaf-audit pin → AUDIT budget → host
- * budget → `no-candidate`. The audit-budget rung sits ABOVE the host-budget
+ * WL-0MWDDHVF2004PTYX AC2 and WL-0MWJE9MIR005SBQK AC4): `code-freeze` → CPU →
+ * review-queue → non-terminal cooldown → attempt budget → in-flight →
+ * leaf-audit pin → AUDIT budget → host budget → lease-capability-absent →
+ * `no-candidate`. The audit-budget rung sits ABOVE the host-budget
  * rung because an audit refusal with `detail: 'http-404'` is a BROKEN PROXY
  * CONTRACT, not the weakest ambient statement — it must never be masked by
  * `host-budget-implement`. The host-budget rung stays last: it is the weakest,
@@ -24,6 +25,7 @@
  */
 
 import { LEAF_AUDIT_PIN_HOLD_REASON } from './downtime-worker.constants.js';
+import { LEASE_CAPABILITY_ABSENT_REASON } from './downtime-worker.offer-attribution.js';
 import type { DowntimeDispatchOutcome } from './downtime-worker.dispatch-contract.js';
 import { CPU_SATURATED_REASON } from './downtime-worker.dispatch-cpu-gate.js';
 import { REVIEW_QUEUE_HOLD_REASON } from './downtime-worker.gates.js';
@@ -44,6 +46,13 @@ export interface TerminalReasonInput {
   pinHeld: boolean;
   /** `undefined` = no relaxed leaf-audit tick, so the pin rung is not armed. */
   pinnedAuditItemId: string | undefined;
+  /**
+   * True when an AUDIT offer was refused because its peer entry does not
+   * advertise the audit-lease capability (WL-0MWJE9MIR005SBQK AC4). Neutral
+   * rung, sits just above `no-candidate` so a fleet-level capability refusal
+   * is never reported as an empty backlog (which would arm the cooldown).
+   */
+  leaseCapabilityHold: boolean;
   /** First audit-budget refusal recorded by this tick's offer path. */
   auditBudgetHold: DowntimeDispatchOutcome | undefined;
   /** First host-budget refusal recorded by this tick's offer path. */
@@ -105,6 +114,13 @@ export function resolveTerminalOutcome(input: TerminalReasonInput): DowntimeDisp
       reason: ownHost.reason,
       ...(ownHost.budget !== undefined ? { budget: ownHost.budget } : {}),
     };
+  }
+  // Fleet capability refusal (WL-0MWJE9MIR005SBQK AC4): an AUDIT offer from a
+  // peer that does not advertise audit-lease support. Neutral — the offer is
+  // kept, no strike, no no-candidate cooldown — but reported as its own token
+  // so the operator can see WHY the audit was not dispatched.
+  if (input.leaseCapabilityHold) {
+    return { dispatched: false, reason: LEASE_CAPABILITY_ABSENT_REASON };
   }
   return { dispatched: false, reason: 'no-candidate' };
 }

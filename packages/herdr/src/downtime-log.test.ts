@@ -267,7 +267,7 @@ describe('downtime rolling log', () => {
 // WL-0MUBEZ6PE002WLP4). The writer is now temp-file + rename (atomic within a
 // filesystem).
 
-// ── 24 h retention & rotation for the coordination log (WL-0MVKNC28B003UOLX) ──
+// ── Entry-bounded retention & rotation for the coordination log (WL-0MVKNC28B003UOLX) ──
 //
 // The dispatch log keeps its legacy 100-entry single-file trim (the
 // dispatched-marker readers depend on that contract). The COORDINATION log
@@ -276,19 +276,20 @@ describe('downtime rolling log', () => {
 // whole current file is rotated to `.1` (older siblings shift down, oldest
 // beyond COORDINATION_LOG_MAX_ROTATED_FILES is dropped) and a fresh current
 // file starts — so the entry that triggers the rotation is never lost (AC4).
-// The retained window is maxEntries × (1 + maxRotatedFiles) entries, which at
-// the observed ≥ 60 decision entries/hour covers ≥ 24 h (AC1) while bounding
-// disk use (AC2).
+// The retained window is maxEntries × (1 + maxRotatedFiles) ENTRIES. That is
+// not a time bound: measured at the observed ≈ 207 decision entries/hour the
+// full log retains ≈ 6.5–9.7 h, NOT reliably ≥ 24 h (WL-0MWT3Z9M9002Z9BF AC4).
+// The tests below pin the ENTRY window and the disk bound (AC2).
 
-describe('coordination-log 24 h retention & rotation (WL-0MVKNC28B003UOLX)', () => {
+describe('coordination-log entry-bounded retention & rotation (WL-0MVKNC28B003UOLX)', () => {
   /** A tiny policy so rotation is exercised without writing 2,000 lines. */
   const SMALL_POLICY = { maxEntries: 10, maxRotatedFiles: 2 };
   const START = Date.parse('2026-10-22T20:00:00.000Z');
   const atMinute = (i: number) => new Date(START + i * 60_000).toISOString();
 
-  it('AC1: retains the oldest 24 h window after writing > 1,500 decision entries', async () => {
+  it('AC1: retains the full 1,501–2,000-entry window after writing > 1,500 decision entries', async () => {
     const cwd = makeTempCwd();
-    const total = 1_600; // ≈ 26.7 h at the observed ≥ 60 entries/hour
+    const total = 1_600; // the shipped four-file window holds 1,501–2,000 entries
     for (let i = 0; i < total; i++) {
       await appendCoordinationLogEntry(cwd, {
         kind: 'decision',
@@ -302,13 +303,13 @@ describe('coordination-log 24 h retention & rotation (WL-0MVKNC28B003UOLX)', () 
     // 1,600 entries. The log is split across the current file and rotated
     // siblings (three rotations happened: at writes 501, 1001 and 1501).
     expect(all).toHaveLength(total);
-    // The oldest 24 h window (the last 1,440 entries at 60/min) is still
-    // present after the fact — exactly the post-mortem the 2026-10-22/23
-    // overnight investigation could not reconstruct.
+    // The oldest 1,440-entry window is still present after the fact — an
+    // ENTRY-bounded window, not a time claim (the measured rate gives
+    // ≈ 6.5–9.7 h for the full log, NOT ≥ 24 h).
     const cutoff = START + (total - 1_440) * 60_000;
-    const oldest24h = all.filter((e) => Date.parse(e.at!) >= cutoff);
-    expect(oldest24h).toHaveLength(1_440);
-    expect(oldest24h[0].at).toBe(new Date(cutoff).toISOString());
+    const oldestWindow = all.filter((e) => Date.parse(e.at!) >= cutoff);
+    expect(oldestWindow).toHaveLength(1_440);
+    expect(oldestWindow[0].at).toBe(new Date(cutoff).toISOString());
   });
 
   it('AC2: rotates at the per-file cap and keeps at most maxEntries × (1 + maxRotatedFiles) entries', async () => {

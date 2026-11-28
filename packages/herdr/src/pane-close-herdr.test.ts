@@ -702,3 +702,71 @@ describe('createHerdrReaperDeps — budget release and dead-pane sweep', () => {
     expect(sweepBudgetLedger).not.toHaveBeenCalled();
   });
 });
+
+// ── Single pane-close record wiring (WL-0MWJ7QYX0001KAQX AC1) ─────────
+
+describe('createHerdrReaperDeps — rolling-log pane-close record', () => {
+  const rawOnePane = JSON.stringify({
+    panes: [
+      {
+        pane_id: 'w1:p1',
+        label: 'Downtime triggered plan Foo - WL-0ABC123',
+        agent: 'pi',
+        agent_status: 'idle',
+        agent_session: { value: '/tmp/nonexistent-but-mapped.jsonl' },
+      },
+    ],
+  });
+
+  it('forwards the pane-close record to the injected io seam', async () => {
+    const recordPaneCloseEntry = vi.fn().mockResolvedValue(undefined);
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(rawOnePane),
+      closePane: vi.fn().mockResolvedValue(true),
+      recordPaneCloseEntry,
+    });
+    const entry = {
+      entryType: 'pane-close' as const,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      itemId: 'WL-0ABC123',
+      itemTitle: 'Do the thing',
+      paneId: 'w1:p1',
+      kind: 'plan' as const,
+      outcome: 'closed-as-plan-complete' as const,
+      reasonCode: 'none',
+      closed: true,
+    };
+    await deps.recordPaneCloseEntry?.(entry);
+    expect(recordPaneCloseEntry).toHaveBeenCalledWith(entry);
+  });
+
+  it('an unwired recordPaneCloseEntry seam is a no-op (legacy reaper callers unchanged)', async () => {
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(rawOnePane),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+    await expect(
+      deps.recordPaneCloseEntry?.({
+        entryType: 'pane-close',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        itemId: 'WL-0ABC123',
+        itemTitle: 'Do the thing',
+        paneId: 'w1:p1',
+        kind: 'plan',
+        outcome: 'closed-as-plan-complete',
+        closed: true,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('maps the item title from getItemInfo into PaneStatus.itemTitle (record itemTitle)', async () => {
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(rawOnePane),
+      closePane: vi.fn().mockResolvedValue(true),
+      getItemInfo: vi.fn().mockResolvedValue({ needsProducerReview: false, stage: 'intake_complete', title: 'Foo the bar' }),
+    });
+    const [pane] = await deps.listPanes();
+    expect(pane.itemTitle).toBe('Foo the bar');
+    expect(pane.itemStage).toBe('intake_complete');
+  });
+});

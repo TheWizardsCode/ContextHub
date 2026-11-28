@@ -20,16 +20,18 @@
  * (WL-0MWKY1839000JM5O) rotates the whole admissible candidate set and flipped
  * `it.fails(` → `it(` here — the scenario is unchanged.
  *
- * The run-length source is the decision log (the fairness-metric sibling's
- * single accounting source), so the second describe below seeds it directly to
- * prove the twice-in-succession bound defers the ceiling root, and that a
- * missing/corrupt log fails open to today's ordering.
+ * The run-length source is the MACHINE-scoped run ledger (WL-0MWT3Z9M9002Z9BF,
+ * `downtime-run-by-root.json`), so the second describe below seeds it directly
+ * to prove the twice-in-succession bound defers the ceiling root, that a
+ * corrupt/absent ledger fails open to today's ordering, and that a run SPANS a
+ * leadership hand-off (two dispatches to A by leader 1, then a leader-2 tick
+ * reads the SAME machine ledger and still defers A).
  *
  * Deterministic: no live `wl`, no real coordination directory, injected clock.
  */
 
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -42,8 +44,10 @@ import {
   loadRoundRobinCursor,
   type RoundRobinByRootData,
 } from './downtime-round-robin-by-root.js';
+import { RUN_LEDGER_FILE_NAME, writeDispatchRunLocked } from './downtime-run-ledger.js';
+import { appendCoordinationLogEntry } from './downtime-log-coordination.js';
 import { deferRunLengthCeilingRoot } from './downtime-worker.fairness.js';
-import { type CoordinationEntry } from './coordination.js';
+import { withCoordLock, type CoordinationEntry } from './coordination.js';
 
 let testDir: string;
 
@@ -200,36 +204,51 @@ describe('fairness invariant — four roots (parent AC1)', () => {
   );
 });
 
-// ── Run-length bound: the decision log is the single accounting source ──
+// ── Run-length bound: the machine-scoped run ledger is the source ──
 //
 // Parent AC1's bound is enforced from the fairness metric's ONLY run-length
-// source (the decision log), never a second durable cursor. These specs seed
-// the log directly: with a twice-dispatched root due, the order defers it
-// behind an admissible peer; with no/less/corrupt history, or in the
-// single-slot band, ordering stays exactly as today (fail-open).
+// source (the machine-scoped run ledger, WL-0MWT3Z9M9002Z9BF), never the
+// leader's own decision log. These specs seed the ledger directly: with a
+// twice-dispatched root due, the order defers it behind an admissible peer;
+// with no/less/corrupt history, or in the single-slot band, ordering stays
+// exactly as today (fail-open).
 
-/** Write a decision log holding `length` consecutive dispatches to `root`. */
-function seedDecisionRun(cwd: string, root: string, length: number): void {
-  mkdirSync(join(cwd, '.worklog'), { recursive: true });
-  const lines: string[] = [];
-  for (let i = 1; i <= length; i += 1) {
-    lines.push(
-      JSON.stringify({
-        kind: 'decision',
-        operation: 'dispatch',
-        reason: 'dispatched',
-        outcome: 'dispatched',
-        dispatchingRoot: root,
-        consecutiveRunLength: i,
-        at: `2026-01-0${i}T00:00:00.000Z`,
-      }),
-    );
-  }
+/** Seed the machine run ledger with `length` consecutive dispatches to `root`. */
+function seedRunLedger(coordinationDir: string, root: string, length: number): void {
+  mkdirSync(coordinationDir, { recursive: true });
   writeFileSync(
-    join(cwd, '.worklog', 'downtime-coordination.log'),
-    `${lines.join('\n')}\n`,
+    join(coordinationDir, RUN_LEDGER_FILE_NAME),
+    JSON.stringify({
+      root,
+      runLength: length,
+      at: '2026-01-01T00:00:00.000Z',
+    }),
     'utf-8',
   );
+}
+
+/**
+ * Record a run the way the production charge does (lock held, write under it)
+ * without touching the seeded cursor — used to simulate a PREVIOUS leader's
+ * dispatches for the hand-off spec.
+ */
+function recordRun(root: string, now: number): void {
+  const written = withCoordLock(testDir, () => writeDispatchRunLocked(testDir, root, now));
+  if (written === null) throw new Error('coordination lock unavailable in test');
+}
+
+/** A dispatched decision row as the fallback scan reads it. */
+function dispatchDecisionRow(root: string, runLength: number) {
+  return {
+    kind: 'decision' as const,
+    operation: 'dispatch' as const,
+    outcome: 'dispatched' as const,
+    instanceId: 'inst-a',
+    reason: 'dispatched',
+    dispatchingRoot: root,
+    consecutiveRunLength: runLength,
+    at: '2026-01-01T00:00:00.000Z',
+  };
 }
 
 /** Two plan-offering roots, `A` strictly due (oldest) and `B` newer. */
@@ -251,10 +270,10 @@ function twoPlanRootDeps(): DowntimeWorkerDeps {
 
 const BASE_NOW = Date.UTC(2026, 0, 10, 0, 0, 0);
 
-describe('run-length bound — decision log is the only accounting source (parent AC1)', () => {
+describe('run-length bound — machine run ledger is the only accounting source (parent AC1)', () => {
   it('defers a root that already dispatched twice in succession behind an admissible peer', async () => {
     seedCursorForDeferral();
-    seedDecisionRun(testDir, '/repo/a', 2);
+    seedRunLedger(testDir, '/repo/a', 2);
     const deps = twoPlanRootDeps();
 
     const outcome = await dispatchFromCoordination(
@@ -283,7 +302,7 @@ describe('run-length bound — decision log is the only accounting source (paren
 
   it('does not defer before the ceiling: a single previous dispatch keeps the due root first', async () => {
     seedCursorForDeferral();
-    seedDecisionRun(testDir, '/repo/a', 1);
+    seedRunLedger(testDir, '/repo/a', 1);
     const deps = twoPlanRootDeps();
 
     const outcome = await dispatchFromCoordination(
@@ -305,7 +324,7 @@ describe('run-length bound — decision log is the only accounting source (paren
     expect(prompt).toContain('WL-A');
   });
 
-  it('fails open with no decision log: the due root still dispatches (today’s ordering)', async () => {
+  it('fails open with no run ledger: the due root still dispatches (today’s ordering)', async () => {
     seedCursorForDeferral();
     const deps = twoPlanRootDeps();
 
@@ -328,11 +347,10 @@ describe('run-length bound — decision log is the only accounting source (paren
     expect(prompt).toContain('WL-A');
   });
 
-  it('fails open on a corrupt decision log: ordering degrades and the tick still dispatches', async () => {
+  it('fails open on a corrupt run ledger: ordering degrades and the tick still dispatches', async () => {
     seedCursorForDeferral();
-    mkdirSync(join(testDir, '.worklog'), { recursive: true });
     writeFileSync(
-      join(testDir, '.worklog', 'downtime-coordination.log'),
+      join(testDir, RUN_LEDGER_FILE_NAME),
       'not-json{{{\n{"kind":\n',
       'utf-8',
     );
@@ -358,8 +376,13 @@ describe('run-length bound — decision log is the only accounting source (paren
   });
 
   it('applies the bound only with surplus capacity: a single free slot keeps the due root first', async () => {
+    // Documents the `requiredFreeSlots = 1` interaction (parent AC3): the bound
+    // is CONDITIONAL on surplus capacity (freeSlots > 1). With a single free
+    // slot `surplusCapacity` is false and the ceiling root is NOT deferred —
+    // `deferRunLengthCeilingRoot` runs only when a peer could actually take the
+    // slot. `docs/dev/downtime-dispatcher.md` states this precondition.
     seedCursorForDeferral();
-    seedDecisionRun(testDir, '/repo/a', 2);
+    seedRunLedger(testDir, '/repo/a', 2);
     const deps = twoPlanRootDeps();
 
     const outcome = await dispatchFromCoordination(
@@ -436,6 +459,179 @@ function seedCursorForDeferral(): void {
     'utf-8',
   );
 }
+
+// ── Run spans a leadership hand-off (WL-0MWT3Z9M9002Z9BF AC2) ──────────
+//
+// The original defect: run length was derived from the LEADER'S OWN decision
+// log, so after a hand-off to a different root the new leader saw an empty log
+// and the ceiling failed open (a run could reach 3). This spec proves the fix:
+// leader 2 reads the SAME machine ledger leader 1 wrote, so the bound survives
+// the hand-off. (Against the old per-leader-log source, leader 2's own log is
+// empty here, so A would NOT have been deferred and the run would have reset.)
+describe('run-length bound — a run spans a leadership hand-off (parent AC1)', () => {
+  it('defers the ceiling root for a NEW leader reading the machine ledger', async () => {
+    const leaderOne = join(testDir, 'leader-1');
+    const leaderTwo = join(testDir, 'leader-2');
+    mkdirSync(join(leaderOne, '.worklog'), { recursive: true });
+    mkdirSync(join(leaderTwo, '.worklog'), { recursive: true });
+    seedCursorForDeferral();
+
+    // Leader 1 dispatches to /repo/a twice (recorded under its own leadership).
+    recordRun('/repo/a', BASE_NOW);
+    recordRun('/repo/a', BASE_NOW + 1);
+
+    // Leadership hands off: leader 2 runs a tick from a DIFFERENT root. Its own
+    // decision log is empty, so only the shared machine ledger can enforce the
+    // bound.
+    expect(existsSync(join(leaderTwo, '.worklog', 'downtime-coordination.log'))).toBe(false);
+    const deps = twoPlanRootDeps();
+    const outcome = await dispatchFromCoordination(
+      deps,
+      twoPlanRootEntries(),
+      {
+        model: 'plan',
+        cwd: leaderTwo,
+        coordinationDir: testDir,
+        browseItemCount: 20,
+        freeSlots: 8,
+        effectiveFreeSlots: 8,
+      },
+      BASE_NOW + 60_000,
+    );
+
+    // A has already run twice, so the admissible peer B must be served — the
+    // run stays <= 2 across the hand-off.
+    expect(outcome.dispatched).toBe(true);
+    const prompt = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(prompt).toContain('WL-B');
+    expect(prompt).not.toContain('WL-A');
+  });
+
+  it('a fresh run after a hand-off is NOT deferred (control: the ledger really is read)', async () => {
+    const leaderTwo = join(testDir, 'leader-2-control');
+    mkdirSync(join(leaderTwo, '.worklog'), { recursive: true });
+    seedCursorForDeferral();
+
+    // Leader 1's last two dispatches went to /repo/b (not the due root A), so
+    // the ceiling root A has no run and must dispatch first.
+    recordRun('/repo/b', BASE_NOW);
+    recordRun('/repo/b', BASE_NOW + 1);
+
+    const deps = twoPlanRootDeps();
+    const outcome = await dispatchFromCoordination(
+      deps,
+      twoPlanRootEntries(),
+      {
+        model: 'plan',
+        cwd: leaderTwo,
+        coordinationDir: testDir,
+        browseItemCount: 20,
+        freeSlots: 8,
+        effectiveFreeSlots: 8,
+      },
+      BASE_NOW + 60_000,
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    const prompt = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(prompt).toContain('WL-A');
+  });
+});
+
+// ── Fail-open fallback chain (WL-0MWT54AR8005LMKN AC4) ─────────────────
+//
+// The machine ledger is the primary source. When it is missing or unreadable
+// (an upgrade / ledger-loss boundary) the read MUST fall back to the leader's
+// own ROTATED decision log, then to `1` — never to a hard failure and never to
+// a blocked dispatch.
+describe('run-length source — decision-log fallback when the ledger is absent/unreadable', () => {
+  it('falls back to the leader\'s rotated decision log when the ledger is missing', async () => {
+    const leaderTwo = join(testDir, 'leader-2-fallback-missing');
+    mkdirSync(join(leaderTwo, '.worklog'), { recursive: true });
+    seedCursorForDeferral();
+    // The leader's OWN log still shows A's run (older generations are included).
+    await appendCoordinationLogEntry(leaderTwo, dispatchDecisionRow('/repo/a', 1));
+    await appendCoordinationLogEntry(leaderTwo, dispatchDecisionRow('/repo/a', 2));
+    expect(existsSync(join(testDir, RUN_LEDGER_FILE_NAME))).toBe(false);
+
+    const deps = twoPlanRootDeps();
+    const outcome = await dispatchFromCoordination(
+      deps,
+      twoPlanRootEntries(),
+      {
+        model: 'plan',
+        cwd: leaderTwo,
+        coordinationDir: testDir,
+        browseItemCount: 20,
+        freeSlots: 8,
+        effectiveFreeSlots: 8,
+      },
+      BASE_NOW + 60_000,
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    const prompt = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(prompt).toContain('WL-B');
+    expect(prompt).not.toContain('WL-A');
+    // The consumed dispatch recreated the ledger for the next tick.
+    expect(existsSync(join(testDir, RUN_LEDGER_FILE_NAME))).toBe(true);
+  });
+
+  it('falls back to the decision log when the ledger is corrupt', async () => {
+    const leaderTwo = join(testDir, 'leader-2-fallback-corrupt');
+    mkdirSync(join(leaderTwo, '.worklog'), { recursive: true });
+    seedCursorForDeferral();
+    writeFileSync(join(testDir, RUN_LEDGER_FILE_NAME), 'not-json{{{\n', 'utf-8');
+    await appendCoordinationLogEntry(leaderTwo, dispatchDecisionRow('/repo/a', 1));
+    await appendCoordinationLogEntry(leaderTwo, dispatchDecisionRow('/repo/a', 2));
+
+    const deps = twoPlanRootDeps();
+    const outcome = await dispatchFromCoordination(
+      deps,
+      twoPlanRootEntries(),
+      {
+        model: 'plan',
+        cwd: leaderTwo,
+        coordinationDir: testDir,
+        browseItemCount: 20,
+        freeSlots: 8,
+        effectiveFreeSlots: 8,
+      },
+      BASE_NOW + 60_000,
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    const prompt = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(prompt).toContain('WL-B');
+    expect(prompt).not.toContain('WL-A');
+  });
+
+  it('fails open to today\'s ordering when neither the ledger nor the log has a run', async () => {
+    const leaderTwo = join(testDir, 'leader-2-no-history');
+    mkdirSync(join(leaderTwo, '.worklog'), { recursive: true });
+    seedCursorForDeferral();
+
+    const deps = twoPlanRootDeps();
+    const outcome = await dispatchFromCoordination(
+      deps,
+      twoPlanRootEntries(),
+      {
+        model: 'plan',
+        cwd: leaderTwo,
+        coordinationDir: testDir,
+        browseItemCount: 20,
+        freeSlots: 8,
+        effectiveFreeSlots: 8,
+      },
+      BASE_NOW + 60_000,
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    const prompt = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    // No history anywhere → no deferral; the due root A still dispatches.
+    expect(prompt).toContain('WL-A');
+  });
+});
 
 describe('deferRunLengthCeilingRoot — pure ordering rule', () => {
   const order = ['/repo/a', '/repo/b', '/repo/c'];

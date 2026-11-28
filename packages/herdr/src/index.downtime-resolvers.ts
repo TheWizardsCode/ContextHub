@@ -216,11 +216,15 @@ export function defaultStalledPaneRootResolver(
 }
 
 /**
- * Collect the pane ids already handled by the dispatch monitor
- * (WL-0MU308WSF0002JWN) from the rolling dispatch log. Used to keep the
- * scheduled pane-close reaper from double-handling a pane the monitor has
- * already processed (parent constraint). Fail-safe: an unreadable log
- * yields an empty set.
+ * Collect the pane ids already recorded as closed from the rolling dispatch
+ * log. Used to keep the scheduled pane-close reaper idempotent across runs
+ * (`alreadyClosedPaneIds`). Single-record reconciliation
+ * (WL-0MWJ7QYX0001KAQX AC1): the reaper is itself the writer of the
+ * `entryType:'pane-close'` record this scrapes — the SAME record that feeds
+ * `isNonTerminalCooldownActive` and the recent-dispatch view — so a pane closed
+ * on one pass is skipped on the next. Historical entries written by the
+ * disabled monitor remain valid. Fail-safe: an unreadable log yields an empty
+ * set.
  */
 export async function readClosedPaneIds(cwd: string): Promise<Set<string>> {
   try {

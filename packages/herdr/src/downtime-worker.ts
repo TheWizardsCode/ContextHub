@@ -204,7 +204,11 @@ export { BLOCKED_QUESTIONS_INSTRUCTION, buildDowntimeDispatchComment, buildDownt
 // ── Dispatch pipeline (WL-0MVLII0NO007JJBA) ────────────────────────────
 // The filter and claim pipeline are internal to the dispatch entry (Q2
 // refinement); only consumer-used symbols keep a barrel export.
-export { selectCriticalFirstCandidates } from './downtime-worker.dispatch-filter.js';
+export { resolveHeadDependencyFrontier, selectCriticalFirstCandidates } from './downtime-worker.dispatch-filter.js';
+export type {
+  BlockerFetcher,
+  HeadDependencyFrontierResult,
+} from './downtime-worker.dispatch-filter.js';
 export { CPU_SATURATED_REASON } from './downtime-worker.dispatch-cpu-gate.js';
 export { dispatchDowntimeWork } from './downtime-worker.dispatch.js';
 export type {

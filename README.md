@@ -14,7 +14,7 @@ At the heart of that orchestration is **Worklog**: a lightweight, Git-friendly i
 - **CLI + API**: Manage work items from the command line or a REST API
 - **Git-Friendly Syncing**: JSONL format enables seamless team collaboration via Git with automatic conflict resolution
 - **Multi-Project Support**: Custom prefixes for issue IDs per project
-- **Cross-Repo Dependencies**: Block a work item on a work item in another project's store — sibling projects are discovered automatically, a missing one is cloned via `wl project add`, and an unresolvable foreign blocker keeps the dependent blocked instead of silently unblocking it (see [Cross-repo dependencies](MULTI_PROJECT_GUIDE.md#cross-repo-dependencies))
+- **Cross-Repo Dependencies**: Block a work item on a work item in another project's store — sibling projects are discovered automatically, a missing one is cloned via `wl project add`, and an unresolvable foreign blocker keeps the dependent blocked instead of silently unblocking it. Recorded cross-repo edges survive `wl sync` (full and delta); only edges foreign at both ends are dropped, with a diagnostic (see [Cross-repo dependencies](MULTI_PROJECT_GUIDE.md#cross-repo-dependencies))
 
 ## Installation
 

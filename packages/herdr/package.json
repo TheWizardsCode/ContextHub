@@ -5,11 +5,12 @@
   "description": "Worklog work item selection list for Herdr",
   "type": "module",
   "bin": {
-    "worklog-pane-close": "dist/pane-close-cli.js"
+    "worklog-pane-close": "dist/pane-close-cli.js",
+    "worklog-prep-supply": "dist/prep-supply-report-cli.js"
   },
   "scripts": {
     "build": "npm run build:shared && npm run build:only",
-    "build:only": "tsc && cp src/shortcuts.json dist/shortcuts.json && chmod +x dist/pane-close-cli.js",
+    "build:only": "tsc && cp src/shortcuts.json dist/shortcuts.json && chmod +x dist/pane-close-cli.js dist/prep-supply-report-cli.js",
     "build:shared": "tsc -p ../../packages/shared/tsconfig.json",
     "postinstall": "node ./scripts/link-shared.mjs",
     "dev": "tsx src/index.ts"

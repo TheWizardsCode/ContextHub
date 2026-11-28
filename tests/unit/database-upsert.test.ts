@@ -157,21 +157,23 @@ describe('WorklogDatabase.upsertItems', () => {
     expect(edgesFromA[0].toId).toBe(itemB.id);
   });
 
-  it('should skip edges where referenced items do not exist in the database', () => {
+  it('keeps an edge whose other endpoint is a foreign/missing id when the owning endpoint exists (WL-0MWXIT6H3006TY2I)', () => {
     // Arrange: create one item
     const itemA = db.create({ title: 'Item A' });
 
-    // Act: upsert itemA with an edge referencing a non-existent item
+    // Act: upsert itemA with an edge referencing a foreign (un-stored) target
     db.upsertItems(
       [{ ...itemA }],
       [
-        { fromId: itemA.id, toId: 'TEST-NONEXISTENT', createdAt: new Date().toISOString() },
+        { fromId: itemA.id, toId: 'SA-0MWFFD9N0050SP5', createdAt: new Date().toISOString() },
       ],
     );
 
-    // Assert: no edge created
+    // Assert: the edge is kept — only edges whose BOTH endpoints are
+    // unresolvable are dropped, so a cross-repo blocker survives.
     const edgesFromA = db.listDependencyEdgesFrom(itemA.id);
-    expect(edgesFromA.length).toBe(0);
+    expect(edgesFromA.length).toBe(1);
+    expect(edgesFromA[0].toId).toBe('SA-0MWFFD9N0050SP5');
   });
 
   it('should not clear existing dependency edges when upserting', () => {

@@ -255,6 +255,85 @@ describe('wl worklist: seeded worklog', () => {
   });
 });
 
+// ── Display invariant: dependency-blocked critical work stays visible ────
+//
+// WL-0MWWMPD4L001RZI8 — display-invariant companion to the dispatch fix in
+// WL-0MWWLLGD2001QKAL. That bug is fixed by refusing to dispatch a
+// dependency-blocked item; it must never be "fixed" by hiding blocked work
+// from the worklist. The invariant (WL-0MV6TFX0600145M2): the display path
+// keeps showing dependency-blocked items — here the critical subset (the
+// mandatory discovery feed the Herdr head consumes) and the browse feed.
+describe('wl worklist: dependency-blocked critical items stay visible (WL-0MWWMPD4L001RZI8)', () => {
+  let tempState: { tempDir: string; originalCwd: string };
+
+  beforeEach(() => {
+    tempState = enterTempDir();
+    writeConfig(tempState.tempDir, 'Blocked display invariant', 'BLK');
+    writeInitSemaphore(tempState.tempDir);
+  });
+
+  afterEach(() => {
+    leaveTempDir(tempState);
+  });
+
+  /** Create an item via the real CLI and return its id. */
+  async function createItem(args: string): Promise<string> {
+    const { stdout } = await execAsync(`tsx ${cliPath} --json create ${args}`);
+    return JSON.parse(stdout).workItem.id as string;
+  }
+
+  /** Ids returned by `wl next` (accepts the `results` / `workItems` aliases). */
+  async function nextIds(args: string): Promise<string[]> {
+    const { stdout } = await execAsync(`tsx ${cliPath} --json next ${args}`);
+    const payload = JSON.parse(stdout);
+    return (payload.results ?? payload.workItems ?? [])
+      .map((entry: any) => entry?.workItem?.id ?? entry?.id)
+      .filter(Boolean);
+  }
+
+  /** Ids of a worklist subset (plain items, or browse entries with `workItem`). */
+  function feedIds(entries: Array<any>): string[] {
+    return entries.map((entry) => entry?.workItem?.id ?? entry?.id).filter(Boolean);
+  }
+
+  it('keeps a live dependency-blocked critical item in the critical subset and the browse feed', async () => {
+    const blockerId = await createItem('-t "Open blocker"');
+    // The observed dispatch-bug shape (WL-0MWWLLGD2001QKAL): critical,
+    // plan_complete, risk medium, effort small.
+    const blockedId = await createItem(
+      '-t "Dependency-blocked critical item" --priority critical --stage plan_complete --risk medium --effort small',
+    );
+
+    // A live outbound `depends-on` edge. `dep add` also flips the dependent to
+    // status=blocked; realign it to open so the item is blocked purely by its
+    // dependency edge — the shape `wl next` excludes as dependency-blocked.
+    const { stdout: depStdout } = await execAsync(`tsx ${cliPath} --json dep add ${blockedId} ${blockerId}`);
+    expect(JSON.parse(depStdout).success).toBe(true);
+    await execAsync(`tsx ${cliPath} --json update ${blockedId} --status open`);
+
+    // Control (so the invariant assertion cannot pass vacuously): with the
+    // edge live the implement-tier query excludes the item, and
+    // `--include-blocked` brings it back — the item really is
+    // dependency-blocked, not merely status-blocked.
+    expect(
+      await nextIds('--stage plan_complete --risk medium --effort medium -n 10'),
+    ).not.toContain(blockedId);
+    expect(
+      await nextIds('--stage plan_complete --risk medium --effort medium -n 10 --include-blocked'),
+    ).toContain(blockedId);
+
+    const payload = await worklist();
+
+    // AC1: the critical subset (the mandatory discovery feed the Herdr head
+    // consumes) must keep the dependency-blocked item.
+    expect(ids(payload.subsets.critical)).toContain(blockedId);
+    expect(payload.subsets.critical.find((item) => item.id === blockedId)?.priority).toBe('critical');
+
+    // ...and so must the browse feed (`wl next --include-blocked` parity).
+    expect(feedIds(payload.subsets.browse)).toContain(blockedId);
+  });
+});
+
 describe('wl worklist: one DB open per invocation', () => {
   let tempState: { tempDir: string; originalCwd: string };
 

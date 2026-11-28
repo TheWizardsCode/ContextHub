@@ -41,7 +41,10 @@ bower_components
 build/Release
 
 # Dependency directories
-node_modules/
+# `node_modules` may be a symlink (implement.py link farm, npm workspace), and a
+# trailing slash would only ignore directories — a committed symlink is a
+# self-referential loop (WL-0MWWSCXEC001BQ3I).
+node_modules
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
@@ -196,3 +199,6 @@ tests/**/*.map
 packages/*/src/**/*.js
 packages/*/src/**/*.d.ts
 packages/*/src/**/*.map
+
+# Per-worktree implement session state (implement.py) — never committed.
+.implement_state.json

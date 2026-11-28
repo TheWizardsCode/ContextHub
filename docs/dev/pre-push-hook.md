@@ -22,9 +22,35 @@ returns the same constant. All three therefore emit identical text.
 
 **Changing the template** means changing all three artifacts together
 (`PRE_PUSH_HOOK_CONTENT`, `.githooks/pre-push`, the fixture). `wl doctor upgrade`
-reports any content difference as `outdated` and overwrites the file, so a
-template that is *older* than a project's committed hook silently downgrades
-that project — the regression WL-0MW2N56M2004PSRP fixes.
+reports any content difference at the **same marker version** as `outdated` and
+overwrites the file, so a template that is *older* than a project's committed
+hook silently downgrades that project — the regression WL-0MW2N56M2004PSRP fixes.
+
+### The `vN` marker is an age contract
+
+Every hook carries a marker line — `# worklog:pre-push-hook:v3`,
+`# worklog:post-pull-hook:v1` — and `wl doctor upgrade` compares those numbers
+before it compares content (`hookMarkerVersion()` in
+`src/doctor/hook-upgrade.ts`):
+
+| Project hook vs reference | Verdict | Effect |
+| --- | --- | --- |
+| newer (`v4` vs template `v3`) | `newer` | **never written** — reported and left byte-identical |
+| older (`v1` vs template `v3`) | `outdated` | upgraded to the template |
+| same version, different content | `outdated` | upgraded to the template (the WL-0MW2N56M2004PSRP reconciliation) |
+| no marker | skipped entirely (not a Worklog hook) | untouched |
+
+A project that improves its hook past the template therefore keeps its hook: the
+fix for the improvement belongs **upstream**, in `PRE_PUSH_HOOK_CONTENT`, not in
+a forced downgrade of the project (WL-0MWWS66JM0090RQ5 — measured on
+`llm`'s `v4` pre-push, which `wl doctor upgrade` used to rewrite to `v3`).
+
+**The upgrade does not commit.** Hook content is pinned by the consuming
+project's own tests (e.g. `llm:tests/test_git_hooks.py` asserts
+`ERROR: no test runner found`), so a same-version refresh is a contract change
+the operator reviews and commits with a work item — never an auto-commit from a
+`doctor` command. The one destructive path (downgrading a newer hook) is now
+closed, so the remaining writes are always reviewable diffs.
 
 ## Behaviours the template must carry
 
@@ -109,8 +135,9 @@ run rather than one per test file.
 - **Never rebuild.** The preflight only `stat`s; the suite must not mutate the
   checkout (the live-repo mutation guard would report it) and a silent rebuild
   would make the suite pass against a build nobody asked for. Run the printed
-  command yourself; `implement.py finish`'s own `npm run build` already does
-  this before it tests, which is why gated runs are never affected.
+  command yourself; `implement.py start` builds a fresh worktree's shared
+  package up front (see below) and `implement.py finish`'s own `npm run build`
+  runs again before it tests, which is why gated runs are never affected.
 - **Fail-open.** An unresolvable package with no discoverable repository root,
   a package outside a `packages/` workspace, and an unreadable directory all
   proceed silently — the guard may only fire for a genuinely stale or absent
@@ -135,6 +162,39 @@ rebuild command.
 > verdict; subsequent runs hit the refreshed entry. The cache key and the
 > reason a rebuild is invisible to it are the runner's own behaviour
 > (WL-0MWRZZ98Y007RKZ4), not this guard's.
+
+## Fresh-worktree shared build at `implement.py start` (WL-0MW3EDP6D002U6V4)
+
+The full-suite guard above catches a stale build in *any* checkout. A **fresh
+implement worktree** has the complementary, harder failure:
+`packages/shared/dist/` is gitignored, and `implement.py start` materialises a
+`node_modules` link farm that points `@worklog/shared` at the worktree's *own*
+(unbuilt) package — so every TypeScript suite that imports the package fails
+with a cascade of import errors before a single test runs.
+
+`implement.py start` therefore ensures the worktree's `packages/shared/dist`
+exists and is fresh before the agent touches the tree (SorraAgents framework,
+SA-0MWHUVJFO009R9EC — framework half of WL-0MW3EDP6D002U6V4):
+
+- **Freshness-based, unconditional on the change set** (producer decision
+  Q2=A): build when `dist/` is missing or older than the newest
+  `packages/shared/src/**` file (the same mtime comparison as `isDistFresh()`
+  above), skip when fresh, and no-op for a repo without a workspace
+  `@worklog/shared` package. The shared `_newest_mtime` /
+  `_shared_dist_freshness` helper is reused by WL-0MW8G1X3V007CGAE's guard.
+- **Worktree-local only.** It builds the package the worktree resolves (never
+  the main checkout), and only when the resolution points inside the worktree.
+- **Best-effort, one diagnostic.** A build failure does not abort `start`; the
+  start report records `steps.shared_build` with a single actionable message
+  naming the resolved `packages/shared` path and `npm run build:shared` — never
+  N import errors.
+
+This is the start-time complement to the full-suite `globalSetup` guard: the
+guard decides whether a run in an *existing* checkout may proceed; the start
+step makes a *fresh* worktree importable in the first place.
+
+See also [wl-shared-dist-diagnostic.md](./wl-shared-dist-diagnostic.md),
+WL-0MW8G1X3V007CGAE (stale build) and WL-0MW3EDP6D002U6V4 (umbrella).
 
 ## The type check rides the full suite (WL-0MWKQ51G0006F3KV)
 

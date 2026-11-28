@@ -17,7 +17,11 @@
  * - Writes use atomic tmp+rename (same pattern as `coordination.ts`).
  * - The charge (`advanceRoot`) is a read-modify-write guarded by the same
  *   coordination-lock mechanism (`tryAcquireCoordLock`) used for the
- *   coordination file — concurrent leaders do not corrupt the cursor.
+ *   coordination file — concurrent leaders do not corrupt the cursor. The SAME
+ *   critical section also writes the machine-scoped consecutive-run ledger
+ *   (`downtime-run-by-root.json`), so a consumed dispatch advances both files
+ *   under ONE lock acquisition and the two can never drift
+ *   (WL-0MWT54AR8005LMKN).
  * - Selection (`selectLeastRecentlyServed`, `orderRootsLeastRecentlyServed`)
  *   is a **pure read**: it takes no coordination lock and writes nothing. Only
  *   a *consumed offer* charges the cursor, via `advanceRoot`; a root that is
@@ -36,6 +40,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { tryAcquireCoordLock } from './coordination.js';
+import { writeDispatchRunLocked } from './downtime-run-ledger.js';
 
 // ── Constants ───────────────────────────────────────────────────────────
 
@@ -240,15 +245,20 @@ function orderRootsFromCursor(
 }
 
 /**
- * Advance the cursor for a single root without selecting.
+ * Advance the cursor (and the run ledger) for a single root without selecting.
  *
  * Records that the given root was just dispatched, updating its last-served
- * timestamp. This is the **only** cursor writer: it is called after an offer
- * is consumed (dispatched, or a spawn-failed / marker-write-failed claim that
- * still removes the offer), never at selection time.
+ * timestamp AND the machine-scoped consecutive-run record. This is the **only**
+ * cursor writer: it is called after an offer is consumed (dispatched, or a
+ * spawn-failed / marker-write-failed claim that still removes the offer), never
+ * at selection time.
  *
- * **Fail-open:** if the lock cannot be acquired, the cursor state is lost
- * for this cycle but dispatch is not blocked.
+ * Both writes happen inside ONE `tryAcquireCoordLock` hold
+ * (WL-0MWT54AR8005LMKN): the ledger's read-modify-write piggybacks on the charge
+ * critical section, so there is no second acquisition and no nested lock.
+ *
+ * **Fail-open:** if the lock cannot be acquired, both the cursor and the run
+ * ledger stay unchanged for this cycle but dispatch is not blocked.
  *
  * @param coordinationDir — The coordination directory.
  * @param root — The `worklogRoot` that was just dispatched.
@@ -271,6 +281,9 @@ export function advanceRoot(
     const data = loadRoundRobinCursor(coordinationDir);
     data[root] = new Date(now).toISOString();
     saveRoundRobinCursor(coordinationDir, data);
+    // Same critical section: the machine-scoped consecutive-run ledger
+    // (WL-0MWT3Z9M9002Z9BF, revised by WL-0MWT54AR8005LMKN). No extra lock.
+    writeDispatchRunLocked(coordinationDir, root, now);
   } finally {
     release();
   }

@@ -448,7 +448,7 @@ export async function dispatchDowntimeWork(
     let auditHostBudget: { live: number; max: number } | undefined;
     // Failing proxy exchange on a fail-closed audit read (audit-budget-unknown).
     let auditHostBudgetDetail: string | undefined;
-
+    let auditHostRetryAfterS: number | undefined; // pre-check-derived cooldown (WL-0MWJE9N7L001V6XI)
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
     // mid-idle-period is honored on the next dispatch attempt. Frozen OR
@@ -519,7 +519,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated, hostBudgetReason: auditHostBudgetReason, hostBudget: auditHostBudget, hostBudgetDetail: auditHostBudgetDetail };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated, hostBudgetReason: auditHostBudgetReason, hostBudget: auditHostBudget, hostBudgetDetail: auditHostBudgetDetail, hostBudgetRetryAfterS: auditHostRetryAfterS };
       const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -574,6 +574,7 @@ export async function dispatchDowntimeWork(
         auditHostBudgetReason = flags.hostBudgetReason;
         auditHostBudget = flags.hostBudget;
         auditHostBudgetDetail = flags.hostBudgetDetail;
+        auditHostRetryAfterS = flags.hostBudgetRetryAfterS;
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
@@ -614,6 +615,7 @@ export async function dispatchDowntimeWork(
               reason: auditHostBudgetReason ?? HOST_BUDGET_AUDIT_REASON,
               ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}),
               ...(auditHostBudgetDetail !== undefined ? { detail: auditHostBudgetDetail } : {}),
+              ...(auditHostRetryAfterS !== undefined ? { retryAfterS: auditHostRetryAfterS } : {}),
             });
           }
           return finalize({ dispatched: false, reason: 'audit-in-flight' });
@@ -644,6 +646,7 @@ export async function dispatchDowntimeWork(
             reason: auditHostBudgetReason,
             ...(auditHostBudget !== undefined ? { budget: auditHostBudget } : {}),
             ...(auditHostBudgetDetail !== undefined ? { detail: auditHostBudgetDetail } : {}),
+            ...(auditHostRetryAfterS !== undefined ? { retryAfterS: auditHostRetryAfterS } : {}),
           });
         }
         return finalize({ dispatched: false, reason: pinnedAuditItemId !== undefined ? LEAF_AUDIT_PIN_HOLD_REASON : 'no-candidate' });
@@ -702,12 +705,12 @@ export async function dispatchDowntimeWork(
         // (mirrors the code-freeze skip, WL-0MSQ0RPQP00636JY) and the next
         // idle tick re-checks. `{ok:false}` (the check could not complete,
         // e.g. a worklog query failure) fails open: the audit tier is
-        // skipped and dispatch falls through to the next tier — the
-        // dispatch loop is never blocked by an unanswerable check, and
-        // when the fallback backlog is also empty the outcome is a
-        // wl-error strike (partial information must not pause the worker
-        // with no-candidate).
+        // skipped and dispatch falls through to the next tier — the dispatch
+        // loop is never blocked by an unanswerable check; an empty fallback
+        // backlog is a wl-error strike (no-candidate must not be assumed).
         const activeAudit = await deps.getActiveAudit(opts.cwd);
+        // ONE proxy observation per audit candidate (WL-0MWJE9IEH001R3P1 AC1).
+        const auditOpts = activeAudit.ok ? { ...opts, auditAvailability: activeAudit.availability } : opts;
         if (activeAudit.ok) {
           if (activeAudit.active) {
             auditInFlight = true;
@@ -717,14 +720,10 @@ export async function dispatchDowntimeWork(
               auditHostBudgetReason = activeAudit.reason;
               auditHostBudget = activeAudit.budget;
               auditHostBudgetDetail = activeAudit.detail;
+              auditHostRetryAfterS = activeAudit.retryAfterS;
             }
-            // Audit-budget refusal (proxy-derived, WL-0MWAMSDNW000SL0E;
-            // formerly the host-wide ledger, WL-0MVXY0XPF006YUHA F2) vs
-            // per-worklog: distinct reason strings for observability. The
-            // `source` field is set by getActiveAudit: 'proxy' when the proxy's
-            // availability verdict refuses (or the read fails closed),
-            // 'host-wide' on the legacy ledger source, 'per-worklog' when a
-            // per-worklog dispatch marker maps to an in_progress item.
+            // Distinct reason strings per `source` (WL-0MWAMSDNW000SL0E; full
+            // mapping: `DowntimeActiveAuditResult`).
             const skipReason = auditHostSaturated
               ? (auditHostBudgetReason ?? HOST_BUDGET_AUDIT_REASON)
               : 'audit-in-flight';
@@ -786,13 +785,13 @@ export async function dispatchDowntimeWork(
                       );
                       // Fall through to the next tier (implement/plan/intake).
                     } else {
-                      return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
+                      return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...auditOpts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
                     }
                   } catch {
                     // Fail-open: the freshness check could not complete (e.g.
                     // wl/CLI error) — proceed with the dispatch (conservative
                     // default). The item is treated as "not fresh" for this tick.
-                    return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
+                    return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...auditOpts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
                   }
                 }
               }
@@ -984,6 +983,7 @@ export async function dispatchDowntimeWork(
                 ...(auditHostSaturated && auditHostBudget !== undefined
                   ? { budget: auditHostBudget }
                   : {}),
+                ...(auditHostSaturated && auditHostRetryAfterS !== undefined ? { retryAfterS: auditHostRetryAfterS } : {}),
               }
             : auditCheckFailed
               ? { dispatched: false, reason: 'wl-error', error: tier2ErrorDetail }

@@ -354,6 +354,12 @@ export interface HostBudgetConfigResult {
 export interface HostBudgetLivePane {
   paneId: string;
   title?: string;
+  /**
+   * pi session id derived from the pane's agent-session path (WL-0MWTAD9NV000IVK5).
+   * Optional: a `paneIds`-only read has none. It lets a session-only
+   * model-cooldown entry match its pane for budget relief.
+   */
+  sessionId?: string;
 }
 
 /**

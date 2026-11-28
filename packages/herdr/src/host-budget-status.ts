@@ -76,6 +76,11 @@ import {
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
 import { countLiveWork } from './host-dispatch-budget.counting.js';
+import {
+  resolveEffectiveHostBudgetCap,
+  resolveModelBlockedPanes,
+} from './host-budget-relief.js';
+import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 import { getMachineCoordinationDir } from './machine-coordination.js';
 import {
   HOST_BUDGET_AUDIT_REASON,
@@ -87,13 +92,24 @@ import {
   type HostBudgetEvidence,
 } from './downtime-log.js';
 import {
+  BUDGET_RELIEF_DECISION_TOKEN,
   HOST_BUDGET_INTAKE_REASON,
   HOST_BUDGET_PLAN_REASON,
   HOST_BUDGET_RISK_EFFORT_REASON,
 } from './downtime-log-budget.js';
 
-/** One tier's observed in-flight count and configured cap. */
-export type HostBudgetTierStatus = HostBudgetEvidence;
+/**
+ * One tier's observed in-flight count and cap.
+ *
+ * `max` is the EFFECTIVE cap: the configured cap, or 2x it while a
+ * model-blocked pane of that kind exists (WL-0MWTAD9NV000IVK5 AC9). `relief`
+ * marks a kind whose cap was relief-raised so the header can name the
+ * `budget-relief` token rather than silently showing a larger number.
+ */
+export type HostBudgetTierStatus = HostBudgetEvidence & {
+  /** True when `max` is a relief-raised cap (2x the configured cap). */
+  relief?: true;
+};
 
 /**
  * One entry per CONFIGURED (capped) kind, as every observability surface
@@ -116,6 +132,15 @@ export interface HostBudgetStatusOptions extends HostBudgetOptions {
    * kind (empty ≠ unknown). The read is non-mutating in every case.
    */
   livePanes?: readonly HostBudgetLivePane[];
+  /**
+   * Active machine-wide model cooldowns (WL-0MWTAD9NV000IVK5). When a kind is
+   * model-blocked the counter shows `n/effectiveCap` (2x) instead of
+   * `n/configuredCap`, so the header agrees with admission. `null` = the signal
+   * is unreadable/corrupt (no relief — fail closed).
+   */
+  modelCooldowns?: readonly ModelCooldownEntry[] | null;
+  /** Relay kill switch (`downtimeBudgetReliefEnabled`, default true). */
+  budgetReliefEnabled?: boolean;
 }
 
 /**
@@ -128,6 +153,8 @@ export interface HostBudgetStatusOptions extends HostBudgetOptions {
 export function summariseHostBudget(
   counts: HostBudgetCounts | null | undefined,
   config: HostBudgetConfig | null | undefined,
+  /** Kinds whose `max` is a relief-raised (2x) cap (WL-0MWTAD9NV000IVK5 AC9). */
+  relieved?: ReadonlySet<HostBudgetKind>,
 ): HostBudgetStatus | null {
   if (counts === null || counts === undefined) return null;
   if (config === null || config === undefined) return null;
@@ -138,7 +165,11 @@ export function summariseHostBudget(
   for (const kind of HOST_BUDGET_KINDS) {
     const max = config[kind];
     if (max === undefined) continue;
-    status[kind] = { live: counts[kind] ?? 0, max };
+    status[kind] = {
+      live: counts[kind] ?? 0,
+      max,
+      ...(relieved?.has(kind) === true ? { relief: true as const } : {}),
+    };
   }
   return status;
 }
@@ -161,7 +192,11 @@ export function hostBudgetStatusText(
   for (const kind of HOST_BUDGET_KINDS) {
     const tier = status[kind];
     if (tier === undefined) continue;
-    segments.push(`${kind} ${tier.live}/${tier.max}`);
+    // A relief-raised cap is marked with the `budget-relief` vocabulary token
+    // so `implement 1/4 (budget-relief)` cannot be mistaken for a configured
+    // cap of 4 (WL-0MWTAD9NV000IVK5 AC9).
+    const marker = tier.relief === true ? ` (${BUDGET_RELIEF_DECISION_TOKEN})` : '';
+    segments.push(`${kind} ${tier.live}/${tier.max}${marker}`);
   }
   if (segments.length === 0) return null;
   return `[budget: ${segments.join(' · ')}]`;
@@ -273,5 +308,52 @@ export function readHostBudgetStatus(
         ? auditDisplayCount(read.ledger.entries, livePaneIds, now, windowMs)
         : countLiveWork(read.ledger.entries, opts.livePanes, kind, now, windowMs).live;
   }
-  return summariseHostBudget(counts, config);
+  const effective = effectiveConfig(config, opts, now);
+  // Mark the kinds whose cap relief raised, so the header names the
+  // `budget-relief` token explicitly (WL-0MWTAD9NV000IVK5 AC9).
+  const relieved = new Set<HostBudgetKind>();
+  for (const kind of HOST_BUDGET_KINDS) {
+    if (effective[kind] !== undefined && effective[kind] !== config[kind]) {
+      relieved.add(kind);
+    }
+  }
+  return summariseHostBudget(counts, effective, relieved);
+}
+
+/**
+ * Apply budget relief to the configured caps for the display counter
+ * (WL-0MWTAD9NV000IVK5 AC9: the worklist shows `n/effectiveCap`). Pure: the
+ * predicate and arithmetic are `host-budget-relief.ts`'s. A disabled/uncapped
+ * kind is never relieved, and an unreadable/absent signal leaves the cap as
+ * configured (relief is fail-closed).
+ */
+function effectiveConfig(
+  config: HostBudgetConfig,
+  opts: HostBudgetStatusOptions,
+  now: number,
+): HostBudgetConfig {
+  if (opts.modelCooldowns === undefined && opts.budgetReliefEnabled !== false) {
+    // No signal supplied by this caller (e.g. a test that only asserts the
+    // configured cap): keep the historical shape.
+    return config;
+  }
+  const blocked = resolveModelBlockedPanes({
+    cooldowns: opts.modelCooldowns,
+    panes: opts.livePanes ?? [],
+    now,
+  });
+  const effective: HostBudgetConfig = { ...config };
+  for (const kind of HOST_BUDGET_KINDS) {
+    const baseCap = config[kind];
+    if (baseCap === undefined) continue;
+    const cap = resolveEffectiveHostBudgetCap({
+      kind,
+      baseCap,
+      blockedPanes:
+        kind === 'implement' ? blocked.implement : kind === 'audit' ? blocked.audit : [],
+      ...(opts.budgetReliefEnabled === false ? { reliefEnabled: false } : {}),
+    });
+    if (cap.effectiveCap !== baseCap) effective[kind] = cap.effectiveCap;
+  }
+  return effective;
 }

@@ -73,6 +73,9 @@ import * as commentsModule from './database/comments.js';
 import * as searchModule from './database/search.js';
 import * as syncModule from './database/sync.js';
 import * as importExportModule from './database/import-export.js';
+// Type-only: used in the façade signatures, deliberately not re-exported so
+// the package's public export surface stays unchanged (decomposition guard).
+import type { DependencyEdgePersistReport } from './database/import-export.js';
 
 export {
   normalizeTitleForMatch,
@@ -830,13 +833,13 @@ export class WorklogDatabase {
   }
 
   /** Import work items by **replacing** all existing data. Implementation in `./database/import-export.js` (WL-0MVOBP8MC0093Y7T). */
-  import(items: WorkItem[], dependencyEdges?: DependencyEdge[], auditResults?: AuditResult[]): void {
-    importExportModule.importWorkItems(this.ctx, items, dependencyEdges, auditResults);
+  import(items: WorkItem[], dependencyEdges?: DependencyEdge[], auditResults?: AuditResult[]): DependencyEdgePersistReport {
+    return importExportModule.importWorkItems(this.ctx, items, dependencyEdges, auditResults);
   }
 
   /** Upsert work items non-destructively (items not provided are preserved). Implementation in `./database/import-export.js` (WL-0MVOBP8MC0093Y7T). */
-  upsertItems(items: WorkItem[], dependencyEdges?: DependencyEdge[]): void {
-    importExportModule.upsertItems(this.ctx, items, dependencyEdges);
+  upsertItems(items: WorkItem[], dependencyEdges?: DependencyEdge[]): DependencyEdgePersistReport {
+    return importExportModule.upsertItems(this.ctx, items, dependencyEdges);
   }
 
   /**

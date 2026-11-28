@@ -57,6 +57,11 @@ import {
   type DowntimeDispatchOutcome,
 } from './downtime-worker.dispatch-contract.js';
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
+import { resolveHeadDependencyFrontier } from './downtime-worker.dispatch-filter.js';
+import {
+  memoizeBlockerFetcher,
+  type DependencyRecheckMemo,
+} from './downtime-worker.claim-dependency-guard.js';
 import {
   auditItemEligible,
   auditPinAdmits,
@@ -156,6 +161,19 @@ export interface HeadScanBase {
   holds: HeadScanHolds;
   /** Producer-review flag writes already performed this cycle (deduped). */
   flaggedForBudget: Set<string>;
+  /**
+   * One tick's dependency-read memo (F3, WL-0MWWMPCD2008HSSP), shared with the
+   * leader's offer loop so a candidate costs at most one `wl dep list` per tick.
+   */
+  dependencyRecheckMemo?: DependencyRecheckMemo;
+  /**
+   * Machine-wide coordination directory (round-robin cursor + run ledger).
+   * Optional so a pure filter-chain test can omit it; every production scan
+   * path supplies it, and the consumed-dispatch charge happens HERE so the
+   * own-backlog, audit-batch-continuation and registered-root-sweep paths all
+   * charge (and advance the run ledger) in ONE lock hold (WL-0MWT54AR8005LMKN).
+   */
+  coordinationDir?: string;
 }
 
 /** A fully-resolved scan over exactly ONE root's canonical window. */
@@ -274,11 +292,30 @@ export async function dispatchFromOwnHead(
     'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
   };
   const ownInFlight = await ctx.inFlightForRoot(ctx.root);
+  const fetchBlockers =
+    deps.fetchCriticalBlockers === undefined || ctx.dependencyRecheckMemo === undefined
+      ? deps.fetchCriticalBlockers
+      : memoizeBlockerFetcher(deps.fetchCriticalBlockers, ctx.dependencyRecheckMemo);
   for (const item of candidates) {
     // Sequential filters — the same contract as the offer path.
     const kind = classifyItemForDispatch(item, now);
     if (kind === null) continue;
     if (ctx.kinds !== null && !ctx.kinds.includes(kind)) continue;
+    // Dependency-frontier guard (F2, WL-0MWWMPBL8003X59M): a dependency-blocked
+    // critical item is never dispatched at itself. The head/offer paths own the
+    // redirect to the nearest open blocker; this scan (own-backlog fallback,
+    // audit-batch continuation, registered-root sweep) SKIPS the blocked item so
+    // the same bug cannot reappear on a foreign root. A lookup failure fails the
+    // scan CLOSED with the stable `dependency-lookup-failed` reason.
+    if (item.priority === 'critical' && fetchBlockers !== undefined) {
+      const guarded = await resolveHeadDependencyFrontier(
+        { item, kind },
+        fetchBlockers,
+        ctx.root,
+      );
+      if (!guarded.ok) return { dispatched: false, reason: guarded.reason };
+      if (guarded.target === null || guarded.target.item.id !== item.id) continue;
+    }
     const marker = ownMarkerMaps[kind]?.get(item.id);
     if (
       marker !== undefined &&
@@ -362,11 +399,19 @@ export async function dispatchFromOwnHead(
         localPreferenceMode: opts.localPreferenceMode,
         selectionPath: ctx.selectionPath,
         selectionReason: ctx.selectionReason,
+        dependencyRecheckMemo: ctx.dependencyRecheckMemo,
       },
     );
     // Per-project fairness (WL-0MWKY141H002LULI AC3): the caller records this
     // attempted root as `dispatchingRoot` only when the outcome dispatched.
     outcome.attemptedRoot = ctx.root;
+    // Every CONSUMED outcome charges this root and advances the machine run
+    // ledger in the SAME lock hold (WL-0MWT54AR8005LMKN). Charging here covers
+    // the own-backlog fallback, the audit-batch continuation and the
+    // registered-root sweep uniformly; the leader offer loop charges its own.
+    if (ctx.coordinationDir !== undefined && isConsumedDispatchOutcome(outcome)) {
+      advanceRoundRobinCursor(ctx.coordinationDir, ctx.root, now);
+    }
     if (outcome.dispatched) return outcome;
     // A non-continuable outcome (wl-error, spawn-failed, marker-write-failed,
     // anchor-unavailable, …) is returned unchanged so the caller's strike/skip
@@ -469,14 +514,15 @@ export async function dispatchFromRegisteredRoots(
   // pure read — it charges nothing; only a consumed item charges its root
   // below, WL-0MWFIZ8H5005FVNN). The whole candidate set follows the same
   // ordering, and the parent AC1 run-length bound (the leader's SAME
-  // decision-log source) defers a root that already dispatched twice in
-  // succession behind its peers while surplus capacity exists — so the sweep
-  // and the offer path cannot drift (WL-0MWKY1839000JM5O). Fail-open: an
-  // absent/corrupt log means no deferral, exactly today's ordering.
+  // machine-scoped run ledger source) defers a root that already dispatched
+  // twice in succession behind its peers while surplus capacity exists — so the
+  // sweep and the offer path cannot drift (WL-0MWKY1839000JM5O,
+  // WL-0MWT3Z9M9002Z9BF). Fail-open: an absent/corrupt ledger means no
+  // deferral, exactly today's ordering.
   const selection = orderRootsLeastRecentlyServed(opts.coordinationDir, roots);
   const first = selection[0] ?? null;
   const previousRun =
-    selection.length > 1 ? await readPreviousDispatchRun(opts.cwd) : null;
+    selection.length > 1 ? await readPreviousDispatchRun(opts.coordinationDir, opts.cwd) : null;
   const ordered = deferRunLengthCeilingRoot(
     selection,
     previousRun,
@@ -511,25 +557,15 @@ export async function dispatchFromRegisteredRoots(
     );
     // A dispatch, or a terminal (strike/spawn-failed/…) outcome, ends the
     // tick. A root with nothing dispatchable returns `null` and the sweep
-    // continues to the next registered root.
+    // continues to the next registered root. The consumed-offer charge (and the
+    // run-ledger advance in the same lock hold) already happened inside
+    // `dispatchFromOwnHead` (WL-0MWT54AR8005LMKN).
     if (outcome !== null) {
-      // Consumed-offer charge (WL-0MWFJTCJ5004BKE4, parent WL-0MWFIZ8H5005FVNN):
-      // a sweep dispatch, or a claim that was consumed without a pane
-      // (spawn-failed / marker-write-failed), charges EXACTLY the dispatching
-      // root. A neutral hold that keeps the offer (reservation `admit: false`,
-      // host/audit-budget, claim-failed, anchor-unavailable) and a
-      // nothing-dispatchable visit (`null`, `continue` above) charge nothing.
-      // Fail-open: `advanceRoot` skips a lost charge under lock contention or
-      // an I/O error — never blocks a dispatch.
-      if (isConsumedDispatchOutcome(outcome)) {
-        advanceRoundRobinCursor(opts.coordinationDir, root, now);
-        // Per-project fairness accounting (WL-0MWKY141H002LULI AC3): the
-        // sweep's OWN selection rides the outcome so the orchestrator records
-        // `selectedRoot` for the registry candidate universe (the offer-list
-        // selection is a different universe and would misattribute a sweep).
-        return { ...outcome, selectedRoot: first };
-      }
-      return outcome;
+      // Per-project fairness accounting (WL-0MWKY141H002LULI AC3): the
+      // sweep's OWN selection rides the outcome so the orchestrator records
+      // `selectedRoot` for the registry candidate universe (the offer-list
+      // selection is a different universe and would misattribute a sweep).
+      return isConsumedDispatchOutcome(outcome) ? { ...outcome, selectedRoot: first } : outcome;
     }
   }
   return null;

@@ -203,7 +203,7 @@ each concern lives in its own module under `packages/shared/src/database/`:
 | `comments.ts` | comment CRUD, activity timestamps, batch import/upsert |
 | `search.ts` | FTS5 search (ID-aware) + semantic index lifecycle |
 | `sync.ts` | Git/JSONL sync (`refreshFromGit`, `exportForSync`), watermarks, dirty counts, delta metadata, auto-sync triggers |
-| `import-export.ts` | whole-store snapshots: `clear`, `getAll*`, destructive `import`, non-destructive `upsertItems` |
+| `import-export.ts` | whole-store snapshots: `clear`, `getAll*`, destructive `import`, non-destructive `upsertItems` (both report unstorable dependency edges via `DependencyEdgePersistReport`) |
 
 The extracted-module graph is acyclic (no module imports the façade) and every
 module is ≤ 1,000 lines — enforced by
@@ -315,7 +315,7 @@ push code and a newcomer can read one concern in one sitting
 | `src/sync/merge-collateral.ts` | Collateral merges: comments, audit results and dependency edges. | `mergeComments`, `mergeAuditResults`, `mergeDependencyEdges` |
 | `src/sync/author-identity.ts` | Author-identity gate and whitelist logic. | `getRemoteAuthorCommits`, `checkAuthorIdentity`, `getConfiguredUserEmail`, `enforceAuthorIdentityGate` |
 | `src/sync/refs.ts` | Last-synced and remote-tracking ref bookkeeping. | `getLastSyncedRefPath`, `readLastSyncedRef`, `writeLastSyncedRef`, `getRemoteTrackingRefSha`, `_testOnly_getRemoteTrackingRef` |
-| `src/sync/prefix-filter.ts` | Cross-project item-ID prefix filtering. | `isOwnProjectItemId`, `filterRemoteDataByPrefix` |
+| `src/sync/prefix-filter.ts` | Cross-project item-ID prefix filtering (keeps any dependency edge with a local endpoint; reports dropped both-foreign edges). | `isOwnProjectItemId`, `filterRemoteDataByPrefix` |
 | `src/sync/repo-context.ts` | Repo-root resolution and the data-file cross-project assertion. | `assertDataFileInCwdRepo` |
 | `src/sync/worktree.ts` | Temporary-worktree lifecycle helpers. | none (internal) |
 | `src/sync/remote.ts` | Remote-ref reading and delta-chain replay. | `getRemoteDataFileContentWithRef`, `getRemoteDataFileContent`, `replayRemoteDeltaChain` |

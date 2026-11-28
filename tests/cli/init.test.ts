@@ -14,7 +14,7 @@ import {
   // eslint-disable-next-line import/no-unresolved
   getPackageVersion
 } from './cli-helpers.js';
-import { initRepo, initBareRepo } from './git-helpers.js';
+import { initRepo, initBareRepo, seedMockUserEmail } from './git-helpers.js';
 import { cleanupTempDir, createTempDir } from '../test-utils.js';
 
 describe('CLI Init Tests', () => {
@@ -183,6 +183,9 @@ describe('CLI Init Tests', () => {
       await execAsync(`git clone ${remoteRepo} ${cloneRepo}`);
       await execAsync('git config user.email "test@example.com"', { cwd: cloneRepo });
       await execAsync('git config user.name "Test User"', { cwd: cloneRepo });
+      // Seed the mock git identity file so the push-side identity guard
+      // (WL-0MWGO58KL00187CO) sees a valid identity on the clone's init sync.
+      seedMockUserEmail(cloneRepo);
 
       writeConfig(cloneRepo, 'Sync Test', 'SYNC');
 

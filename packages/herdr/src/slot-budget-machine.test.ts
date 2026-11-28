@@ -11,10 +11,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatchFromCoordination, type DowntimeWorkerDeps, type DowntimeItemInfo } from './downtime-worker.js';
 import type { CoordinationEntry } from './coordination.js';
+import { AUDIT_LEASE_CAPABILITY } from './coordination.js';
 
 function entry(id: string, item: string, root: string): CoordinationEntry {
   const now = new Date().toISOString();
-  return { instanceId: id, workItemId: item, directory: root, worklogRoot: root, assignedAt: now, lastUpdated: now };
+  // A modern peer advertises audit-lease support (WL-0MWJE9MIR005SBQK AC4).
+  return { instanceId: id, workItemId: item, directory: root, worklogRoot: root, assignedAt: now, lastUpdated: now, capabilities: [AUDIT_LEASE_CAPABILITY] };
 }
 function info(o: Partial<DowntimeItemInfo> & { id: string }): DowntimeItemInfo {
   return { id: o.id, title: o.id, status: o.status ?? 'open', stage: o.stage ?? 'idea', priority: o.priority, risk: o.risk, effort: o.effort, updatedAt: o.updatedAt, auditedAt: o.auditedAt } as DowntimeItemInfo;

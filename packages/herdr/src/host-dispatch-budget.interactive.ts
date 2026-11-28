@@ -59,6 +59,11 @@ import {
   type HostBudgetOptions,
 } from './host-dispatch-budget.js';
 import { readHostBudgetLiveWork } from './host-dispatch-budget.counting.js';
+import {
+  resolveEffectiveHostBudgetCap,
+  resolveModelBlockedPanes,
+} from './host-budget-relief.js';
+import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 import { getMachineCoordinationDir } from './machine-coordination.js';
 import { budgetAuditTrailPath } from './host-dispatch-budget.audit.js';
 import type { HostBudgetDialogChoice, HostBudgetPromptRequest } from './host-budget-dialog.js';
@@ -116,6 +121,15 @@ export interface InteractiveAgentDispatchDeps {
   instanceId?: string;
   /** Ledger clock/env/dir seams — tests pass a temp coordination dir. */
   budget?: HostBudgetOptions;
+  /**
+   * Active machine-wide model cooldowns (WL-0MWTAD9NV000IVK5). `[]`/absent =
+   * nothing recorded; `null` = unreadable/corrupt (no relief). The hand-fired
+   * threshold uses the SAME effective cap as admission so the counter and the
+   * prompt cannot disagree.
+   */
+  modelCooldowns?: readonly ModelCooldownEntry[] | null;
+  /** Relay kill switch (`downtimeBudgetReliefEnabled`, default true). */
+  budgetReliefEnabled?: boolean;
 }
 
 /** The gate's verdict for one user-fired agent dispatch. */
@@ -302,6 +316,25 @@ export async function prepareInteractiveAgentDispatch(
     budgetOptions,
   );
 
+  // Budget relief (WL-0MWTAD9NV000IVK5): the hand-fired over-quota threshold is
+  // the SAME effective cap admission uses, so the header `n/effectiveCap` and
+  // the dialog cannot disagree. The human-override path above the effective
+  // cap is unchanged.
+  const blocked = resolveModelBlockedPanes({
+    cooldowns: deps.modelCooldowns,
+    panes: livePanes ?? [],
+    now: budgetOptions.now ?? Date.now(),
+  });
+  const effectiveMax = resolveEffectiveHostBudgetCap({
+    kind,
+    baseCap: max,
+    blockedPanes: kind === 'implement' ? blocked.implement : kind === 'audit' ? blocked.audit : [],
+    ...(deps.budgetReliefEnabled === false ? { reliefEnabled: false } : {}),
+    ...(blocked.unreadable && blocked.reason !== undefined
+      ? { unreadableReason: blocked.reason }
+      : {}),
+  }).effectiveCap;
+
   if (counted.state === 'noLedger') {
     // Parent AC11: no machine dir ⇒ no ledger, no new failure mode.
     await deps.claim(command);
@@ -328,7 +361,7 @@ export async function prepareInteractiveAgentDispatch(
     instanceId: deps.instanceId ?? `herdr:${process.pid}`,
   };
 
-  if (counted.live < max) {
+  if (counted.live < effectiveMax) {
     // Below quota: no dialog, no extra keypress (AC2). Best-effort reservation
     // so hand-fired work counts against the budget like dispatcher-fired work.
     const reserved = reserve({ ...entryBase }, budgetOptions).ok;
@@ -344,7 +377,7 @@ export async function prepareInteractiveAgentDispatch(
   const request: HostBudgetPromptRequest = {
     kind,
     live: counted.live,
-    max,
+    max: effectiveMax,
     ...(counted.unreserved !== undefined ? { unreserved: counted.unreserved } : {}),
     ...(trailDir !== null ? { trailPath: budgetAuditTrailPath(trailDir) } : {}),
   };

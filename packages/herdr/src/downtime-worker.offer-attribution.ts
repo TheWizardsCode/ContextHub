@@ -82,6 +82,14 @@ export type DispatchGateToken =
   | 'review-queue-hold'
   /** A live working pane already exists for the (critical) item. */
   | 'in-flight-pane'
+  /**
+   * The item carries a live outbound `depends-on` edge to a non-terminal
+   * blocker, so it must never be dispatched/offered at itself. The
+   * critical-first scan redirects to the nearest open dispatchable blocker;
+   * the normal pass rejects the blocked item with this token.
+   * (F2, WL-0MWWMPBL8003X59M.)
+   */
+  | 'dependency-blocked'
   /** No slot can host a pane this cycle (single-pane tier minimum unmet). */
   | 'slots-unavailable'
   /**
@@ -92,7 +100,25 @@ export type DispatchGateToken =
    */
   | 'audit-budget'
   /** The item could not be read (wl/CLI failure) — entry kept, fail-open. */
-  | 'wl-error';
+  | 'wl-error'
+  /**
+   * An AUDIT offer from a peer whose coordination entry does not advertise
+   * the audit-lease capability (WL-0MWJE9MIR005SBQK AC4). Fail-closed: the
+   * old peer would run availability-only admission and reopen the cross-host
+   * audit race. The offer is KEPT (neutral hold) and the peer's non-audit
+   * offers are unaffected. Surfaces the same token as the terminal reason
+   * {@link LEASE_CAPABILITY_ABSENT_REASON}.
+   */
+  | 'lease-capability-absent';
+
+/**
+ * Neutral terminal reason when the only refused work was an AUDIT offer from a
+ * peer that does not advertise the audit-lease capability
+ * (WL-0MWJE9MIR005SBQK AC4). Shares the string with the
+ * {@link DispatchGateToken} so the refusal is observable both as the per-offer
+ * attribution and as the tick's no-dispatch reason (never `no-candidate`).
+ */
+export const LEASE_CAPABILITY_ABSENT_REASON = 'lease-capability-absent';
 
 /**
  * The subset of {@link DispatchGateToken} produced by
@@ -138,7 +164,13 @@ export type EmptyOfferReason =
   /** No slot could host a pane (single-pane tier minimum unmet). */
   | 'slots-unavailable'
   /** The offer computation failed (wl/CLI error) — the entry is kept. */
-  | 'wl-error';
+  | 'wl-error'
+  /**
+   * A dependency-blocker lookup (`wl dep list`) failed, so the offer is
+   * failed CLOSED: nothing is offered this computation rather than risking a
+   * silent wrong target (F2, WL-0MWWMPBL8003X59M).
+   */
+  | 'dependency-lookup-failed';
 
 /** One rejected candidate of an offer computation (in-memory attribution). */
 export interface OfferRejection {

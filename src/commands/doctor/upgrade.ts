@@ -121,6 +121,10 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
 
         const hasPendingMigrations = pending && pending.length > 0;
         const hasOutdatedHooks = hooksResult.outdatedCount > 0;
+        // Project hooks that evolved past the embedded template. They are never
+        // rewritten (WL-0MWWS66JM0090RQ5), but the operator must see that they
+        // were deliberately left alone rather than silently skipped.
+        const newerHooks = hooksResult.hooks.filter(h => h.status === 'newer');
 
         if (!hasPendingMigrations && !hasOutdatedHooks) {
           if (utils.isJsonMode()) {
@@ -128,7 +132,12 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
             return;
           }
           console.log('Doctor: no pending migrations. See docs/migrations.md for migration policy and guidance.');
-          console.log('Doctor: all installed hooks are up-to-date.');
+          console.log(
+            newerHooks.length > 0
+              ? 'Doctor: no installed hook needs upgrading; the hooks below are newer than the embedded template and are left untouched.'
+              : 'Doctor: all installed hooks are up-to-date.'
+          );
+          newerHooks.forEach(h => console.log(` - ${h.name}: ${h.reason ?? 'newer than the template'}`));
           return;
         }
 
@@ -163,9 +172,14 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
               .filter(h => h.status === 'outdated')
               .forEach(h => console.log(` - ${h.name} at ${h.hookPath}`));
           }
+          if (newerHooks.length > 0) {
+            console.log('');
+            console.log('Newer hooks (left untouched — project-evolved past the template):');
+            newerHooks.forEach(h => console.log(` - ${h.name} at ${h.hookPath}: ${h.reason ?? 'newer'}`));
+          }
           if (!hasOutdatedHooks && hasPendingMigrations) {
             console.log('');
-            console.log('Doctor: all installed hooks are up-to-date.');
+            console.log('Doctor: no installed hook needs upgrading.');
           }
           return;
         }
@@ -325,6 +339,9 @@ export function registerUpgradeCommand(doctor: Command, ctx: UpgradeCommandConte
           if (migrationResult.backups && migrationResult.backups.length > 0) console.log(`Backups: ${migrationResult.backups.join(', ')}`);
           if (hooksApplied.length > 0) {
             console.log(`Upgraded hooks: ${hooksApplied.join(', ')}`);
+          }
+          if (newerHooks.length > 0) {
+            console.log(`Left untouched (newer than the template): ${newerHooks.map(h => h.name).join(', ')}`);
           }
         } catch (err) {
           if (err instanceof MigrationUnsafeError) {

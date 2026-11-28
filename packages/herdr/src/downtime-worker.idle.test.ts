@@ -19,7 +19,9 @@
  * `downtime-worker.fixtures.ts`; no setup logic is re-implemented here.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { writeFileSync } from 'node:fs';
+
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   isIdleStatus,
   evaluateIdle,
@@ -38,6 +40,7 @@ import {
   type LlamaSlot,
 } from './downtime-worker.js';
 import {
+  createTempDirTracker,
   jsonResponseFixture,
   makeDeps,
   singleSlotIdleOwned,
@@ -49,6 +52,8 @@ import {
   prefillBusyOccupancy,
 } from './downtime-worker.fixtures.js';
 import type { CoordinationLogEntry } from './downtime-log.js';
+import { budgetLedgerPath } from './host-dispatch-budget.js';
+import { resolveEffectiveDir } from './coordination.js';
 
 // ── Idle detection (AC2) ──────────────────────────────────────────────
 
@@ -735,6 +740,15 @@ describe('pre-v2 lease regression (LP-0MVGDUVGE0024YAI backward compatibility)',
 
 describe('proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
   const THRESHOLD_MS = 60_000;
+  // One sandbox root per worker. A tmp-root cwd keeps every fire-and-forget
+  // first-tick pass (the host-budget reconciliation pass in particular) on
+  // this test's OWN ledger instead of the live machine dir — see
+  // `makeIdleAgeWorker` (WL-0MWUON2T9003Q0MU).
+  const roots = createTempDirTracker();
+
+  afterEach(() => {
+    roots.cleanup();
+  });
 
   function idleAgeStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
     return {
@@ -762,6 +776,16 @@ describe('proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
     thresholdMs?: number;
     recordDecision?: (entry: CoordinationLogEntry, cwd: string) => Promise<void>;
   }) {
+    // The tick's host-budget reconciliation pass is deliberately
+    // fire-and-forget and resolves its ledger dir with
+    // `resolveEffectiveDir(cfg.cwd)`. A tmp-root cwd resolves to that root
+    // (the documented unit-test isolation contract, WL-0MWJPVWB6002208H); a
+    // literal path such as `'/repo'` resolves to the LIVE machine dir, where
+    // a lock-contention or corrupt-ledger failure records a non-blocking
+    // `host-budget-reconcile-failed` observation through the SAME
+    // `deps.recordDecision` mock — an unrelated call that raced the refusal
+    // under test (WL-0MWUON2T9003Q0MU). Never reintroduce a non-tmp cwd here.
+    const cwd = roots.make('herdr-idle-age-');
     const poller = createDowntimePoller(
       'http://proxy:8000',
       vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
@@ -781,12 +805,12 @@ describe('proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
         thresholdMs: opts.thresholdMs ?? THRESHOLD_MS,
         requiredFreeSlots: opts.requiredFreeSlots ?? 0,
         model: 'plan',
-        cwd: '/repo',
+        cwd,
         noCandidateCooldownMs: 3_600_000,
         browseItemCount: 20,
       }),
     });
-    return { worker, deps };
+    return { worker, deps, cwd };
   }
 
   it('AC2: an already-elapsed proxy idle age dispatches on the FIRST poll (global mode)', async () => {
@@ -917,7 +941,7 @@ describe('proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
       { slots: [] },
     ] as Array<Partial<LlamaStatus>>) {
       const recordDecision = vi.fn().mockResolvedValue(undefined);
-      const { worker, deps } = makeIdleAgeWorker({
+      const { worker, deps, cwd } = makeIdleAgeWorker({
         status: idleAgeStatus({ ...overrides, local_idle_seconds: 7_200 }),
         recordDecision,
       });
@@ -925,11 +949,62 @@ describe('proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
       expect(outcome.dispatched).toBe(false);
       expect(deps.spawnAgentPane).not.toHaveBeenCalled();
       expect(worker.blockReason).toBe('no-slots');
-      expect(recordDecision.mock.calls[0][0]).toMatchObject({
-        reason: 'slots-unavailable',
-        localIdleSeconds: 7_200,
-      });
+      // Assert the REFUSAL decision itself, never `calls[0]`: the tick's
+      // fire-and-forget passes may record an unrelated non-blocking
+      // observation through the same mock (WL-0MWUON2T9003Q0MU).
+      expect(recordDecision).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'slots-unavailable', localIdleSeconds: 7_200 }),
+        cwd,
+      );
     }
+  });
+
+  it('AC6: a harness root resolves to its own ledger, never the machine dir', () => {
+    // Pins the isolation every first tick depends on (WL-0MWUON2T9003Q0MU):
+    // the tick's fire-and-forget host-budget reconciliation pass resolves its
+    // ledger dir from `cfg.cwd`, so the harness root MUST stay inside the
+    // test tmp tree. The failure mode this guards against is a literal
+    // `'/repo'` cwd resolving to the live `~/.herdr/downtime` ledger, where a
+    // concurrent real dispatcher's lock makes the pass fail and inject an
+    // unrelated `host-budget-reconcile-failed` decision into the mock.
+    const { cwd } = makeIdleAgeWorker({ status: idleAgeStatus() });
+    expect(resolveEffectiveDir(cwd)).toBe(cwd);
+  });
+
+  it('AC6: a concurrent budget-reconcile observation cannot mask the slots-unavailable decision', async () => {
+    // Failing-first witness for WL-0MWUON2T9003Q0MU. The first tick runs the
+    // host-budget reconciliation pass BEFORE the poll's refusal (the pass is
+    // `void`-fired and its first await is a mock, so its continuation lands
+    // first). A corrupt ledger in the harness root makes that pass report a
+    // failure, which it records as a NON-BLOCKING
+    // `host-budget-reconcile-failed` observation through the same
+    // `deps.recordDecision` mock — so an ordering-sensitive `calls[0]`
+    // assertion sees the observation instead of the refusal. That is exactly
+    // the load-sensitive flake: with a `/repo` cwd the pass read the live
+    // machine ledger and failed whenever the real dispatcher held its lock.
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const { worker, deps, cwd } = makeIdleAgeWorker({
+      status: idleAgeStatus({ slots: [], local_idle_seconds: 7_200 }),
+      recordDecision,
+    });
+    writeFileSync(budgetLedgerPath(cwd), '{ not a ledger', 'utf8');
+
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // The unrelated observation really did land on this tick, and BEFORE the
+    // refusal — the exact interleaving that made the old `calls[0]`
+    // assertion read the wrong decision...
+    expect(recordDecision.mock.calls[0][0].reason).toBe('host-budget-reconcile-failed');
+    expect(recordDecision.mock.calls.map(([entry]) => entry.reason)).toContain(
+      'slots-unavailable',
+    );
+    // ...and it is non-blocking, so the refusal is still what the header says.
+    expect(worker.blockReason).toBe('no-slots');
+    expect(recordDecision).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'slots-unavailable', localIdleSeconds: 7_200 }),
+      cwd,
+    );
   });
 
   it('AC7: a deferred tick records idle-age-pending with the idle-age evidence', async () => {
